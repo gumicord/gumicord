@@ -14,7 +14,12 @@
 
 ## 決定
 
-**すべてを単一のモノレポに統合する。既存の 3 リポジトリはアーカイブする。**
+**すべてを単一のモノレポに統合する。既存の 3 リポジトリは削除する。**
+
+> 当初は「アーカイブする」としていたが、実行時に**削除**へ変更した。
+> 3 リポジトリはいずれも star / fork / issue / watcher がすべて 0 で、内容も
+> LICENSE と README.md のみ (どちらも新リポジトリに存在する)。
+> 参照を残す価値がなく、org に空のリポジトリが並ぶ状態を避けた。
 
 ```
 gumicord/
@@ -67,12 +72,19 @@ gumicord/
 
 ### 移行作業
 
-| 対象 | 措置 |
-|---|---|
-| `gumicord/Android` | GitHub 上でアーカイブ。README に移行先を記載 |
-| `gumicord/iOS` | 同上 |
-| `nennneko5787/desktop` | 同上。なお remote が `gumicord` org を向いていない設定ミスがあったが、アーカイブするため修正不要 |
-| ローカルの `android/`, `desktop/`, `iOS/` | 移行完了まで `.gitignore` で除外。完了後に削除 |
+| 対象 | 措置 | 状態 |
+|---|---|---|
+| `gumicord/Android` | 削除 | ✅ 2026-08-14 |
+| `gumicord/iOS` | 削除 | ✅ 2026-08-14 |
+| `gumicord/desktop` | 削除 | ✅ 2026-08-14 |
+| ローカルの `android/`, `desktop/`, `iOS/` | 削除 | ✅ 2026-08-14 |
+| `gumicord/gumicord` | 新規作成 (public) | ✅ 2026-08-14 |
+
+> **記録**: ローカルの `desktop/` の remote は `nennneko5787/desktop` を向いていたが、
+> 実際には既に `gumicord/desktop` へ移管済みだった。API はリダイレクトで解決するが
+> 削除には正式名が要るため、`nennneko5787/desktop` を指定した削除は
+> 「name changed or transferred」で失敗した。**リダイレクトで到達できることと、
+> 破壊的操作の対象として指定できることは別である。**
 
 ### ビルド
 
