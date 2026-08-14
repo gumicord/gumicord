@@ -2,12 +2,12 @@
 
 | | |
 |---|---|
-| ステータス | **暫定** — スパイク ([08-spike-plan.md](08-spike-plan.md)) の結果で確定させる |
+| ステータス | **ドラフト** — スパイクの結果を反映済み。実装で確定させる |
 | 最終更新 | 2026-08-14 |
 | 前提となる決定 | [ADR-0001](adr/0001-native-rust-renderer.md), [ADR-0002](adr/0002-quickjs-plugin-runtime.md), [ADR-0004](adr/0004-semantic-uitree-as-extension-abi.md) |
 
-> この文書は未検証の想定を含む。特にクレート選定・スレッドモデル・性能特性は、スパイクで実測するまで確定していない。
-> 確定した項目には ✅、スパイクで検証中の項目には 🔬 を付す。
+> スパイクフェーズ完了時点の状態。✅ = 実測で確定 / 🔬 = 未検証。
+> スレッドモデルとクレート構成の一部は、実装で初めて確定する。
 
 ## 全体像
 
@@ -166,12 +166,35 @@ GLES で動くことは、**Android の古い端末でも同じ描画コード�
 | ウィンドウ | `winit` | `winit` | `winit` (X11/Wayland) | `winit` + `android-activity` | `winit` |
 | GPU ✅ | GL → D3D12 (Vulkan 除外) | Metal | Vulkan / GL | GLES / Vulkan | Metal |
 | カスタムタイトルバー | DWM 拡張フレーム + `WM_NCHITTEST` | `titlebarAppearsTransparent` + `fullSizeContentView` | CSD (Wayland) / `_GTK_FRAME_EXTENTS` (X11) | — | — |
-| IME 🔬 | winit の `Ime` イベント | 同左 | 同左 | **要自前** (`InputConnection`) | **要自前** (`UITextInput`) |
-| アクセシビリティ 🔬 | `accesskit` (UIA) | `accesskit` | `accesskit` (AT-SPI) | `accesskit` | **要確認** |
+| IME ✅ | **要自前** (TSF `ITextStoreACP`) | `NSTextInputClient` 🔬 | ibus / fcitx5 / `text-input-v3` 🔬 | **要自前** (`InputConnection`) | **要自前** (`UITextInput`) |
+| アクセシビリティ ✅ | `accesskit` (UIA) — 動作確認済 | `accesskit` | `accesskit` (AT-SPI) | `accesskit` (**GameActivity のみ**) | `accesskit_ios` 0.1.2 (成熟度に注意) |
 | 通知 | `ToastNotification` | `UNUserNotification` | D-Bus (`org.freedesktop.Notifications`) | `NotificationManager` + FCM | `UNUserNotification` + APNs |
 | セキュアストレージ | DPAPI | Keychain | Secret Service | Keystore | Keychain |
 
-> 🔬 **最大の未検証リスクはモバイルの IME である。** winit のデスクトップ実装は `Ime` イベントを提供するが、Android の `InputConnection` と iOS の `UITextInput` は自前で橋渡しする必要がある可能性が高い。`PLT-001`, `PLT-002` はこれに依存する。スパイク S2 の最優先項目。
+> ✅ **S2 の結論**: `winit` はウィンドウと生の入力イベントの面倒は見るが、**テキスト入力の面倒は見ない。**
+> Windows では `winit` の `Ime` イベントで preedit は取れるものの、**変換候補ウィンドウが一切表示されない**。
+> 主要な日本語 IME (Google 日本語入力 / Microsoft IME / ATOK) はいずれも TSF ベースであり、
+> アプリが TSF テキストストアを持たないと IMM32 互換ブリッジに落ちて UI が機能しないためである。
+>
+> したがって**テキスト入力層は 5 プラットフォーム分を自前で実装する** ([ADR-0005](adr/0005-ime-strategy.md))。
+> プラットフォーム固有コードは `TextInputHost` という単一の抽象の裏に閉じ込める。
+>
+> **残る最大の未検証リスクは Android / iOS の IME である。** 実装不可能と判明した場合、ADR-0001 ごと再検討する。
+
+### `TextInputHost` の抽象 ([ADR-0005](adr/0005-ime-strategy.md))
+
+```
+gumicord-render
+      │  TextInputHost
+      │    - preedit の変更を通知する
+      │    - 確定文字列を通知する
+      │    - キャレット矩形を問い合わせられる  ← TSF の GetTextExt に対応
+      │    - 選択範囲を読み書きできる
+      ▼
+gumicord-platform/{windows,android,ios,macos,linux}/text_input.rs
+```
+
+「キャレット矩形を問い合わせられる」という形は、Windows の `GetTextExt`、Android の `InputConnection`、iOS の `UITextInput` のいずれにも共通して現れる要求である。
 
 ## テーマとプラグインのデータフロー
 
