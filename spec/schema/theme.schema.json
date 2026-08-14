@@ -43,7 +43,17 @@
         "author": { "type": "string", "maxLength": 128 },
         "description": { "type": "string", "maxLength": 512 },
         "homepage": { "type": "string", "format": "uri" },
-        "license": { "type": "string", "maxLength": 64 }
+        "license": { "type": "string", "maxLength": 64 },
+        "remoteAssets": {
+          "type": "array",
+          "description": "外部からアセットを取得するホスト名。宣言されていないホストへは到達しない (SEC-022)。インストール時に利用者の承認を得る (SEC-023)。",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+          },
+          "uniqueItems": true,
+          "maxItems": 16
+        }
       }
     },
 
@@ -59,6 +69,7 @@
           { "$ref": "#/$defs/length" },
           { "$ref": "#/$defs/font" },
           { "$ref": "#/$defs/shadow" },
+          { "$ref": "#/$defs/background" },
           { "$ref": "#/$defs/tokenRef" }
         ]
       }
@@ -139,7 +150,7 @@
       "description": "M1 のスタイルプロパティ。未知のプロパティは警告して無視する (前方互換性)。",
       "additionalProperties": false,
       "properties": {
-        "background": { "$ref": "#/$defs/colorOrRef" },
+        "background": { "$ref": "#/$defs/backgroundOrRef" },
         "color": { "$ref": "#/$defs/colorOrRef" },
         "font": { "$ref": "#/$defs/fontOrRef" },
         "borderColor": { "$ref": "#/$defs/colorOrRef" },
@@ -193,6 +204,63 @@
       }
     },
 
+    "background": {
+      "type": "object",
+      "description": "背景。合成順序は下から color → image (opacity/blur 適用済み) → tint。",
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "description": "画像の下に敷く色。画像が読めなかった場合のフォールバックでもある (EXT-027)。",
+          "$ref": "#/$defs/colorOrRef"
+        },
+        "image": { "$ref": "#/$defs/assetRef" },
+        "fit": {
+          "type": "string",
+          "enum": ["cover", "contain", "stretch", "tile", "none"],
+          "default": "cover"
+        },
+        "position": {
+          "description": "cover / contain / none のときの寄せ位置。各成分 0.0〜1.0。",
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 1 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "blur": {
+          "description": "読み込み時に一度だけ適用される (EXT-023)。毎フレームのぼかしは EXT-025 で M2。",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "tint": {
+          "description": "画像の上に重ねる色。可読性の確保に使う。",
+          "$ref": "#/$defs/colorOrRef"
+        }
+      }
+    },
+
+    "assetRef": {
+      "type": "string",
+      "description": "同梱アセットへの相対パス / data: URI / https: URL。相対パスはテーマディレクトリの外へ出られない。外部 URL は manifest.remoteAssets での宣言と利用者の承認が必要 (SEC-022, SEC-023)。",
+      "minLength": 1,
+      "maxLength": 4096,
+      "oneOf": [
+        {
+          "description": "同梱アセットへの相対パス",
+          "pattern": "^(?!\\.\\.?/)(?!/)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)*\\.(png|jpg|jpeg|webp|avif|woff2|ttf|otf)$"
+        },
+        {
+          "description": "data URI",
+          "pattern": "^data:(image/(png|jpeg|webp|avif)|font/woff2);base64,[A-Za-z0-9+/=]+$"
+        },
+        {
+          "description": "外部 URL (https のみ)",
+          "pattern": "^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?/[^\\s]*$"
+        }
+      ]
+    },
+
     "shadow": {
       "type": "object",
       "required": ["color"],
@@ -221,6 +289,14 @@
 
     "colorOrRef": {
       "oneOf": [{ "$ref": "#/$defs/color" }, { "$ref": "#/$defs/tokenRef" }]
+    },
+    "backgroundOrRef": {
+      "description": "色の短縮記法、背景オブジェクト、またはトークン参照",
+      "oneOf": [
+        { "$ref": "#/$defs/color" },
+        { "$ref": "#/$defs/tokenRef" },
+        { "$ref": "#/$defs/background" }
+      ]
     },
     "lengthOrRef": {
       "oneOf": [{ "$ref": "#/$defs/length" }, { "$ref": "#/$defs/tokenRef" }]

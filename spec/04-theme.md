@@ -241,7 +241,7 @@ theme.json ──[JSON Schema 検証]──▶ トークン表 + ルール表
 
 | プロパティ | 型 | 意味 |
 |---|---|---|
-| `background` | 色 | 背景 |
+| `background` | 色、または**背景オブジェクト** ([6.1](#61-背景画像-ext-021-ext-024)) | 背景 |
 | `color` | 色 | 前景 (文字色)。子に継承する |
 | `font` | フォント | 書体。子に継承する |
 | `borderColor` | 色 | 枠線 |
@@ -260,6 +260,210 @@ theme.json ──[JSON Schema 検証]──▶ トークン表 + ルール表
 
 > **レイアウトの上書き** (方向・配置・表示/非表示) は `EXT-018` で M2 の範囲。M1 のテーマは**見た目のみ**を変える。
 > レイアウトを変えたい場合は M1 ではプラグインを使う。
+
+---
+
+## 6.1 背景画像 (`EXT-021`〜`EXT-024`)
+
+BetterDiscord / Vencord のテーマで最も需要が大きい機能である。**M1 に含める。**
+
+`background` は色の短縮記法に加えて、オブジェクトを受け付ける。
+
+```jsonc
+{
+  "select": "app.window",
+  "style": {
+    "background": {
+      "color": "$color.bg.base",
+      "image": "assets/wallpaper.png",
+      "fit": "cover",
+      "position": [0.5, 0.35],
+      "opacity": 1.0,
+      "blur": 0,
+      "tint": "#0f0f1766"
+    }
+  }
+}
+```
+
+| キー | 型 | 既定 | 意味 |
+|---|---|---|---|
+| `color` | 色 | 透明 | 画像の**下**に敷く色。画像が読めなかった場合のフォールバックでもある (`EXT-027`) |
+| `image` | アセット参照 | — | 背景画像 ([6.3](#63-アセットの参照-ext-017)) |
+| `fit` | `cover` / `contain` / `stretch` / `tile` / `none` | `cover` | 領域への合わせ方 |
+| `position` | `[x, y]` (各 0.0〜1.0) | `[0.5, 0.5]` | `cover` / `contain` / `none` のときの寄せ位置 |
+| `opacity` | 0.0〜1.0 | `1.0` | 画像の不透明度 |
+| `blur` | 数値 (論理 px) | `0` | 画像のぼかし半径 |
+| `tint` | 色 | 透明 | 画像の**上**に重ねる色。可読性の確保に使う |
+
+合成順序は下から `color` → `image` (`opacity`, `blur` 適用済み) → `tint`。
+
+### 6.1.1 `blur` は読み込み時に一度だけ行う (`EXT-023`)
+
+**背景画像のぼかしは、画像を読み込んだ時点で一度だけ適用し、結果をテクスチャとしてキャッシュする。** 毎フレームぼかさない。
+
+S1 の実測環境 (Intel HD 520) を下限基準とする以上、毎フレームの畳み込みは避ける。ぼかし半径が変わるのはテーマの再読み込み時だけなので、これで十分である。
+
+> `EXT-025` (ノードの背後にあるものをぼかす、いわゆるすりガラス) は**別物**であり **M2**。
+> あちらは背後の内容が毎フレーム変わるため、フレームごとの処理が避けられない。
+
+### 6.1.2 半透明合成の保証 (`EXT-024`)
+
+背景画像を敷く使い方では、その上に載る UI が半透明でなければ意味がない。
+
+```jsonc
+{ "select": "app.window",      "style": { "background": { "image": "assets/bg.png", "fit": "cover" } } },
+{ "select": "nav.channel_list","style": { "background": "#16161fcc" } },
+{ "select": "chat.header",     "style": { "background": "#0f0f1799" } }
+```
+
+8 桁の色 (`#RRGGBBAA`) で不透明度を指定する。レンダラは**すべてのノードで正しいアルファ合成**を行わなければならない。
+
+> S1 で実装した SDF バッチャは既に `BlendState::ALPHA_BLENDING` で描画しており、この要件は満たせる見込みである。
+> ただし**画像テクスチャの描画経路は未実装**であり、`06-renderer.md` で定義する。
+
+### 6.1.3 どのノードにも指定できる
+
+背景画像は `app.window` 専用ではない。**安定 ID を持つ任意のノードに指定できる。**
+
+```jsonc
+{ "select": "nav.guild_list", "style": { "background": { "image": "assets/sidebar.png", "fit": "tile" } } },
+{ "select": "chat.message.avatar", "style": { "background": { "image": "assets/ring.png" } } }
+```
+
+---
+
+## 6.2 使用例: 全面背景 + 半透明 UI
+
+冒頭のスクリーンショットのような構成を作る最小の組み合わせ。
+
+```jsonc
+{
+  "tokens": {
+    "color.panel":  "#16161fb3",
+    "color.panel.deep": "#0f0f17cc",
+    "color.text.primary": "#f0f0f5"
+  },
+  "rules": [
+    {
+      "select": "app.window",
+      "style": {
+        "background": {
+          "color": "#0f0f17",
+          "image": "assets/wallpaper.png",
+          "fit": "cover",
+          "tint": "#0f0f1740"
+        },
+        "color": "$color.text.primary"
+      }
+    },
+    { "select": "nav.guild_list",    "style": { "background": "$color.panel.deep" } },
+    { "select": "nav.channel_list",  "style": { "background": "$color.panel" } },
+    { "select": "chat.header",       "style": { "background": "$color.panel" } },
+    { "select": "chat.input.field",  "style": { "background": "$color.panel.deep" } },
+    { "select": "chat.message",      "when": { "state": "hover" }, "style": { "background": "#ffffff14" } }
+  ]
+}
+```
+
+**`chat.message_list` と `chat.view` に背景色を指定しない**のが要点である。指定しなければ透明のままで、`app.window` の画像が透ける。
+
+---
+
+## 6.3 アセットの参照 (`EXT-017`)
+
+> `EXT-017` (アセットの同梱) を M2 から **M1 に前倒しした。** 背景画像はアセットなしには成立しないため。
+
+テーマは単一の JSON ではなく**ディレクトリ**として配布できる。
+
+```
+midnight/
+├─ theme.json
+└─ assets/
+   ├─ wallpaper.png
+   └─ Inter.woff2
+```
+
+`image` と `font.family` は 3 通りの参照を受け付ける。
+
+| 種類 | 書式 | 例 |
+|---|---|---|
+| **同梱アセット** | `theme.json` からの相対パス | `"assets/wallpaper.png"` |
+| **データ URI** | `data:` | `"data:image/png;base64,..."` |
+| **外部 URL** | `https:` のみ | `"https://cdn.example.com/bg.png"` |
+
+**相対パスはテーマディレクトリの外へ出られない。** `../` を含む参照、絶対パス、シンボリックリンクの追跡は拒否する。
+
+対応形式は PNG / JPEG / WebP / AVIF。アニメーションは `EXT-026` で M2。
+
+---
+
+## 6.4 外部 URL の扱い (`SEC-022`〜`SEC-025`)
+
+> **Vencord のテーマは外部 URL を多用する。互換性のために許可するが、無条件では許可しない。**
+
+外部から画像を取得することは、以下を意味する。
+
+- **起動のたびに利用者の IP アドレスが画像ホストへ渡る**
+- テーマ作者またはホスト運営者が、利用者の起動時刻・頻度を観測できる
+- ホストが消えるとテーマが壊れる
+
+したがってプラグインのケイパビリティモデルと**同じ仕組み**を使う。
+
+### 6.4.1 manifest での宣言 (`SEC-022`)
+
+```jsonc
+{
+  "manifest": {
+    "id": "com.example.wallpaper",
+    "name": "Wallpaper",
+    "version": "1.0.0",
+    "abi": 1,
+    "remoteAssets": ["cdn.example.com", "i.imgur.com"]
+  }
+}
+```
+
+**宣言されていないホストへの取得は行われない。** 拒否ではなく、そもそも到達しない。
+
+### 6.4.2 利用者の承認 (`SEC-023`)
+
+インストール時に取得先ホストの一覧を提示し、承認を得る。
+
+```
+「Wallpaper」は以下のサイトから画像を取得します:
+  ・cdn.example.com
+  ・i.imgur.com
+
+これらのサイトには、あなたが Gumicord を起動したことが伝わります。
+                                        [許可しない]  [許可する]
+```
+
+承認しなければ、外部画像は読み込まれず `background.color` にフォールバックする (`EXT-027`)。**テーマの他の部分は適用される。**
+
+### 6.4.3 取得時の制約 (`SEC-024`, `SEC-025`)
+
+| 制約 | 内容 |
+|---|---|
+| 認証情報を付けない | Cookie・Authorization・Referer を送らない |
+| `https` のみ | `http` は拒否 |
+| キャッシュする | 一度取得したらローカルに保存し、起動のたびに再取得しない |
+| サイズ上限 | 1 ファイルあたり 32MB |
+| リダイレクトの制限 | 宣言済みホストの外へのリダイレクトは追わない |
+
+> **同梱アセットを推奨する。** ドキュメントとテーマ作成ツールは、外部 URL より同梱を既定として案内する。
+> 外部 URL は「Vencord から持ってきたテーマがそのまま動く」ための互換機構と位置づける。
+
+### 6.4.4 読み込み失敗 (`EXT-027`)
+
+| 状況 | 挙動 |
+|---|---|
+| ファイルがない / 取得失敗 | `background.color` にフォールバックし、設定画面に警告を出す |
+| 未対応の形式 | 同上 |
+| サイズ上限超過 | 同上 |
+| 未承認のホスト | 同上 (エラーではなく「未承認」として表示) |
+
+**テーマ全体を無効化しない。** 画像 1 枚が読めないだけで UI が使えなくなるのは過剰である ([7 章](#7-検証とエラー処理-ext-016) と同じ方針)。
 
 ---
 
@@ -326,8 +530,10 @@ theme.json ──[JSON Schema 検証]──▶ トークン表 + ルール表
 
 | 項目 | 要件 | 予定 |
 |---|---|---|
-| フォントと画像アセットの同梱 | `EXT-017` | M2 |
+| すりガラス (背後をぼかす背景) | `EXT-025` | M2 |
+| アニメーション背景 (GIF / WebP) | `EXT-026` | M2 |
 | レイアウトの上書き | `EXT-018` | M2 |
 | 複数テーマの適用順序と合成 | `EXT-019` | M2 |
 | アニメーションとトランジション | — | M2 |
 | テーマ作成支援ツール (UITree Inspector 連携) | `EXT-006` | M2 |
+| 動画背景 | — | **非目標**。常駐アプリの消費電力に対して見返りが釣り合わない |

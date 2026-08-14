@@ -58,8 +58,56 @@ if (existsSync(themesDir)) {
       ok(`${name} (${data.rules?.length ?? 0} ルール, ${Object.keys(data.tokens ?? {}).length} トークン)`);
     } else {
       ng(name, JSON.stringify(themeValidate.errors?.slice(0, 3), null, 2));
+      continue;
+    }
+
+    // スキーマは書式しか見ない。同梱アセットが実在するか、
+    // 外部 URL が manifest.remoteAssets で宣言されているか (SEC-022) までは
+    // スキーマでは表現できないので、ここで確かめる。
+    const dir = join(themesDir, name);
+    const declared = new Set(data.manifest?.remoteAssets ?? []);
+    const refs = collectAssetRefs(data);
+    for (const ref of refs) {
+      if (ref.startsWith("data:")) continue;
+      if (ref.startsWith("https://")) {
+        const host = new URL(ref).hostname;
+        if (declared.has(host)) ok(`  外部 ${host} — remoteAssets で宣言済み`);
+        else ng(`  外部 ${host} — manifest.remoteAssets に宣言がない (SEC-022)`);
+        continue;
+      }
+      if (existsSync(join(dir, ref))) ok(`  同梱 ${ref}`);
+      else ng(`  同梱 ${ref} — ファイルが存在しない`);
+    }
+
+    // 宣言したのに一度も使っていないホストは、無用な権限要求である
+    const usedHosts = new Set(
+      refs.filter((r) => r.startsWith("https://")).map((r) => new URL(r).hostname),
+    );
+    for (const h of declared) {
+      if (!usedHosts.has(h)) ng(`  ${h} を remoteAssets に宣言しているが使っていない`);
     }
   }
+}
+
+/** テーマ内のすべてのアセット参照を集める */
+function collectAssetRefs(theme) {
+  const out = [];
+  const visit = (v) => {
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) return v.forEach(visit);
+    for (const [k, val] of Object.entries(v)) {
+      if ((k === "image" || k === "family") && typeof val === "string") {
+        // family はフォント名かアセット参照のどちらか。拡張子があればアセットとみなす
+        if (k === "family" && !/\.(woff2|ttf|otf)$/i.test(val)) continue;
+        out.push(val);
+      } else {
+        visit(val);
+      }
+    }
+  };
+  visit(theme.tokens);
+  visit(theme.rules);
+  return out;
 }
 
 // ---------------------------------------------------------------- 異常系
@@ -90,6 +138,21 @@ const shouldFail = [
   ["トークン参照の書式が不正", { ...base, rules: [{ select: "chat.message", style: { color: "$Color.Bg" } }] }],
   ["style なしのルール", { ...base, rules: [{ select: "chat.message" }] }],
   ["トップレベルに未知のキー", { ...base, extra: 1 }],
+
+  // --- 背景画像 (EXT-021, SEC-022) ---
+  ["背景に未知のキー", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", repeat: "x" } } }] }],
+  ["fit が未知の値", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", fit: "fill" } } }] }],
+  ["position の要素数が不正", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", position: [0.5] } } }] }],
+  ["position が範囲外", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", position: [1.5, 0] } } }] }],
+  ["アセット参照が親ディレクトリへ出る", { ...base, rules: [{ select: "app.window", style: { background: { image: "../secret.png" } } }] }],
+  ["アセット参照が親を途中に含む", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/../../x.png" } } }] }],
+  ["アセット参照が絶対パス", { ...base, rules: [{ select: "app.window", style: { background: { image: "/etc/passwd.png" } } }] }],
+  ["アセット参照が Windows 絶対パス", { ...base, rules: [{ select: "app.window", style: { background: { image: "C:/x/a.png" } } }] }],
+  ["外部 URL が http", { ...base, rules: [{ select: "app.window", style: { background: { image: "http://e.com/a.png" } } }] }],
+  ["外部 URL が file スキーム", { ...base, rules: [{ select: "app.window", style: { background: { image: "file:///etc/passwd" } } }] }],
+  ["未対応の画像形式", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/a.bmp" } } }] }],
+  ["blur が負", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", blur: -1 } } }] }],
+  ["remoteAssets がホスト名でない", { manifest: { ...base.manifest, remoteAssets: ["https://cdn.example.com/"] } }],
 ];
 
 for (const [label, data] of shouldFail) {
@@ -110,6 +173,42 @@ const shouldPass = [
   ["8 桁の色 (アルファ)", { ...base, tokens: { "color.a": "#ffffff14" } }],
   ["padding の 4 要素", { ...base, rules: [{ select: "chat.message", style: { padding: [1, 2, 3, 4] } }] }],
   ["font の family 省略", { ...base, tokens: { "font.a": { size: 15, lineHeight: 22 } } }],
+
+  // --- 背景画像 (EXT-021) ---
+  ["背景が色の短縮記法", { ...base, rules: [{ select: "app.window", style: { background: "#0f0f17" } }] }],
+  ["背景がトークン参照", { ...base, rules: [{ select: "app.window", style: { background: "$color.bg" } }] }],
+  [
+    "背景オブジェクト一式",
+    {
+      ...base,
+      rules: [
+        {
+          select: "app.window",
+          style: {
+            background: {
+              color: "#0f0f17",
+              image: "assets/wallpaper.png",
+              fit: "cover",
+              position: [0.5, 0.35],
+              opacity: 0.9,
+              blur: 4,
+              tint: "#0f0f1766",
+            },
+          },
+        },
+      ],
+    },
+  ],
+  ["背景を token として定義", { ...base, tokens: { "bg.main": { image: "assets/a.webp", fit: "tile" } } }],
+  ["ネストした同梱アセット", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/img/bg.avif" } } }] }],
+  ["data URI の画像", { ...base, rules: [{ select: "app.window", style: { background: { image: "data:image/png;base64,iVBORw0KGgo=" } } }] }],
+  [
+    "外部 URL + remoteAssets 宣言",
+    {
+      manifest: { ...base.manifest, remoteAssets: ["cdn.example.com", "i.imgur.com"] },
+      rules: [{ select: "app.window", style: { background: { image: "https://cdn.example.com/bg.png" } } }],
+    },
+  ],
 ];
 
 for (const [label, data] of shouldPass) {

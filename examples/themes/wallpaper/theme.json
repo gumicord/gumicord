@@ -1,0 +1,236 @@
+{
+  "$schema": "https://gumicord.dev/schema/theme-1.json",
+
+  "manifest": {
+    "id": "dev.gumicord.wallpaper",
+    "name": "Wallpaper",
+    "version": "1.0.0",
+    "abi": 1,
+    "author": "Gumicord",
+    "description": "背景画像を全面に敷き、UI を半透明にする構成の見本 (EXT-021, EXT-024)。assets/wallpaper.png を好きな画像に差し替えて使える。",
+    "license": "MIT"
+  },
+
+  "tokens": {
+    "color.text.primary": "#f2f2f8",
+    "color.text.secondary": "#c0c0d0",
+    "color.text.muted": "#8e8ea4",
+    "color.accent": "#8f7cff",
+    "color.danger": "#ff6b7a",
+
+    "color.panel": "#141420b3",
+    "color.panel.deep": "#0c0c14cc",
+    "color.panel.hover": "#ffffff14",
+    "color.panel.selected": "#ffffff26",
+    "color.border": "#ffffff1f",
+
+    "radius.sm": 4,
+    "radius.md": 8,
+    "radius.lg": 12,
+    "radius.full": 9999,
+
+    "font.body": { "size": 15, "lineHeight": 22 },
+    "font.title": { "size": 16, "lineHeight": 22, "weight": 600 },
+    "font.small": { "size": 12, "lineHeight": 16 },
+
+    "shadow.panel": { "x": 0, "y": 4, "blur": 16, "color": "#00000066" }
+  },
+
+  "rules": [
+    {
+      "select": "app.window",
+      "style": {
+        "background": {
+          "color": "#0c0c14",
+          "image": "assets/wallpaper.png",
+          "fit": "cover",
+          "position": [0.5, 0.4],
+          "tint": "#0c0c1440"
+        },
+        "color": "$color.text.primary",
+        "font": "$font.body"
+      }
+    },
+
+    {
+      "select": "chrome.titlebar",
+      "when": { "platform": "desktop" },
+      "style": { "background": "#00000000", "height": 32 }
+    },
+    {
+      "select": "chrome.titlebar.title",
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+    {
+      "select": "chrome.titlebar.control",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover" }
+    },
+
+    {
+      "select": "nav.guild_list",
+      "style": { "background": "$color.panel.deep", "padding": 8, "gap": 8 }
+    },
+    {
+      "select": "nav.guild_list.item",
+      "style": { "width": 48, "height": 48, "radius": "$radius.lg" }
+    },
+    {
+      "select": "nav.guild_list.item",
+      "when": { "state": "selected" },
+      "style": { "radius": "$radius.md", "borderColor": "$color.accent", "borderWidth": 2 }
+    },
+    {
+      "select": "nav.guild_list.item.badge",
+      "style": {
+        "background": "$color.danger",
+        "color": "#ffffff",
+        "font": "$font.small",
+        "radius": "$radius.full",
+        "padding": [2, 6, 2, 6]
+      }
+    },
+
+    {
+      "select": "nav.channel_list",
+      "style": {
+        "background": "$color.panel",
+        "padding": 8,
+        "borderColor": "$color.border",
+        "borderWidth": 1
+      }
+    },
+    {
+      "select": "nav.channel_list.category",
+      "style": { "font": "$font.small", "color": "$color.text.muted", "padding": [12, 8, 4, 8] }
+    },
+    {
+      "select": "nav.channel_list.item",
+      "style": { "radius": "$radius.sm", "padding": [6, 8, 6, 8], "color": "$color.text.secondary" }
+    },
+    {
+      "select": "nav.channel_list.item",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover", "color": "$color.text.primary" }
+    },
+    {
+      "select": "nav.channel_list.item",
+      "when": { "state": "selected" },
+      "style": { "background": "$color.panel.selected", "color": "$color.text.primary" }
+    },
+    {
+      "select": "nav.channel_list.item",
+      "when": { "state": "mentioned" },
+      "style": { "color": "$color.danger" }
+    },
+
+    {
+      "select": "chat.header",
+      "style": {
+        "background": "$color.panel",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "height": 48,
+        "padding": [0, 16, 0, 16],
+        "shadow": "$shadow.panel"
+      }
+    },
+    {
+      "select": "chat.header.title",
+      "style": { "font": "$font.title" }
+    },
+
+    {
+      "select": "chat.message",
+      "style": { "padding": [4, 16, 4, 16], "gap": 8 }
+    },
+    {
+      "select": "chat.message",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover" }
+    },
+    {
+      "select": "chat.message",
+      "when": { "state": "mentioned" },
+      "style": { "background": "#8f7cff26", "borderColor": "$color.accent", "borderWidth": 2 }
+    },
+    {
+      "select": "chat.message.avatar",
+      "style": { "width": 40, "height": 40, "radius": "$radius.full" }
+    },
+    {
+      "select": "chat.message.header.author",
+      "style": { "font": "$font.title" }
+    },
+    {
+      "select": "chat.message.header.timestamp",
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+    {
+      "select": "chat.message.embed",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.md",
+        "padding": 16,
+        "borderColor": "$color.accent",
+        "borderWidth": 4
+      }
+    },
+
+    {
+      "select": "chat.input",
+      "style": { "padding": [0, 16, 16, 16] }
+    },
+    {
+      "select": "chat.input.field",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.md",
+        "padding": 16,
+        "minHeight": 44,
+        "borderColor": "$color.border",
+        "borderWidth": 1
+      }
+    },
+    {
+      "select": "chat.input.field",
+      "when": { "state": "focus" },
+      "style": { "borderColor": "$color.accent" }
+    },
+
+    {
+      "select": "primitive.mention",
+      "style": { "background": "#8f7cff33", "color": "$color.accent", "radius": "$radius.sm" }
+    },
+    {
+      "select": "primitive.link",
+      "style": { "color": "$color.accent" }
+    },
+    {
+      "select": "primitive.code_block",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.sm",
+        "padding": 8,
+        "borderColor": "$color.border",
+        "borderWidth": 1
+      }
+    },
+    {
+      "select": "primitive.badge",
+      "style": {
+        "background": "$color.accent",
+        "color": "#ffffff",
+        "font": "$font.small",
+        "radius": "$radius.sm",
+        "padding": [1, 4, 1, 4]
+      }
+    },
+
+    {
+      "select": "nav.channel_list",
+      "when": { "maxWidth": 600 },
+      "style": { "background": "$color.panel.deep" }
+    }
+  ]
+}
