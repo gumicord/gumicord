@@ -1,0 +1,13 @@
+[package]
+name = "s2-text-input"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+accesskit = "0.24"
+accesskit_winit = "0.33"
+bytemuck = "1"
+cosmic-text = "0.19"
+pollster = "1"
+wgpu = "30"
+winit = "0.30"

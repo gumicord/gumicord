@@ -276,22 +276,32 @@ rustup component add rust-analyzer clippy rustfmt
 | スパイク | 状態 | 完了日 | 記録先 |
 |---|---|---|---|
 | S0 ツールチェーン | ✅ 完了 | 2026-08-14 | Rust 1.97.1 / MSVC (VS Community 2026) / Windows SDK 10.0.26100 |
-| S1 ウィンドウ | 🟡 **Windows は自動計測完了。手動検証と他 OS が残** | — | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s1-の測定結果-2026-08-14) |
-| S2 IME + a11y | 未着手 | — | ADR-0001 |
+| S1 ウィンドウ | ✅ **Windows 完了** (他 OS は環境確保待ち) | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s1-の測定結果-2026-08-14) |
+| S2 IME + a11y | 🔴 **Windows 完了。2-3 が不合格 → ADR-0005 で判断** | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s2-の測定結果-2026-08-14) |
 | S3 QuickJS | 未着手 | — | ADR-0002 |
 | S4 Gateway | 未着手 | — | ADR-0002 / `09-discord-protocol.md` |
 
-### S1 の残作業
+### S1 の判定
 
-自動で測れる項目は完了した。以下は人の操作か別環境が要る。
+**Windows における Go/No-Go 条件はすべて満たした。**
 
-| # | 残作業 | 誰が / どこで |
+| 条件 | 結果 |
+|---|---|
+| 常駐メモリが公式クライアントを下回る | ✅ 69.7MB vs 1,273MB |
+| コールドスタートが公式クライアントを下回る | ✅ 332ms |
+| 独自タイトルバーが `PLT-021` の挙動を満たす | ✅ 手動確認済 (2026-08-14) |
+| スクロールの p99 がリフレッシュ周期に収まる | ⚠️ p99 18.8ms / 周期 16.67ms。約 1% で 1 フレーム落ち |
+
+`NFR-003` のみ未達。原因は毎フレームのインスタンスバッファ全体転送と `ControlFlow::Poll` の疑いがあり、実装では差分更新と `ControlFlow::Wait` に変える。**M1 の実装後に再測定して判定する。**
+
+### S1 で残った項目 (S1 の合否には影響しない)
+
+| # | 項目 | 必要なもの |
 |---|---|---|
-| 1-3 | ドラッグ移動・端のリサイズ・最大化トグル・最小化が OS 標準と等価に動くか | **手動操作** (`spike/s1-window` を実行) |
-| 1-5 | DPI 変更・ディスプレイ間移動への追従 | マルチディスプレイ環境 |
-| `PLT-022` | Windows スナップレイアウト。`winit` の `with_decorations(false)` では `WM_NCHITTEST` に `HTMAXBUTTON` を返せない。Win32 のウィンドウプロシージャ差し込みが必要か | 追加調査 |
-| — | macOS / Linux での S1 全項目 | 環境確保が必要 |
-| — | Android / iOS での S1 全項目 | NDK / macOS + Xcode が必要 |
+| `PLT-022` | Windows スナップレイアウト。`winit` の `with_decorations(false)` では `WM_NCHITTEST` に `HTMAXBUTTON` を返せないため、レンダラ実装時に Win32 のウィンドウプロシージャ差し込みが必要か再確認する | 実装時に判断 |
+| 1-5 | DPI 変更・ディスプレイ間移動への追従 (`PLT-009`) | マルチディスプレイ環境 |
+| — | macOS / Linux での S1 全項目 | 環境確保 |
+| — | Android / iOS での S1 全項目 | NDK / macOS + Xcode |
 | — | NVIDIA / AMD / Apple Silicon でのバックエンド挙動 (発見 1・2 の追試) | 別 GPU 環境 |
 
 #### 実行方法
