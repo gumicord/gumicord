@@ -201,7 +201,7 @@ impl ZstdStream {
     }
 }
 
-fn identify_payload(cfg: &Config) -> Value {
+fn identify_payload(cfg: &Config, intents: u64) -> Value {
     match cfg.kind {
         // NFR-020: 公式クライアントと同等のプロパティで接続する。
         // 隠すためではなく、サーバーに嘘の情報を渡さないため。
@@ -209,8 +209,7 @@ fn identify_payload(cfg: &Config) -> Value {
             "op": 2,
             "d": {
                 "token": cfg.token,
-                // GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT
-                "intents": (1 << 0) | (1 << 9) | (1 << 15),
+                "intents": intents,
                 "properties": {
                     "os": std::env::consts::OS,
                     "browser": "Gumicord",
@@ -242,6 +241,218 @@ fn identify_payload(cfg: &Config) -> Value {
     }
 }
 
+
+// ============================================================ Gateway 観測
+
+#[derive(Default)]
+struct GatewayResult {
+    ready_ms: Option<f32>,
+    guilds: usize,
+    heartbeats_sent: u32,
+    heartbeat_acks: u32,
+    messages_seen: u32,
+    session_id: Option<String>,
+    resume_url: Option<String>,
+    last_seq: Option<u64>,
+    close_code: Option<u16>,
+    zstd_ok: bool,
+    sent_ok: Option<String>,
+}
+
+/// GUILDS | GUILD_MESSAGES  (いずれも非特権)
+const INTENTS_BASIC: u64 = (1 << 0) | (1 << 9);
+/// 上記 + MESSAGE_CONTENT (特権。Developer Portal での許可が必要)
+const INTENTS_PRIVILEGED: u64 = INTENTS_BASIC | (1 << 15);
+
+async fn observe_gateway(
+    cfg: &Config,
+    intents: u64,
+    http: &reqwest::Client,
+    limiter: &mut RateLimiter,
+    observe_secs: u64,
+) -> Result<GatewayResult, Box<dyn std::error::Error>> {
+    let mut r = GatewayResult::default();
+
+    let compress = if cfg.zstd { "&compress=zstd-stream" } else { "" };
+    let url = format!("wss://gateway.discord.gg/?v={GATEWAY_VERSION}&encoding=json{compress}");
+    println!("[gateway] 接続先 = {url}");
+
+    let t_connect = Instant::now();
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
+    println!("[MEASURE] WebSocket 確立 = {:.0}ms", t_connect.elapsed().as_secs_f32() * 1000.0);
+
+    let mut zstd_stream = if cfg.zstd { Some(ZstdStream::new()?) } else { None };
+    let mut heartbeat_interval = Duration::from_secs(41);
+    let mut identified = false;
+
+    let deadline = Instant::now() + Duration::from_secs(observe_secs);
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let mut next_heartbeat = Instant::now() + Duration::from_secs(3600);
+
+    println!("[gateway] {observe_secs} 秒間観測します");
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if Instant::now() > deadline { break; }
+                // 4-3: ハートビート
+                if identified && Instant::now() >= next_heartbeat {
+                    ws.send(Message::Text(json!({"op":1,"d":r.last_seq}).to_string().into())).await?;
+                    r.heartbeats_sent += 1;
+                    next_heartbeat = Instant::now() + heartbeat_interval;
+                    println!("[gateway] ハートビート送信 #{} (seq={:?})", r.heartbeats_sent, r.last_seq);
+                }
+            }
+            msg = ws.next() => {
+                let Some(msg) = msg else { println!("[gateway] ストリーム終端"); break };
+                let msg = msg?;
+
+                let text: String = match msg {
+                    Message::Text(t) => t.to_string(),
+                    Message::Binary(b) => {
+                        // 4-2: zstd-stream はフレームを跨ぐ 1 本のストリーム
+                        match &mut zstd_stream {
+                            Some(z) => {
+                                let out = z.push(&b)?;
+                                if out.is_empty() { continue; }
+                                r.zstd_ok = true;
+                                String::from_utf8_lossy(&out).into_owned()
+                            }
+                            None => { println!("[gateway] 予期しないバイナリフレーム"); continue }
+                        }
+                    }
+                    Message::Close(c) => {
+                        if let Some(f) = &c {
+                            r.close_code = Some(u16::from(f.code));
+                            println!("[gateway] Close: code={} reason={}", u16::from(f.code), f.reason);
+                        }
+                        break;
+                    }
+                    _ => continue,
+                };
+
+                let payload: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => { println!("[gateway] JSON 解析失敗: {e}"); continue }
+                };
+                if let Some(s) = payload["s"].as_u64() { r.last_seq = Some(s); }
+
+                match payload["op"].as_u64().unwrap_or(u64::MAX) {
+                    10 => {
+                        let ms = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(41250);
+                        heartbeat_interval = Duration::from_millis(ms);
+                        println!("[MEASURE] op=10 Hello  heartbeat_interval = {ms}ms");
+                        if cfg.zstd && r.zstd_ok {
+                            println!("[MEASURE] 4-2 zstd-stream の解凍に成功");
+                        }
+                        ws.send(Message::Text(identify_payload(cfg, intents).to_string().into())).await?;
+                        identified = true;
+                        // 最初のハートビートには jitter を入れる (公式クライアントと同じ挙動)
+                        next_heartbeat = Instant::now() + heartbeat_interval.mul_f64(0.5);
+                        println!("[gateway] op=2 Identify 送信 (intents={intents:#x})");
+                    }
+                    11 => {
+                        r.heartbeat_acks += 1;
+                        println!("[gateway] op=11 Heartbeat ACK #{}", r.heartbeat_acks);
+                    }
+                    1 => {
+                        ws.send(Message::Text(json!({"op":1,"d":r.last_seq}).to_string().into())).await?;
+                        r.heartbeats_sent += 1;
+                    }
+                    9 => { println!("[gateway] op=9 Invalid Session"); break }
+                    7 => { println!("[gateway] op=7 Reconnect 要求"); break }
+                    0 => {
+                        match payload["t"].as_str().unwrap_or("") {
+                            "READY" => {
+                                r.ready_ms = Some(t_connect.elapsed().as_secs_f32() * 1000.0);
+                                r.session_id = payload["d"]["session_id"].as_str().map(str::to_string);
+                                r.resume_url = payload["d"]["resume_gateway_url"].as_str().map(str::to_string);
+                                r.guilds = payload["d"]["guilds"].as_array().map(|a| a.len()).unwrap_or(0);
+                                println!("[MEASURE] 4-1 READY 到達 = {:.0}ms", r.ready_ms.unwrap());
+                                println!("[MEASURE] ギルド数 = {}", r.guilds);
+                                assert_no_token(&payload.to_string(), &cfg.token);
+                                println!("[MEASURE] SEC-001 自己点検: READY ペイロードにトークンなし");
+
+                                // 4-5: REST でメッセージ送信
+                                if let Some(ch) = &cfg.channel_id {
+                                    let route = "POST /channels/:id/messages";
+                                    limiter.acquire(route).await;
+                                    let t = Instant::now();
+                                    let resp = http
+                                        .post(format!("{API_BASE}/channels/{ch}/messages"))
+                                        .header("Authorization", cfg.auth_header())
+                                        .json(&json!({ "content": "Gumicord スパイク S4 からの送信テストです" }))
+                                        .send().await?;
+                                    let st = resp.status();
+                                    println!("[MEASURE] 4-5 メッセージ送信 = {st} ({:.0}ms)", t.elapsed().as_secs_f32()*1000.0);
+                                    limiter.update(route, resp.headers());
+                                    r.sent_ok = Some(st.to_string());
+                                    if !st.is_success() {
+                                        let body = resp.text().await.unwrap_or_default();
+                                        assert_no_token(&body, &cfg.token);
+                                        println!("           応答: {body}");
+                                    }
+                                } else {
+                                    println!("[skip]    4-5 は GUMICORD_CHANNEL_ID 未設定のため飛ばします");
+                                }
+                            }
+                            "MESSAGE_CREATE" => {
+                                r.messages_seen += 1;
+                                let author = payload["d"]["author"]["username"].as_str().unwrap_or("?");
+                                let content = payload["d"]["content"].as_str().unwrap_or("");
+                                let preview: String = content.chars().take(40).collect();
+                                let note = if content.is_empty() { "  (本文が空 = MESSAGE_CONTENT 未許可)" } else { "" };
+                                println!("[MEASURE] 4-4 MESSAGE_CREATE #{}: {author}: {preview}{note}", r.messages_seen);
+                            }
+                            other if !other.is_empty() => println!("[gateway] dispatch: {other}"),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let _ = ws.close(None).await;
+    Ok(r)
+}
+
+/// 4-3: resume を試す
+async fn try_resume(cfg: &Config, r: &GatewayResult) -> Result<bool, Box<dyn std::error::Error>> {
+    let (Some(sid), Some(base), Some(seq)) = (&r.session_id, &r.resume_url, r.last_seq) else {
+        println!("[skip]    session_id / resume_gateway_url が得られなかったため飛ばします");
+        return Ok(false);
+    };
+    let url = format!("{base}/?v={GATEWAY_VERSION}&encoding=json");
+    println!("[gateway] resume を試行: {url}");
+    let t = Instant::now();
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
+
+    let dl = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < dl {
+        let Some(Ok(m)) = ws.next().await else { break };
+        let Message::Text(frame) = m else { continue };
+        let v: Value = serde_json::from_str(&frame)?;
+        match v["op"].as_u64() {
+            Some(10) => {
+                let p = json!({ "op": 6, "d": { "token": cfg.token, "session_id": sid, "seq": seq }});
+                ws.send(Message::Text(p.to_string().into())).await?;
+                println!("[gateway] op=6 Resume 送信 (seq={seq})");
+            }
+            Some(0) if v["t"] == "RESUMED" => {
+                println!("[MEASURE] 4-3 RESUMED 成功 = {:.0}ms", t.elapsed().as_secs_f32() * 1000.0);
+                let _ = ws.close(None).await;
+                return Ok(true);
+            }
+            Some(9) => { println!("[gateway] op=9 resume 不可 (セッション期限切れ)"); break }
+            _ => {}
+        }
+    }
+    let _ = ws.close(None).await;
+    println!("[MEASURE] 4-3 RESUMED を確認できませんでした");
+    Ok(false)
+}
+
 // ============================================================ main
 
 #[tokio::main]
@@ -254,25 +465,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!();
             eprintln!("{e}");
             eprintln!();
-            eprintln!("  spike/s4-gateway/.env を作って以下を書いてください:");
-            eprintln!();
-            eprintln!("    GUMICORD_TOKEN=<Bot トークン>");
-            eprintln!("    GUMICORD_TOKEN_KIND=bot          # または user");
-            eprintln!("    GUMICORD_CHANNEL_ID=<送信テスト先のチャンネルID>   # 任意");
-            eprintln!();
-            eprintln!("  ■ Bot トークンを推奨します。");
-            eprintln!("    Gateway の機構はユーザーアカウントと同一なので 4-1〜4-7 は Bot で検証でき、");
-            eprintln!("    その場合アカウント停止のリスクがありません。");
-            eprintln!("    https://discord.com/developers/applications で作成し、");
-            eprintln!("    Bot 設定で MESSAGE CONTENT INTENT を有効にしてください。");
-            eprintln!();
-            eprintln!("  .env は .gitignore 済みです。トークンはログにも出力しません (SEC-001)。");
+            eprintln!("  spike/s4-gateway/.env.example をコピーして .env を作ってください。");
             return Ok(());
         }
     };
 
     println!("[config]  トークン種別 = {:?}", cfg.kind);
     println!("[config]  zstd-stream = {}", cfg.zstd);
+    println!("[config]  送信テスト先 = {}", if cfg.channel_id.is_some() { "設定済み" } else { "未設定" });
     if cfg.kind == TokenKind::User {
         println!();
         println!("  ⚠️  ユーザートークンでの検証はアカウント停止のリスクがあります。");
@@ -280,23 +480,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
-    // ---------------------------------------------------------------- REST
     let http = reqwest::Client::builder()
         .user_agent("Gumicord/0.0.1-spike (https://github.com/gumicord)")
         .build()?;
     let mut limiter = RateLimiter::default();
 
-    // 4-6: レート制限ヘッダの解釈
+    // ---------------------------------------------------------------- 4-6
     println!();
     println!("──────── 4-6 レート制限ヘッダの解釈 (NFR-021) ────────");
     let route = "GET /users/@me";
     limiter.acquire(route).await;
     let t = Instant::now();
-    let resp = http
-        .get(format!("{API_BASE}/users/@me"))
-        .header("Authorization", cfg.auth_header())
-        .send()
-        .await?;
+    let resp = http.get(format!("{API_BASE}/users/@me"))
+        .header("Authorization", cfg.auth_header()).send().await?;
     let status = resp.status();
     let headers = resp.headers().clone();
     println!("[MEASURE] GET /users/@me = {status} ({:.0}ms)", t.elapsed().as_secs_f32() * 1000.0);
@@ -306,243 +502,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let body = resp.text().await.unwrap_or_default();
         assert_no_token(&body, &cfg.token);
         eprintln!("[error]   認証に失敗しました: {body}");
-        eprintln!("          トークンが正しいか、種別 (bot/user) が合っているか確認してください。");
         return Ok(());
     }
-
     let me: Value = resp.json().await?;
-    println!(
-        "[MEASURE] 認証成功: {}#{} (id={})",
-        me["username"].as_str().unwrap_or("?"),
-        me["discriminator"].as_str().unwrap_or("0"),
-        me["id"].as_str().unwrap_or("?")
-    );
+    println!("[MEASURE] 認証成功: {} (id={})",
+        me["username"].as_str().unwrap_or("?"), me["id"].as_str().unwrap_or("?"));
 
-    // 4-6 続き: 連続リクエストで残量が減るのを観測する。
-    // NFR-024 に反しないよう少数回に留める。
     for i in 1..=3 {
         limiter.acquire(route).await;
-        let r = http
-            .get(format!("{API_BASE}/users/@me"))
-            .header("Authorization", cfg.auth_header())
-            .send()
-            .await?;
-        println!("  {i} 回目: {}", r.status());
-        limiter.update(route, r.headers());
+        let rr = http.get(format!("{API_BASE}/users/@me"))
+            .header("Authorization", cfg.auth_header()).send().await?;
+        println!("  {i} 回目: {}", rr.status());
+        limiter.update(route, rr.headers());
     }
 
-    // ---------------------------------------------------------------- Gateway
+    // ---------------------------------------------------------------- 診断
+    // READY のギルド数が 0 だった原因を推測せず直接確かめる。
     println!();
-    println!("──────── 4-1〜4-4 Gateway 接続 ────────");
-
-    let compress = if cfg.zstd { "&compress=zstd-stream" } else { "" };
-    let url = format!("wss://gateway.discord.gg/?v={GATEWAY_VERSION}&encoding=json{compress}");
-    println!("[gateway] 接続先 = {url}");
-
-    let t_connect = Instant::now();
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
-    println!("[MEASURE] WebSocket 確立 = {:.0}ms", t_connect.elapsed().as_secs_f32() * 1000.0);
-
-    let mut zstd_stream = if cfg.zstd { Some(ZstdStream::new()?) } else { None };
-    let mut heartbeat_interval = Duration::from_secs(41);
-    let mut last_seq: Option<u64> = None;
-    let mut identified = false;
-    let mut ready_at: Option<Duration> = None;
-    let mut heartbeat_acks = 0u32;
-    let mut heartbeats_sent = 0u32;
-    let mut messages_seen = 0u32;
-    let mut session_id: Option<String> = None;
-    let mut resume_url: Option<String> = None;
-
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut hb_timer = tokio::time::interval(Duration::from_secs(1));
-    let mut next_heartbeat = Instant::now() + Duration::from_secs(60);
-
-    println!("[gateway] 60 秒間観測します。Ctrl+C で中断できます。");
-
-    loop {
-        tokio::select! {
-            _ = hb_timer.tick() => {
-                if Instant::now() > deadline { break; }
-                // 4-3: ハートビート
-                if identified && Instant::now() >= next_heartbeat {
-                    let hb = json!({ "op": 1, "d": last_seq });
-                    ws.send(Message::Text(hb.to_string().into())).await?;
-                    heartbeats_sent += 1;
-                    next_heartbeat = Instant::now() + heartbeat_interval;
-                    println!("[gateway] ハートビート送信 #{heartbeats_sent} (seq={last_seq:?})");
-                }
-            }
-            msg = ws.next() => {
-                let Some(msg) = msg else { println!("[gateway] 接続が閉じられました"); break };
-                let msg = msg?;
-
-                let text: String = match msg {
-                    Message::Text(t) => t.to_string(),
-                    Message::Binary(b) => {
-                        // 4-2: zstd-stream
-                        match &mut zstd_stream {
-                            Some(z) => {
-                                let out = z.push(&b)?;
-                                if out.is_empty() { continue; }
-                                String::from_utf8_lossy(&out).into_owned()
-                            }
-                            None => { println!("[gateway] 予期しないバイナリフレーム"); continue }
-                        }
-                    }
-                    Message::Close(c) => { println!("[gateway] Close: {c:?}"); break }
-                    _ => continue,
-                };
-
-                let payload: Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(e) => { println!("[gateway] JSON 解析失敗: {e}"); continue }
-                };
-
-                if let Some(s) = payload["s"].as_u64() { last_seq = Some(s); }
-                let op = payload["op"].as_u64().unwrap_or(u64::MAX);
-
-                match op {
-                    // Hello
-                    10 => {
-                        let ms = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(41250);
-                        heartbeat_interval = Duration::from_millis(ms);
-                        println!("[MEASURE] op=10 Hello  heartbeat_interval = {ms}ms");
-                        if cfg.zstd {
-                            println!("[MEASURE] 4-2 zstd-stream の解凍に成功 (Hello を復号できた)");
-                        }
-
-                        // 4-1: identify
-                        let id = identify_payload(&cfg);
-                        let s = id.to_string();
-                        ws.send(Message::Text(s.into())).await?;
-                        identified = true;
-                        // 最初のハートビートは jitter を入れる (公式クライアントと同じ挙動)
-                        next_heartbeat = Instant::now() + heartbeat_interval.mul_f64(0.5);
-                        println!("[gateway] op=2 Identify 送信");
-                    }
-                    // Heartbeat ACK
-                    11 => {
-                        heartbeat_acks += 1;
-                        println!("[gateway] op=11 Heartbeat ACK #{heartbeat_acks}");
-                    }
-                    // サーバーからのハートビート要求
-                    1 => {
-                        ws.send(Message::Text(json!({"op":1,"d":last_seq}).to_string().into())).await?;
-                        heartbeats_sent += 1;
-                    }
-                    // Invalid session
-                    9 => {
-                        println!("[gateway] op=9 Invalid Session (resumable={})", payload["d"].as_bool().unwrap_or(false));
-                        break;
-                    }
-                    // Reconnect
-                    7 => { println!("[gateway] op=7 Reconnect 要求"); break }
-                    // Dispatch
-                    0 => {
-                        let ev = payload["t"].as_str().unwrap_or("");
-                        match ev {
-                            "READY" => {
-                                ready_at = Some(t_connect.elapsed());
-                                session_id = payload["d"]["session_id"].as_str().map(str::to_string);
-                                resume_url = payload["d"]["resume_gateway_url"].as_str().map(str::to_string);
-                                let guilds = payload["d"]["guilds"].as_array().map(|a| a.len()).unwrap_or(0);
-                                println!("[MEASURE] 4-1 READY 到達 = {:.0}ms", ready_at.unwrap().as_secs_f32() * 1000.0);
-                                println!("[MEASURE] ギルド数 = {guilds}");
-                                println!("[MEASURE] resume_gateway_url = {}", resume_url.as_deref().unwrap_or("なし"));
-                                let raw = payload.to_string();
-                                assert_no_token(&raw, &cfg.token);
-                                println!("[MEASURE] SEC-001 自己点検: READY ペイロードにトークンなし");
-
-                                // 4-5: メッセージ送信
-                                if let Some(ch) = &cfg.channel_id {
-                                    let route = "POST /channels/:id/messages";
-                                    limiter.acquire(route).await;
-                                    let t = Instant::now();
-                                    let r = http
-                                        .post(format!("{API_BASE}/channels/{ch}/messages"))
-                                        .header("Authorization", cfg.auth_header())
-                                        .json(&json!({ "content": "Gumicord スパイク S4 からの送信テストです" }))
-                                        .send()
-                                        .await?;
-                                    println!("[MEASURE] 4-5 メッセージ送信 = {} ({:.0}ms)", r.status(), t.elapsed().as_secs_f32()*1000.0);
-                                    limiter.update(route, r.headers());
-                                } else {
-                                    println!("[skip]    4-5 送信テストは GUMICORD_CHANNEL_ID 未設定のため飛ばします");
-                                }
-                            }
-                            "MESSAGE_CREATE" => {
-                                messages_seen += 1;
-                                let author = payload["d"]["author"]["username"].as_str().unwrap_or("?");
-                                let content = payload["d"]["content"].as_str().unwrap_or("");
-                                let preview: String = content.chars().take(40).collect();
-                                println!("[MEASURE] 4-4 MESSAGE_CREATE #{messages_seen}: {author}: {preview}");
-                            }
-                            other if !other.is_empty() => {
-                                println!("[gateway] dispatch: {other}");
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
+    println!("──────── 診断: 参加ギルドとチャンネルの到達性 ────────");
+    let gr = http.get(format!("{API_BASE}/users/@me/guilds"))
+        .header("Authorization", cfg.auth_header()).send().await?;
+    let gst = gr.status();
+    if gst.is_success() {
+        let guilds: Value = gr.json().await?;
+        let list = guilds.as_array().cloned().unwrap_or_default();
+        println!("[diag]    参加ギルド数 = {}", list.len());
+        for g in &list {
+            println!("            - {} (id={})",
+                g["name"].as_str().unwrap_or("?"), g["id"].as_str().unwrap_or("?"));
         }
+        if list.is_empty() {
+            println!("[diag]    ★ Bot がどのサーバーにも参加していません。");
+            println!("            招待 URL (client_id は上の id と同じ):");
+            println!("            https://discord.com/oauth2/authorize?client_id={}&scope=bot&permissions=68608",
+                me["id"].as_str().unwrap_or("APPLICATION_ID"));
+        }
+    } else {
+        let body = gr.text().await.unwrap_or_default();
+        assert_no_token(&body, &cfg.token);
+        println!("[diag]    GET /users/@me/guilds = {gst}: {body}");
+    }
+
+    if let Some(ch) = &cfg.channel_id {
+        let cr = http.get(format!("{API_BASE}/channels/{ch}"))
+            .header("Authorization", cfg.auth_header()).send().await?;
+        let cst = cr.status();
+        let body = cr.text().await.unwrap_or_default();
+        assert_no_token(&body, &cfg.token);
+        if cst.is_success() {
+            let c: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            println!("[diag]    チャンネル到達可: #{} (type={}, guild_id={})",
+                c["name"].as_str().unwrap_or("?"),
+                c["type"].as_u64().unwrap_or(999),
+                c["guild_id"].as_str().unwrap_or("DM?"));
+        } else {
+            println!("[diag]    ★ チャンネルに到達できません: {cst} {body}");
+            println!("            GUMICORD_CHANNEL_ID が Bot の参加サーバー内のものか確認してください。");
+        }
+    }
+
+    // ---------------------------------------------------------------- 4-1〜4-5
+    println!();
+    println!("──────── 4-1〜4-5 Gateway 接続 (特権インテントあり) ────────");
+    let mut result = observe_gateway(&cfg, INTENTS_PRIVILEGED, &http, &mut limiter, 45).await?;
+    let mut used_intents = INTENTS_PRIVILEGED;
+
+    // 4014 = Disallowed intent(s)。Developer Portal で特権インテントが未許可。
+    // MESSAGE_CONTENT を外せば MESSAGE_CREATE 自体は届く (本文が空になるだけ) ので、
+    // 検証を止めずに続行する。
+    if result.close_code == Some(4014) {
+        println!();
+        println!("[info]    4014 Disallowed intent(s) — 特権インテントが未許可です。");
+        println!("          MESSAGE_CONTENT を外して再試行します。");
+        println!("          (本文まで取得したい場合は Developer Portal → Bot →");
+        println!("           Privileged Gateway Intents で MESSAGE CONTENT INTENT を有効化)");
+        println!();
+        println!("──────── 4-1〜4-5 Gateway 接続 (非特権インテントのみ) ────────");
+        result = observe_gateway(&cfg, INTENTS_BASIC, &http, &mut limiter, 45).await?;
+        used_intents = INTENTS_BASIC;
     }
 
     // ---------------------------------------------------------------- 4-3 resume
     println!();
     println!("──────── 4-3 再接続 (resume) ────────");
-    if let (Some(sid), Some(url), Some(seq)) = (&session_id, &resume_url, last_seq) {
-        let resume_url = format!("{url}/?v={GATEWAY_VERSION}&encoding=json");
-        println!("[gateway] resume を試行: {resume_url}");
-        let t = Instant::now();
-        match tokio_tungstenite::connect_async(&resume_url).await {
-            Ok((mut ws2, _)) => {
-                // Hello を待つ
-                let mut resumed = false;
-                let dl = Instant::now() + Duration::from_secs(15);
-                while Instant::now() < dl {
-                    let Some(Ok(m)) = ws2.next().await else { break };
-                    let Message::Text(frame) = m else { continue };
-                    let v: Value = serde_json::from_str(&frame)?;
-                    match v["op"].as_u64() {
-                        Some(10) => {
-                            let payload = json!({
-                                "op": 6,
-                                "d": { "token": cfg.token, "session_id": sid, "seq": seq }
-                            });
-                            ws2.send(Message::Text(payload.to_string().into())).await?;
-                            println!("[gateway] op=6 Resume 送信 (seq={seq})");
-                        }
-                        Some(0) if v["t"] == "RESUMED" => {
-                            println!("[MEASURE] 4-3 RESUMED 成功 = {:.0}ms", t.elapsed().as_secs_f32()*1000.0);
-                            resumed = true;
-                            break;
-                        }
-                        Some(9) => { println!("[gateway] op=9 resume 不可 (セッション期限切れ)"); break }
-                        _ => {}
-                    }
-                }
-                if !resumed {
-                    println!("[MEASURE] 4-3 RESUMED を確認できませんでした");
-                }
-                let _ = ws2.close(None).await;
-            }
-            Err(e) => println!("[gateway] resume 接続に失敗: {e}"),
-        }
-    } else {
-        println!("[skip]    session_id / resume_gateway_url が得られなかったため飛ばします");
-    }
+    let resumed = try_resume(&cfg, &result).await.unwrap_or(false);
 
     // ---------------------------------------------------------------- まとめ
     println!();
     println!("======== S4 測定結果 ========");
-    println!("[MEASURE] 4-1 identify → READY = {}", ready_at.map(|d| format!("{:.0}ms", d.as_secs_f32()*1000.0)).unwrap_or("★未達★".into()));
-    println!("[MEASURE] 4-2 zstd-stream      = {}", if cfg.zstd { "有効で復号成功" } else { "無効" });
-    println!("[MEASURE] 4-3 ハートビート      = 送信 {heartbeats_sent} / ACK {heartbeat_acks}");
-    println!("[MEASURE] 4-4 MESSAGE_CREATE   = {messages_seen} 件");
-    println!("[MEASURE] 4-6 追跡バケット数     = {}", limiter.buckets.len());
+    println!("[MEASURE] intents            = {used_intents:#x}{}",
+        if used_intents == INTENTS_BASIC { " (MESSAGE_CONTENT なし)" } else { "" });
+    println!("[MEASURE] 4-1 identify→READY = {}",
+        result.ready_ms.map(|m| format!("{m:.0}ms  ギルド {} 個", result.guilds)).unwrap_or("★未達★".into()));
+    println!("[MEASURE] 4-2 zstd-stream    = {}",
+        if !cfg.zstd { "無効".to_string() } else if result.zstd_ok { "復号成功".into() } else { "★復号なし★".into() });
+    println!("[MEASURE] 4-3 ハートビート    = 送信 {} / ACK {}", result.heartbeats_sent, result.heartbeat_acks);
+    println!("[MEASURE] 4-3 resume         = {}", if resumed { "RESUMED 成功" } else { "未確認" });
+    println!("[MEASURE] 4-4 MESSAGE_CREATE = {} 件", result.messages_seen);
+    println!("[MEASURE] 4-5 メッセージ送信   = {}", result.sent_ok.as_deref().unwrap_or("未実施"));
+    println!("[MEASURE] 4-6 追跡バケット数   = {}", limiter.buckets.len());
     println!("=============================");
     Ok(())
 }
