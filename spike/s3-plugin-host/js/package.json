@@ -1,0 +1,16 @@
+{
+  "name": "gumicord-s3-plugin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:iife": "esbuild plugin.ts --bundle --format=iife --target=es2022 --outfile=dist/plugin.iife.js",
+    "build:esm": "esbuild plugin.ts --bundle --format=esm --target=es2022 --outfile=dist/plugin.esm.js",
+    "build:min": "esbuild plugin.ts --bundle --format=iife --target=es2022 --minify --outfile=dist/plugin.min.js",
+    "build": "npm run build:iife && npm run build:esm && npm run build:min",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}
