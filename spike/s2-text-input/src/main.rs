@@ -698,10 +698,23 @@ impl App {
         //   → まず (a) を潰すため、位置が実際に変わったときだけ呼ぶ。
         let px = (tx + cx) as f64;
         let py = iy as f64;
-        let changed = match self.last_ime_area {
-            Some((lx, ly)) => (lx - px).abs() > 1.0 || (ly - py).abs() > 1.0,
-            None => true,
-        };
+        //
+        //   H1 (呼びすぎ) は否定済み。H3 (winit が抑制している) も否定済み
+        //   (winit が落とすのは ISC_SHOWUICOMPOSITIONWINDOW のみ)。
+        //   H4 (候補リストを開く操作をしていない) も、ユーザーの実機確認で否定された
+        //   (スペース連打で こんにちは → 今日は → コンニチハ と巡回しているのに
+        //    候補ウィンドウは出ない)。
+        //
+        //   残る疑い: set_ime_cursor_area を呼ぶこと自体が候補ウィンドウを消している。
+        //   winit は CANDIDATEFORM を dwStyle=CFS_EXCLUDE で設定するため、
+        //   指定した矩形を避けるよう IME に指示している。
+        //   GUMICORD_NO_IME_POS=1 で一切呼ばずに比較する。
+        let suppress = std::env::var("GUMICORD_NO_IME_POS").is_ok();
+        let changed = !suppress
+            && match self.last_ime_area {
+                Some((lx, ly)) => (lx - px).abs() > 1.0 || (ly - py).abs() > 1.0,
+                None => true,
+            };
         if changed {
             self.last_ime_area = Some((px, py));
             if let Some(w) = &self.window {
