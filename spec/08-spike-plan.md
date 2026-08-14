@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| ステータス | 実行中 |
+| ステータス | **完了** (Windows 分。他プラットフォームは環境確保待ち) |
 | 最終更新 | 2026-08-14 |
 
 ## 目的
@@ -277,7 +277,7 @@ rustup component add rust-analyzer clippy rustfmt
 |---|---|---|---|
 | S0 ツールチェーン | ✅ 完了 | 2026-08-14 | Rust 1.97.1 / MSVC (VS Community 2026) / Windows SDK 10.0.26100 |
 | S1 ウィンドウ | ✅ **Windows 完了** (他 OS は環境確保待ち) | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s1-の測定結果-2026-08-14) |
-| S2 IME + a11y | 🔴 **Windows 完了。2-3 が不合格 → ADR-0005 で判断** | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s2-の測定結果-2026-08-14) |
+| S2 IME + a11y | ✅ **完了。2-3 の原因を特定し ADR-0005 で決定** | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s2-の測定結果-2026-08-14) |
 | S3 QuickJS | ✅ **Windows 完了。全項目合格** | 2026-08-14 | [ADR-0002](adr/0002-quickjs-plugin-runtime.md#スパイク-s3-の測定結果-2026-08-14) |
 | S4 Gateway | ✅ **完了** (NFR-022 のバックオフのみ M1 でモック検証) | 2026-08-14 | [09-discord-protocol.md](09-discord-protocol.md) |
 

@@ -14,7 +14,7 @@
 | [05-plugin-api.md](05-plugin-api.md) | プラグイン API 仕様 | **ドラフト** — 実行モデルの節のみ確定 (S3) |
 | [06-renderer.md](06-renderer.md) | レンダラ仕様 | 未執筆 |
 | [07-roadmap.md](07-roadmap.md) | マイルストーン | 未執筆 |
-| [08-spike-plan.md](08-spike-plan.md) | 技術検証計画 | **実行中** |
+| [08-spike-plan.md](08-spike-plan.md) | 技術検証計画 | **完了** |
 | [09-discord-protocol.md](09-discord-protocol.md) | Discord プロトコル仕様 | **ドラフト** — S4 で実測した範囲 |
 
 `03`〜`07` はスパイク完了後に執筆する。レンダラとプラグインホストの実現可能性が確定するまで書いても手戻りになるため。
@@ -27,7 +27,7 @@
 | [0002](adr/0002-quickjs-plugin-runtime.md) | プラグインランタイムに QuickJS、開発言語に TypeScript を採用する | 承認 |
 | [0003](adr/0003-monorepo.md) | 単一のモノレポで開発する | 承認 |
 | [0004](adr/0004-semantic-uitree-as-extension-abi.md) | セマンティック UI ツリーを唯一の拡張 ABI とする | 承認 |
-| [0005](adr/0005-ime-strategy.md) | IME テキスト入力層をどう実装するか | **決定待ち** |
+| [0005](adr/0005-ime-strategy.md) | IME テキスト入力層を自前実装する | 承認 |
 
 ## ルール
 
