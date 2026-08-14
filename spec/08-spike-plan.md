@@ -275,8 +275,42 @@ rustup component add rust-analyzer clippy rustfmt
 
 | スパイク | 状態 | 完了日 | 記録先 |
 |---|---|---|---|
-| S0 ツールチェーン | 未着手 | — | — |
-| S1 ウィンドウ | 未着手 | — | ADR-0001 |
+| S0 ツールチェーン | ✅ 完了 | 2026-08-14 | Rust 1.97.1 / MSVC (VS Community 2026) / Windows SDK 10.0.26100 |
+| S1 ウィンドウ | 🟡 **Windows は自動計測完了。手動検証と他 OS が残** | — | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s1-の測定結果-2026-08-14) |
 | S2 IME + a11y | 未着手 | — | ADR-0001 |
 | S3 QuickJS | 未着手 | — | ADR-0002 |
 | S4 Gateway | 未着手 | — | ADR-0002 / `09-discord-protocol.md` |
+
+### S1 の残作業
+
+自動で測れる項目は完了した。以下は人の操作か別環境が要る。
+
+| # | 残作業 | 誰が / どこで |
+|---|---|---|
+| 1-3 | ドラッグ移動・端のリサイズ・最大化トグル・最小化が OS 標準と等価に動くか | **手動操作** (`spike/s1-window` を実行) |
+| 1-5 | DPI 変更・ディスプレイ間移動への追従 | マルチディスプレイ環境 |
+| `PLT-022` | Windows スナップレイアウト。`winit` の `with_decorations(false)` では `WM_NCHITTEST` に `HTMAXBUTTON` を返せない。Win32 のウィンドウプロシージャ差し込みが必要か | 追加調査 |
+| — | macOS / Linux での S1 全項目 | 環境確保が必要 |
+| — | Android / iOS での S1 全項目 | NDK / macOS + Xcode が必要 |
+| — | NVIDIA / AMD / Apple Silicon でのバックエンド挙動 (発見 1・2 の追試) | 別 GPU 環境 |
+
+#### 実行方法
+
+```bash
+cd spike/s1-window
+
+# 手動検証: ウィンドウが開くので操作して確認する。Esc で終了し統計を出力
+cargo run --release
+
+# 無人ベンチ: 20 秒で自動終了
+GUMICORD_BENCH_SECS=20 cargo run --release
+
+# バックエンドを固定して比較
+WGPU_BACKEND=gl   GUMICORD_BENCH_SECS=20 cargo run --release
+WGPU_BACKEND=dx12 GUMICORD_BENCH_SECS=20 cargo run --release
+
+# 描画負荷を上げる (追加インスタンス数を指定)
+GUMICORD_STRESS=20000 GUMICORD_BENCH_SECS=20 cargo run --release
+```
+
+> ⚠️ `WGPU_BACKEND=vulkan` は検証機 (Intel HD 520) では**プロセスごとクラッシュする**。既知の挙動。
