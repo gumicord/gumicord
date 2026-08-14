@@ -9,7 +9,7 @@
 | [00-vision.md](00-vision.md) | ビジョン・目標・非目標・リスク | 確定 |
 | [01-requirements.md](01-requirements.md) | 要件定義 (ID 付き) | ドラフト |
 | [02-architecture.md](02-architecture.md) | アーキテクチャ | **暫定** — スパイク待ち |
-| [03-uitree.md](03-uitree.md) | セマンティック UI ツリー仕様 (拡張 ABI) | 未執筆 |
+| [03-uitree.md](03-uitree.md) | セマンティック UI ツリー仕様 (拡張 ABI) | **ドラフト** — M1 の安定 ID セットを提案 |
 | [04-theme.md](04-theme.md) | テーマ仕様 | 未執筆 |
 | [05-plugin-api.md](05-plugin-api.md) | プラグイン API 仕様 | **ドラフト** — 実行モデルの節のみ確定 (S3) |
 | [06-renderer.md](06-renderer.md) | レンダラ仕様 | 未執筆 |
@@ -17,7 +17,7 @@
 | [08-spike-plan.md](08-spike-plan.md) | 技術検証計画 | **完了** |
 | [09-discord-protocol.md](09-discord-protocol.md) | Discord プロトコル仕様 | **ドラフト** — S4 で実測した範囲 |
 
-`03`〜`07` はスパイク完了後に執筆する。レンダラとプラグインホストの実現可能性が確定するまで書いても手戻りになるため。
+スパイクフェーズは完了した。残る , ,  を順次執筆する。
 
 ## アーキテクチャ決定記録 (ADR)
 
