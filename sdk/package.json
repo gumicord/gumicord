@@ -12,10 +12,13 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:types": "node test/run.mjs"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

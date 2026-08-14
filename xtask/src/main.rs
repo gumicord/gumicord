@@ -10,6 +10,7 @@
 //!     cargo xtask lint      clippy
 //!     cargo xtask test      テスト
 //!     cargo xtask schema    JSON Schema と公式サンプルの検証
+//!     cargo xtask sdk       SDK の型レベルの保証を検証
 //!     cargo xtask abi       安定 ID の後方互換性検査
 //!     cargo xtask gen       安定 ID から仕様書と SDK 型定義を生成
 
@@ -26,6 +27,7 @@ fn main() -> ExitCode {
         "lint" => lint(&root),
         "test" => test(&root),
         "schema" => schema(&root),
+        "sdk" => sdk(&root),
         "abi" => abi(&root),
         "gen" => generate(&root),
         "help" | "--help" | "-h" => {
@@ -57,6 +59,7 @@ fn help() {
   cargo xtask lint      clippy
   cargo xtask test      テスト
   cargo xtask schema    JSON Schema と公式サンプルの検証
+  cargo xtask sdk       SDK の型レベルの保証を検証
   cargo xtask abi       安定 ID の後方互換性検査 (EXT-003)
   cargo xtask gen       安定 ID から仕様書と SDK 型定義を生成"
     );
@@ -84,6 +87,8 @@ fn check(root: &Path) -> Result<(), String> {
     run(root, "cargo", &["test", "--workspace"])?;
     step("JSON Schema");
     schema(root)?;
+    step("SDK の型レベルの保証");
+    sdk(root)?;
     step("安定 ID の後方互換性");
     abi(root)?;
     println!("\n\x1b[32mすべて通過\x1b[0m");
@@ -119,6 +124,19 @@ fn schema(root: &Path) -> Result<(), String> {
         return Err("npm install を先に実行してください (ajv が入っていません)".into());
     }
     run(root, "node", &["spec/schema/validate.mjs"])
+}
+
+/// SDK の型が拡張 ABI の約束を実際に守れているかを検証する。
+///
+/// 「存在しない安定 ID はビルドが通らない」「プラグインは中核 ID を製造できない」
+/// といった主張は、通ってはいけないコードが実際に落ちることまで確かめないと
+/// 保証にならない。
+fn sdk(root: &Path) -> Result<(), String> {
+    let dir = root.join("sdk");
+    if !dir.join("node_modules/typescript").exists() {
+        return Err("sdk/ で npm install を先に実行してください".into());
+    }
+    run(&dir, "node", &["test/run.mjs"])
 }
 
 /// EXT-003: 安定 ID はメジャーバージョン内で削除も改名もできない。

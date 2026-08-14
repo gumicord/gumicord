@@ -10,13 +10,21 @@
 
 export type {
   NodeId,
+  PluginNodeId,
+  CreatableNodeId,
   NodeState,
   UINode,
+  NewUINode,
   PatchContext,
   PatchFn,
+  UserData,
+  MessageData,
+  GuildData,
+  ChannelData,
+  DataByNode,
 } from "./uitree.js";
 
-import type { NodeId, PatchContext, PatchFn, UINode } from "./uitree.js";
+import type { CreatableNodeId, NewUINode, NodeId, PatchFn, UINode } from "./uitree.js";
 import { registerPatch } from "./runtime.js";
 
 /**
@@ -49,20 +57,38 @@ export const ui = {
    * ⚠️ 存在しないノード (モバイルにおける `chrome.*` など) に登録しても
    * エラーにはならず、単に呼ばれない。事前に分岐したいときは {@link exists}。
    *
-   * ⚠️ 仮想化により、**画面外のノードには呼ばれない**。全メッセージを走査する
-   * ような処理は書けない。代わりに Gateway イベントのミドルウェアを使う。
+   * ⚠️ 仮想化により、**画面外のノードには呼ばれない** (規則 V1)。全メッセージを
+   * 走査するような処理は書けない。代わりに Gateway イベントのミドルウェアを使う。
+   *
+   * ⚠️ **`fn` は純粋関数でなければならない (規則 P7)。**
+   * 同じメッセージに対して何度呼ばれるかは決まっていない。画面外へ出て戻る
+   * たびに呼び直されるため、副作用を書くと数が合わなくなる。
+   *
+   * `ctx.data` の型は `id` から決まる。`chat.message.header.author` に
+   * 登録すれば `ctx.data.author.bot` が型安全に読める。
    */
-  patch(id: NodeId, fn: PatchFn): void {
-    registerPatch(id, fn);
+  patch<Id extends NodeId>(id: Id, fn: PatchFn<Id>): void {
+    registerPatch(id, fn as PatchFn);
   },
 
-  /** そのノードが現在の環境に存在しうるかを返す */
+  /**
+   * そのノードが現在の環境に存在しうるかを返す。
+   *
+   * `chrome.*` はモバイルに存在しない。存在しない ID にパッチを登録しても
+   * エラーにはならず単に呼ばれないが、事前に分岐したいときに使う。
+   */
   exists(id: NodeId): boolean {
     return __gumicord_host.node_exists(id);
   },
 
-  /** ノードを別のノードの子として包む */
-  wrap(node: UINode, wrapper: Omit<UINode, "children">): UINode {
+  /**
+   * ノードを別のノードの子として包む。
+   *
+   * ⚠️ `wrapper` に中核 ID (`chat.*` など) は使えない。
+   * プラグインは受け取ったノードを変形するのであって、中核ノードを製造しない
+   * (`spec/03-uitree.md` 8.2)。
+   */
+  wrap(node: UINode, wrapper: Omit<NewUINode, "children">): UINode {
     return { ...wrapper, children: [node] };
   },
 
@@ -81,19 +107,27 @@ export const ui = {
     return { id: "layout.column", children: nodes };
   },
 
-  text(value: string): UINode {
+  /** 任意の生成可能ノードを作る。プラグイン固有の ID を使うときに */
+  node(id: CreatableNodeId, props?: Record<string, unknown>, children?: UINode[]): NewUINode {
+    const n: NewUINode = { id };
+    if (props) n.props = props;
+    if (children) n.children = children;
+    return n;
+  },
+
+  text(value: string): NewUINode {
     return { id: "primitive.text", props: { value } };
   },
 
-  badge(opts: { text: string; tone?: string }): UINode {
+  badge(opts: { text: string; tone?: string }): NewUINode {
     return { id: "primitive.badge", props: { ...opts } };
   },
 
-  button(opts: { label: string; onPress: () => void }): UINode {
+  button(opts: { label: string; onPress: () => void }): NewUINode {
     return { id: "primitive.button", props: { ...opts } };
   },
 
-  icon(name: string): UINode {
+  icon(name: string): NewUINode {
     return { id: "primitive.icon", props: { name } };
   },
 } as const;
@@ -128,4 +162,4 @@ export const storage = {
   },
 };
 
-export type { PatchContext as Context };
+export type { PatchContext as Context } from "./uitree.js";

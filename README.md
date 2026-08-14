@@ -88,13 +88,15 @@ gumicord/
 ## 開発
 
 ```bash
-npm install           # 初回のみ (JSON Schema の検証に使う)
+npm install           # 初回のみ
+(cd sdk && npm install)
 
 cargo xtask check     # すべての検査 (CI と同じ)
 cargo xtask fmt       # 整形
 cargo xtask lint      # clippy
 cargo xtask test      # テスト
 cargo xtask schema    # JSON Schema と公式サンプルの検証
+cargo xtask sdk       # SDK の型レベルの保証を検証
 cargo xtask abi       # 安定 ID の後方互換性検査 (EXT-003)
 ```
 

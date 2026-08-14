@@ -97,9 +97,32 @@ export type NodeState =
   | "mentioned"
   | "loading";
 
+/**
+ * プラグインが自分の名前空間に作る ID。
+ *
+ * 接頭辞は `plugin.` + プラグイン ID の `.` を `_` に置換したもの。
+ * テーマから狙えるようにするためのフックであり、**この ID の後方互換性は
+ * プラグイン作者が負う** (`spec/03-uitree.md` 8.3)。
+ */
+export type PluginNodeId = `plugin.${string}`;
+
+/**
+ * プラグインが**生成してよい** ID。
+ *
+ * ⚠️ `app.*` / `chrome.*` / `nav.*` / `chat.*` は含まれない。
+ * これらは実在するドメインオブジェクトと結びついており、偽物を作ると
+ * アクセシビリティツリーが嘘をつき、他プラグインのセレクタが実体のない
+ * ノードにマッチする (`spec/03-uitree.md` 8.2)。
+ *
+ * **プラグインは受け取ったノードを変形するのであって、中核ノードを製造しない。**
+ */
+export type CreatableNodeId =
+  | Extract<NodeId, `primitive.${string}` | `layout.${string}`>
+  | PluginNodeId;
+
 export interface UINode {
   /** 安定 ID */
-  id: NodeId;
+  id: NodeId | PluginNodeId;
   /** 同じ親の下で同じ id を持つノードを区別する鍵。読み取り専用 */
   readonly key?: string;
   /** 現在立っている状態 */
@@ -108,12 +131,105 @@ export interface UINode {
   children?: UINode[];
 }
 
-export interface PatchContext {
-  /**
-   * そのノードが表現しているドメインオブジェクトの読み取り専用スナップショット。
-   * **これを書き換えてもクライアントの状態は変わらない。**
-   */
-  readonly data?: Readonly<Record<string, unknown>>;
+/** プラグインが新しく作るノード。中核 ID は使えない */
+export interface NewUINode extends UINode {
+  id: CreatableNodeId;
 }
 
-export type PatchFn = (node: UINode, ctx: PatchContext) => UINode;
+// ---------------------------------------------------------------- data
+
+/**
+ * `data` で公開されるフィールド。
+ *
+ * ⚠️ **これも拡張 ABI である。** 追加は破壊的変更ではないが、削除と改名は
+ * 破壊的変更になる (`spec/03-uitree.md` 2.4)。
+ *
+ * Discord API の生のペイロードは**公開しない**。公開するとそれ自体が ABI に
+ * なり、Discord 側の変更に追随できなくなる。
+ */
+export interface UserData {
+  readonly id: string;
+  readonly username: string;
+  readonly displayName: string;
+  readonly bot: boolean;
+  readonly avatarUrl?: string;
+}
+
+export interface MessageData {
+  readonly id: string;
+  readonly channelId: string;
+  readonly guildId?: string;
+  readonly createdAt: string;
+  readonly editedAt?: string;
+  /** プレーンテキスト。Markdown の構文解析結果はノードとして現れる */
+  readonly content: string;
+  readonly author: UserData;
+  readonly pinned: boolean;
+  readonly referencedMessageId?: string;
+}
+
+export interface GuildData {
+  readonly id: string;
+  readonly name: string;
+  readonly iconUrl?: string;
+  readonly unread: boolean;
+  readonly mentionCount: number;
+}
+
+export interface ChannelData {
+  readonly id: string;
+  readonly name: string;
+  readonly type: string;
+  readonly topic?: string;
+  readonly nsfw: boolean;
+  readonly unread: boolean;
+  readonly mentionCount: number;
+}
+
+/** ノード種別ごとの `data` の対応 (`spec/03-uitree.md` 2.4) */
+export interface DataByNode {
+  "chat.message": MessageData;
+  "chat.message.avatar": MessageData;
+  "chat.message.header": MessageData;
+  "chat.message.header.author": MessageData;
+  "chat.message.header.badges": MessageData;
+  "chat.message.header.timestamp": MessageData;
+  "chat.message.content": MessageData;
+  "chat.message.reply_ref": MessageData;
+  "chat.message.attachments": MessageData;
+  "chat.message.embeds": MessageData;
+  "chat.message.actions": MessageData;
+  "nav.guild_list.item": GuildData;
+  "nav.guild_list.item.icon": GuildData;
+  "nav.guild_list.item.badge": GuildData;
+  "nav.channel_list.item": ChannelData;
+  "nav.channel_list.item.icon": ChannelData;
+  "nav.channel_list.item.name": ChannelData;
+  "nav.channel_list.item.badge": ChannelData;
+  "chat.header": ChannelData;
+  "chat.header.title": ChannelData;
+  "chat.header.topic": ChannelData;
+}
+
+/**
+ * パッチに渡される文脈。
+ *
+ * `data` の型は安定 ID から決まるため、`ctx.data.author.bot` のような
+ * アクセスが**型安全**になる。`data` を持たないノードでは `undefined` になる。
+ */
+export interface PatchContext<Id extends NodeId = NodeId> {
+  readonly data: Id extends keyof DataByNode ? Readonly<DataByNode[Id]> : undefined;
+}
+
+/**
+ * ノード変換。
+ *
+ * ⚠️ **純粋関数でなければならない (規則 P7)。**
+ * 仮想化により、同じメッセージに対して何度呼ばれるかは決まっていない。
+ * 画面外へ出て戻るたびに呼び直される。副作用を書くと予測不能になる。
+ * 出来事に反応したいときは Gateway イベントのミドルウェアを使う。
+ */
+export type PatchFn<Id extends NodeId = NodeId> = (
+  node: UINode,
+  ctx: PatchContext<Id>,
+) => UINode;
