@@ -1,0 +1,4 @@
+# cargo xtask で タスクランナーを呼べるようにする。
+# just や make を導入しなくても cargo だけで完結させるため。
+[alias]
+xtask = "run --package xtask --"

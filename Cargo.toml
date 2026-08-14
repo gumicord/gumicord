@@ -1,0 +1,86 @@
+[workspace]
+resolver = "3"
+members = [
+    "core/model",
+    "core/gateway",
+    "core/rest",
+    "core/store",
+    "core/uitree",
+    "core/theme",
+    "core/plugin",
+    "render/render",
+    "render/platform",
+    "app/core",
+    "app/desktop",
+    "xtask",
+]
+# スパイクは捨てる前提のコードなので、ワークスペースには含めない。
+exclude = ["spike"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/gumicord/gumicord"
+authors = ["ねんねこ"]
+
+# 依存のバージョンはここで一元管理する。
+# バージョンはスパイク S1〜S4 で実際にビルド・動作確認したものを採用している。
+[workspace.dependencies]
+# 内部クレート
+gumicord-model = { path = "core/model" }
+gumicord-gateway = { path = "core/gateway" }
+gumicord-rest = { path = "core/rest" }
+gumicord-store = { path = "core/store" }
+gumicord-uitree = { path = "core/uitree" }
+gumicord-theme = { path = "core/theme" }
+gumicord-plugin = { path = "core/plugin" }
+gumicord-render = { path = "render/render" }
+gumicord-platform = { path = "render/platform" }
+gumicord-app = { path = "app/core" }
+
+# 描画 (S1 / S2 で検証済み)
+wgpu = "30"
+winit = "0.30"
+cosmic-text = "0.19"
+accesskit = "0.24"
+accesskit_winit = "0.33"
+bytemuck = "1"
+pollster = "1"
+
+# プラグイン (S3 で検証済み)
+rquickjs = "0.12"
+
+# 通信 (S4 で検証済み)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+futures-util = "0.3"
+zstd = "0.13"
+
+# 永続化
+rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+
+# 共通
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# スパイク S1 の実測: release ビルドは LTO fat で 5 分かかる。
+# 日常の開発では dev を使い、計測時のみ release を使う。
+[profile.dev]
+opt-level = 1
+
+# 依存クレートは dev ビルドでも最適化する。
+# 最適化なしの wgpu / cosmic-text は描画が実用にならないため。
+[profile.dev.package."*"]
+opt-level = 3

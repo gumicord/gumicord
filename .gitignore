@@ -34,13 +34,7 @@ local.properties
 .DS_Store
 Thumbs.db
 
-# スパイク成果物 (捨てる前提のコード。結果は spec/adr/ に残す)
-/spike/**/target/
-
-# 旧リポジトリ — モノレポ移行前の残骸。移行完了後に削除する
-/android/
-/desktop/
-/iOS/
-
-# スパイクのビルド成果物 (コードは残すが成果物は残さない)
+# スパイクのビルド成果物。
+# コードは残す (実測の再現に必要) が、成果物は残さない。
 /spike/*/target/
+/spike/*/js/dist/

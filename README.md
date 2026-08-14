@@ -58,12 +58,47 @@ gumicord/
 │  ├─ 08-spike-plan.md      技術検証計画
 │  ├─ schema/               JSON Schema (テーマ / プラグインmanifest)
 │  └─ adr/                  アーキテクチャ決定記録
-├─ core/          Rust — Gateway / REST / Store / QuickJS ホスト
-├─ render/        Rust — wgpu レンダラ、プラットフォーム統合層
-├─ app/           Rust — 各プラットフォームのエントリポイント
-├─ sdk/           TypeScript — プラグイン SDK (型定義 + CLI)
-└─ examples/      公式サンプルのテーマとプラグイン
+│  └─ 09-discord-protocol.md
+│
+├─ core/          Rust
+│  ├─ model/        ドメイン型
+│  ├─ gateway/      Gateway (WS / zstd / resume)
+│  ├─ rest/         REST + レート制限
+│  ├─ store/        状態 + SQLite
+│  ├─ uitree/       UITree — 安定 ID の唯一の定義元
+│  ├─ theme/        テーマ解決
+│  └─ plugin/       QuickJS ホスト
+│
+├─ render/        Rust
+│  ├─ render/       wgpu レンダラ (プラットフォーム非依存)
+│  └─ platform/     OS 統合 — IME / a11y / 通知 (PF 依存はここだけ)
+│
+├─ app/           Rust
+│  ├─ core/         画面遷移・アプリ状態・結線
+│  ├─ desktop/      Windows / macOS / Linux の入口
+│  ├─ android/      (M1.2)
+│  └─ ios/          (M1.2)
+│
+├─ sdk/           TypeScript — プラグイン SDK
+├─ examples/      公式サンプルテーマ
+├─ spike/         技術検証コード (捨てる前提。結果は adr/ に記録済み)
+└─ xtask/         タスクランナー
 ```
+
+## 開発
+
+```bash
+npm install           # 初回のみ (JSON Schema の検証に使う)
+
+cargo xtask check     # すべての検査 (CI と同じ)
+cargo xtask fmt       # 整形
+cargo xtask lint      # clippy
+cargo xtask test      # テスト
+cargo xtask schema    # JSON Schema と公式サンプルの検証
+cargo xtask abi       # 安定 ID の後方互換性検査 (EXT-003)
+```
+
+`just` や `make` ではなく `cargo xtask` にしているのは、**貢献者に追加のツール導入を要求しないため**です。cargo があれば動きます。
 
 ## 開発方針: 仕様駆動開発
 

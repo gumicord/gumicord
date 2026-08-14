@@ -1,0 +1,17 @@
+[package]
+name = "gumicord-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+gumicord-uitree.workspace = true
+wgpu.workspace = true
+cosmic-text.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

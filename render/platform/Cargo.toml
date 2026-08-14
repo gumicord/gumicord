@@ -1,0 +1,16 @@
+[package]
+name = "gumicord-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+gumicord-render.workspace = true
+winit.workspace = true
+accesskit.workspace = true
+accesskit_winit.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

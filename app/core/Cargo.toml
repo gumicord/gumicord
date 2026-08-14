@@ -1,0 +1,22 @@
+[package]
+name = "gumicord-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+gumicord-model.workspace = true
+gumicord-gateway.workspace = true
+gumicord-rest.workspace = true
+gumicord-store.workspace = true
+gumicord-uitree.workspace = true
+gumicord-theme.workspace = true
+gumicord-plugin.workspace = true
+gumicord-render.workspace = true
+gumicord-platform.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
