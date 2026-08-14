@@ -13,11 +13,11 @@
 | [04-theme.md](04-theme.md) | テーマ仕様 | **ドラフト** — M1 の範囲を定義 + JSON Schema |
 | [05-plugin-api.md](05-plugin-api.md) | プラグイン API 仕様 | **ドラフト** — 実行モデルの節のみ確定 (S3) |
 | [06-renderer.md](06-renderer.md) | レンダラ仕様 | **ドラフト** — S1/S2 の実測に基づく |
-| [07-roadmap.md](07-roadmap.md) | マイルストーン | 未執筆 |
+| [07-roadmap.md](07-roadmap.md) | マイルストーン | **ドラフト** — M1 のスコープを提案 |
 | [08-spike-plan.md](08-spike-plan.md) | 技術検証計画 | **完了** |
 | [09-discord-protocol.md](09-discord-protocol.md) | Discord プロトコル仕様 | **ドラフト** — S4 で実測した範囲 |
 
-スパイクフェーズは完了した ([08-spike-plan.md](08-spike-plan.md))。残るは 07-roadmap.md のみ。
+スパイクフェーズは完了し、仕様書は一通り揃った ([08-spike-plan.md](08-spike-plan.md))。次は M1 の実装に入る前に、07-roadmap.md 5.1 の「M1 実装前に決めること」を確定させる。
 
 ## アーキテクチャ決定記録 (ADR)
 
