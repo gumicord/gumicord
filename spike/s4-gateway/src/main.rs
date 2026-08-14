@@ -123,25 +123,27 @@ struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// リクエスト前に呼ぶ。必要なら待つ (事前抑制)
-    async fn acquire(&mut self, route: &str) {
+    /// リクエスト前に呼ぶ。必要なら待つ (事前抑制)。待ったら true を返す。
+    async fn acquire(&mut self, route: &str) -> bool {
         let Some(bucket_id) = self.routes.get(route) else {
-            return; // 未知のルートは 1 回目なので通す
+            return false; // 未知のルートは 1 回目なので通す
         };
         let Some(b) = self.buckets.get(bucket_id) else {
-            return;
+            return false;
         };
         if b.remaining == 0 {
             let now = Instant::now();
             if b.reset_at > now {
                 let wait = b.reset_at - now;
                 println!(
-                    "[rate]    事前抑制: route={route} 残量0 → {:.2}秒待機",
+                    "[rate]    ★事前抑制: route={route} 残量0 → {:.2}秒待機",
                     wait.as_secs_f32()
                 );
                 tokio::time::sleep(wait).await;
+                return true;
             }
         }
+        false
     }
 
     /// レスポンスヘッダから状態を更新する
@@ -453,11 +455,194 @@ async fn try_resume(cfg: &Config, r: &GatewayResult) -> Result<bool, Box<dyn std
     Ok(false)
 }
 
+// ============================================================ 4-7 レート制限
+
+/// 4-7: レート制限に到達させ、事前抑制 (NFR-021) と
+/// 指数バックオフからの復帰 (NFR-022) を検証する。
+///
+/// `POST /channels/:id/messages` は実測で 5 回 / 1.00 秒。
+/// 上限を少し超える回数だけ送れば、429 を起こさずに事前抑制が働くはずである。
+/// **429 が 1 度も起きないことが NFR-021 の合格条件**であり、
+/// もし起きた場合はバックオフで復帰できることを確認する。
+async fn test_rate_limit(
+    cfg: &Config,
+    http: &reqwest::Client,
+    limiter: &mut RateLimiter,
+    count: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(ch) = &cfg.channel_id else {
+        println!("[skip]    GUMICORD_CHANNEL_ID 未設定のため飛ばします");
+        return Ok(());
+    };
+    let route = "POST /channels/:id/messages";
+
+    let mut sent = 0u32;
+    let mut preempted = 0u32;
+    let mut hit_429 = 0u32;
+    let mut max_backoff = Duration::ZERO;
+    let t_all = Instant::now();
+
+    for i in 1..=count {
+        if limiter.acquire(route).await {
+            preempted += 1;
+        }
+
+        // NFR-022: 429 を受けたら指数バックオフで再試行する
+        let mut attempt = 0u32;
+        loop {
+            let t = Instant::now();
+            let resp = http
+                .post(format!("{API_BASE}/channels/{ch}/messages"))
+                .header("Authorization", cfg.auth_header())
+                .json(&json!({ "content": format!("S4 レート制限テスト {i}/{count}") }))
+                .send()
+                .await?;
+            let st = resp.status();
+            let headers = resp.headers().clone();
+
+            if st.as_u16() == 429 {
+                hit_429 += 1;
+                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                let retry_after = body["retry_after"].as_f64().unwrap_or(1.0);
+                let global = body["global"].as_bool().unwrap_or(false);
+                let scope = headers
+                    .get("x-ratelimit-scope")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("?");
+                // サーバーが指定した retry_after を下限に、試行回数で指数的に伸ばす
+                let backoff = Duration::from_secs_f64(retry_after * 2f64.powi(attempt as i32));
+                max_backoff = max_backoff.max(backoff);
+                println!(
+                    "[rate]    ★429 到達 (試行{}) global={global} scope={scope} retry_after={retry_after:.2}秒 → {:.2}秒待機",
+                    attempt + 1,
+                    backoff.as_secs_f32()
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+                if attempt >= 5 {
+                    println!("[rate]    ★5 回試しても復帰できませんでした");
+                    break;
+                }
+                continue;
+            }
+
+            limiter.update(route, &headers);
+            if st.is_success() {
+                sent += 1;
+                println!("  {i}/{count}: {st} ({:.0}ms)", t.elapsed().as_secs_f32() * 1000.0);
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                assert_no_token(&body, &cfg.token);
+                println!("  {i}/{count}: {st} — {body}");
+            }
+            break;
+        }
+    }
+
+    println!();
+    println!("[MEASURE] 4-7 送信成功        = {sent}/{count} ({:.1}秒)", t_all.elapsed().as_secs_f32());
+    println!("[MEASURE] 4-7 事前抑制の発動   = {preempted} 回");
+    println!("[MEASURE] 4-7 429 到達        = {hit_429} 回");
+    if hit_429 == 0 {
+        println!("[MEASURE] 4-7 判定 = ✅ NFR-021 合格 (429 に到達せず事前抑制で回避)");
+        println!("           ※ NFR-022 (バックオフ) は発動しなかったため未検証のまま");
+    } else {
+        println!("[MEASURE] 4-7 最大バックオフ  = {:.2}秒", max_backoff.as_secs_f32());
+        println!("[MEASURE] 4-7 判定 = ⚠️ 429 に到達した。NFR-021 の事前抑制に漏れがある");
+        if sent == count {
+            println!("           ただし NFR-022 のバックオフでは全件復帰できた");
+        }
+    }
+    Ok(())
+}
+
+/// 4-7 の補完: 事前抑制ロジックそのものをローカルで検証する。
+///
+/// 実サーバー相手のテストでは、往復遅延 (321〜833ms) が自然な間隔になるため、
+/// 逐次リクエストではバケットの上限に届きにくい。実際 7 通送っても
+/// 残量が 0 になったのは最後の 1 通の後で、事前抑制は一度も発動しなかった。
+///
+/// 「抑制が発動しなかった」ことは「抑制が動く」ことの証明にはならないので、
+/// 合成したバケット状態に対して acquire() が実際に待つかを直接確かめる。
+/// ネットワークもチャンネルへの投稿も伴わない。
+async fn verify_limiter_locally() {
+    println!("──────── 4-7 補完: 事前抑制ロジックのローカル検証 ────────");
+
+    let mut limiter = RateLimiter::default();
+    let route = "POST /test";
+    let bucket = "synthetic".to_string();
+
+    // 残量 0、0.5 秒後に回復するバケットを合成する
+    limiter.routes.insert(route.to_string(), bucket.clone());
+    limiter.buckets.insert(
+        bucket.clone(),
+        Bucket {
+            remaining: 0,
+            limit: 5,
+            reset_at: Instant::now() + Duration::from_millis(500),
+        },
+    );
+
+    let t = Instant::now();
+    let waited = limiter.acquire(route).await;
+    let elapsed = t.elapsed();
+    println!(
+        "[MEASURE] 残量0 のバケット: 待機={waited} 実測={:.0}ms (期待 約500ms)",
+        elapsed.as_secs_f32() * 1000.0
+    );
+    let ok_blocked = waited && elapsed >= Duration::from_millis(450);
+
+    // 残量ありのバケットでは待たないこと
+    limiter.buckets.insert(
+        bucket.clone(),
+        Bucket {
+            remaining: 3,
+            limit: 5,
+            reset_at: Instant::now() + Duration::from_secs(5),
+        },
+    );
+    let t = Instant::now();
+    let waited2 = limiter.acquire(route).await;
+    let elapsed2 = t.elapsed();
+    println!(
+        "[MEASURE] 残量3 のバケット: 待機={waited2} 実測={:.0}ms (期待 約0ms)",
+        elapsed2.as_secs_f32() * 1000.0
+    );
+    let ok_passthrough = !waited2 && elapsed2 < Duration::from_millis(50);
+
+    // 回復時刻を過ぎたバケットでは待たないこと
+    limiter.buckets.insert(
+        bucket,
+        Bucket {
+            remaining: 0,
+            limit: 5,
+            reset_at: Instant::now() - Duration::from_secs(1),
+        },
+    );
+    let t = Instant::now();
+    let waited3 = limiter.acquire(route).await;
+    let elapsed3 = t.elapsed();
+    println!(
+        "[MEASURE] 残量0 だが回復済み: 待機={waited3} 実測={:.0}ms (期待 約0ms)",
+        elapsed3.as_secs_f32() * 1000.0
+    );
+    let ok_expired = !waited3 && elapsed3 < Duration::from_millis(50);
+
+    println!(
+        "[MEASURE] 4-7 事前抑制ロジック = {}",
+        if ok_blocked && ok_passthrough && ok_expired { "✅ 3 条件すべて期待どおり" } else { "★不合格★" }
+    );
+}
+
 // ============================================================ main
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("======== S4: Discord Gateway ========");
+
+    // ネットワーク不要の検証は先に済ませる
+    verify_limiter_locally().await;
+    println!();
 
     let cfg = match Config::load() {
         Ok(c) => c,
@@ -586,6 +771,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("──────── 4-3 再接続 (resume) ────────");
     let resumed = try_resume(&cfg, &result).await.unwrap_or(false);
+
+    // ---------------------------------------------------------------- 4-7
+    if let Ok(n) = std::env::var("GUMICORD_TEST_RATELIMIT") {
+        let count: u32 = n.parse().unwrap_or(7);
+        println!();
+        println!("──────── 4-7 レート制限の事前抑制とバックオフ (NFR-021 / NFR-022) ────────");
+        println!("[info]    テストチャンネルへ {count} 通送信します");
+        test_rate_limit(&cfg, &http, &mut limiter, count).await?;
+    }
 
     // ---------------------------------------------------------------- まとめ
     println!();
