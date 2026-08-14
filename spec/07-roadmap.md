@@ -77,11 +77,13 @@ M1 をそのまま 1 本の作業として進めると、**3 プラットフォ�
 
 ### 3.1 基盤 — 他のすべてが乗る土台
 
-| # | 作業 | 規模 | 根拠 |
-|---|---|---|---|
-| B1 | Cargo workspace とクレート分割、`just` タスクランナー | S | [02-architecture.md](02-architecture.md#クレート構成-) |
-| B2 | `gumicord-uitree`: UITree の型、安定 ID の定義元、差分計算 | M | [03-uitree.md](03-uitree.md)。**ID の定義元から md と .d.ts を生成する仕組みを含む** |
-| B3 | CI: 安定 ID の後方互換性検査、スキーマ検証、Rust テスト | M | [03-uitree.md 4.1](03-uitree.md#41-ci-による強制) |
+| # | 作業 | 規模 | 状態 | 根拠 |
+|---|---|---|---|---|
+| B1 | Cargo workspace とクレート分割、`cargo xtask` タスクランナー | S | ✅ 完了 | [02-architecture.md](02-architecture.md#クレート構成-) |
+| B2 | `gumicord-uitree`: UITree の型、安定 ID の定義元、差分計算 | M | ✅ 完了 | [03-uitree.md](03-uitree.md)。**ID の定義元から md と .d.ts を生成する仕組みを含む** |
+| B3 | CI: 安定 ID の後方互換性検査、スキーマ検証、Rust テスト | M | ✅ 完了 | [03-uitree.md 4.1](03-uitree.md#41-ci-による強制) |
+
+> B2 の差分計算 (レンダラへ渡す UITree の差分) はまだ実装していない。**レンダラ側の要求が固まってから書く**ほうが手戻りが少ないため、R2 (レイアウト) と同時に行う。
 
 ### 3.2 レンダラ — S1 / S2 の成果を製品品質にする
 

@@ -91,16 +91,29 @@ gumicord/
 npm install           # 初回のみ
 (cd sdk && npm install)
 
-cargo xtask check     # すべての検査 (CI と同じ)
-cargo xtask fmt       # 整形
-cargo xtask lint      # clippy
-cargo xtask test      # テスト
-cargo xtask schema    # JSON Schema と公式サンプルの検証
-cargo xtask sdk       # SDK の型レベルの保証を検証
-cargo xtask abi       # 安定 ID の後方互換性検査 (EXT-003)
+cargo xtask check-light  # ビルドを伴わない検査だけ (数十秒)
+cargo xtask check        # すべての検査 (ビルドを伴う)
+cargo xtask fmt          # 整形
+cargo xtask lint         # clippy
+cargo xtask test         # テスト
+cargo xtask schema       # JSON Schema と公式サンプルの検証
+cargo xtask sdk          # SDK の型レベルの保証を検証
+cargo xtask abi          # 安定 ID の後方互換性検査 (EXT-003)
 ```
 
 `just` や `make` ではなく `cargo xtask` にしているのは、**貢献者に追加のツール導入を要求しないため**です。cargo があれば動きます。
+
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) が 3 つのジョブを回します。
+
+| ジョブ | 内容 | 速さ |
+|---|---|---|
+| **仕様** | ABI の後方互換性 / JSON Schema / SDK 型検査 / 生成物の鮮度 | ワークスペースをビルドしないので数十秒 |
+| **Rust** | fmt / `clippy --all-targets` / テスト (Linux + Windows) | 依存のビルドを含む |
+| **MSRV** | `rust-version = "1.97"` が嘘でないことの確認 | — |
+
+**手元で重いビルドを回す必要はありません。** 日常は `cargo xtask check-light` で足り、`--all-targets` の clippy は CI が担保します。
 
 ### ビルドの資源消費
 

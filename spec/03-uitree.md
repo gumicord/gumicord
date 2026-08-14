@@ -299,6 +299,8 @@ git のタグではなくスナップショットと比較するのは、**オ�
 
 意図的に破壊的変更を受け入れる場合のみ `cargo xtask abi --accept` でスナップショットを更新し、ADR に理由を記録する。
 
+この検査は [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) の `spec` ジョブが全 PR で実行する。**Rust ワークスペースをビルドしないので数十秒で結果が返る。**
+
 ### 4.2 非推奨の手順
 
 ```

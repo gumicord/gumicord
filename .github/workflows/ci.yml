@@ -1,0 +1,120 @@
+name: CI
+
+# 仕様駆動開発の要は「仕様と実装がずれた瞬間に落ちること」である。
+# 手元で回さなくても、ここが必ず落ちる。
+#
+# ■ 開発機で重いビルドを回さなくて済むようにしてある
+#   .cargo/config.toml は jobs = 2 で並列数を絞ってある (4 コア / 8 GB の
+#   開発機を守るため)。CI ランナには余裕があるので CARGO_BUILD_JOBS で上書きする。
+#   clippy --all-targets も、開発機ではなくここで走らせる。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # 同じブランチに続けて push したとき、古い実行は捨てる
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 開発機向けの jobs = 2 を打ち消す (.cargo/config.toml の意図した上書き経路)
+  CARGO_BUILD_JOBS: 4
+  # CI ではデバッグ情報が要らない。ディスクとキャッシュを節約する
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # 仕様まわりの検査。Rust ワークスペースをビルドしないので数十秒で終わる。
+  # PR に最初に返る信号はこれになる。
+  # ────────────────────────────────────────────────────────────
+  spec:
+    name: 仕様 (ABI / スキーマ / SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            sdk/package-lock.json
+
+      - name: 依存の取得
+        run: |
+          npm ci
+          npm ci --prefix sdk
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # xtask とその依存 (serde / gumicord-uitree) しかビルドしない
+          shared-key: xtask
+
+      # 以下をまとめて確認する:
+      #   - JSON Schema が公式サンプルを通し、異常系 31 件で確実に落ちること
+      #   - SDK の型が、通ってはいけないコード 5 件を実際に弾くこと
+      #   - ids.rs から生成した spec/03-uitree.md と sdk/src/ids.ts が最新であること
+      #   - 安定 ID が削除・改名されていないこと (EXT-003 / C1・C2)
+      - name: cargo xtask check-light
+        run: cargo xtask check-light
+
+  # ────────────────────────────────────────────────────────────
+  # Rust 本体。開発機では走らせない重い検査はすべてここに置く。
+  # ────────────────────────────────────────────────────────────
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # M1.1 の主対象は Windows。Linux は依存の移植性を早期に検出するために回す。
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 整形
+        run: cargo fmt --all --check
+
+      # 開発機では --all-targets を既定から外してある (メモリ消費が倍になり、
+      # 実際に OS ごと不安定になったため)。テスト・examples を含む全ターゲットの
+      # clippy はここで担保する。
+      - name: clippy (全ターゲット)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: テスト
+        run: cargo test --workspace
+
+  # ────────────────────────────────────────────────────────────
+  # Cargo.toml の rust-version = "1.97" が嘘でないことを確認する。
+  # 宣言しておいて検査しない値は、いずれ必ずずれる。
+  # ────────────────────────────────────────────────────────────
+  msrv:
+    name: MSRV (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.97
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
