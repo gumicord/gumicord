@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-# xtask は依存を持たない。
-# タスクランナーのために外部ツールの導入を要求しないことが目的なので、
-# ここに依存を足すのは本末転倒である。
+# 外部ツールの導入を要求しないことが xtask の目的である。
+# ワークスペース内のクレートへの依存はこれに反しない。
+# 安定 ID を Rust ソースからパースするより、定義元をそのまま使うほうが確実。
 [dependencies]
+gumicord-uitree.workspace = true

@@ -5,14 +5,23 @@
 //!
 //! 使い方:
 //!
-//!     cargo xtask check     すべての検査 (CI と同じ)
-//!     cargo xtask fmt       整形
-//!     cargo xtask lint      clippy
-//!     cargo xtask test      テスト
-//!     cargo xtask schema    JSON Schema と公式サンプルの検証
-//!     cargo xtask sdk       SDK の型レベルの保証を検証
-//!     cargo xtask abi       安定 ID の後方互換性検査
-//!     cargo xtask gen       安定 ID から仕様書と SDK 型定義を生成
+//!     cargo xtask check-light  ビルドを伴わない検査だけ (省メモリ)
+//!     cargo xtask check        すべての検査 (ビルドを伴う)
+//!     cargo xtask fmt          整形
+//!     cargo xtask lint         clippy (--all-targets で全ターゲット)
+//!     cargo xtask test         テスト
+//!     cargo xtask schema       JSON Schema と公式サンプルの検証
+//!     cargo xtask sdk          SDK の型レベルの保証を検証
+//!     cargo xtask abi          安定 ID の後方互換性検査 (--accept で更新)
+//!     cargo xtask gen          生成 (--check で最新かだけ確認)
+//!
+//! # 資源消費について
+//!
+//! 開発機は 4 コア / 8 GB しかないことがある。ビルドを伴うタスクは
+//! `.cargo/config.toml` の `jobs = 2` で並列数を絞ってある。
+//! 仕様まわりの作業なら `check-light` で足りる。
+
+mod uitree;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -23,13 +32,14 @@ fn main() -> ExitCode {
 
     let result = match task.as_str() {
         "check" => check(&root),
+        "check-light" => check_light(&root),
         "fmt" => fmt(&root),
         "lint" => lint(&root),
         "test" => test(&root),
         "schema" => schema(&root),
         "sdk" => sdk(&root),
-        "abi" => abi(&root),
-        "gen" => generate(&root),
+        "abi" => uitree::abi(&root, flag("--accept")),
+        "gen" => uitree::generate(&root, flag("--check")),
         "help" | "--help" | "-h" => {
             help();
             Ok(())
@@ -54,43 +64,61 @@ fn help() {
     println!(
         "Gumicord タスクランナー
 
-  cargo xtask check     すべての検査 (CI と同じ)
-  cargo xtask fmt       整形
-  cargo xtask lint      clippy
-  cargo xtask test      テスト
-  cargo xtask schema    JSON Schema と公式サンプルの検証
-  cargo xtask sdk       SDK の型レベルの保証を検証
-  cargo xtask abi       安定 ID の後方互換性検査 (EXT-003)
-  cargo xtask gen       安定 ID から仕様書と SDK 型定義を生成"
+  cargo xtask check-light  ビルドを伴わない検査だけ (省メモリ)
+  cargo xtask check        すべての検査 (ビルドを伴う)
+  cargo xtask fmt          整形
+  cargo xtask lint         clippy (--all-targets で全ターゲット)
+  cargo xtask test         テスト
+  cargo xtask schema       JSON Schema と公式サンプルの検証
+  cargo xtask sdk          SDK の型レベルの保証を検証
+  cargo xtask abi          安定 ID の後方互換性検査 (EXT-003)
+                           --accept でスナップショットを更新
+  cargo xtask gen          安定 ID から仕様書と SDK 型定義を生成
+                           --check で生成物が最新かだけ確認
+
+ビルドを伴うタスクは .cargo/config.toml の jobs = 2 で並列数を絞ってある。
+潤沢なメモリがあるなら CARGO_BUILD_JOBS=8 などで上書きできる。"
     );
 }
 
 // ---------------------------------------------------------------- タスク
 
+/// ネットワークもビルドも伴わない検査だけを走らせる。
+///
+/// メモリの少ない機械でも安全に回せる。仕様まわりの作業ではこれで足りる。
+fn check_light(root: &Path) -> Result<(), String> {
+    step("JSON Schema");
+    schema(root)?;
+    step("SDK の型レベルの保証");
+    sdk(root)?;
+    step("生成物が最新か");
+    uitree::generate(root, true)?;
+    step("安定 ID の後方互換性");
+    uitree::abi(root, false)?;
+    println!("\n\x1b[32mすべて通過 (軽量)\x1b[0m");
+    Ok(())
+}
+
 fn check(root: &Path) -> Result<(), String> {
     step("整形の確認");
     run(root, "cargo", &["fmt", "--all", "--check"])?;
     step("clippy");
-    run(
-        root,
-        "cargo",
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )?;
+    // ⚠️ `--all-targets` を付けない。
+    //   テスト・ベンチ・examples を別ターゲットとしてビルドし直すため
+    //   メモリ消費がおよそ倍になる。4 コア / 8 GB の機械では実際に
+    //   OS ごと不安定になった (.cargo/config.toml の jobs の項を参照)。
+    //   CI では `cargo xtask lint --all-targets` を別途走らせる。
+    run(root, "cargo", &["clippy", "--workspace", "--", "-D", "warnings"])?;
     step("テスト");
     run(root, "cargo", &["test", "--workspace"])?;
     step("JSON Schema");
     schema(root)?;
     step("SDK の型レベルの保証");
     sdk(root)?;
+    step("生成物が最新か");
+    uitree::generate(root, true)?;
     step("安定 ID の後方互換性");
-    abi(root)?;
+    uitree::abi(root, false)?;
     println!("\n\x1b[32mすべて通過\x1b[0m");
     Ok(())
 }
@@ -100,18 +128,13 @@ fn fmt(root: &Path) -> Result<(), String> {
 }
 
 fn lint(root: &Path) -> Result<(), String> {
-    run(
-        root,
-        "cargo",
-        &[
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )
+    // --all-targets は明示されたときだけ。既定では付けない (資源消費が倍になる)
+    let mut args = vec!["clippy", "--workspace"];
+    if flag("--all-targets") {
+        args.push("--all-targets");
+    }
+    args.extend(["--", "-D", "warnings"]);
+    run(root, "cargo", &args)
 }
 
 fn test(root: &Path) -> Result<(), String> {
@@ -139,31 +162,9 @@ fn sdk(root: &Path) -> Result<(), String> {
     run(&dir, "node", &["test/run.mjs"])
 }
 
-/// EXT-003: 安定 ID はメジャーバージョン内で削除も改名もできない。
-/// 追加のみを許す。CI でこれを強制する。
-fn abi(_root: &Path) -> Result<(), String> {
-    // TODO: M1.1 B3
-    //   1. 直前のリリースタグの安定 ID 一覧を取り出す
-    //   2. 現在の core/uitree/src/ids.rs と比較する
-    //   3. 削除・改名があれば落とす。追加のみなら通す
-    //   4. 親子関係の変更を検出したら警告する (spec/03-uitree.md C4)
-    //
-    // 現時点では ids.rs が未実装のため何もしない。
-    // **ids.rs を実装したら必ずここも実装すること。**
-    // これが動かないまま安定 ID を公開すると、EXT-003 の約束を
-    // 強制する仕組みが存在しないことになる。
-    println!("  (未実装 — core/uitree/src/ids.rs の実装と同時に対応する)");
-    Ok(())
-}
-
-/// 安定 ID の唯一の定義元 (core/uitree/src/ids.rs) から、
-/// spec/03-uitree.md の一覧と sdk/ の型定義を生成する。
-/// 手書きで同期しない (ADR-0004 の帰結 3)。
-// 関数名が generate なのは、gen が Rust 2024 の予約語のため。
-fn generate(_root: &Path) -> Result<(), String> {
-    // TODO: M1.1 B2
-    println!("  (未実装 — core/uitree/src/ids.rs の実装と同時に対応する)");
-    Ok(())
+/// コマンドラインにフラグが渡されているか
+fn flag(name: &str) -> bool {
+    std::env::args().any(|a| a == name)
 }
 
 // ---------------------------------------------------------------- ユーティリティ

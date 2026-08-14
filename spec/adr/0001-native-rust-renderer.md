@@ -102,7 +102,7 @@ UI を描画する層からプラットフォーム統合層まで、Web 技術�
 | OS | Windows 10 Pro 22H2 (10.0.19045) |
 | GPU | **Intel HD Graphics 520** (Skylake, 2015年世代の内蔵 GPU) |
 | Rust | 1.97.1 / `winit` 0.30.13 / `wgpu` 30.0.0 |
-| ビルド | release, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true` |
+| ビルド | `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`<br>(現在の `dist` プロファイル相当。`cargo build --profile dist`) |
 | 比較対象 | 公式 Discord デスクトップ版 (実行中、5 プロセス) |
 
 > この GPU は**意図的に低性能な下限基準**として扱う。ここで滑らかに動けば、より新しい環境では余裕がある。

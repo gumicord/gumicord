@@ -102,6 +102,20 @@ cargo xtask abi       # 安定 ID の後方互換性検査 (EXT-003)
 
 `just` や `make` ではなく `cargo xtask` にしているのは、**貢献者に追加のツール導入を要求しないため**です。cargo があれば動きます。
 
+### ビルドの資源消費
+
+日常の `cargo build --release` は thin LTO で、控えめな機械でも通ります。
+
+配布物と性能計測には `dist` プロファイルを使います。
+
+```bash
+cargo build --profile dist
+```
+
+⚠️ `dist` は fat LTO のためリンク時に**数 GB のメモリ**を使い、`target/` も数 GB に育ちます。メモリの少ない機械では他を閉じてから実行してください。
+
+不要になったビルド成果物は `cargo clean` で消せます。スパイクの成果物は `rm -rf spike/*/target` で消して構いません（コードは残り、測定結果は [`spec/adr/`](spec/adr/) に記録済みです）。
+
 ## 開発方針: 仕様駆動開発
 
 1. **仕様が先。** 実装は `spec/` に書かれた要件 ID を参照する

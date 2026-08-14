@@ -1,4 +1,24 @@
-# cargo xtask で タスクランナーを呼べるようにする。
+# cargo xtask でタスクランナーを呼べるようにする。
 # just や make を導入しなくても cargo だけで完結させるため。
 [alias]
 xtask = "run --package xtask --"
+
+[build]
+# ■ 並列数を絞る理由 (2026-08-14 に実際に起きたこと)
+#
+#   開発機は 4 論理コア / 物理メモリ 7.9 GB。
+#   既定の並列数 (= コア数) で wgpu / rusqlite / aws-lc-sys などを
+#   一斉にビルドしたところ、メモリとディスクを使い切って
+#   **OS 全体が不安定になった**。
+#
+#     - rustc が STATUS_STACK_BUFFER_OVERRUN (0xc0000409) で落ちる
+#     - os error 1453 (ERROR_NO_SYSTEM_RESOURCES)
+#     - Volsnap がシャドウコピーを削除
+#     - 無関係なアプリ (Chrome) まで巻き添えでクラッシュ
+#
+#   rustc は 1 プロセスあたり 1〜2 GB 使うことがある。
+#   コア数ぶん並べてよいのはメモリに余裕がある機械だけである。
+#
+#   潤沢なメモリのある機械では、環境変数で上書きできる:
+#     CARGO_BUILD_JOBS=8 cargo build
+jobs = 2

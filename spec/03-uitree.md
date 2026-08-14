@@ -148,112 +148,113 @@ M1 で公開するフィールド。
 
 `03` の本体。**この一覧が拡張 ABI である。**
 
-### 3.1 `app.*` — アプリのルートと画面
+<!-- BEGIN GENERATED: node-ids -->
 
-| ID | 意味 |
-|---|---|
-| `app.root` | ツリーの根 |
-| `app.window` | ウィンドウ 1 枚 |
-| `app.screen.loading` | 起動中 |
-| `app.screen.login` | ログイン画面 (`FR-001`) |
-| `app.screen.main` | メイン画面 |
+> ⚠️ **この節は `core/uitree/src/ids.rs` から生成されている。**
+> 直接編集しても `cargo xtask gen` で上書きされる。
 
-### 3.2 `chrome.*` — ウィンドウクローム
+### `app.*`
 
-`PLT-020` の独自タイトルバー。デスクトップのみ。
-
-| ID | 意味 |
-|---|---|
-| `chrome.titlebar` | 独自タイトルバー |
-| `chrome.titlebar.title` | タイトル表示 |
-| `chrome.titlebar.controls` | ウィンドウ操作ボタン群 |
-| `chrome.titlebar.control` | 個々のボタン (`key` で minimize/maximize/close を区別) |
-
-> モバイルには `chrome.*` が存在しない。テーマは `when: { platform: ... }` で分岐する (`EXT-014`)。
-> **プラグインは「あるかもしれないし、ないかもしれない」前提で書く必要がある。** これは [5.3](#53-存在しないノードへのパッチ) で扱う。
-
-### 3.3 `nav.*` — ナビゲーション
-
-| ID | 意味 | 要件 |
+| ID | `data` | 意味 |
 |---|---|---|
-| `nav.guild_list` | ギルド一覧 | `FR-010` |
-| `nav.guild_list.home` | DM への入口 | `FR-013` |
-| `nav.guild_list.item` | ギルド 1 個 | `FR-010` |
-| `nav.guild_list.item.icon` | ギルドアイコン | |
-| `nav.guild_list.item.badge` | 未読・メンション数 | `FR-042` |
-| `nav.channel_list` | チャンネル一覧 | `FR-011` |
-| `nav.channel_list.header` | ギルド名などの見出し | |
-| `nav.channel_list.category` | カテゴリ | `FR-011` |
-| `nav.channel_list.item` | チャンネル 1 個 | `FR-011` |
-| `nav.channel_list.item.icon` | 種別アイコン | |
-| `nav.channel_list.item.name` | チャンネル名 | |
-| `nav.channel_list.item.badge` | 未読・メンション数 | `FR-042` |
-| `nav.dm_list` | DM 一覧 | `FR-013` |
-| `nav.dm_list.item` | DM 1 件 | `FR-013` |
+| `app.root` | — | ツリーの根 |
+| `app.window` | — | ウィンドウ 1 枚 |
+| `app.screen` | — | 現在表示中の画面を包むコンテナ |
+| `app.screen.loading` | — | 起動中 |
+| `app.screen.login` | — | ログイン画面 (FR-001) |
+| `app.screen.main` | — | メイン画面 |
 
-### 3.4 `chat.*` — チャット
+### `chrome.*`
 
-**拡張が最も集中する領域。** BetterDiscord のプラグインの大半はここを触る。
-
-| ID | 意味 | 要件 |
+| ID | `data` | 意味 |
 |---|---|---|
-| `chat.view` | チャット領域全体 | |
-| `chat.header` | チャンネルヘッダ | |
-| `chat.header.title` | チャンネル名 | |
-| `chat.header.topic` | トピック | |
-| `chat.message_list` | メッセージ一覧 | `FR-020` |
-| `chat.message` | メッセージ 1 件 | `FR-020` |
-| `chat.message.avatar` | 送信者アイコン | |
-| `chat.message.header` | 送信者行 | |
-| `chat.message.header.author` | 送信者名 | `FR-022` |
-| `chat.message.header.badges` | BOT タグなど | |
-| `chat.message.header.timestamp` | 時刻 | |
-| `chat.message.reply_ref` | 返信元の参照表示 | `FR-028` |
-| `chat.message.content` | 本文 | `FR-021` |
-| `chat.message.attachments` | 添付一覧 | `FR-025` |
-| `chat.message.attachment` | 添付 1 件 | `FR-025` |
-| `chat.message.embeds` | 埋め込み一覧 | `FR-026` |
-| `chat.message.embed` | 埋め込み 1 件 | `FR-026` |
-| `chat.message.actions` | ホバー時の操作群 | `FR-024` |
-| `chat.typing_indicator` | 入力中表示 | `FR-027` |
-| `chat.input` | 入力欄全体 | `FR-024` |
-| `chat.input.field` | テキスト入力そのもの | `PLT-001` |
-| `chat.input.toolbar` | 入力欄の上部 | |
-| `chat.input.actions` | 送信・添付などのボタン群 | |
+| `chrome.titlebar` | — | 独自タイトルバー (PLT-020) |
+| `chrome.titlebar.title` | — | タイトル表示 |
+| `chrome.titlebar.controls` | — | ウィンドウ操作ボタン群 |
+| `chrome.titlebar.control` | — | 個々のボタン (key で minimize/maximize/close を区別) |
 
-### 3.5 `primitive.*` — 描画プリミティブ
+### `nav.*`
 
-**プラグインが新しいノードを作るときに使う語彙。** これがないとプラグインは何も生成できない。
+| ID | `data` | 意味 |
+|---|---|---|
+| `nav.guild_list` | — | ギルド一覧 (FR-010) |
+| `nav.guild_list.home` | — | DM への入口 (FR-013) |
+| `nav.guild_list.item` | `GuildData` | ギルド 1 個 (FR-010) |
+| `nav.guild_list.item.icon` | `GuildData` | ギルドアイコン |
+| `nav.guild_list.item.badge` | `GuildData` | 未読・メンション数 (FR-042) |
+| `nav.channel_list` | — | チャンネル一覧 (FR-011) |
+| `nav.channel_list.header` | — | ギルド名などの見出し |
+| `nav.channel_list.category` | `CategoryData` | カテゴリ (FR-011) |
+| `nav.channel_list.item` | `ChannelData` | チャンネル 1 個 (FR-011) |
+| `nav.channel_list.item.icon` | `ChannelData` | 種別アイコン |
+| `nav.channel_list.item.name` | `ChannelData` | チャンネル名 |
+| `nav.channel_list.item.badge` | `ChannelData` | 未読・メンション数 (FR-042) |
+| `nav.dm_list` | — | DM 一覧 (FR-013) |
+| `nav.dm_list.item` | `DmData` | DM 1 件 (FR-013) |
 
-| ID | 意味 |
-|---|---|
-| `primitive.text` | 文字列 |
-| `primitive.image` | 画像 |
-| `primitive.icon` | アイコン |
-| `primitive.avatar` | 円形の人物画像 |
-| `primitive.badge` | 小さなラベル |
-| `primitive.button` | 押せるもの |
-| `primitive.divider` | 区切り線 |
-| `primitive.spinner` | 読み込み表示 |
-| `primitive.mention` | メンション (`FR-022`) |
-| `primitive.emoji` | 絵文字 (`FR-023`) |
-| `primitive.code_block` | コードブロック (`FR-021`) |
-| `primitive.spoiler` | スポイラー (`FR-021`) |
-| `primitive.link` | リンク (`FR-021`) |
+### `chat.*`
 
-### 3.6 `layout.*` — レイアウトノード
+| ID | `data` | 意味 |
+|---|---|---|
+| `chat.view` | — | チャット領域全体 |
+| `chat.header` | `ChannelData` | チャンネルヘッダ |
+| `chat.header.title` | `ChannelData` | チャンネル名 |
+| `chat.header.topic` | `ChannelData` | トピック |
+| `chat.message_list` | — | メッセージ一覧 (FR-020) |
+| `chat.message` | `MessageData` | メッセージ 1 件 (FR-020) |
+| `chat.message.avatar` | `MessageData` | 送信者アイコン |
+| `chat.message.header` | `MessageData` | 送信者行 |
+| `chat.message.header.author` | `MessageData` | 送信者名 (FR-022) |
+| `chat.message.header.badges` | `MessageData` | BOT タグなど |
+| `chat.message.header.timestamp` | `MessageData` | 時刻 |
+| `chat.message.reply_ref` | `MessageData` | 返信元の参照表示 (FR-028) |
+| `chat.message.content` | `MessageData` | 本文 (FR-021) |
+| `chat.message.attachments` | `MessageData` | 添付一覧 (FR-025) |
+| `chat.message.attachment` | `AttachmentData` | 添付 1 件 (FR-025) |
+| `chat.message.embeds` | `MessageData` | 埋め込み一覧 (FR-026) |
+| `chat.message.embed` | `EmbedData` | 埋め込み 1 件 (FR-026) |
+| `chat.message.actions` | `MessageData` | ホバー時の操作群 (FR-024) |
+| `chat.typing_indicator` | — | 入力中表示 (FR-027) |
+| `chat.input` | — | 入力欄全体 (FR-024) |
+| `chat.input.field` | — | テキスト入力そのもの (PLT-001) |
+| `chat.input.toolbar` | — | 入力欄の上部 |
+| `chat.input.actions` | — | 送信・添付などのボタン群 |
 
-| ID | 意味 |
-|---|---|
-| `layout.row` | 横並び |
-| `layout.column` | 縦並び |
-| `layout.stack` | 重ね |
-| `layout.scroll` | スクロール領域 |
-| `layout.spacer` | 空き |
+### `primitive.*` — プラグインも生成できる
+
+| ID | `data` | 意味 |
+|---|---|---|
+| `primitive.text` | — | 文字列 |
+| `primitive.image` | — | 画像 |
+| `primitive.icon` | — | アイコン |
+| `primitive.avatar` | — | 円形の人物画像 |
+| `primitive.badge` | — | 小さなラベル |
+| `primitive.button` | — | 押せるもの |
+| `primitive.divider` | — | 区切り線 |
+| `primitive.spinner` | — | 読み込み表示 |
+| `primitive.mention` | — | メンション (FR-022) |
+| `primitive.emoji` | — | 絵文字 (FR-023) |
+| `primitive.code_block` | — | コードブロック (FR-021) |
+| `primitive.spoiler` | — | スポイラー (FR-021) |
+| `primitive.link` | — | リンク (FR-021) |
+
+### `layout.*` — プラグインも生成できる
+
+| ID | `data` | 意味 |
+|---|---|---|
+| `layout.row` | — | 横並び |
+| `layout.column` | — | 縦並び |
+| `layout.stack` | — | 重ね |
+| `layout.scroll` | — | スクロール領域 |
+| `layout.spacer` | — | 空き |
+
+**合計 65 個** (中核 47 / プラグインも生成可 18)。
+
+<!-- END GENERATED: node-ids -->
 
 ### 3.7 M1 の合計
 
-**約 60 個。** 意図的にここで止めている。
+**65 個。** 意図的にここで止めている。
 
 **M1 で意図的に含めなかったもの** (M2 以降で追加する):
 
@@ -282,16 +283,21 @@ M1 で公開するフィールド。
 | C5 | ノードが**出現しなくなる**のも破壊的変更である (ID は残っているが誰も生成しない状態) |
 | C6 | やむを得ず C1〜C5 に反する必要が生じた場合、**1 メジャーバージョン以上の非推奨期間**を設ける (`EXT-004`) |
 
-### 4.1 CI による強制
+### 4.1 CI による強制 ✅ 実装済み
 
-`spec/03-uitree.md` の変更を含む PR では、CI が以下を検査する。
+`cargo xtask abi` が [`spec/uitree-abi.json`](uitree-abi.json) と現在の定義を比較する。
 
-```
-1. 前のリリースの ID 一覧と比較する
-2. 削除・改名があれば PR を落とす
-3. 追加のみなら通す
-4. 親子関係の変更を検出したら警告する
-```
+| 変更 | 判定 |
+|---|---|
+| 追加 | ✅ 通る |
+| 削除 | ❌ 落ちる |
+| 改名 | ❌ 落ちる (削除として検出される) |
+| `data` の型変更 | ❌ 落ちる |
+| 親の削除 (C4) | ❌ 落ちる |
+
+git のタグではなくスナップショットと比較するのは、**オフラインで動き、差分が PR のレビューにそのまま現れる**ためである。
+
+意図的に破壊的変更を受け入れる場合のみ `cargo xtask abi --accept` でスナップショットを更新し、ADR に理由を記録する。
 
 ### 4.2 非推奨の手順
 
@@ -346,12 +352,14 @@ ui.patch("chrome.titlebar.title", (node) => ui.wrap(node, /* ... */));
 ```
 core/uitree/src/ids.rs        ← 唯一の真実の源
         │
-        ├──[生成]──▶ spec/03-uitree.md の 3 章 (この一覧)
-        ├──[生成]──▶ sdk/src/ids.d.ts     (文字列リテラル型)
-        └──[生成]──▶ 適合テストの期待値
+        ├──[cargo xtask gen]──▶ spec/03-uitree.md の 3 章 (この一覧)
+        ├──[cargo xtask gen]──▶ sdk/src/ids.ts   (文字列リテラル型 + DataByNode)
+        └──[cargo xtask abi]──▶ spec/uitree-abi.json との比較
 ```
 
 手書きで同期しない。同期漏れが起きた瞬間、ABI の保証が崩れるためである ([ADR-0004](adr/0004-semantic-uitree-as-extension-abi.md#引き受けるコスト) の帰結 3)。
+
+`cargo xtask gen --check` が生成物の陳腐化を検出する。CI に組み込んであるため、**`ids.rs` を変えて生成を忘れると落ちる**。
 
 SDK 側では文字列リテラル型になるため、**存在しない ID を指定するとビルドが通らない**。
 
