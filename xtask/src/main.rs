@@ -87,6 +87,10 @@ fn help() {
 ///
 /// メモリの少ない機械でも安全に回せる。仕様まわりの作業ではこれで足りる。
 fn check_light(root: &Path) -> Result<(), String> {
+    // rustfmt はソースを構文解析するだけでコンパイルはしない。
+    // ここに入れておかないと、整形漏れを CI まで気づけない。
+    step("整形の確認");
+    run(root, "cargo", &["fmt", "--all", "--check"])?;
     step("JSON Schema");
     schema(root)?;
     step("SDK の型レベルの保証");
@@ -108,7 +112,11 @@ fn check(root: &Path) -> Result<(), String> {
     //   メモリ消費がおよそ倍になる。4 コア / 8 GB の機械では実際に
     //   OS ごと不安定になった (.cargo/config.toml の jobs の項を参照)。
     //   CI では `cargo xtask lint --all-targets` を別途走らせる。
-    run(root, "cargo", &["clippy", "--workspace", "--", "-D", "warnings"])?;
+    run(
+        root,
+        "cargo",
+        &["clippy", "--workspace", "--", "-D", "warnings"],
+    )?;
     step("テスト");
     run(root, "cargo", &["test", "--workspace"])?;
     step("JSON Schema");
