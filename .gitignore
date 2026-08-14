@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/target/
+*.pdb
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+
+# プラットフォーム別ビルド成果物
+*.apk
+*.aab
+*.ipa
+*.dSYM/
+/app/ios/build/
+/app/android/.gradle/
+/app/android/build/
+local.properties
+
+# 秘匿情報 — トークンを絶対にコミットしない
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+*.p12
+*.mobileprovision
+
+# エディタ / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# スパイク成果物 (捨てる前提のコード。結果は spec/adr/ に残す)
+/spike/**/target/
+
+# 旧リポジトリ — モノレポ移行前の残骸。移行完了後に削除する
+/android/
+/desktop/
+/iOS/
