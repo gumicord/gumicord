@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gumicord.dev/schema/theme-1.json",
+  "title": "Gumicord テーマ",
+  "description": "Gumicord のテーマ定義。仕様は spec/04-theme.md を参照。",
+  "type": "object",
+  "required": ["manifest"],
+  "additionalProperties": false,
+
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifest": { "$ref": "#/$defs/manifest" },
+    "tokens": { "$ref": "#/$defs/tokens" },
+    "rules": {
+      "type": "array",
+      "description": "記述順に適用される。後のルールが前のルールをプロパティ単位で上書きする (規則 K1)。",
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+
+  "$defs": {
+    "manifest": {
+      "type": "object",
+      "required": ["id", "name", "version", "abi"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "逆ドメイン形式の一意な識別子",
+          "pattern": "^[a-z0-9]+(\\.[a-z0-9_-]+)+$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "version": {
+          "type": "string",
+          "description": "セマンティックバージョニング",
+          "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$"
+        },
+        "abi": {
+          "type": "integer",
+          "description": "想定する UITree の ABI メジャーバージョン。クライアントより大きければ利用者に通知した上で既知のルールのみ適用する。",
+          "minimum": 1
+        },
+        "author": { "type": "string", "maxLength": 128 },
+        "description": { "type": "string", "maxLength": 512 },
+        "homepage": { "type": "string", "format": "uri" },
+        "license": { "type": "string", "maxLength": 64 }
+      }
+    },
+
+    "tokens": {
+      "type": "object",
+      "description": "デザイントークン。名前は自由に定義できる。値は他のトークンを $ 参照できる (循環参照は検証時にエラー)。",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
+      },
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/color" },
+          { "$ref": "#/$defs/length" },
+          { "$ref": "#/$defs/font" },
+          { "$ref": "#/$defs/shadow" },
+          { "$ref": "#/$defs/tokenRef" }
+        ]
+      }
+    },
+
+    "rule": {
+      "type": "object",
+      "required": ["select", "style"],
+      "additionalProperties": false,
+      "properties": {
+        "select": {
+          "type": "string",
+          "description": "UITree の安定 ID。完全一致のみ。ワイルドカードは前方互換性のため提供しない。一覧は spec/03-uitree.md を参照。",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+){0,3}$"
+        },
+        "when": { "$ref": "#/$defs/when" },
+        "style": { "$ref": "#/$defs/style" }
+      }
+    },
+
+    "when": {
+      "type": "object",
+      "description": "すべての条件が成立したときのみルールが適用される。",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "description": "配列の場合はすべての状態が同時に成立している必要がある。",
+          "oneOf": [
+            { "$ref": "#/$defs/stateName" },
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/stateName" },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          ]
+        },
+        "platform": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["windows", "macos", "linux", "android", "ios", "desktop", "mobile"]
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["windows", "macos", "linux", "android", "ios", "desktop", "mobile"]
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          ]
+        },
+        "colorScheme": { "type": "string", "enum": ["light", "dark"] },
+        "minWidth": { "type": "number", "minimum": 0 },
+        "maxWidth": { "type": "number", "minimum": 0 }
+      }
+    },
+
+    "stateName": {
+      "type": "string",
+      "description": "spec/03-uitree.md 2.3 が定義する状態",
+      "enum": [
+        "hover",
+        "active",
+        "focus",
+        "selected",
+        "disabled",
+        "unread",
+        "mentioned",
+        "loading"
+      ]
+    },
+
+    "style": {
+      "type": "object",
+      "description": "M1 のスタイルプロパティ。未知のプロパティは警告して無視する (前方互換性)。",
+      "additionalProperties": false,
+      "properties": {
+        "background": { "$ref": "#/$defs/colorOrRef" },
+        "color": { "$ref": "#/$defs/colorOrRef" },
+        "font": { "$ref": "#/$defs/fontOrRef" },
+        "borderColor": { "$ref": "#/$defs/colorOrRef" },
+        "borderWidth": { "$ref": "#/$defs/lengthOrRef" },
+        "radius": { "$ref": "#/$defs/lengthOrRef" },
+        "padding": { "$ref": "#/$defs/edgesOrRef" },
+        "margin": { "$ref": "#/$defs/edgesOrRef" },
+        "gap": { "$ref": "#/$defs/lengthOrRef" },
+        "width": { "$ref": "#/$defs/lengthOrRef" },
+        "height": { "$ref": "#/$defs/lengthOrRef" },
+        "minWidth": { "$ref": "#/$defs/lengthOrRef" },
+        "maxWidth": { "$ref": "#/$defs/lengthOrRef" },
+        "minHeight": { "$ref": "#/$defs/lengthOrRef" },
+        "maxHeight": { "$ref": "#/$defs/lengthOrRef" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "shadow": { "$ref": "#/$defs/shadowOrRef" }
+      }
+    },
+
+    "tokenRef": {
+      "type": "string",
+      "description": "トークン参照",
+      "pattern": "^\\$[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
+    },
+
+    "color": {
+      "type": "string",
+      "description": "#RGB / #RRGGBB / #RRGGBBAA",
+      "pattern": "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+    },
+
+    "length": {
+      "type": "number",
+      "description": "論理ピクセル。DPI スケールはレンダラが掛ける。",
+      "minimum": 0
+    },
+
+    "font": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "type": "string",
+          "description": "省略するとクライアント同梱の既定フォントを使う。EXT-020 の観点では省略が望ましい。"
+        },
+        "size": { "type": "number", "exclusiveMinimum": 0 },
+        "lineHeight": { "type": "number", "exclusiveMinimum": 0 },
+        "weight": { "type": "integer", "minimum": 100, "maximum": 900 },
+        "italic": { "type": "boolean" },
+        "letterSpacing": { "type": "number" }
+      }
+    },
+
+    "shadow": {
+      "type": "object",
+      "required": ["color"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "blur": { "type": "number", "minimum": 0 },
+        "spread": { "type": "number" },
+        "color": { "$ref": "#/$defs/colorOrRef" }
+      }
+    },
+
+    "edges": {
+      "description": "単一値、または [上, 右, 下, 左]",
+      "oneOf": [
+        { "$ref": "#/$defs/length" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/length" },
+          "minItems": 4,
+          "maxItems": 4
+        }
+      ]
+    },
+
+    "colorOrRef": {
+      "oneOf": [{ "$ref": "#/$defs/color" }, { "$ref": "#/$defs/tokenRef" }]
+    },
+    "lengthOrRef": {
+      "oneOf": [{ "$ref": "#/$defs/length" }, { "$ref": "#/$defs/tokenRef" }]
+    },
+    "fontOrRef": {
+      "oneOf": [{ "$ref": "#/$defs/font" }, { "$ref": "#/$defs/tokenRef" }]
+    },
+    "shadowOrRef": {
+      "oneOf": [{ "$ref": "#/$defs/shadow" }, { "$ref": "#/$defs/tokenRef" }]
+    },
+    "edgesOrRef": {
+      "oneOf": [{ "$ref": "#/$defs/edges" }, { "$ref": "#/$defs/tokenRef" }]
+    }
+  }
+}

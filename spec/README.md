@@ -10,7 +10,7 @@
 | [01-requirements.md](01-requirements.md) | 要件定義 (ID 付き) | ドラフト |
 | [02-architecture.md](02-architecture.md) | アーキテクチャ | **ドラフト** — 描画とバックエンドは確定、IME 層は要更新 |
 | [03-uitree.md](03-uitree.md) | セマンティック UI ツリー仕様 (拡張 ABI) | **ドラフト** — M1 の安定 ID セットを提案 |
-| [04-theme.md](04-theme.md) | テーマ仕様 | 未執筆 |
+| [04-theme.md](04-theme.md) | テーマ仕様 | **ドラフト** — M1 の範囲を定義 + JSON Schema |
 | [05-plugin-api.md](05-plugin-api.md) | プラグイン API 仕様 | **ドラフト** — 実行モデルの節のみ確定 (S3) |
 | [06-renderer.md](06-renderer.md) | レンダラ仕様 | 未執筆 |
 | [07-roadmap.md](07-roadmap.md) | マイルストーン | 未執筆 |
