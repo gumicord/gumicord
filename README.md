@@ -55,10 +55,10 @@ gumicord/
 │  ├─ 05-plugin-api.md      プラグインAPI仕様
 │  ├─ 06-renderer.md        レンダラ仕様
 │  ├─ 07-roadmap.md         マイルストーン
-│  ├─ 08-spike-plan.md      技術検証計画
-│  ├─ schema/               JSON Schema (テーマ / プラグインmanifest)
-│  └─ adr/                  アーキテクチャ決定記録
-│  └─ 09-discord-protocol.md
+│  ├─ 08-spike-plan.md      技術検証計画 (完了)
+│  ├─ 09-discord-protocol.md
+│  ├─ schema/               JSON Schema と検証ツール
+│  └─ adr/                  アーキテクチャ決定記録 0001-0005
 │
 ├─ core/          Rust
 │  ├─ model/        ドメイン型
@@ -109,7 +109,21 @@ cargo xtask abi       # 安定 ID の後方互換性検査 (EXT-003)
 3. **拡張 ABI は不可侵。** `spec/03-uitree.md` の安定 ID は破壊的変更をしない
 4. **推測で決めない。** 性能・IME・プラットフォーム制約はスパイクで実測してから仕様に落とす
 
-現在のフェーズは **スパイク (技術検証)** です。[spec/08-spike-plan.md](spec/08-spike-plan.md) を参照してください。
+## 現在地
+
+**スパイク (技術検証) は完了しました。** Windows 上で以下を実測済みです。
+
+| | 実測 | 比較 |
+|---|---|---|
+| バイナリサイズ | **4.66 MB** | 公式 Discord は 150〜300MB 程度 |
+| 常駐メモリ | **69.7 MB** | 公式 Discord は 1,273 MB (5 プロセス) |
+| コールドスタート | **332 ms** | — |
+| 描画性能 | 20,000 インスタンスまで 60fps | Intel HD Graphics 520 (2015 年世代) |
+| プラグイン 1 個のメモリ | **11.3 KB** | 完全隔離した状態で |
+
+同時に、**自前レンダラのコストは性能ではなくプラットフォーム統合にある**ことが分かりました。とくに Windows では変換候補ウィンドウを出すために TSF テキストストアの自前実装が必要です ([ADR-0005](spec/adr/0005-ime-strategy.md))。
+
+次は M1.1 (Windows のみで縦に通す) です。詳細は [spec/07-roadmap.md](spec/07-roadmap.md)。
 
 ## ライセンス
 
