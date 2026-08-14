@@ -15,7 +15,7 @@
 | [06-renderer.md](06-renderer.md) | レンダラ仕様 | 未執筆 |
 | [07-roadmap.md](07-roadmap.md) | マイルストーン | 未執筆 |
 | [08-spike-plan.md](08-spike-plan.md) | 技術検証計画 | **実行中** |
-| [09-discord-protocol.md](09-discord-protocol.md) | Discord プロトコル仕様 | 未執筆 |
+| [09-discord-protocol.md](09-discord-protocol.md) | Discord プロトコル仕様 | **ドラフト** — S4 で実測した範囲 |
 
 `03`〜`07` はスパイク完了後に執筆する。レンダラとプラグインホストの実現可能性が確定するまで書いても手戻りになるため。
 

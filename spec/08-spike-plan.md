@@ -279,7 +279,7 @@ rustup component add rust-analyzer clippy rustfmt
 | S1 ウィンドウ | ✅ **Windows 完了** (他 OS は環境確保待ち) | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s1-の測定結果-2026-08-14) |
 | S2 IME + a11y | 🔴 **Windows 完了。2-3 が不合格 → ADR-0005 で判断** | 2026-08-14 | [ADR-0001](adr/0001-native-rust-renderer.md#スパイク-s2-の測定結果-2026-08-14) |
 | S3 QuickJS | ✅ **Windows 完了。全項目合格** | 2026-08-14 | [ADR-0002](adr/0002-quickjs-plugin-runtime.md#スパイク-s3-の測定結果-2026-08-14) |
-| S4 Gateway | 未着手 | — | ADR-0002 / `09-discord-protocol.md` |
+| S4 Gateway | ✅ **完了。4-7 のみ意図的に未実施** | 2026-08-14 | [09-discord-protocol.md](09-discord-protocol.md) |
 
 ### S1 の判定
 
