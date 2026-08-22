@@ -116,8 +116,21 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+# ■ ディスク消費について
+#
+#   開発機の実測 (2026-08-22): target/ が 19.8 GB まで育ち、
+#   **C ドライブの空きが 3.7 GB まで落ちた。** 内訳:
+#
+#     target/debug/incremental   8.2 GB   ← 中間キャッシュ。消してよい
+#     target/debug/deps         残り      ← 大半がデバッグ情報
+#
+#   incremental は消せば済むが、また育つ。デバッグ情報のほうを絞る。
+
 [profile.dev]
 opt-level = 1
+# 行番号だけ残す。**backtrace に file:line は出る。**
+# 失うのは変数の中身を見ながらの逐次実行で、それが要るときだけ戻せばよい
+debug = "line-tables-only"
 
 # 依存クレートは dev ビルドでも最適化する。
 # 最適化なしの wgpu / cosmic-text は描画が実用にならないため。
@@ -125,3 +138,7 @@ opt-level = 1
 # 描画性能の差はこの用途では体感できない。
 [profile.dev.package."*"]
 opt-level = 2
+# ⚠️ **依存のデバッグ情報は持たない。** wgpu や cosmic-text の中へ
+# 踏み込むことはまずなく、ここが target/ の大きさの大半を占めていた。
+# 関数名は記号表に残るので、backtrace が読めなくなるわけではない
+debug = false
