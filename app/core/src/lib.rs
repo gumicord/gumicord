@@ -728,6 +728,9 @@ impl Gumicord {
         self.live
             .guilds()
             .iter()
+            // ⚠️ **落ちているギルドは出さない。** 名前もチャンネルも無いので、
+            // 中身の無い丸が並ぶだけになる。GUILD_CREATE で届いたら出る
+            .filter(|g| !g.unavailable && !g.name.is_empty())
             .map(|g| GuildRow {
                 id: g.id.get(),
                 name: g.name.clone(),

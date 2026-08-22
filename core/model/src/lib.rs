@@ -24,6 +24,8 @@
 pub mod snowflake;
 pub mod token;
 
+pub mod de;
+
 pub use snowflake::{
     AttachmentId, ChannelId, EmojiId, GuildId, MessageId, RoleId, Snowflake, UserId,
 };
@@ -72,11 +74,25 @@ impl User {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guild {
     pub id: GuildId,
+    /// ⚠️ **無いことがある。**
+    ///
+    /// READY には「落ちているギルド」が `{"id": …, "unavailable": true}`
+    /// という**識別子だけの殻**で並ぶ。名前を必須にしていたせいで、
+    /// 殻が 1 つ混ざっただけで READY 全体が読めなくなり、Gateway が
+    /// 永久に繋ぎ直し続けた。
+    ///
+    /// **Discord のデータで必須にしてよいのは識別子だけである。**
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub icon: Option<String>,
-    /// READY では入っていないことがある。あとから GUILD_CREATE で埋まる
+    /// いま落ちている。**名前もチャンネルも入っていない**
     #[serde(default)]
+    pub unavailable: bool,
+    /// READY では入っていないことがある。あとから GUILD_CREATE で埋まる。
+    ///
+    /// ⚠️ **読めないチャンネルが 1 つあってもギルドごと落とさない**
+    #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     pub channels: Vec<Channel>,
 }
 

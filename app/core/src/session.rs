@@ -262,11 +262,22 @@ impl Default for Login {
     }
 }
 
+/// 失敗した後に繋ぎ直すまでの待ち時間。**倍々に伸びて上限で止まる**
+const RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(2);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// ログインする。**まず保存されたトークンを試し、駄目なら QR を出す。**
 ///
-/// QR には寿命があり (公式クライアントでも 2 分ほどで消える)、置きっぱなしの
-/// 画面の前に戻ってきた利用者は、**死んだ QR を読んで無反応に困る**。
-/// 取り消されたら黙って繋ぎ直す。
+/// # 諦めない
+///
+/// QR には寿命があり、**公式クライアントでも 2 分ほどで消える**。置きっぱなしの
+/// 画面の前に戻ってきた利用者が死んだ QR を読んで無反応に困らないよう、
+/// 期限が切れたら黙って出し直す。
+///
+/// ⚠️ **失敗しても諦めない。** ここで止まると、画面に「失敗しました」と
+/// 出たまま二度と QR が出ず、**アプリを起動し直すしか道がなくなる**。
+/// 網が落ちているだけかもしれないので、待ち時間を伸ばしながら繋ぎ続ける。
+/// 理由は画面に出るので、黙って隠しているわけではない。
 async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
     if let Some(l) = restore(store.as_ref()).await {
         let _ = tx.send(LoginEvent::Done(Box::new(l)));
@@ -274,20 +285,24 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
         return;
     }
 
+    let mut wait = RETRY_MIN;
     loop {
         match attempt(&tx, &waker, store.as_ref()).await {
             // 入れた。もう繰り返さない
             Ok(true) => return,
-            // 期限切れ。QR を出し直す
+            // 期限切れ。**すぐに**出し直す。待たせる理由がない
             Ok(false) => {
+                tracing::debug!("QR の期限が切れた。出し直す");
+                wait = RETRY_MIN;
                 let _ = tx.send(LoginEvent::Restarted);
                 waker.wake();
             }
             Err(e) => {
-                tracing::warn!(error = %e, "リモート認証が失敗した");
+                tracing::warn!(error = %e, wait_s = wait.as_secs(), "リモート認証が失敗した");
                 let _ = tx.send(LoginEvent::Failed(e));
                 waker.wake();
-                return;
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(RETRY_MAX);
             }
         }
     }
@@ -337,7 +352,14 @@ async fn attempt(
     let rest = RestClient::anonymous().map_err(|e| e.to_string())?;
 
     loop {
-        let event = auth.next().await.map_err(|e| e.to_string())?;
+        let event = match auth.next().await {
+            Ok(e) => e,
+            // ⚠️ **QR の期限切れはこの形で来る。**「取り消し」の合図が来る
+            // とは限らず、多くの場合は黙って接続を閉じられるだけである。
+            // これを誤りとして扱うと、2 分ごとに「失敗しました」が出る
+            Err(gumicord_gateway::RemoteAuthError::Closed) => return Ok(false),
+            Err(e) => return Err(e.to_string()),
+        };
         match event {
             RemoteAuthEvent::Ready { url, fingerprint } => {
                 tracing::info!(%fingerprint, "QR を出せる");

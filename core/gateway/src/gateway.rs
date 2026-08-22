@@ -128,9 +128,11 @@ pub struct Ready {
     /// resume で繋ぐ先。**リージョン別のホストが返る**
     #[serde(default)]
     pub resume_gateway_url: Option<String>,
-    /// ⚠️ ボットでは中身のない殻が来て、後から GUILD_CREATE で埋まる。
-    /// 利用者トークンでは最初から埋まっている
-    #[serde(default)]
+    /// ⚠️ **落ちているギルドは識別子だけの殻で来る。**
+    ///
+    /// 読めない要素があっても飛ばして残りを採る。**殻が 1 つ混ざっただけで
+    /// READY 全体が読めなくなり、Gateway が永久に繋ぎ直し続けた**ことがある
+    #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
     pub guilds: Vec<Guild>,
 }
 

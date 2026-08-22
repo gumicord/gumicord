@@ -77,6 +77,8 @@ pub enum LiveEvent {
     Ready(Box<Ready>),
     /// Gateway から届いた新着
     Posted(Box<Message>),
+    /// ギルドの中身が届いた・変わった。**殻だった分がここで埋まる**
+    GuildChanged(Box<Guild>),
     /// REST で取ってきた過去分。**古い順に並べ替えてある**
     Backlog {
         channel: ChannelId,
@@ -131,6 +133,15 @@ impl Live {
     /// 参加しているギルド。**READY が来るまで空である**
     pub fn guilds(&self) -> &[Guild] {
         &self.guilds
+    }
+
+    /// 名前順に並べる。**READY の順は当てにならない。**
+    ///
+    /// ⚠️ 名前が同じギルドは実在するので、そのときは ID 順に倒す。
+    /// **並びが毎フレーム入れ替わると読めない**
+    fn sort_guilds(&mut self) {
+        self.guilds
+            .sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     }
 
     pub fn guild(&self, id: u64) -> Option<&Guild> {
@@ -247,11 +258,17 @@ impl Live {
         match event {
             LiveEvent::Ready(ready) => {
                 self.link = Link::Up;
-                // ⚠️ **チャンネルを持っているギルドだけを採る。** READY の
-                // 直後に殻だけのギルドが来ることがあり、上書きすると
-                // 一覧からチャンネルが消える
                 self.guilds = ready.guilds;
-                self.guilds.sort_by(|a, b| a.name.cmp(&b.name));
+                self.sort_guilds();
+            }
+            LiveEvent::GuildChanged(g) => {
+                match self.guilds.iter_mut().find(|x| x.id == g.id) {
+                    // ⚠️ **殻を中身で置き換える。** READY で来るのは
+                    // 識別子だけのことがあり、本体はここで遅れて届く
+                    Some(slot) => *slot = *g,
+                    None => self.guilds.push(*g),
+                }
+                self.sort_guilds();
             }
             LiveEvent::Posted(m) => {
                 let channel = m.channel_id.get();
@@ -294,16 +311,21 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
             Event::Ready(ready) => send(LiveEvent::Ready(ready)),
             // 取りこぼしはこの後で順に届く。**画面ですることはない**
             Event::Resumed => send(LiveEvent::Link(Link::Up)),
-            Event::Dispatch { kind, data } => {
-                if kind == "MESSAGE_CREATE" {
-                    match serde_json::from_value::<Message>(data) {
-                        Ok(m) => send(LiveEvent::Posted(Box::new(m))),
-                        // ⚠️ 読めない 1 件で接続ごと落とさない。
-                        // Discord は予告なく形を変える
-                        Err(e) => tracing::warn!(%e, "MESSAGE_CREATE を読めなかった"),
-                    }
-                }
-            }
+            // ⚠️ **読めない 1 件で接続ごと落とさない。**
+            // Discord は予告なく形を変える
+            Event::Dispatch { kind, data } => match kind.as_str() {
+                "MESSAGE_CREATE" => match serde_json::from_value::<Message>(data) {
+                    Ok(m) => send(LiveEvent::Posted(Box::new(m))),
+                    Err(e) => tracing::warn!(%e, "MESSAGE_CREATE を読めなかった"),
+                },
+                // READY で殻だけだったギルドが、遅れてここで埋まる。
+                // **これが来ないと落ちていたギルドは永久に出てこない**
+                "GUILD_CREATE" | "GUILD_UPDATE" => match serde_json::from_value::<Guild>(data) {
+                    Ok(g) => send(LiveEvent::GuildChanged(Box::new(g))),
+                    Err(e) => tracing::warn!(%e, "{kind} を読めなかった"),
+                },
+                _ => {}
+            },
             Event::Reconnecting { reason, .. } => send(LiveEvent::Link(Link::Reconnecting(reason))),
             Event::Fatal(Fatal::Unauthorized) => {
                 send(LiveEvent::TokenRejected);
@@ -433,12 +455,14 @@ mod tests {
                     id: 2u64.into(),
                     name: "ばなな".to_owned(),
                     icon: None,
+                    unavailable: false,
                     channels: Vec::new(),
                 },
                 Guild {
                     id: 1u64.into(),
                     name: "あんず".to_owned(),
                     icon: None,
+                    unavailable: false,
                     channels: Vec::new(),
                 },
             ],
@@ -447,5 +471,69 @@ mod tests {
         let names: Vec<_> = live.guilds().iter().map(|g| &*g.name).collect();
         assert_eq!(names, vec!["あんず", "ばなな"]);
         assert_eq!(live.link(), &Link::Up);
+    }
+}
+
+#[cfg(test)]
+mod guild_tests {
+    use super::*;
+
+    fn shell(id: u64) -> Guild {
+        Guild {
+            id: id.into(),
+            name: String::new(),
+            icon: None,
+            unavailable: true,
+            channels: Vec::new(),
+        }
+    }
+
+    fn full(id: u64, name: &str) -> Guild {
+        Guild {
+            id: id.into(),
+            name: name.to_owned(),
+            icon: None,
+            unavailable: false,
+            channels: Vec::new(),
+        }
+    }
+
+    /// **殻が中身で置き換わる。** READY で識別子だけ来て、
+    /// 本体は GUILD_CREATE で遅れて届く
+    #[test]
+    fn a_shell_is_replaced_by_the_real_guild() {
+        let mut live = Live::new();
+        live.apply(LiveEvent::Ready(Box::new(Ready {
+            user: serde_json::from_str(r#"{"id":"1","username":"x"}"#).unwrap(),
+            session_id: "s".to_owned(),
+            resume_gateway_url: None,
+            guilds: vec![shell(2)],
+        })));
+        assert_eq!(live.guilds().len(), 1);
+        assert!(live.guilds()[0].unavailable);
+
+        live.apply(LiveEvent::GuildChanged(Box::new(full(2, "ばなな"))));
+        assert_eq!(live.guilds().len(), 1, "同じギルドが二重に並んでいる");
+        assert_eq!(live.guilds()[0].name, "ばなな");
+        assert!(!live.guilds()[0].unavailable);
+    }
+
+    /// 知らないギルドが来たら足す。招待された直後がこれである
+    #[test]
+    fn an_unknown_guild_is_added() {
+        let mut live = Live::new();
+        live.apply(LiveEvent::GuildChanged(Box::new(full(2, "あんず"))));
+        assert_eq!(live.guilds().len(), 1);
+    }
+
+    /// 名前が同じでも並びが安定する。**毎フレーム入れ替わると読めない**
+    #[test]
+    fn guilds_with_the_same_name_keep_a_stable_order() {
+        let mut live = Live::new();
+        live.apply(LiveEvent::GuildChanged(Box::new(full(9, "おなじ"))));
+        live.apply(LiveEvent::GuildChanged(Box::new(full(3, "おなじ"))));
+
+        let ids: Vec<_> = live.guilds().iter().map(|g| g.id.get()).collect();
+        assert_eq!(ids, vec![3, 9]);
     }
 }
