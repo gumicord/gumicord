@@ -33,6 +33,15 @@ pub const FLOATS_PER_RECT: usize = 12;
 /// グリフ 1 個ぶんの float 数。64 バイト
 pub const FLOATS_PER_GLYPH: usize = 16;
 
+/// 入力欄が空のときの薄さ
+const PLACEHOLDER_ALPHA: f32 = 0.45;
+/// 選択範囲の濃さ。文字が読める程度に抑える
+const SELECTION_ALPHA: f32 = 0.30;
+/// キャレットの太さ (論理 px)
+const CARET_WIDTH: f32 = 2.0;
+/// 変換中を示す下線の太さ (論理 px)
+const UNDERLINE_THICKNESS: f32 = 2.0;
+
 /// テーマが文字色を指定しなかったときの色。
 ///
 /// 真っ白ではなく少し落とす。テーマなしで起動したときに目が痛くならない程度
@@ -232,6 +241,9 @@ pub fn build(
             Content::Icon(name) => {
                 draw_icon(&mut dl, text, queue, placed, name, opacity, scale, scissor);
             }
+            Content::Editable(e) => {
+                draw_editable(&mut dl, text, queue, placed, e, opacity, scale, scissor);
+            }
             _ => {}
         }
     }
@@ -312,41 +324,154 @@ fn draw_background(
     }
 }
 
+/// 編集中のテキスト (`PLT-001`)。
+///
+/// 重ねる順序が意味を持つ。**選択 → 文字 → 変換中の下線 → キャレット**。
+/// 選択を文字の後に描くと文字が隠れ、キャレットを文字の前に描くと文字に
+/// 隠れる。
+///
+/// ⚠️ 選択と変換中の色は文字色から作っている。テーマに専用のトークンが
+/// ないためで、`spec/04-theme.md` に足すまでの当座の措置である。
 #[allow(clippy::too_many_arguments)]
-fn draw_text(
+fn draw_editable(
     dl: &mut DrawList,
     text: &mut TextEngine,
     queue: &wgpu::Queue,
     placed: &crate::layout::Placed<'_>,
-    s: &str,
+    e: &gumicord_uitree::Editable,
     opacity: f32,
     scale: f32,
     scissor: Option<[u32; 4]>,
 ) {
     let style = &placed.node.style;
     let font = ResolvedFont::from_style(style);
-    let color = linear(style.color.unwrap_or(FALLBACK_TEXT), opacity);
     let inner = placed.inner;
+    let fg = style.color.unwrap_or(FALLBACK_TEXT);
 
-    // 折り返し幅を決めてから、実寸を測って位置合わせに使う。
-    // shape 済みなので 2 度目は表引きで返る
+    // 中身が空なら placeholder を薄く出すだけ。印は出さない
+    if e.text.is_empty() {
+        if !e.placeholder.is_empty() {
+            let faded = Color {
+                a: (fg.a as f32 * PLACEHOLDER_ALPHA) as u8,
+                ..fg
+            };
+            draw_glyph_run(
+                dl,
+                text,
+                queue,
+                placed,
+                &e.placeholder,
+                linear(faded, opacity),
+                scale,
+                scissor,
+            );
+        }
+        return;
+    }
+
+    let origin = text_origin(text, placed, &e.text, scale);
+    let shaped = text.shaper().shape(&e.text, &font, Some(inner.w)).clone();
+
+    let mark = |r: crate::text::TextRect, color: [f32; 4], dl: &mut DrawList| {
+        dl.push_rect(
+            [
+                (origin.0 + r.x).round(),
+                (origin.1 + r.y).round(),
+                r.w.max(1.0).round(),
+                r.h.round(),
+            ],
+            color,
+            0.0,
+            0.0,
+            scissor,
+        );
+    };
+
+    // [1] 選択
+    let sel = linear(
+        Color {
+            a: (fg.a as f32 * SELECTION_ALPHA) as u8,
+            ..fg
+        },
+        opacity,
+    );
+    for r in shaped.range_rects(&e.selection) {
+        mark(r, sel, dl);
+    }
+
+    // [2] 文字
+    draw_glyph_run(
+        dl,
+        text,
+        queue,
+        placed,
+        &e.text,
+        linear(fg, opacity),
+        scale,
+        scissor,
+    );
+
+    // [3] 変換中の下線。**確定していないことが見て分かる必要がある**
+    if let Some(c) = &e.composing {
+        let thickness = (UNDERLINE_THICKNESS * scale).max(1.0);
+        for r in shaped.range_rects(c) {
+            mark(
+                crate::text::TextRect {
+                    y: r.y + r.h - thickness,
+                    h: thickness,
+                    ..r
+                },
+                linear(fg, opacity),
+                dl,
+            );
+        }
+    }
+
+    // [4] キャレット
+    mark(
+        shaped.caret(e.caret, (CARET_WIDTH * scale).max(1.0)),
+        linear(fg, opacity),
+        dl,
+    );
+}
+
+/// テキストの原点 (物理 px)。文字も印もここを基準に置く
+fn text_origin(
+    text: &mut TextEngine,
+    placed: &crate::layout::Placed<'_>,
+    s: &str,
+    scale: f32,
+) -> (f32, f32) {
+    let font = ResolvedFont::from_style(&placed.node.style);
+    let inner = placed.inner;
     let size = text.shaper().measure(s, &font, Some(inner.w));
 
-    // 縦は常に中央。1 行なら見た目が変わらず、行が箱より低いときだけ効く
     let y = inner.y + ((inner.h - size.h) * 0.5).max(0.0);
-    // 横は「重ね」のノードだけ中央。ボタン・アイコン・アバターがこれにあたる
     let x = if intrinsic(placed.node.id).axis == Axis::Stack {
         inner.x + ((inner.w - size.w) * 0.5).max(0.0)
     } else {
         inner.x
     };
+    ((x * scale).round(), (y * scale).round())
+}
 
-    // ベースラインは丸める。字送りは丸めない (spec/06-renderer.md 3.1)
-    let ox = (x * scale).round();
-    let oy = (y * scale).round();
+/// グリフを積む。色と文字列だけが違う 2 つの呼び出し元で共有する
+#[allow(clippy::too_many_arguments)]
+fn draw_glyph_run(
+    dl: &mut DrawList,
+    text: &mut TextEngine,
+    queue: &wgpu::Queue,
+    placed: &crate::layout::Placed<'_>,
+    s: &str,
+    color: [f32; 4],
+    scale: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    let font = ResolvedFont::from_style(&placed.node.style);
+    let (ox, oy) = text_origin(text, placed, s, scale);
 
     let mut out: Vec<([f32; 4], [f32; 4], bool)> = Vec::new();
-    text.draw_glyphs(queue, s, &font, Some(inner.w), |e, gx, gy| {
+    text.draw_glyphs(queue, s, &font, Some(placed.inner.w), |e, gx, gy| {
         out.push((
             [
                 ox + (gx + e.left) as f32,
@@ -362,6 +487,21 @@ fn draw_text(
     for (r, uv, is_color) in out {
         dl.push_glyph(r, uv, color, is_color, scissor);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_text(
+    dl: &mut DrawList,
+    text: &mut TextEngine,
+    queue: &wgpu::Queue,
+    placed: &crate::layout::Placed<'_>,
+    s: &str,
+    opacity: f32,
+    scale: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    let color = linear(placed.node.style.color.unwrap_or(FALLBACK_TEXT), opacity);
+    draw_glyph_run(dl, text, queue, placed, s, color, scale, scissor);
 }
 
 #[cfg(test)]

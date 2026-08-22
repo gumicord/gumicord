@@ -42,11 +42,13 @@
 
 use std::sync::Arc;
 
+use crate::text_input::{EditKey, TextDocument};
 use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 /// ウィンドウの縁で、リサイズの掴みしろとする幅 (論理 px)
@@ -93,6 +95,27 @@ pub trait Application {
     fn pressed(&mut self, hits: &[Hit]) -> bool;
 
     fn title(&self) -> String;
+
+    /// いま入力を受け取る文書 (`PLT-001`)。`None` ならテキスト入力は起きない。
+    ///
+    /// **どれに入力を流すかを決めるのはアプリである。** プラットフォーム層は
+    /// フォーカスの概念を持たない。
+    fn focused_document(&mut self) -> Option<&mut TextDocument> {
+        None
+    }
+
+    /// 入力を確定して送る (`FR-024`)。Enter が押されたときに呼ばれる。
+    ///
+    /// **変換中は呼ばれない。** 変換の確定に使う Enter を送信と取り違えると、
+    /// 日本語がまともに打てなくなる。
+    fn submit(&mut self) -> bool {
+        false
+    }
+
+    /// テキスト入力から抜ける。Esc が押されたときに呼ばれる
+    fn cancel_input(&mut self) -> bool {
+        false
+    }
 }
 
 /// ウィンドウを開いてアプリを走らせる。**返ってくるのは終了時である。**
@@ -108,6 +131,8 @@ pub fn run(app: impl Application + 'static) -> Result<(), PlatformError> {
         zone: Zone::Client,
         maximized: false,
         scroll_grab: None,
+        modifiers: ModifiersState::empty(),
+        ime_allowed: false,
         first_frame: true,
     };
     event_loop.run_app(&mut host)?;
@@ -133,6 +158,10 @@ struct Host {
     maximized: bool,
     /// 掴んでいるスクロールバー。押している間だけ入る
     scroll_grab: Option<ScrollGrab>,
+    /// 押されている修飾キー。Shift での選択と Ctrl+A に使う
+    modifiers: ModifiersState,
+    /// IME を許可しているか。切り替えたときだけ OS へ伝える
+    ime_allowed: bool,
     first_frame: bool,
 }
 
@@ -211,6 +240,134 @@ impl Host {
         w.set_cursor(icon);
     }
 
+    /// IME からの通知を文書へ流す。**再描画が要るなら真。**
+    ///
+    /// ⚠️ 現状は `winit` の `Ime` イベントを使っている。Windows では preedit は
+    /// 取れるが**変換候補ウィンドウが出ない** (S2 の実測)。候補ウィンドウを
+    /// 出すには TSF テキストストアが要る ([ADR-0005](../../../spec/adr/0005-ime-strategy.md))。
+    fn on_ime(&mut self, ime: Ime) -> bool {
+        let Some(doc) = self.app.focused_document() else {
+            return false;
+        };
+        match ime {
+            Ime::Preedit(s, cursor) => {
+                // cursor は (開始, 終了) のバイト位置。開始だけ使う
+                doc.set_composition(&s, cursor.map(|(a, _)| a));
+                true
+            }
+            Ime::Commit(s) => {
+                doc.commit_composition(&s);
+                true
+            }
+            // 入力の開始と終了。文書は変わらない
+            Ime::Enabled | Ime::Disabled => false,
+        }
+    }
+
+    /// キー入力を文書へ流す。**再描画が要るなら真。**
+    fn on_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+
+        let shift = self.modifiers.shift_key();
+        let ctrl = self.modifiers.control_key();
+
+        // 変換中かどうかで Enter と Esc の意味が変わる。
+        // **変換の確定に使う Enter を送信と取り違えてはならない**
+        let composing = self
+            .app
+            .focused_document()
+            .is_some_and(|d| d.is_composing());
+
+        let edit = match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => Some(EditKey::Backspace),
+            Key::Named(NamedKey::Delete) => Some(EditKey::Delete),
+            Key::Named(NamedKey::ArrowLeft) => Some(EditKey::Left),
+            Key::Named(NamedKey::ArrowRight) => Some(EditKey::Right),
+            Key::Named(NamedKey::Home) => Some(EditKey::Home),
+            Key::Named(NamedKey::End) => Some(EditKey::End),
+            Key::Named(NamedKey::Enter) if !composing => Some(EditKey::Enter),
+            Key::Named(NamedKey::Escape) => Some(EditKey::Escape),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => Some(EditKey::SelectAll),
+            _ => None,
+        };
+
+        match edit {
+            Some(EditKey::Enter) => return self.app.submit(),
+            Some(EditKey::Escape) => {
+                if let Some(doc) = self.app.focused_document()
+                    && doc.is_composing()
+                {
+                    doc.cancel_composition();
+                    return true;
+                }
+                return self.app.cancel_input();
+            }
+            Some(key) => {
+                if let Some(doc) = self.app.focused_document() {
+                    return key.apply(doc, shift);
+                }
+                return false;
+            }
+            None => {}
+        }
+
+        // ⚠️ **変換中の文字は `Ime::Preedit` で来る。** ここで拾うと二重に入る
+        if composing || ctrl {
+            return false;
+        }
+        // 制御文字を弾く。Tab や改行が生の文字として来ることがある
+        match event
+            .text
+            .as_ref()
+            .filter(|t| !t.is_empty() && !t.chars().any(|c| c.is_control()))
+        {
+            Some(t) => match self.app.focused_document() {
+                Some(doc) => {
+                    doc.insert(t);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// IME に「入力欄はここ」と伝える (`PLT-001`)。
+    ///
+    /// **変換候補ウィンドウの位置はこれで決まる。** 伝えないと画面の隅に出る。
+    fn update_ime_area(&mut self) {
+        let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
+            return;
+        };
+        let has_input = self.app.focused_document().is_some();
+
+        // ⚠️ **許可しない限り `Ime` イベントは一切来ない。** winit の既定は
+        // 不許可であり、これを呼び忘れると変換中の文字列がどこにも届かない。
+        //
+        // 変わったときだけ呼ぶ。毎フレーム呼ぶと IME の文脈を繋ぎ直し続ける
+        if has_input != self.ime_allowed {
+            self.ime_allowed = has_input;
+            w.set_ime_allowed(has_input);
+            tracing::debug!(allowed = has_input, "IME の許可を切り替えた");
+        }
+        if !has_input {
+            return;
+        }
+
+        // 入力欄の位置は当たり判定の記録から引く
+        let Some(field) = r
+            .hit_boxes()
+            .iter()
+            .find(|h| h.id == NodeId::ChatInputField)
+        else {
+            return;
+        };
+        w.set_ime_cursor_area(
+            winit::dpi::LogicalPosition::new(field.rect.x, field.rect.y),
+            winit::dpi::LogicalSize::new(field.rect.w, field.rect.h),
+        );
+    }
+
     fn redraw(&mut self) {
         // ⚠️ **描く直前に窓の実寸からサーフェスを合わせる。**
         //
@@ -258,6 +415,10 @@ impl Host {
         if self.app.hover_changed(&self.hits()) {
             self.request_redraw();
         }
+
+        // 入力欄の位置が決まるのは配置のあとである。
+        // **変換候補ウィンドウの位置はこれで決まる** (`PLT-001`)
+        self.update_ime_area();
 
         if self.first_frame && stats.presented == Presented::Yes {
             self.first_frame = false;
@@ -446,6 +607,23 @@ impl ApplicationHandler for Host {
             // `NFR-005` (非アクティブ時に描画を止める) を満たしているのは
             // `ControlFlow::Wait` と「変化したときだけ再描画を要求する」ほうで
             // あって、ここではない。何も起きなければそもそも呼ばれない。
+            // PLT-001: 変換中の文字列。**確定ではない**
+            WindowEvent::Ime(ime) => {
+                if self.on_ime(ime) {
+                    self.request_redraw();
+                }
+            }
+
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                if self.on_key(&event) {
+                    self.request_redraw();
+                }
+            }
+
+            WindowEvent::ModifiersChanged(m) => {
+                self.modifiers = m.state();
+            }
+
             WindowEvent::RedrawRequested => self.redraw(),
 
             _ => {}

@@ -7,6 +7,8 @@
 //! 日本語を混ぜてあるのは意図的である。CJK のグリフが出ること、
 //! 折り返しが効くことをこの段階で見ておきたい。
 
+use std::borrow::Cow;
+
 pub struct Guild {
     pub id: u64,
     pub name: &'static str,
@@ -25,9 +27,9 @@ pub struct Channel {
 
 pub struct Message {
     pub id: u64,
-    pub author: &'static str,
-    pub time: &'static str,
-    pub body: &'static str,
+    pub author: Cow<'static, str>,
+    pub time: Cow<'static, str>,
+    pub body: Cow<'static, str>,
     /// 自分宛てのメンションを含むか
     pub mentioned: bool,
 }
@@ -104,97 +106,115 @@ pub const CHANNELS: &[Channel] = &[
     },
 ];
 
-pub const MESSAGES: &[Message] = &[
+pub static MESSAGES: &[Message] = &[
     Message {
         id: 100,
-        author: "ねんねこ",
-        time: "昨日 21:04",
-        body: "レンダラを縦に通した。UITree → テーマ解決 → レイアウト → 描画 が全部つながっている。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("昨日 21:04"),
+        body: Cow::Borrowed(
+            "レンダラを縦に通した。UITree → テーマ解決 → レイアウト → 描画 が全部つながっている。",
+        ),
         mentioned: false,
     },
     Message {
         id: 101,
-        author: "みどり",
-        time: "昨日 21:07",
-        body: "おお、ということはこの画面自体が examples/themes/midnight の適用結果ということ？",
+        author: Cow::Borrowed("みどり"),
+        time: Cow::Borrowed("昨日 21:07"),
+        body: Cow::Borrowed(
+            "おお、ということはこの画面自体が examples/themes/midnight の適用結果ということ？",
+        ),
         mentioned: false,
     },
     Message {
         id: 102,
-        author: "ねんねこ",
-        time: "昨日 21:08",
-        body: "そう。テーマの JSON を書き換えれば、この見た目はそのまま変わる。ハードコードした色はひとつもない。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("昨日 21:08"),
+        body: Cow::Borrowed(
+            "そう。テーマの JSON を書き換えれば、この見た目はそのまま変わる。ハードコードした色はひとつもない。",
+        ),
         mentioned: false,
     },
     Message {
         id: 103,
-        author: "みどり",
-        time: "昨日 21:12",
-        body: "長い行の折り返しも見ておきたいな。cosmic-text で整形しているなら、日本語の途中でも自然な位置で折り返せるはずで、英語と混ざったときに variable font のフォールバックがどう効くかも気になる。",
+        author: Cow::Borrowed("みどり"),
+        time: Cow::Borrowed("昨日 21:12"),
+        body: Cow::Borrowed(
+            "長い行の折り返しも見ておきたいな。cosmic-text で整形しているなら、日本語の途中でも自然な位置で折り返せるはずで、英語と混ざったときに variable font のフォールバックがどう効くかも気になる。",
+        ),
         mentioned: false,
     },
     Message {
         id: 104,
-        author: "sururu",
-        time: "今日 09:31",
-        body: "@ねんねこ メンションの当たったメッセージだけ枠が付くのも確認できる？",
+        author: Cow::Borrowed("sururu"),
+        time: Cow::Borrowed("今日 09:31"),
+        body: Cow::Borrowed("@ねんねこ メンションの当たったメッセージだけ枠が付くのも確認できる？"),
         mentioned: true,
     },
     Message {
         id: 105,
-        author: "ねんねこ",
-        time: "今日 09:33",
-        body: "付いてる。これは when.state = mentioned のルールがそのまま効いている。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 09:33"),
+        body: Cow::Borrowed(
+            "付いてる。これは when.state = mentioned のルールがそのまま効いている。",
+        ),
         mentioned: false,
     },
     Message {
         id: 106,
-        author: "みどり",
-        time: "今日 09:40",
-        body: "次は日本語入力 (TSF) だね。変換候補ウィンドウが出ないと使えない。",
+        author: Cow::Borrowed("みどり"),
+        time: Cow::Borrowed("今日 09:40"),
+        body: Cow::Borrowed("次は日本語入力 (TSF) だね。変換候補ウィンドウが出ないと使えない。"),
         mentioned: false,
     },
     Message {
         id: 107,
-        author: "ねんねこ",
-        time: "今日 09:41",
-        body: "そこが M1.1 のクリティカルパス。ADR-0005 のとおり自前で ITextStoreACP を持つ。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 09:41"),
+        body: Cow::Borrowed(
+            "そこが M1.1 のクリティカルパス。ADR-0005 のとおり自前で ITextStoreACP を持つ。",
+        ),
         mentioned: false,
     },
     // ── ここから下は連投。送信者行が繰り返されないことを見るためにある
     Message {
         id: 108,
-        author: "ねんねこ",
-        time: "今日 09:42",
-        body: "ついでにスクロールバーも入れた。摘みの大きさと位置ははみ出し量から決まるので、レンダラが計算している。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 09:42"),
+        body: Cow::Borrowed(
+            "ついでにスクロールバーも入れた。摘みの大きさと位置ははみ出し量から決まるので、レンダラが計算している。",
+        ),
         mentioned: false,
     },
     Message {
         id: 109,
-        author: "ねんねこ",
-        time: "今日 09:43",
-        body: "テーマが決めるのは幅と余白と色だけ。layout.scrollbar と layout.scrollbar.thumb を足した。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 09:43"),
+        body: Cow::Borrowed(
+            "テーマが決めるのは幅と余白と色だけ。layout.scrollbar と layout.scrollbar.thumb を足した。",
+        ),
         mentioned: false,
     },
     Message {
         id: 110,
-        author: "みどり",
-        time: "今日 09:50",
-        body: "連投したときに送信者行が消えるのは when.state = grouped でやってる？",
+        author: Cow::Borrowed("みどり"),
+        time: Cow::Borrowed("今日 09:50"),
+        body: Cow::Borrowed("連投したときに送信者行が消えるのは when.state = grouped でやってる？"),
         mentioned: false,
     },
     Message {
         id: 111,
-        author: "ねんねこ",
-        time: "今日 09:51",
-        body: "そう。字下げの量もテーマの padding で決まる。クライアント側に焼き付けると、テーマごとに揃えられなくなる。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 09:51"),
+        body: Cow::Borrowed(
+            "そう。字下げの量もテーマの padding で決まる。クライアント側に焼き付けると、テーマごとに揃えられなくなる。",
+        ),
         mentioned: false,
     },
     Message {
         id: 112,
-        author: "ねんねこ",
-        time: "今日 09:52",
-        body: "次は通信 (C1〜C4) と日本語入力 (P2)。ここまでは全部ダミーデータ。",
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 09:52"),
+        body: Cow::Borrowed("次は通信 (C1〜C4) と日本語入力 (P2)。ここまでは全部ダミーデータ。"),
         mentioned: false,
     },
 ];

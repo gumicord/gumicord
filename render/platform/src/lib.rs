@@ -24,6 +24,8 @@
 //! 要件: `PLT-001`〜`PLT-046`, `FR-003`
 //! 仕様: [`spec/02-architecture.md`], [`spec/adr/0005-ime-strategy.md`]
 
+pub mod text_input;
 pub mod window;
 
+pub use text_input::{EditKey, TextDocument, TextInputHost};
 pub use window::{Application, FrameCx, PlatformError, run};

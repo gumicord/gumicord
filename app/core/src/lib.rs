@@ -35,10 +35,12 @@
 
 pub mod demo;
 
-use gumicord_platform::{Application, FrameCx};
+use std::borrow::Cow;
+
+use gumicord_platform::{Application, FrameCx, TextDocument};
 use gumicord_render::Hit;
 use gumicord_theme::{MatchContext, Theme};
-use gumicord_uitree::{Key, NodeId, State, UiNode};
+use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 
 /// クライアント同梱の既定テーマ。
 ///
@@ -123,8 +125,12 @@ pub struct Gumicord {
     hovered: Option<(NodeId, Option<Key>)>,
     selected_guild: u64,
     selected_channel: u64,
-    /// 入力欄にフォーカスがあるか。P2 (TSF) が入るまでは見た目だけ
+    /// 入力欄にフォーカスがあるか
     input_focused: bool,
+    /// 入力欄の中身 (`PLT-001`)
+    input: TextDocument,
+    /// この場で送ったメッセージ。**Store (C5) ができたら消える**
+    sent: Vec<demo::Message>,
 }
 
 impl Gumicord {
@@ -135,7 +141,14 @@ impl Gumicord {
             selected_guild: demo::GUILDS[0].id,
             selected_channel: demo::CHANNELS[1].id,
             input_focused: false,
+            input: TextDocument::new(),
+            sent: Vec::new(),
         }
+    }
+
+    /// 画面に出すメッセージ。デモの固定分と、この場で送った分
+    fn messages(&self) -> impl Iterator<Item = &demo::Message> {
+        demo::MESSAGES.iter().chain(&self.sent)
     }
 
     fn is_hovered(&self, id: NodeId, key: Option<&Key>) -> bool {
@@ -219,6 +232,41 @@ impl Application for Gumicord {
             break;
         }
         changed
+    }
+
+    /// `PLT-001`: 入力を受け取るのは、フォーカスのある入力欄だけである
+    fn focused_document(&mut self) -> Option<&mut TextDocument> {
+        self.input_focused.then_some(&mut self.input)
+    }
+
+    /// `FR-024`: 送信。
+    ///
+    /// Store (C5) と REST (C3) ができるまでは、その場で一覧に足すだけである。
+    /// **送れたように見えるが、どこへも行っていない。**
+    fn submit(&mut self) -> bool {
+        let body = self.input.text().trim().to_owned();
+        if body.is_empty() {
+            return false;
+        }
+        self.input.take();
+
+        let id = 1000 + self.sent.len() as u64;
+        self.sent.push(demo::Message {
+            id,
+            author: Cow::Borrowed("ねんねこ"),
+            time: Cow::Borrowed("たった今"),
+            body: Cow::Owned(body),
+            mentioned: false,
+        });
+        true
+    }
+
+    fn cancel_input(&mut self) -> bool {
+        if !self.input_focused {
+            return false;
+        }
+        self.input_focused = false;
+        true
     }
 
     /// パイプラインの [3] と [5]。
@@ -367,9 +415,9 @@ impl Gumicord {
         // **字下げの量はテーマが決める** (`when.state: "grouped"` の padding)
         let mut messages = UiNode::new(NodeId::ChatMessageList);
         let mut prev: Option<&str> = None;
-        for m in demo::MESSAGES {
-            messages = messages.child(self.message(m, prev == Some(m.author)));
-            prev = Some(m.author);
+        for m in self.messages() {
+            messages = messages.child(self.message(m, prev == Some(&*m.author)));
+            prev = Some(&m.author);
         }
         messages = messages.child(scrollbar());
 
@@ -382,9 +430,15 @@ impl Gumicord {
             ))
             .child(
                 UiNode::new(NodeId::ChatInput).child(
-                    UiNode::text(
+                    UiNode::editable(
                         NodeId::ChatInputField,
-                        format!("#{} へメッセージを送信", channel.name),
+                        Editable {
+                            text: self.input.text().to_owned(),
+                            caret: self.input.caret(),
+                            selection: self.input.selection(),
+                            composing: self.input.composing(),
+                            placeholder: format!("#{} へメッセージを送信", channel.name),
+                        },
                     )
                     .with_state_if(self.input_focused, State::Focus),
                 ),
@@ -401,13 +455,15 @@ impl Gumicord {
             .child_if(!grouped, || {
                 UiNode::new(NodeId::ChatMessageHeader)
                     .with_data(m.id)
-                    .child(UiNode::text(NodeId::ChatMessageHeaderAuthor, m.author).with_data(m.id))
+                    .child(
+                        UiNode::text(NodeId::ChatMessageHeaderAuthor, &*m.author).with_data(m.id),
+                    )
                     .child(
                         UiNode::text(NodeId::ChatMessageHeaderTime, format!("  {}", m.time))
                             .with_data(m.id),
                     )
             })
-            .child(UiNode::text(NodeId::ChatMessageContent, m.body).with_data(m.id));
+            .child(UiNode::text(NodeId::ChatMessageContent, &*m.body).with_data(m.id));
 
         UiNode::new(NodeId::ChatMessage)
             .with_id_key(m.id)
@@ -416,7 +472,7 @@ impl Gumicord {
             .with_state_if(m.mentioned, State::Mentioned)
             .with_state_if(self.hovered_id(NodeId::ChatMessage, m.id), State::Hover)
             .child_if(!grouped, || {
-                UiNode::text(NodeId::ChatMessageAvatar, demo::initial(m.author)).with_data(m.id)
+                UiNode::text(NodeId::ChatMessageAvatar, demo::initial(&m.author)).with_data(m.id)
             })
             // 送信者行と本文を縦に積む。`layout.column` はこのためにある
             .child(body)
@@ -559,5 +615,120 @@ mod responsive_tests {
             vec![NodeId::NavChannelList, NodeId::ChatView]
         );
         assert_eq!(panes_in(&a.build_tree(Panes::One)), vec![NodeId::ChatView]);
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use gumicord_uitree::Content;
+
+    use super::*;
+
+    fn cx() -> FrameCx {
+        FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        }
+    }
+
+    fn field(tree: &UiNode) -> Editable {
+        let mut found = None;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatInputField
+                && let Content::Editable(e) = &n.content
+            {
+                found = Some(e.clone());
+            }
+        });
+        found.expect("入力欄が見つからない")
+    }
+
+    fn bodies(tree: &UiNode) -> Vec<String> {
+        let mut out = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessageContent
+                && let Some(s) = n.content.as_text()
+            {
+                out.push(s.to_owned());
+            }
+        });
+        out
+    }
+
+    /// フォーカスが無いと入力は届かない (`PLT-001`)
+    #[test]
+    fn input_only_reaches_a_focused_field() {
+        let mut a = Gumicord::new();
+        assert!(a.focused_document().is_none());
+
+        a.input_focused = true;
+        assert!(a.focused_document().is_some());
+    }
+
+    /// 変換中の範囲が UITree まで届く。**下線を描くのに要る**
+    #[test]
+    fn a_composition_reaches_the_tree() {
+        let mut a = Gumicord::new();
+        a.input_focused = true;
+
+        let doc = a.focused_document().unwrap();
+        doc.insert("送信: ");
+        doc.set_composition("にほんご", None);
+
+        let f = field(&a.build(&cx()));
+        assert_eq!(f.text, "送信: にほんご");
+        assert_eq!(
+            f.composing,
+            Some("送信: ".len().."送信: にほんご".len()),
+            "変換中の範囲が伝わっていない"
+        );
+        assert_eq!(f.caret, f.text.len());
+    }
+
+    /// 空なら placeholder が入り、**変換の印は出ない**
+    #[test]
+    fn an_empty_field_shows_only_its_placeholder() {
+        let mut a = Gumicord::new();
+        let f = field(&a.build(&cx()));
+        assert!(f.text.is_empty());
+        assert!(f.placeholder.contains("メッセージを送信"));
+        assert!(f.composing.is_none());
+    }
+
+    /// FR-024: Enter で送ると一覧に増え、入力欄は空になる
+    #[test]
+    fn submitting_appends_the_message_and_clears_the_field() {
+        let mut a = Gumicord::new();
+        a.input_focused = true;
+        a.focused_document().unwrap().insert("こんにちは");
+
+        let before = bodies(&a.build(&cx())).len();
+        assert!(a.submit());
+
+        let tree = a.build(&cx());
+        let after = bodies(&tree);
+        assert_eq!(after.len(), before + 1);
+        assert_eq!(after.last().map(String::as_str), Some("こんにちは"));
+        assert!(field(&tree).text.is_empty(), "入力欄が空になっていない");
+    }
+
+    /// 空白だけのものは送らない
+    #[test]
+    fn whitespace_is_not_submitted() {
+        let mut a = Gumicord::new();
+        a.input_focused = true;
+        a.focused_document().unwrap().insert("   ");
+        assert!(!a.submit());
+    }
+
+    /// Esc でフォーカスが外れる。**変換中の Esc は取り消しであって、
+    /// フォーカス外しではない** — その分岐はプラットフォーム層が持つ
+    #[test]
+    fn escape_leaves_the_field() {
+        let mut a = Gumicord::new();
+        a.input_focused = true;
+        assert!(a.cancel_input());
+        assert!(!a.input_focused);
+        assert!(!a.cancel_input(), "既に外れていれば何も起きない");
     }
 }

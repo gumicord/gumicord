@@ -1222,6 +1222,7 @@ dependencies = [
  "gumicord-uitree",
  "thiserror 2.0.20",
  "tracing",
+ "unicode-segmentation",
  "winit",
 ]
 

@@ -214,7 +214,11 @@ impl<'a> Cx<'a, '_, '_> {
     /// 内容 (テキスト・アイコン・子) の大きさ。余白を含まない。
     fn measure_content(&mut self, node: &UiNode, it: &Intrinsic, inner: Size) -> Size {
         match &node.content {
-            Content::Text(s) => {
+            // 編集中のテキストも、大きさの上ではただの文字列である。
+            // キャレットや選択の印は既にある行の上に描かれるだけで、
+            // 入れ物を広げない
+            Content::Text(_) | Content::Editable(_) => {
+                let s = node.content.as_text().unwrap_or_default();
                 let font = ResolvedFont::from_style(&node.style);
                 // 折り返し幅が無限なら折り返さない
                 let max_w = inner.w.is_finite().then_some(inner.w);

@@ -34,12 +34,45 @@ pub enum Content {
     /// やめてテクスチャにしたときに、UITree 側を変えずに済ませるためである。
     /// **知らない名前は誤りではない**。描かずに進む。
     Icon(String),
+    /// 編集中のテキスト (`PLT-001`)。
+    ///
+    /// ただの文字列と分けているのは、**キャレット・選択・変換中の範囲を
+    /// 描くのがレンダラの仕事**だからである。文字の位置を知っているのは
+    /// 整形したところだけで、アプリはバイト位置しか持てない。
+    Editable(Editable),
+}
+
+/// 編集中のテキストと、その上の印。位置は**バイト位置**である。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Editable {
+    pub text: String,
+    /// キャレットの位置
+    pub caret: usize,
+    /// 選択範囲。空なら選択なし
+    pub selection: core::ops::Range<usize>,
+    /// 変換中の範囲。確定していない文字を下線で示す
+    pub composing: Option<core::ops::Range<usize>>,
+    /// 入力欄が空のときに薄く出す文字列。**編集の対象ではない**
+    pub placeholder: String,
 }
 
 impl Content {
+    /// 整形して描く文字列。
+    ///
+    /// 編集中のテキストも文字列であることに変わりはないので、ここから
+    /// 取れる。空なら代わりに `placeholder` を返す。
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Content::Text(s) => Some(s),
+            Content::Editable(e) if e.text.is_empty() => Some(&e.placeholder),
+            Content::Editable(e) => Some(&e.text),
+            _ => None,
+        }
+    }
+
+    pub fn as_editable(&self) -> Option<&Editable> {
+        match self {
+            Content::Editable(e) => Some(e),
             _ => None,
         }
     }
@@ -114,6 +147,11 @@ impl UiNode {
     /// アイコンを持つノード。
     pub fn icon(id: NodeId, name: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Icon(name.into()))
+    }
+
+    /// 編集中のテキストを持つノード (`PLT-001`)。
+    pub fn editable(id: NodeId, e: Editable) -> Self {
+        UiNode::new(id).with_content(Content::Editable(e))
     }
 
     pub fn with_key(mut self, key: Key) -> Self {

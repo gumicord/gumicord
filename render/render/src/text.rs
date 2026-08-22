@@ -221,8 +221,18 @@ struct ShapeKey {
 #[derive(Debug, Clone, Copy)]
 pub struct PlacedGlyph {
     pub cache_key: CacheKey,
+    /// ラスタライズ用に丸めた位置
     pub x: i32,
     pub y: i32,
+    /// 元の文字列でのバイト範囲。キャレットと選択の位置決めに使う
+    pub start: usize,
+    pub end: usize,
+    /// 丸める前の位置と送り幅。**丸めた `x` を使うと選択範囲に隙間が出る**
+    pub left: f32,
+    pub advance: f32,
+    /// この字が乗っている行
+    pub line_top: f32,
+    pub line_height: f32,
 }
 
 /// 整形済みのテキスト。
@@ -232,6 +242,83 @@ pub struct Shaped {
     pub size: Size,
     /// 原点 (0,0) を左上としたときのグリフ列。位置は物理 px
     pub glyphs: Vec<PlacedGlyph>,
+    /// 行の高さ (物理 px)。字が 1 つもないときのキャレットの高さに使う
+    pub line_height: f32,
+}
+
+/// テキストの上の矩形 1 つ (物理 px、原点からの相対)。
+///
+/// キャレットも選択も下線も、結局は矩形である。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Shaped {
+    /// バイト位置にキャレットを置いたときの矩形。
+    ///
+    /// **その位置から始まる字の左端**に置く。該当する字がなければ、
+    /// 直前の字の右端 (= 行末) に置く。
+    pub fn caret(&self, at: usize, width: f32) -> TextRect {
+        // その位置から始まる字
+        if let Some(g) = self.glyphs.iter().find(|g| g.start >= at) {
+            return TextRect {
+                x: g.left,
+                y: g.line_top,
+                w: width,
+                h: g.line_height,
+            };
+        }
+        // 行末。最後の字の右
+        match self.glyphs.last() {
+            Some(g) => TextRect {
+                x: g.left + g.advance,
+                y: g.line_top,
+                w: width,
+                h: g.line_height,
+            },
+            // 何も入っていない
+            None => TextRect {
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: self.line_height,
+            },
+        }
+    }
+
+    /// バイト範囲を覆う矩形。**行ごとに 1 つずつ**返す。
+    ///
+    /// 折り返した選択範囲を 1 つの矩形で塗ると、行間まで塗ってしまう。
+    pub fn range_rects(&self, range: &core::ops::Range<usize>) -> Vec<TextRect> {
+        let mut out: Vec<TextRect> = Vec::new();
+        if range.is_empty() {
+            return out;
+        }
+
+        for g in &self.glyphs {
+            // 範囲に少しでも掛かる字を拾う
+            if g.end <= range.start || g.start >= range.end {
+                continue;
+            }
+            // 同じ行の続きなら伸ばす
+            match out.last_mut() {
+                Some(last) if (last.y - g.line_top).abs() < f32::EPSILON => {
+                    last.w = (g.left + g.advance) - last.x;
+                }
+                _ => out.push(TextRect {
+                    x: g.left,
+                    y: g.line_top,
+                    w: g.advance,
+                    h: g.line_height,
+                }),
+            }
+        }
+        out
+    }
 }
 
 /// アトラスに載ったグリフ。
@@ -379,6 +466,12 @@ impl Shaper {
                     cache_key: p.cache_key,
                     x: p.x,
                     y: p.y,
+                    start: g.start,
+                    end: g.end,
+                    left: g.x,
+                    advance: g.w,
+                    line_top: run.line_top,
+                    line_height: run.line_height,
                 });
             }
         }
@@ -392,6 +485,7 @@ impl Shaper {
             // 収まっていたはずの最後の 1 文字が次の行へ落ちる
             size: Size::new((w / scale).ceil(), (h / scale).ceil()),
             glyphs,
+            line_height: metrics.line_height,
         }
     }
 }
