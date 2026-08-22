@@ -487,14 +487,7 @@ fn draw_qr(
     let ox = box_px[0] + ((box_px[2] - side) * 0.5).round();
     let oy = box_px[1] + ((box_px[3] - side) * 0.5).round();
 
-    let style = &placed.node.style;
-    // 背景は必ず敷く。**暗いテーマの上に暗い QR を置いても読めない**
-    let light = style
-        .background
-        .as_ref()
-        .and_then(|b| b.color)
-        .unwrap_or(QR_LIGHT);
-    let dark = style.color.unwrap_or(QR_DARK);
+    let (light, dark) = qr_colors(&placed.node.style);
 
     dl.push_rect(
         [ox, oy, side, side],
@@ -520,6 +513,60 @@ fn draw_qr(
             scissor,
         );
     }
+}
+
+/// QR の地とマスの色を決める。
+///
+/// # 読めるかどうかは好みの問題ではない
+///
+/// テーマは `primitive.qr` に色を書けるが、**書けなかった場合に何が起きるかを
+/// テーマ任せにできない**。`color` は継承する性質なので、何も書かなければ
+/// `app.window` の文字色が降りてくる。暗いテーマならそれは明るい色であり、
+/// QR の白地の上に**ほとんど見えないマス**が並ぶ。実際にそうなった。
+///
+/// したがってここは 2 つを強制する:
+///
+/// 1. **地は必ず明るい。** QR 規格は明るい地に暗いマスを前提とする。
+///    反転した QR を読める読み取り機もあるが、読めないものもある
+/// 2. **地とマスは十分に違う。** 足りなければテーマの指定を捨てて黒にする
+fn qr_colors(style: &Style) -> (Color, Color) {
+    /// これを下回ったらテーマの指定を採らない。
+    /// WCAG の AA (4.5:1) を借りている。本来の黒と白は 21:1 ある
+    const MIN_CONTRAST: f32 = 4.5;
+    /// 「明るい」と見なす相対輝度の下限
+    const LIGHT_ENOUGH: f32 = 0.5;
+
+    let themed_light = style.background.as_ref().and_then(|b| b.color);
+    let light = match themed_light {
+        Some(c) if luminance(c) >= LIGHT_ENOUGH => c,
+        _ => QR_LIGHT,
+    };
+
+    let dark = match style.color {
+        Some(c) if contrast(c, light) >= MIN_CONTRAST => c,
+        _ => QR_DARK,
+    };
+
+    if themed_light != Some(light) || (style.color.is_some() && style.color != Some(dark)) {
+        // ⚠️ 毎フレーム来るので 1 回だけ言う
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!("primitive.qr の色では読み取れないため、既定の白地に黒で描いた");
+        });
+    }
+    (light, dark)
+}
+
+/// 相対輝度 (WCAG)。0 が黒、1 が白
+fn luminance(c: Color) -> f32 {
+    0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
+}
+
+/// 2 色のコントラスト比 (WCAG)。1.0 が同色、21.0 が黒と白
+fn contrast(a: Color, b: Color) -> f32 {
+    let (x, y) = (luminance(a), luminance(b));
+    let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+    (hi + 0.05) / (lo + 0.05)
 }
 
 /// QR の既定の地の色。**白でないと読み取り機が困る**
@@ -610,6 +657,65 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 色を書かないテーマでも読める。**継承した文字色をそのまま使わない。**
+    ///
+    /// 暗いテーマの `color` は明るい色である。白地にそれを敷くと、実際に
+    /// 「見えるが読めない QR」になった
+    #[test]
+    fn an_inherited_light_text_colour_is_not_used_for_the_qr() {
+        let style = Style {
+            color: Some(FALLBACK_TEXT),
+            ..Style::default()
+        };
+
+        let (light, dark) = qr_colors(&style);
+        assert_eq!(light, QR_LIGHT);
+        assert_eq!(dark, QR_DARK, "地とほぼ同じ色で描こうとしている");
+        assert!(contrast(dark, light) > 20.0);
+    }
+
+    /// 十分に暗い色ならテーマの指定を尊重する
+    #[test]
+    fn a_dark_enough_theme_colour_is_kept() {
+        let navy = Color {
+            r: 0x10,
+            g: 0x20,
+            b: 0x50,
+            a: 0xff,
+        };
+        let style = Style {
+            color: Some(navy),
+            ..Style::default()
+        };
+
+        assert_eq!(qr_colors(&style).1, navy);
+    }
+
+    /// **地が暗いテーマは採らない。** 反転した QR を読めない読み取り機がある
+    #[test]
+    fn a_dark_background_is_refused() {
+        let style = Style {
+            background: Some(gumicord_uitree::value::Background {
+                color: Some(Color {
+                    r: 0x0f,
+                    g: 0x0f,
+                    b: 0x17,
+                    a: 0xff,
+                }),
+                ..Default::default()
+            }),
+            ..Style::default()
+        };
+
+        assert_eq!(qr_colors(&style).0, QR_LIGHT);
+    }
+
+    /// 黒と白は 21:1、同じ色は 1:1 (WCAG の定義どおり)
+    #[test]
+    fn contrast_matches_the_wcag_definition() {
+        assert!((contrast(QR_DARK, QR_LIGHT) - 21.0).abs() < 0.01);
+        assert!((contrast(QR_LIGHT, QR_LIGHT) - 1.0).abs() < 0.001);
+    }
 
     #[test]
     fn snap_keeps_adjacent_rects_flush() {

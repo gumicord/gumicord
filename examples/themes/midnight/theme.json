@@ -70,7 +70,12 @@
     },
     {
       "select": "primitive.qr",
-      "style": { "background": "#ffffff", "radius": "$radius.md", "padding": [12, 12, 12, 12] }
+      "style": {
+        "background": "#ffffff",
+        "color": "#000000",
+        "radius": "$radius.md",
+        "padding": [12, 12, 12, 12]
+      }
     },
 
     {
