@@ -14,9 +14,13 @@
 //! 要件: `NFR-010`, `NFR-020`, `NFR-023`
 //! 仕様: [`spec/09-discord-protocol.md`]
 
+pub mod gateway;
 pub mod remote_auth;
+pub mod zstd_stream;
 
+pub use gateway::{Event, Fatal, Gateway, GatewayError, Ready};
 pub use remote_auth::{RemoteAuth, RemoteAuthError, RemoteAuthEvent, ScannedUser};
+pub use zstd_stream::ZstdStream;
 
 /// TLS の暗号実装を選んでおく。**何度呼んでもよい。**
 ///

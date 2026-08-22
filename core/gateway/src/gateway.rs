@@ -1,0 +1,744 @@
+//! Discord Gateway への接続 (C2)。
+//!
+//! 責務: 接続 / identify / ハートビート / resume / zstd-stream の解凍 /
+//! イベント配信 (`NFR-010`, `NFR-020`)。
+//!
+//! # 呼び出し側から見た形
+//!
+//! [`Gateway::next`] を回すだけでよい。**切断も再接続もこの中で起きる。**
+//! 呼び出し側が知るのは「いま繋がっているか」と「何が届いたか」だけである。
+//!
+//! ```text
+//!   loop {
+//!       match gateway.next().await {
+//!           Event::Ready(r)        => 一覧を作り直す
+//!           Event::Resumed         => 取りこぼしが埋まった。何もしなくてよい
+//!           Event::Dispatch { .. } => 状態を更新する
+//!           Event::Reconnecting{..}=> 「再接続中」と出す
+//!           Event::Fatal(reason)   => 諦める。トークンを捨てる場合もある
+//!       }
+//!   }
+//! ```
+//!
+//! **`Fatal` 以外で `next` が終わることはない。** 網が切れている間は
+//! 待ち時間を伸ばしながら繋ぎ直し続ける。
+//!
+//! # 接続シーケンス
+//!
+//! ```text
+//!   ├─ WebSocket 確立 ───────────▶│   実測 338〜390 ms
+//!   │◀────────────── op=10 Hello ─┤   heartbeat_interval = 41250 ms
+//!   ├─ op=2 Identify ────────────▶│   (resume なら op=6)
+//!   │◀───────── op=0 t=READY ─────┤   実測 672〜1120 ms
+//!   ├─ op=1 Heartbeat ───────────▶│   最初は interval × jitter 後
+//!   │◀────────── op=11 ACK ───────┤
+//! ```
+//!
+//! ⚠️ **resume は `resume_gateway_url` へ繋ぐ。** READY で渡されるリージョン
+//! 別のホストで、初回と同じ `gateway.discord.gg` に戻ると別のサーバへ
+//! 割り当てられ、resume に失敗しうる。
+//!
+//! # ハートビートの ACK は生存確認である
+//!
+//! 送る番が来たのに前回の ACK がまだ来ていない ⇒ **その接続は死んでいる**。
+//! 網が切れても TCP はすぐには気付かないので、これが唯一の検知手段になる。
+//! 待たずに捨てて resume する。
+//!
+//! # identify では嘘をつかない (`NFR-020`)
+//!
+//! ⚠️ 公式クライアントの `client_build_number` を騙るようなことはしない。
+//! `NFR-020` の「公式クライアントと同等の identify プロパティ」は**検出を
+//! 回避するためではなく、サーバーに嘘の情報を渡さないため**の要件である。
+//! 名乗るのは Gumicord であり、版も OS も実際の値を送る。
+//!
+//! 仕様: [`spec/09-discord-protocol.md`] 2〜6 章
+
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use gumicord_model::{CurrentUser, Guild, Token};
+use serde::Deserialize;
+use serde_json::json;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+use crate::zstd_stream::ZstdStream;
+
+/// 初回の接続先 ([`spec/09-discord-protocol.md`] 1 章)
+const GATEWAY: &str = "wss://gateway.discord.gg/?v=10&encoding=json&compress=zstd-stream";
+/// resume 先に付ける問い合わせ。**`resume_gateway_url` には付いていない**
+const QUERY: &str = "?v=10&encoding=json&compress=zstd-stream";
+
+/// 再接続を諦めない代わりに、間隔を伸ばす上限
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
+const BACKOFF_MIN: Duration = Duration::from_secs(1);
+
+type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum GatewayError {
+    #[error("接続できない: {0}")]
+    Connect(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("解凍できない: {0}")]
+    Decompress(#[from] std::io::Error),
+    #[error("読めない応答: {0}")]
+    Decode(#[from] serde_json::Error),
+    #[error("Hello が来ないまま接続が終わった")]
+    NoHello,
+    #[error("接続が閉じられた (コード {0})")]
+    Closed(u16),
+}
+
+/// もう繋がらない理由。**呼び出し側が後始末を決める。**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fatal {
+    /// トークンが弾かれた (`FR-004`)。**捨ててログイン画面へ戻す**
+    Unauthorized,
+    /// こちらの送り方が誤っている。何度やっても同じ
+    Rejected { code: u16, reason: String },
+}
+
+/// Gateway から届くもの。
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// 繋がって初期状態が届いた
+    Ready(Box<Ready>),
+    /// 取りこぼしを埋め終えた。**`Ready` は来ない**
+    Resumed,
+    /// まだ型を付けていない出来事。
+    ///
+    /// ⚠️ **捨てずにそのまま渡す。** どれを使うかを決めるのは Store (C5)
+    /// であって、ここではない
+    Dispatch {
+        kind: String,
+        data: serde_json::Value,
+    },
+    /// 切れた。**繋ぎ直しはこの中で続く。** 画面に出すためだけの知らせ
+    Reconnecting { reason: String, wait: Duration },
+    /// 諦めた
+    Fatal(Fatal),
+}
+
+/// READY で届く初期状態。
+#[derive(Debug, Clone, Deserialize)]
+pub struct Ready {
+    pub user: CurrentUser,
+    pub session_id: String,
+    /// resume で繋ぐ先。**リージョン別のホストが返る**
+    #[serde(default)]
+    pub resume_gateway_url: Option<String>,
+    /// ⚠️ ボットでは中身のない殻が来て、後から GUILD_CREATE で埋まる。
+    /// 利用者トークンでは最初から埋まっている
+    #[serde(default)]
+    pub guilds: Vec<Guild>,
+}
+
+/// 接続を保ち続けるもの。
+pub struct Gateway {
+    token: Token,
+    conn: Option<Connection>,
+    /// resume に要る 3 つ組。**切断を跨いで持ち続ける**
+    session: Option<SessionInfo>,
+    backoff: Duration,
+    /// 次に返す `Reconnecting`。`next` の頭で吐き出す
+    pending_notice: Option<Event>,
+}
+
+impl core::fmt::Debug for Gateway {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // ⚠️ トークンを出さない (`SEC-001`)
+        f.debug_struct("Gateway")
+            .field("connected", &self.conn.is_some())
+            .field("resumable", &self.session.is_some())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SessionInfo {
+    id: String,
+    url: String,
+    seq: Option<u64>,
+}
+
+impl Gateway {
+    pub fn new(token: Token) -> Self {
+        Gateway {
+            token,
+            conn: None,
+            session: None,
+            backoff: BACKOFF_MIN,
+            pending_notice: None,
+        }
+    }
+
+    /// 次の出来事まで進める。
+    ///
+    /// **[`Event::Fatal`] を返した後は呼ばないこと。** 呼んでも同じものを
+    /// 返し続ける。
+    pub async fn next(&mut self) -> Event {
+        loop {
+            if let Some(notice) = self.pending_notice.take() {
+                return notice;
+            }
+
+            if self.conn.is_none() {
+                match self.open().await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if let Some(fatal) = fatal_of(&e) {
+                            return Event::Fatal(fatal);
+                        }
+                        let wait = self.grow_backoff();
+                        tracing::warn!(error = %e, wait_ms = wait.as_millis() as u64, "繋げない");
+                        // 待つ前に知らせる。**待ってから知らせると、
+                        // 画面が黙ったまま最大 1 分固まったように見える**
+                        self.pending_notice = Some(Event::Reconnecting {
+                            reason: e.to_string(),
+                            wait,
+                        });
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                }
+            }
+
+            let conn = self.conn.as_mut().expect("直前に開いた");
+            match conn.pump(&mut self.session).await {
+                Ok(Some(event)) => {
+                    // 何か届いたということは繋がっている。待ち時間を戻す
+                    self.backoff = BACKOFF_MIN;
+                    return event;
+                }
+                // 心拍など、内部で片付いたもの
+                Ok(None) => continue,
+                Err(e) => {
+                    self.conn = None;
+                    if let Some(fatal) = fatal_of(&e) {
+                        // ⚠️ 二度と resume できない。持ち越さない
+                        self.session = None;
+                        return Event::Fatal(fatal);
+                    }
+                    if !recoverable_session(&e) {
+                        // セッションは死んだが、identify からならやり直せる
+                        self.session = None;
+                    }
+                    let wait = self.grow_backoff();
+                    tracing::warn!(error = %e, "切れた。繋ぎ直す");
+                    self.pending_notice = Some(Event::Reconnecting {
+                        reason: e.to_string(),
+                        wait,
+                    });
+                    tokio::time::sleep(wait).await;
+                }
+            }
+        }
+    }
+
+    /// 待ち時間を倍にする。**上限で止める**
+    fn grow_backoff(&mut self) -> Duration {
+        let wait = self.backoff;
+        self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        wait
+    }
+
+    /// 繋いで Hello を受け、identify か resume を送る。
+    async fn open(&mut self) -> Result<(), GatewayError> {
+        // resume できるならリージョン別のホストへ。**ここを間違えると
+        // 別のサーバへ割り当てられて resume が落ちる**
+        let url = match &self.session {
+            Some(s) => format!("{}{QUERY}", s.url.trim_end_matches('/')),
+            None => GATEWAY.to_owned(),
+        };
+
+        crate::install_crypto_provider();
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
+        let mut conn = Connection::new(ws)?;
+
+        let hello = conn.wait_for_hello().await?;
+        conn.heartbeat = Duration::from_millis(hello);
+
+        match &self.session {
+            Some(s) => {
+                tracing::debug!(session = %s.id, "resume する");
+                conn.last_seq = s.seq;
+                conn.send(json!({
+                    "op": OP_RESUME,
+                    "d": { "token": self.token.expose(), "session_id": s.id, "seq": s.seq },
+                }))
+                .await?;
+            }
+            None => {
+                tracing::debug!("identify する");
+                conn.send(identify(&self.token)).await?;
+            }
+        }
+
+        // 最初の心拍は間隔 × ゆらぎの後。
+        // **全クライアントが同時に叩かないため** (仕様 5 章)
+        conn.schedule_first_heartbeat();
+        self.conn = Some(conn);
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────── オペコード
+
+const OP_DISPATCH: u8 = 0;
+const OP_HEARTBEAT: u8 = 1;
+const OP_IDENTIFY: u8 = 2;
+const OP_RESUME: u8 = 6;
+const OP_RECONNECT: u8 = 7;
+const OP_INVALID_SESSION: u8 = 9;
+const OP_HELLO: u8 = 10;
+const OP_HEARTBEAT_ACK: u8 = 11;
+
+#[derive(Debug, Deserialize)]
+struct Payload {
+    op: u8,
+    #[serde(default)]
+    d: Option<serde_json::Value>,
+    #[serde(default)]
+    s: Option<u64>,
+    #[serde(default)]
+    t: Option<String>,
+}
+
+/// identify のペイロード ([`spec/09-discord-protocol.md`] 3 章)。
+///
+/// ⚠️ **公式クライアントを騙らない** (`NFR-020`)。`browser` も `device` も
+/// Gumicord である。版と OS は実際の値を送る。
+fn identify(token: &Token) -> serde_json::Value {
+    json!({
+        "op": OP_IDENTIFY,
+        "d": {
+            "token": token.expose(),
+            "capabilities": CAPABILITIES,
+            "properties": {
+                "os": std::env::consts::OS,
+                "browser": "Gumicord",
+                "device": "Gumicord",
+                "system_locale": locale(),
+                "client_version": env!("CARGO_PKG_VERSION"),
+                "release_channel": "stable",
+            },
+            "compress": false,
+            "client_state": { "guild_versions": {} },
+        },
+    })
+}
+
+/// 利用者トークンで要求する機能の組 ([`spec/09-discord-protocol.md`] 3 章)。
+///
+/// ⚠️ **意味の内訳は未検証である。** 仕様に載っている値をそのまま送っている。
+/// 分かったら名前付きの定数に割る
+const CAPABILITIES: u32 = 161789;
+
+/// システムの言語。分からなければ英語を名乗る。
+///
+/// **嘘をつくくらいなら既定を送る** (`NFR-020`)
+fn locale() -> String {
+    std::env::var("LANG")
+        .ok()
+        .and_then(|l| l.split('.').next().map(|s| s.replace('_', "-")))
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| "en-US".to_owned())
+}
+
+// ─────────────────────────────────────────────── 接続 1 本
+
+/// 接続 1 本ぶんの状態。**繋ぎ直したら丸ごと捨てる。**
+struct Connection {
+    ws: Ws,
+    /// ⚠️ 接続の生存期間中ずっと持つ。フレームを跨ぐ 1 本のストリームである
+    zstd: ZstdStream,
+    heartbeat: Duration,
+    /// 次に心拍を送る時刻
+    next_beat: tokio::time::Instant,
+    /// 前回の心拍に ACK が返ったか。**返っていなければその接続は死んでいる**
+    acked: bool,
+    last_seq: Option<u64>,
+    /// 1 枚のフレームに複数入っていたぶんの残り
+    queued: std::collections::VecDeque<Payload>,
+}
+
+impl Connection {
+    fn new(ws: Ws) -> Result<Self, GatewayError> {
+        Ok(Connection {
+            ws,
+            zstd: ZstdStream::new()?,
+            heartbeat: Duration::from_secs(45),
+            next_beat: tokio::time::Instant::now() + Duration::from_secs(45),
+            acked: true,
+            last_seq: None,
+            queued: std::collections::VecDeque::new(),
+        })
+    }
+
+    async fn send(&mut self, value: serde_json::Value) -> Result<(), GatewayError> {
+        self.ws.send(Message::text(value.to_string())).await?;
+        Ok(())
+    }
+
+    /// 最初の心拍を `間隔 × ゆらぎ` 後に置く。
+    ///
+    /// ⚠️ **乱数の質は問題ではない。** 目的は世界中のクライアントが同じ瞬間に
+    /// 叩かないようにすることだけなので、時刻の端数で足りる
+    fn schedule_first_heartbeat(&mut self) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let jitter = nanos as f64 / 1e9;
+        self.next_beat = tokio::time::Instant::now() + self.heartbeat.mul_f64(jitter);
+    }
+
+    /// Hello を待って `heartbeat_interval` を返す。
+    async fn wait_for_hello(&mut self) -> Result<u64, GatewayError> {
+        loop {
+            let payload = match self.queued.pop_front() {
+                Some(p) => p,
+                None => match self.recv().await? {
+                    Some(()) => continue,
+                    None => return Err(GatewayError::NoHello),
+                },
+            };
+            if payload.op == OP_HELLO {
+                #[derive(Deserialize)]
+                struct Hello {
+                    heartbeat_interval: u64,
+                }
+                let hello: Hello = serde_json::from_value(payload.d.unwrap_or_default())?;
+                return Ok(hello.heartbeat_interval);
+            }
+        }
+    }
+
+    /// 1 歩進める。返すものが無ければ `Ok(None)`。
+    async fn pump(
+        &mut self,
+        session: &mut Option<SessionInfo>,
+    ) -> Result<Option<Event>, GatewayError> {
+        if let Some(payload) = self.queued.pop_front() {
+            return self.handle(payload, session).await;
+        }
+
+        tokio::select! {
+            // 心拍の番
+            _ = tokio::time::sleep_until(self.next_beat) => {
+                if !self.acked {
+                    // ⚠️ 網が切れても TCP はすぐには気付かない。
+                    // **これが唯一の検知手段である**
+                    return Err(GatewayError::Closed(CLOSE_NO_ACK));
+                }
+                self.acked = false;
+                self.next_beat = tokio::time::Instant::now() + self.heartbeat;
+                self.send(json!({ "op": OP_HEARTBEAT, "d": self.last_seq })).await?;
+                Ok(None)
+            }
+            got = self.recv() => {
+                match got? {
+                    Some(()) => Ok(None),
+                    None => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
+                }
+            }
+        }
+    }
+
+    /// フレームを 1 枚読み、解凍して `queued` へ積む。
+    ///
+    /// 接続が終わったら `Ok(None)`。**空のフレームは誤りではない**
+    async fn recv(&mut self) -> Result<Option<()>, GatewayError> {
+        let Some(message) = self.ws.next().await else {
+            return Ok(None);
+        };
+
+        let plain = match message? {
+            Message::Binary(bytes) => self.zstd.push(&bytes)?,
+            // 圧縮を頼んでいるので普通は来ないが、来たらそのまま読む
+            Message::Text(text) => text.as_bytes().to_vec(),
+            Message::Close(frame) => {
+                let code = frame.map(|f| u16::from(f.code)).unwrap_or(CLOSE_ABNORMAL);
+                return Err(GatewayError::Closed(code));
+            }
+            // ping/pong は tokio-tungstenite が返す
+            _ => return Ok(Some(())),
+        };
+
+        if plain.is_empty() {
+            // フレームを跨いだ途中。次を待つ
+            return Ok(Some(()));
+        }
+
+        // ⚠️ 1 枚に複数の JSON が入っていることがある。連結したまま読む
+        for value in serde_json::Deserializer::from_slice(&plain).into_iter::<Payload>() {
+            self.queued.push_back(value?);
+        }
+        Ok(Some(()))
+    }
+
+    async fn handle(
+        &mut self,
+        payload: Payload,
+        session: &mut Option<SessionInfo>,
+    ) -> Result<Option<Event>, GatewayError> {
+        if let Some(s) = payload.s {
+            self.last_seq = Some(s);
+            if let Some(info) = session.as_mut() {
+                info.seq = Some(s);
+            }
+        }
+
+        match payload.op {
+            OP_DISPATCH => {
+                let kind = payload.t.unwrap_or_default();
+                let data = payload.d.unwrap_or_default();
+                match kind.as_str() {
+                    "READY" => {
+                        let ready: Ready = serde_json::from_value(data)?;
+                        // resume 先が来なければ初回の URL へ戻る。
+                        // 落ちるよりは「別サーバに当たるかもしれない」ほうがまし
+                        *session = Some(SessionInfo {
+                            id: ready.session_id.clone(),
+                            url: ready
+                                .resume_gateway_url
+                                .clone()
+                                .unwrap_or_else(|| "wss://gateway.discord.gg".to_owned()),
+                            seq: self.last_seq,
+                        });
+                        tracing::info!(
+                            user = %ready.user.user.name(),
+                            guilds = ready.guilds.len(),
+                            "READY"
+                        );
+                        Ok(Some(Event::Ready(Box::new(ready))))
+                    }
+                    "RESUMED" => {
+                        tracing::info!("RESUMED");
+                        Ok(Some(Event::Resumed))
+                    }
+                    _ => Ok(Some(Event::Dispatch { kind, data })),
+                }
+            }
+            // サーバから催促された。**即座に返す**
+            OP_HEARTBEAT => {
+                self.acked = false;
+                self.next_beat = tokio::time::Instant::now() + self.heartbeat;
+                self.send(json!({ "op": OP_HEARTBEAT, "d": self.last_seq }))
+                    .await?;
+                Ok(None)
+            }
+            OP_HEARTBEAT_ACK => {
+                self.acked = true;
+                Ok(None)
+            }
+            // 繋ぎ直せと言われた。resume はできる
+            OP_RECONNECT => Err(GatewayError::Closed(CLOSE_RECONNECT)),
+            OP_INVALID_SESSION => {
+                // d が true なら resume し直せる。false ならセッションごと死んだ
+                let resumable = payload.d.and_then(|d| d.as_bool()).unwrap_or(false);
+                if !resumable {
+                    *session = None;
+                }
+                Err(GatewayError::Closed(CLOSE_INVALID_SESSION))
+            }
+            // Hello は open が食べている。ここへ来るのは二重の Hello だけ
+            other => {
+                tracing::debug!(op = other, "知らないオペコード。読み飛ばす");
+                Ok(None)
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────── 切断の分岐
+
+/// ACK が返らないまま次の番が来た。**内部で作る番号**
+const CLOSE_NO_ACK: u16 = 4_900;
+/// op=7 で繋ぎ直しを指示された
+const CLOSE_RECONNECT: u16 = 4_901;
+/// op=9。セッションの生死は `session` 側で決めてある
+const CLOSE_INVALID_SESSION: u16 = 4_902;
+/// 何も言われずに切れた
+const CLOSE_ABNORMAL: u16 = 1_006;
+
+/// もう繋いでも無駄な切断か ([`spec/09-discord-protocol.md`] 6 章)。
+///
+/// ⚠️ **ここに挙げていないものは全部やり直す。** Discord は予告なく
+/// コードを足すので、知らないコードを「諦める」側に倒すと、直せる切断で
+/// 利用者を追い出すことになる。
+fn fatal_of(error: &GatewayError) -> Option<Fatal> {
+    let GatewayError::Closed(code) = error else {
+        return None;
+    };
+    match code {
+        // 認証失敗。**トークンを捨てる** (`FR-004`)
+        4004 => Some(Fatal::Unauthorized),
+        4010 => Some(Fatal::Rejected {
+            code: *code,
+            reason: "シャードの指定が誤っている".to_owned(),
+        }),
+        4011 => Some(Fatal::Rejected {
+            code: *code,
+            reason: "シャード分割が必要である".to_owned(),
+        }),
+        4012 => Some(Fatal::Rejected {
+            code: *code,
+            reason: "API の版が古い".to_owned(),
+        }),
+        4013 => Some(Fatal::Rejected {
+            code: *code,
+            reason: "intent の指定が誤っている".to_owned(),
+        }),
+        4014 => Some(Fatal::Rejected {
+            code: *code,
+            reason: "許可されていない intent を要求した".to_owned(),
+        }),
+        _ => None,
+    }
+}
+
+/// その切断の後も **resume を試してよい**か。
+///
+/// 駄目なら identify からやり直す。⚠️ **迷ったら resume 側に倒す。**
+/// 無駄な resume は 1 往復で失敗が分かるだけだが、無駄な identify は
+/// 取りこぼしたイベントを永久に失う。
+fn recoverable_session(error: &GatewayError) -> bool {
+    match error {
+        // 網の都合。セッションは生きている
+        GatewayError::Connect(_) | GatewayError::Decompress(_) | GatewayError::Decode(_) => true,
+        GatewayError::NoHello => true,
+        GatewayError::Closed(code) => !matches!(
+            *code,
+            // 4007: seq が不正 / 4009: セッション期限切れ
+            4007 | 4009 | CLOSE_INVALID_SESSION
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn closed(code: u16) -> GatewayError {
+        GatewayError::Closed(code)
+    }
+
+    /// トークンが弾かれたら諦める。**捨ててログイン画面へ戻すため**
+    #[test]
+    fn an_invalid_token_is_fatal() {
+        assert_eq!(fatal_of(&closed(4004)), Some(Fatal::Unauthorized));
+    }
+
+    /// **知らないコードは諦めない。** Discord は予告なく足す
+    #[test]
+    fn unknown_close_codes_are_retried() {
+        for code in [4000, 4001, 4002, 4003, 4005, 4008, 4020, 4999, 1006] {
+            assert_eq!(fatal_of(&closed(code)), None, "コード {code} で諦めている");
+        }
+    }
+
+    /// 網の都合で切れただけならセッションは生きている
+    #[test]
+    fn a_network_hiccup_keeps_the_session() {
+        assert!(recoverable_session(&GatewayError::NoHello));
+        assert!(recoverable_session(&closed(1006)));
+        assert!(recoverable_session(&closed(CLOSE_NO_ACK)));
+        assert!(recoverable_session(&closed(CLOSE_RECONNECT)));
+    }
+
+    /// セッションが死んだと言われたら identify からやり直す
+    #[test]
+    fn an_expired_session_is_not_resumed() {
+        assert!(!recoverable_session(&closed(4007)));
+        assert!(!recoverable_session(&closed(4009)));
+        assert!(!recoverable_session(&closed(CLOSE_INVALID_SESSION)));
+    }
+
+    /// 待ち時間は倍々に伸び、**上限で止まる**
+    #[test]
+    fn the_backoff_grows_but_is_capped() {
+        let mut g = Gateway::new(Token::new("x"));
+        assert_eq!(g.grow_backoff(), BACKOFF_MIN);
+        assert_eq!(g.grow_backoff(), BACKOFF_MIN * 2);
+        assert_eq!(g.grow_backoff(), BACKOFF_MIN * 4);
+
+        for _ in 0..20 {
+            g.grow_backoff();
+        }
+        assert_eq!(g.grow_backoff(), BACKOFF_MAX, "上限を超えて伸びている");
+    }
+
+    /// ⚠️ **トークンが Debug に出ない** (`SEC-001`)
+    #[test]
+    fn the_token_never_appears_in_debug() {
+        let g = Gateway::new(Token::new("mfa.SUPER_SECRET"));
+        let shown = format!("{g:?}");
+        assert!(
+            !shown.contains("SUPER_SECRET"),
+            "トークンが漏れている: {shown}"
+        );
+    }
+
+    /// identify に嘘が入っていない (`NFR-020`)。
+    /// **公式クライアントの版を騙らない**
+    #[test]
+    fn identify_does_not_impersonate_the_official_client() {
+        let payload = identify(&Token::new("t"));
+        let props = &payload["d"]["properties"];
+
+        assert_eq!(props["browser"], "Gumicord");
+        assert_eq!(props["device"], "Gumicord");
+        assert_eq!(props["client_version"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            props.get("client_build_number").is_none(),
+            "公式の build number を騙っている"
+        );
+        assert_eq!(payload["d"]["token"], "t");
+    }
+
+    /// READY が読める。**知らないフィールドで落ちない**
+    #[test]
+    fn ready_is_parsed_and_tolerates_unknown_fields() {
+        let ready: Ready = serde_json::from_str(
+            r#"{
+                "user": {"id": "1", "username": "ねんねこ"},
+                "session_id": "abc",
+                "resume_gateway_url": "wss://gateway-us-east1-b.discord.gg",
+                "guilds": [{"id": "2", "name": "テスト"}],
+                "まだ知らないもの": {"入れ子": [1,2]}
+            }"#,
+        )
+        .expect("READY を読めない");
+
+        assert_eq!(ready.session_id, "abc");
+        assert_eq!(ready.guilds.len(), 1);
+        assert_eq!(ready.user.user.name(), "ねんねこ");
+    }
+
+    /// `resume_gateway_url` が無くても落ちない。
+    /// **無いほうが普通ではないが、無くても動けるべきである**
+    #[test]
+    fn ready_without_a_resume_url_still_parses() {
+        let ready: Ready =
+            serde_json::from_str(r#"{"user":{"id":"1","username":"x"},"session_id":"s"}"#).unwrap();
+        assert!(ready.resume_gateway_url.is_none());
+        assert!(ready.guilds.is_empty());
+    }
+
+    /// 1 枚のフレームに複数の JSON が入っていても全部読む
+    #[test]
+    fn several_payloads_in_one_frame_are_all_read() {
+        let raw = br#"{"op":11}{"op":0,"t":"MESSAGE_CREATE","s":5,"d":{}}"#;
+        let payloads: Vec<Payload> = serde_json::Deserializer::from_slice(raw)
+            .into_iter::<Payload>()
+            .collect::<Result<_, _>>()
+            .expect("連結した JSON を読めない");
+
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0].op, OP_HEARTBEAT_ACK);
+        assert_eq!(payloads[1].s, Some(5));
+        assert_eq!(payloads[1].t.as_deref(), Some("MESSAGE_CREATE"));
+    }
+}
