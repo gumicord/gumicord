@@ -194,6 +194,8 @@ M1 で公開するフィールド。
 | `app.screen` | — | 現在表示中の画面を包むコンテナ |
 | `app.screen.loading` | — | 起動中 |
 | `app.screen.login` | — | ログイン画面 (FR-001) |
+| `app.screen.login.title` | — | ログイン画面の見出し |
+| `app.screen.login.hint` | — | ログイン画面の説明文・状態表示 |
 | `app.screen.main` | — | メイン画面 |
 
 ### `chrome.*`
@@ -259,6 +261,7 @@ M1 で公開するフィールド。
 | `primitive.text` | — | 文字列 |
 | `primitive.image` | — | 画像 |
 | `primitive.icon` | — | アイコン |
+| `primitive.qr` | — | QR コード (FR-001) |
 | `primitive.avatar` | — | 円形の人物画像 |
 | `primitive.badge` | — | 小さなラベル |
 | `primitive.button` | — | 押せるもの |
@@ -282,7 +285,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 67 個** (中核 47 / プラグインも生成可 20)。
+**合計 70 個** (中核 49 / プラグインも生成可 21)。
 
 <!-- END GENERATED: node-ids -->
 

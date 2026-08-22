@@ -60,6 +60,10 @@ rquickjs = "0.12"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+# ⚠️ 暗号の実装を**明示的に選ぶ**。rustls は自分の機能から自動で選ぶが、
+# 「ちょうど 1 つ有効」でないと選べずに実行時 panic になる。どの機能が
+# 立つかは依存の合流次第で変わるので、他人任せにしない
+rustls = "0.23"
 futures-util = "0.3"
 zstd = "0.13"
 

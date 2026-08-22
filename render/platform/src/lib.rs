@@ -26,4 +26,4 @@ pub mod text_input;
 pub mod window;
 
 pub use text_input::{EditKey, TextDocument, TextInputHost};
-pub use window::{Application, FrameCx, PlatformError, run};
+pub use window::{Application, FrameCx, PlatformError, Waker, run};

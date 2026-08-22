@@ -34,13 +34,15 @@
 //! 仕様: [`spec/02-architecture.md`]
 
 pub mod demo;
+pub mod session;
 
 use std::borrow::Cow;
 
-use gumicord_platform::{Application, FrameCx, TextDocument};
+use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
+use session::Login;
 
 /// クライアント同梱の既定テーマ。
 ///
@@ -121,6 +123,8 @@ impl Panes {
 /// アプリケーションの状態と、そこから UITree を組み立てる責務。
 pub struct Gumicord {
     theme: Option<Theme>,
+    /// ログインの進み具合 (`FR-001`)。**画面の切り替えはこれが決める**
+    login: Login,
     /// ポインタが乗っているノード
     hovered: Option<(NodeId, Option<Key>)>,
     selected_guild: u64,
@@ -137,12 +141,25 @@ impl Gumicord {
     pub fn new() -> Self {
         Gumicord {
             theme: load_theme(),
+            login: Login::new(),
             hovered: None,
             selected_guild: demo::GUILDS[0].id,
             selected_channel: demo::CHANNELS[1].id,
             input_focused: false,
             input: TextDocument::new(),
             sent: Vec::new(),
+        }
+    }
+
+    /// ログインを飛ばし、[`demo`] の固定データで画面を組む。
+    ///
+    /// レンダラやテーマを触るのに毎回スマホを出すのは馬鹿らしい。
+    /// `GUMICORD_SKIP_LOGIN=1` で起動したときと同じ状態になる。
+    /// **本物のデータは出ない。**
+    pub fn demo() -> Self {
+        Gumicord {
+            login: Login::skipped(),
+            ..Gumicord::new()
         }
     }
 
@@ -192,6 +209,18 @@ fn load_theme() -> Option<Theme> {
 impl Application for Gumicord {
     fn title(&self) -> String {
         "Gumicord".to_owned()
+    }
+
+    /// ログインを始める。**ウィンドウが出るより前に呼ばれる。**
+    ///
+    /// 鍵の生成に 1 秒前後かかるので、早く始めたぶんだけ QR が早く出る
+    fn start(&mut self, waker: Waker) {
+        self.login.start(waker);
+    }
+
+    /// 背景の知らせを取り込む。ここが唯一の入り口である
+    fn wake(&mut self) -> bool {
+        self.login.poll()
     }
 
     fn hover_changed(&mut self, hits: &[Hit]) -> bool {
@@ -292,16 +321,47 @@ impl Gumicord {
     /// ⚠️ 毎フレーム木を丸ごと組み直している。差分構築 (B2 の残件) は
     /// レンダラ側の要求が固まってから入れる。
     fn build_tree(&self, panes: Panes) -> UiNode {
-        let main = UiNode::new(NodeId::AppScreenMain)
-            .child_if(panes.guilds(), || self.guild_list())
-            .child_if(panes.channels(), || self.channel_list())
-            .child(self.chat_view());
+        // **画面の分かれ目はここだけである。** ログインしていなければ
+        // メイン画面は組み立てもしない
+        let screen = if self.login.shows_main() {
+            UiNode::new(NodeId::AppScreenMain)
+                .child_if(panes.guilds(), || self.guild_list())
+                .child_if(panes.channels(), || self.channel_list())
+                .child(self.chat_view())
+        } else {
+            self.login_screen()
+        };
 
         UiNode::new(NodeId::AppRoot).child(
             UiNode::new(NodeId::AppWindow)
                 .child(self.titlebar())
-                .child(UiNode::new(NodeId::AppScreen).child(main)),
+                .child(UiNode::new(NodeId::AppScreen).child(screen)),
         )
+    }
+
+    /// ログイン画面 (`FR-001`)。QR を出して読まれるのを待つ。
+    ///
+    /// **入力欄も押しボタンも無い。** 利用者がここですることは、スマホで
+    /// QR を読むことだけである。パスワード経路 (C4b) が入るとここに増える。
+    ///
+    /// 上下の `layout.spacer` が縦の余りを分け合うことで中央に来る。
+    /// `app.screen.login` の交差軸は `Center` なので横は勝手に揃う
+    fn login_screen(&self) -> UiNode {
+        let s = self.login.session();
+
+        UiNode::new(NodeId::AppScreenLogin)
+            .child(UiNode::new(NodeId::LayoutSpacer))
+            .child(UiNode::text(
+                NodeId::AppScreenLoginTitle,
+                "QR コードでログイン",
+            ))
+            // QR が無い間 (接続中・交換中) は出さない。
+            // **枠だけ出して中身が空だと、読めない QR を見せることになる**
+            .child_if(s.qr().is_some(), || {
+                UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
+            })
+            .child(UiNode::text(NodeId::AppScreenLoginHint, s.hint()))
+            .child(UiNode::new(NodeId::LayoutSpacer))
     }
 
     /// `PLT-020`: 独自タイトルバー。
@@ -320,8 +380,15 @@ impl Gumicord {
                 )
         };
 
+        // ログインできたら誰として入っているかを出す。**本物のデータが
+        // 通っていることが目で分かる唯一の場所**でもある (Store は C5)
+        let title = match self.login.session().logged_in() {
+            Some(l) => format!("  Gumicord — {}", l.me.user.name()),
+            None => "  Gumicord".to_owned(),
+        };
+
         UiNode::new(NodeId::ChromeTitlebar)
-            .child(UiNode::text(NodeId::ChromeTitlebarTitle, "  Gumicord"))
+            .child(UiNode::text(NodeId::ChromeTitlebarTitle, title))
             .child(
                 UiNode::new(NodeId::ChromeTitlebarControls)
                     .child(button("minimize", "window.minimize"))
@@ -493,7 +560,7 @@ mod tests {
     use super::*;
 
     fn app() -> Gumicord {
-        Gumicord::new()
+        Gumicord::demo()
     }
 
     /// 同梱テーマが常に読める。ここが壊れると起動して真っ黒になる
@@ -588,7 +655,7 @@ mod responsive_tests {
     /// 何も出ない幅があってはいけない
     #[test]
     fn the_chat_view_never_disappears() {
-        let a = Gumicord::new();
+        let a = Gumicord::demo();
         for w in [320.0, 599.0, 600.0, 899.0, 900.0, 1920.0] {
             let tree = a.build_tree(Panes::for_width(w));
             assert!(
@@ -600,7 +667,7 @@ mod responsive_tests {
 
     #[test]
     fn narrower_windows_drop_panes_from_the_left() {
-        let a = Gumicord::new();
+        let a = Gumicord::demo();
 
         assert_eq!(
             panes_in(&a.build_tree(Panes::Three)),
@@ -658,7 +725,7 @@ mod input_tests {
     /// フォーカスが無いと入力は届かない (`PLT-001`)
     #[test]
     fn input_only_reaches_a_focused_field() {
-        let mut a = Gumicord::new();
+        let mut a = Gumicord::demo();
         assert!(a.focused_document().is_none());
 
         a.input_focused = true;
@@ -668,7 +735,7 @@ mod input_tests {
     /// 変換中の範囲が UITree まで届く。**下線を描くのに要る**
     #[test]
     fn a_composition_reaches_the_tree() {
-        let mut a = Gumicord::new();
+        let mut a = Gumicord::demo();
         a.input_focused = true;
 
         let doc = a.focused_document().unwrap();
@@ -688,7 +755,7 @@ mod input_tests {
     /// 空なら placeholder が入り、**変換の印は出ない**
     #[test]
     fn an_empty_field_shows_only_its_placeholder() {
-        let mut a = Gumicord::new();
+        let mut a = Gumicord::demo();
         let f = field(&a.build(&cx()));
         assert!(f.text.is_empty());
         assert!(f.placeholder.contains("メッセージを送信"));
@@ -698,7 +765,7 @@ mod input_tests {
     /// FR-024: Enter で送ると一覧に増え、入力欄は空になる
     #[test]
     fn submitting_appends_the_message_and_clears_the_field() {
-        let mut a = Gumicord::new();
+        let mut a = Gumicord::demo();
         a.input_focused = true;
         a.focused_document().unwrap().insert("こんにちは");
 
@@ -715,7 +782,7 @@ mod input_tests {
     /// 空白だけのものは送らない
     #[test]
     fn whitespace_is_not_submitted() {
-        let mut a = Gumicord::new();
+        let mut a = Gumicord::demo();
         a.input_focused = true;
         a.focused_document().unwrap().insert("   ");
         assert!(!a.submit());
@@ -725,10 +792,130 @@ mod input_tests {
     /// フォーカス外しではない** — その分岐はプラットフォーム層が持つ
     #[test]
     fn escape_leaves_the_field() {
-        let mut a = Gumicord::new();
+        let mut a = Gumicord::demo();
         a.input_focused = true;
         assert!(a.cancel_input());
         assert!(!a.input_focused);
         assert!(!a.cancel_input(), "既に外れていれば何も起きない");
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::session::{Login, LoginEvent};
+    use super::*;
+
+    /// まだログインしていないアプリ。
+    ///
+    /// ⚠️ `Gumicord::new()` は `GUMICORD_SKIP_LOGIN` を読む。**開発機の
+    /// 環境変数で試験の結果が変わってはいけない**ので、ここで潰す
+    fn pending() -> Gumicord {
+        Gumicord {
+            login: Login::fresh_for_test(),
+            ..Gumicord::new()
+        }
+    }
+
+    fn ids(tree: &UiNode) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        tree.walk(&mut |n, _| out.push(n.id));
+        out
+    }
+
+    /// **ログインしていなければメイン画面は組み立てもしない。**
+    /// 中身が見えているのに触れない状態が一番たちが悪い
+    #[test]
+    fn the_main_screen_is_not_built_before_login() {
+        let a = pending();
+        let seen = ids(&a.build_tree(Panes::Three));
+
+        assert!(seen.contains(&NodeId::AppScreenLogin));
+        assert!(!seen.contains(&NodeId::AppScreenMain));
+        assert!(!seen.contains(&NodeId::ChatMessageList), "本文が漏れている");
+    }
+
+    /// QR が来る前に QR ノードを出さない。
+    /// **読めない QR を見せるのは、何も見せないより悪い**
+    #[test]
+    fn the_qr_node_appears_only_once_there_is_a_qr() {
+        let mut a = pending();
+        assert!(!ids(&a.build_tree(Panes::Three)).contains(&NodeId::PrimitiveQr));
+
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        let tree = a.build_tree(Panes::Three);
+        assert!(ids(&tree).contains(&NodeId::PrimitiveQr));
+
+        let mut data = None;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveQr {
+                data = n.content.as_qr().map(str::to_owned);
+            }
+        });
+        assert_eq!(data.as_deref(), Some("https://example/1"));
+    }
+
+    /// 進み具合が必ず文字で出ている。**黙って止まって見える状態を作らない**
+    #[test]
+    fn every_state_says_something() {
+        let mut a = pending();
+        for event in [
+            None,
+            Some(LoginEvent::Qr("x".to_owned())),
+            Some(LoginEvent::Approved),
+            Some(LoginEvent::Failed("接続できない".to_owned())),
+        ] {
+            if let Some(e) = event {
+                a.login.apply_for_test(e);
+            }
+            let tree = a.build_tree(Panes::Three);
+
+            let mut hint = None;
+            tree.walk(&mut |n, _| {
+                if n.id == NodeId::AppScreenLoginHint {
+                    hint = n.content.as_text().map(str::to_owned);
+                }
+            });
+            let hint = hint.expect("説明文が無い");
+            assert!(!hint.trim().is_empty(), "説明文が空である");
+        }
+    }
+
+    /// テーマがログイン画面まで届く。**QR の地は必ず明るい**
+    #[test]
+    fn the_theme_reaches_the_login_screen() {
+        let mut a = pending();
+        a.login.apply_for_test(LoginEvent::Qr("x".to_owned()));
+
+        let tree = a.build(&FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        });
+
+        let mut qr_style = None;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveQr {
+                qr_style = Some(n.style.clone());
+            }
+        });
+        let s = qr_style.expect("QR が無い");
+        assert!(s.background.is_some(), "QR の地が解決されていない");
+        assert!(s.padding.is_some(), "静音領域ぶんの余白が無い");
+    }
+
+    /// `GUMICORD_SKIP_LOGIN` 相当ならメイン画面が出る
+    #[test]
+    fn skipping_shows_the_main_screen() {
+        let a = Gumicord::demo();
+        assert!(a.login.shows_main());
+        assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::AppScreenMain));
+    }
+
+    /// 未ログインでも `Login::new` が勝手に走り出さない (試験が網を叩かない)
+    #[test]
+    fn nothing_starts_until_start_is_called() {
+        let login = Login::fresh_for_test();
+        assert!(!login.shows_main());
+        assert!(login.session().qr().is_none());
     }
 }

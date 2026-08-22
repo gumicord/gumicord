@@ -116,12 +116,64 @@ pub trait Application {
     fn cancel_input(&mut self) -> bool {
         false
     }
+
+    /// ウィンドウが開く前に一度だけ呼ばれる。**背景の仕事はここから始める。**
+    ///
+    /// 渡される [`Waker`] が、外のスレッドからイベントループを起こす唯一の手
+    /// である。
+    fn start(&mut self, _waker: Waker) {}
+
+    /// [`Waker::wake`] で起こされた。溜まった知らせを取り込む。
+    /// 再描画が要るなら `true`。
+    ///
+    /// ⚠️ **何回起こされるかは約束されない。** 複数の `wake` が 1 回に
+    /// まとめられることがあるので、**溜まっているぶんを全部**取り込むこと。
+    fn wake(&mut self) -> bool {
+        false
+    }
+}
+
+/// イベントループを外から起こす手。
+///
+/// # なぜ要るのか
+///
+/// イベントループは [`ControlFlow::Wait`] で寝ている (`NFR-005`)。
+/// 非同期の仕事 — ログインの進み具合、Gateway のイベント — は別スレッドで
+/// 進むので、**そのままでは画面が何も知らないまま眠り続ける**。
+///
+/// `wake` を呼ぶと [`Application::wake`] が主スレッドで呼ばれる。
+///
+/// ⚠️ **知らせそのものはここを通らない。** 運べるのは「何かあった」だけで
+/// ある。中身はアプリが自前の通り道 (チャネルなど) で渡す。ここに載せると
+/// `winit` の型がアプリの型に混ざり、`gumicord-app` から `winit` を隠せなく
+/// なる ([`spec/02-architecture.md`])。
+#[derive(Clone)]
+pub struct Waker(winit::event_loop::EventLoopProxy<()>);
+
+impl Waker {
+    /// 主スレッドを起こす。**どのスレッドから呼んでもよい。**
+    ///
+    /// イベントループが既に終わっていれば黙って何もしない。終了処理の途中で
+    /// 背景の仕事が最後の知らせを出すのは普通のことで、誤りではない。
+    pub fn wake(&self) {
+        let _ = self.0.send_event(());
+    }
+}
+
+impl core::fmt::Debug for Waker {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Waker")
+    }
 }
 
 /// ウィンドウを開いてアプリを走らせる。**返ってくるのは終了時である。**
-pub fn run(app: impl Application + 'static) -> Result<(), PlatformError> {
+pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+
+    // ⚠️ ウィンドウを作る前に渡す。ログインは窓が出るより先に始めてよく、
+    // むしろ先に始めたほうが QR が早く出る
+    app.start(Waker(event_loop.create_proxy()));
 
     let mut host = Host {
         app: Box::new(app),
@@ -434,6 +486,15 @@ impl Host {
 }
 
 impl ApplicationHandler for Host {
+    /// [`Waker::wake`] で起こされた。
+    ///
+    /// **中身は運ばれてこない。** アプリが自前の通り道から取り込む
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        if self.app.wake() {
+            self.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;

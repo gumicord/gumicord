@@ -13,6 +13,7 @@
 //! 要件: `NFR-021`, `NFR-022`, `NFR-024`
 //! 仕様: [`spec/09-discord-protocol.md`]
 
+pub mod auth;
 pub mod client;
 pub mod ratelimit;
 pub mod route;

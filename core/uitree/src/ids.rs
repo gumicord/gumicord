@@ -136,6 +136,8 @@ define_node_ids! {
     AppScreen,                "app.screen",                      None,    Core,   "現在表示中の画面を包むコンテナ";
     AppScreenLoading,         "app.screen.loading",              None,    Core,   "起動中";
     AppScreenLogin,           "app.screen.login",                None,    Core,   "ログイン画面 (FR-001)";
+    AppScreenLoginTitle,      "app.screen.login.title",          None,    Core,   "ログイン画面の見出し";
+    AppScreenLoginHint,       "app.screen.login.hint",           None,    Core,   "ログイン画面の説明文・状態表示";
     AppScreenMain,            "app.screen.main",                 None,    Core,   "メイン画面";
 
     // ─────────────────────────── chrome.* — ウィンドウクローム (デスクトップのみ)
@@ -189,6 +191,7 @@ define_node_ids! {
     PrimitiveText,            "primitive.text",                  None,    Plugin, "文字列";
     PrimitiveImage,           "primitive.image",                 None,    Plugin, "画像";
     PrimitiveIcon,            "primitive.icon",                  None,    Plugin, "アイコン";
+    PrimitiveQr,              "primitive.qr",                    None,    Plugin, "QR コード (FR-001)";
     PrimitiveAvatar,          "primitive.avatar",                None,    Plugin, "円形の人物画像";
     PrimitiveBadge,           "primitive.badge",                 None,    Plugin, "小さなラベル";
     PrimitiveButton,          "primitive.button",                None,    Plugin, "押せるもの";

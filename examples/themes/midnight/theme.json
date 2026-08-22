@@ -57,6 +57,23 @@
     },
 
     {
+      "select": "app.screen.login",
+      "style": { "background": "$color.bg.base", "gap": "$space.3", "padding": [24, 24, 24, 24] }
+    },
+    {
+      "select": "app.screen.login.title",
+      "style": { "font": { "size": 22, "lineHeight": 30, "weight": 600 } }
+    },
+    {
+      "select": "app.screen.login.hint",
+      "style": { "color": "$color.text.secondary", "font": "$font.body" }
+    },
+    {
+      "select": "primitive.qr",
+      "style": { "background": "#ffffff", "radius": "$radius.md", "padding": [12, 12, 12, 12] }
+    },
+
+    {
       "select": "chrome.titlebar",
       "when": { "platform": "desktop" },
       "style": { "background": "$color.bg.sunken", "height": 32 }

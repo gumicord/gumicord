@@ -128,6 +128,8 @@ const TITLEBAR_H: f32 = 32.0;
 const TITLEBAR_BUTTON_W: f32 = 46.0;
 /// スクロールバーの幅。細くても掴めるよう、摘みより広めに取る
 const SCROLLBAR_W: f32 = 10.0;
+/// QR の既定の一辺 (論理 px)。公式クライアントとほぼ同じ大きさ
+const QR_SIZE: f32 = 176.0;
 
 /// そのノードは親の流れに入らず、親の矩形へ重ねて置かれるか。
 ///
@@ -147,6 +149,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // ── app.* — 画面いっぱいに広がる入れ物
         AppRoot | AppWindow | AppScreen => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
         AppScreenLoading | AppScreenLogin => Intrinsic::column().grow(1.0).cross(Cross::Center),
+        AppScreenLoginTitle | AppScreenLoginHint => Intrinsic::row().cross(Cross::Center),
         // メイン画面だけが横 3 ペインである
         AppScreenMain => Intrinsic::row().grow(1.0).cross(Cross::Stretch),
 
@@ -210,6 +213,9 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         PrimitiveIcon | PrimitiveEmoji => Intrinsic::stack().w(20.0).h(20.0),
         PrimitiveSpinner => Intrinsic::stack().w(20.0).h(20.0),
         PrimitiveImage => Intrinsic::stack(),
+        // QR は**読める大きさ**が要る。内容から決まらないので既定を持つ。
+        // 小さすぎるとスマホのカメラが拾えず、そこで詰まる
+        PrimitiveQr => Intrinsic::stack().w(QR_SIZE).h(QR_SIZE),
         PrimitiveCodeBlock => Intrinsic::column().cross(Cross::Stretch),
         PrimitiveText | PrimitiveBadge | PrimitiveButton | PrimitiveMention | PrimitiveSpoiler
         | PrimitiveLink => Intrinsic::row().cross(Cross::Center),

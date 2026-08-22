@@ -11,6 +11,7 @@ authors.workspace = true
 gumicord-model.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
 futures-util.workspace = true
 zstd.workspace = true
 rsa.workspace = true

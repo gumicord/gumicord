@@ -138,6 +138,8 @@ impl RemoteAuth {
     /// **鍵生成は重い**ので別スレッドへ逃がす。メインスレッドを止めない
     /// ([`spec/02-architecture.md`] のスレッドモデル)。
     pub async fn connect() -> Result<Self, RemoteAuthError> {
+        crate::install_crypto_provider();
+
         let mut request = GATEWAY
             .into_client_request()
             .map_err(RemoteAuthError::Connect)?;
