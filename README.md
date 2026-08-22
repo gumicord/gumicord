@@ -105,15 +105,18 @@ cargo xtask abi          # 安定 ID の後方互換性検査 (EXT-003)
 
 ### CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) が 3 つのジョブを回します。
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) が 4 つのジョブを回します。
 
 | ジョブ | 内容 | 速さ |
 |---|---|---|
 | **仕様** | ABI の後方互換性 / JSON Schema / SDK 型検査 / 生成物の鮮度 | ワークスペースをビルドしないので数十秒 |
 | **Rust** | fmt / `clippy --all-targets` / テスト (Linux + Windows) | 依存のビルドを含む |
+| **配布物** | Windows 版をビルドして Actions の artifact に上げる | LTO を含むので長い |
 | **MSRV** | `rust-version = "1.97"` が嘘でないことの確認 | — |
 
-**手元で重いビルドを回す必要はありません。** 日常は `cargo xtask check-light` で足り、`--all-targets` の clippy は CI が担保します。
+**すべての実行で動くバイナリが残ります。** Actions の実行ページ下部の `gumicord-windows-<sha>` を落とすと、ビルドせずにその時点の状態を触れます。テーマ (`themes/`) が同梱してあるので `GUMICORD_THEME` で差し替えて見比べられます。
+
+**手元で重いビルドを回す必要はありません。** 日常は `cargo xtask check-light` で足ります。ワークスペース全体のテストと `--all-targets` の clippy、そして配布物のビルドは CI が担保します。
 
 ### ビルドの資源消費
 
@@ -150,7 +153,31 @@ cargo build --profile dist
 
 同時に、**自前レンダラのコストは性能ではなくプラットフォーム統合にある**ことが分かりました。とくに Windows では変換候補ウィンドウを出すために TSF テキストストアの自前実装が必要です ([ADR-0005](spec/adr/0005-ime-strategy.md))。
 
-次は M1.1 (Windows のみで縦に通す) です。詳細は [spec/07-roadmap.md](spec/07-roadmap.md)。
+### M1.1 — 描画が縦に通りました
+
+**UITree → テーマ解決 → レイアウト → 描画** が一本につながり、ウィンドウが出ます。
+
+```bash
+cargo run -p gumicord-desktop
+
+# テーマを差し替えて見比べる
+GUMICORD_THEME=examples/themes/midnight/theme.json cargo run -p gumicord-desktop
+```
+
+画面に出ているものに**ハードコードされた色は 1 つもありません。** 見えている色・角丸・余白・書体はすべて [`examples/themes/midnight/theme.json`](examples/themes/midnight/theme.json) が決めています。
+
+| | 状態 |
+|---|---|
+| ウィンドウ + 独自タイトルバー (P1) | ✅ ドラッグ移動・端のリサイズ・最小化/最大化/閉じる |
+| レイアウト (R2) | ✅ row / column / stack / scroll |
+| SDF 角丸矩形バッチャ (R1) | ✅ 差分バッファ転送はまだ |
+| テキスト (R3) | ✅ CJK・折り返し・カラー絵文字。アトラスは 1 ページのみ |
+| テーマ解決 (E1) | ✅ トークン・セレクタ・`when.state`・継承 |
+| **通信 (C1〜C6)** | ❌ **まだ。画面に出ているのは固定のダミーデータです** |
+| **日本語入力 (P2)** | ❌ **まだ。M1.1 のクリティカルパス** |
+| プラグイン (E4〜E7) | ❌ まだ |
+
+次は C1〜C4 (実データ) と P2 (TSF) です。詳細は [spec/07-roadmap.md](spec/07-roadmap.md)。
 
 ## ライセンス
 

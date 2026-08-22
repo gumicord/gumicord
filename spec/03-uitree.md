@@ -41,11 +41,30 @@ struct UiNode {
     states: StateSet,
     /// このノードが表現しているドメインオブジェクトへの参照
     data: Option<DataRef>,
+    /// 表示する中身。いまは文字列だけ
+    content: Content,
     /// テーマとプラグインによって解決された最終的なスタイル
     style: Style,
     children: Vec<UiNode>,
 }
 ```
+
+### 2.0 `content` — 表示する中身
+
+`chat.message.content` が「本文である」ことは安定 ID が表しているが、**その本文が何という文字列か**はどこにも入っていなかった。描画できないので `content` を持つ。
+
+```rust
+enum Content {
+    /// 子ノードだけを持つ。コンテナ
+    None,
+    /// 文字列。整形はレンダラが行う
+    Text(String),
+}
+```
+
+> **`content` は拡張 ABI ではない。** プラグインは `ui.text()` のような SDK の関数を通してのみ中身を作る ([05-plugin-api.md](05-plugin-api.md))。列挙子の追加はここでは破壊的変更にならない。
+
+**レイアウトの方向 (row / column) は `UiNode` に持たない。** 「`nav.channel_list` は縦に並ぶ細い列である」はその安定 ID の**意味**から決まることであり、ノードごとの属性ではない。したがって安定 ID から既定のレイアウトを引く表をレンダラが持つ ([06-renderer.md 8.2](06-renderer.md#82-既定のレイアウトは安定-id-から引く))。テーマは `width` / `height` でそれを上書きできる。
 
 ### 2.1 安定 ID
 
