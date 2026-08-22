@@ -221,6 +221,12 @@ impl Live {
         &self.store
     }
 
+    /// ⚠️ 試験から状態を組み立てるためだけにある
+    #[cfg(test)]
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// 前回開いていたチャンネル。**そこを開いた状態で起動する**
     pub fn last_channel(&self) -> Option<ChannelId> {
         self.last_channel

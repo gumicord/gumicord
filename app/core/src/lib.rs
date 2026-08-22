@@ -606,7 +606,7 @@ impl Gumicord {
     }
 
     fn chat_view(&self) -> UiNode {
-        let channels = self.channel_rows();
+        let channels = self.openable_rows();
         let channel = channels
             .iter()
             .find(|c| c.id == self.selected_channel)
@@ -792,7 +792,7 @@ impl Gumicord {
             changed = true;
         }
 
-        let channels = self.channel_rows();
+        let channels = self.openable_rows();
         if !channels.iter().any(|c| c.id == self.selected_channel)
             && let Some(first) = channels.first()
         {
@@ -870,6 +870,18 @@ impl Gumicord {
             .map(|g| &*g.name)
             .collect::<Vec<_>>()
             .join("、")
+    }
+
+    /// 一覧のうち、**開けるものだけ**。
+    ///
+    /// ⚠️ **カテゴリは見出しであって、開けるものではない。** 選択の既定を
+    /// 決めるときにここを間違えると、**押してもいないカテゴリが勝手に
+    /// 開かれる。** 実際にそうなった
+    fn openable_rows(&self) -> Vec<ChannelRow> {
+        self.channel_rows()
+            .into_iter()
+            .filter(|c| !c.category)
+            .collect()
     }
 
     fn channel_rows(&self) -> Vec<ChannelRow> {
@@ -1394,5 +1406,79 @@ mod typing_tests {
     fn a_crowd_is_summarised() {
         let many = ["あ", "い", "う", "え", "お", "か"];
         assert_eq!(typing_line(&many), "  あ、い ほか 4 人が入力中…");
+    }
+}
+
+#[cfg(test)]
+mod channel_selection_tests {
+    use super::*;
+    use gumicord_model::{Channel, ChannelKind, Guild};
+
+    fn guild_with_category() -> Guild {
+        Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon: None,
+            unavailable: false,
+            channels: vec![
+                // ⚠️ **カテゴリが先に来る。** 位置が 0 なので、
+                // 素直に「最初のもの」を採るとこれが選ばれる
+                Channel {
+                    id: 10u64.into(),
+                    kind: ChannelKind::GuildCategory,
+                    name: Some("カテゴリ".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: None,
+                    position: 0,
+                    topic: None,
+                    nsfw: false,
+                    recipients: Vec::new(),
+                },
+                Channel {
+                    id: 11u64.into(),
+                    kind: ChannelKind::GuildText,
+                    name: Some("いっぱん".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: Some(10u64.into()),
+                    position: 0,
+                    topic: None,
+                    nsfw: false,
+                    recipients: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    /// ⚠️ **カテゴリは見出しであって、開けるものではない。**
+    ///
+    /// 既定の選択がカテゴリを拾うと、押してもいないカテゴリが開かれた
+    /// ことになる。実際にそうなった
+    #[test]
+    fn a_category_is_never_selected_by_default() {
+        let mut a = Gumicord::demo();
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_category()]);
+        a.selected_guild = 1;
+        a.selected_channel = 0;
+
+        a.sync_selection();
+
+        assert_eq!(a.selected_channel, 11, "カテゴリを開こうとしている");
+    }
+
+    /// 一覧にはカテゴリも出る。**出さないのと開けないのは別である**
+    #[test]
+    fn the_category_still_appears_in_the_list() {
+        let mut a = Gumicord::demo();
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_category()]);
+        a.selected_guild = 1;
+
+        let rows = a.channel_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].category);
+        assert_eq!(a.openable_rows().len(), 1);
     }
 }
