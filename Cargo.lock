@@ -1246,6 +1246,7 @@ dependencies = [
  "gumicord-store",
  "gumicord-theme",
  "gumicord-uitree",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

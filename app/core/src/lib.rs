@@ -34,6 +34,7 @@
 //! 仕様: [`spec/02-architecture.md`]
 
 pub mod demo;
+pub mod live;
 pub mod session;
 
 use std::borrow::Cow;
@@ -42,6 +43,7 @@ use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
+use live::Live;
 use session::Login;
 
 /// クライアント同梱の既定テーマ。
@@ -123,8 +125,16 @@ impl Panes {
 /// アプリケーションの状態と、そこから UITree を組み立てる責務。
 pub struct Gumicord {
     theme: Option<Theme>,
+    /// 背景の仕事を載せる土台。
+    ///
+    /// ⚠️ **手放すと走っている仕事が止まる。** アプリがその持ち主である
+    runtime: Option<tokio::runtime::Runtime>,
+    /// イベントループを起こす手。ログインが済んだ後に Gateway へ渡す
+    waker: Option<Waker>,
     /// ログインの進み具合 (`FR-001`)。**画面の切り替えはこれが決める**
     login: Login,
+    /// 本物のデータ (C2, C3)。**demo との分かれ目はここが空かどうか**
+    live: Live,
     /// ポインタが乗っているノード
     hovered: Option<(NodeId, Option<Key>)>,
     selected_guild: u64,
@@ -133,7 +143,7 @@ pub struct Gumicord {
     input_focused: bool,
     /// 入力欄の中身 (`PLT-001`)
     input: TextDocument,
-    /// この場で送ったメッセージ。**Store (C5) ができたら消える**
+    /// demo のときにこの場で送ったもの。**本物では使わない**
     sent: Vec<demo::Message>,
 }
 
@@ -141,7 +151,10 @@ impl Gumicord {
     pub fn new() -> Self {
         Gumicord {
             theme: load_theme(),
+            runtime: None,
+            waker: None,
             login: Login::new(),
+            live: Live::new(),
             hovered: None,
             selected_guild: demo::GUILDS[0].id,
             selected_channel: demo::CHANNELS[1].id,
@@ -161,11 +174,6 @@ impl Gumicord {
             login: Login::skipped(),
             ..Gumicord::new()
         }
-    }
-
-    /// 画面に出すメッセージ。デモの固定分と、この場で送った分
-    fn messages(&self) -> impl Iterator<Item = &demo::Message> {
-        demo::MESSAGES.iter().chain(&self.sent)
     }
 
     fn is_hovered(&self, id: NodeId, key: Option<&Key>) -> bool {
@@ -215,12 +223,52 @@ impl Application for Gumicord {
     ///
     /// 鍵の生成に 1 秒前後かかるので、早く始めたぶんだけ QR が早く出る
     fn start(&mut self, waker: Waker) {
-        self.login.start(waker);
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(%e, "非同期処理を始められない");
+                return;
+            }
+        };
+
+        self.login.start(runtime.handle(), waker.clone());
+        self.waker = Some(waker);
+        self.runtime = Some(runtime);
     }
 
-    /// 背景の知らせを取り込む。ここが唯一の入り口である
+    /// 背景の知らせを取り込む。**ここが唯一の入り口である。**
     fn wake(&mut self) -> bool {
-        self.login.poll()
+        let mut changed = self.login.poll();
+        changed |= self.live.poll();
+
+        // ログインが済んだら Gateway へ進む。**`Live::start` は 2 回目から
+        // 何もしない**ので、ここで毎回呼んでも構わない
+        if let (Some(l), Some(rt), Some(waker)) =
+            (self.login.session().logged_in(), &self.runtime, &self.waker)
+        {
+            self.live.start(
+                rt.handle(),
+                l.client.clone(),
+                l.token.clone(),
+                waker.clone(),
+            );
+        }
+
+        // `FR-004`: Gateway にトークンを弾かれた。**捨ててログイン画面へ戻す**
+        if self.live.take_rejection()
+            && let (Some(rt), Some(waker)) = (&self.runtime, &self.waker)
+        {
+            tracing::warn!("トークンが無効になった。ログインし直す");
+            self.login.forget(rt.handle(), waker.clone());
+            changed = true;
+        }
+
+        changed |= self.sync_selection();
+        changed
     }
 
     fn hover_changed(&mut self, hits: &[Hit]) -> bool {
@@ -249,8 +297,14 @@ impl Application for Gumicord {
         for h in hits {
             match (h.id, &h.key) {
                 (NodeId::NavGuildListItem, Some(Key::Id(id))) => {
-                    changed |= self.selected_guild != *id;
+                    if self.selected_guild == *id {
+                        break;
+                    }
                     self.selected_guild = *id;
+                    // ⚠️ **チャンネルの選択を落とす。** 別のギルドの
+                    // チャンネルが選ばれたままだと、一覧と本文が食い違う
+                    self.selected_channel = 0;
+                    changed = true;
                 }
                 (NodeId::NavChannelListItem, Some(Key::Id(id))) => {
                     changed |= self.selected_channel != *id;
@@ -260,6 +314,10 @@ impl Application for Gumicord {
             }
             break;
         }
+
+        // ⚠️ **押した直後にここで取りに行く。** 次に何かが起きるまで
+        // 待っていると、選んだのに空のまま止まって見える
+        changed |= self.sync_selection();
         changed
     }
 
@@ -269,9 +327,6 @@ impl Application for Gumicord {
     }
 
     /// `FR-024`: 送信。
-    ///
-    /// Store (C5) と REST (C3) ができるまでは、その場で一覧に足すだけである。
-    /// **送れたように見えるが、どこへも行っていない。**
     fn submit(&mut self) -> bool {
         let body = self.input.text().trim().to_owned();
         if body.is_empty() {
@@ -279,6 +334,15 @@ impl Application for Gumicord {
         }
         self.input.take();
 
+        if self.uses_live() {
+            // ⚠️ **ここで一覧に足さない。** 送れたら Gateway が
+            // `MESSAGE_CREATE` を返してくるので、そこで 1 回だけ足る。
+            // 先に足すと、届いたときに同じものが二重に並ぶ
+            self.live.send_message(self.selected_channel, body);
+            return true;
+        }
+
+        // demo ではどこへも行かない。**その場の一覧に足すだけである**
         let id = 1000 + self.sent.len() as u64;
         self.sent.push(demo::Message {
             id,
@@ -397,6 +461,10 @@ impl Gumicord {
             )
     }
 
+    /// ギルド一覧 (`FR-010`)。
+    ///
+    /// ⚠️ **未読とメンションの印はまだ本物ではない。** read-state は C5 と
+    /// 一緒に入る。demo のときだけ印が付く
     fn guild_list(&self) -> UiNode {
         let mut list = UiNode::new(NodeId::NavGuildList).child(
             UiNode::text(NodeId::NavGuildListHome, "DM").with_state_if(
@@ -405,9 +473,9 @@ impl Gumicord {
             ),
         );
 
-        for g in demo::GUILDS {
+        for g in self.guild_rows() {
             list = list.child(
-                UiNode::text(NodeId::NavGuildListItem, demo::initial(g.name))
+                UiNode::text(NodeId::NavGuildListItem, initial(&g.name))
                     .with_id_key(g.id)
                     .with_data(g.id)
                     .with_state_if(g.id == self.selected_guild, State::Selected)
@@ -419,23 +487,25 @@ impl Gumicord {
                     ),
             );
         }
-        list
+        list.child(scrollbar())
     }
 
     fn channel_list(&self) -> UiNode {
-        let guild = demo::GUILDS
-            .iter()
+        let title = self
+            .guild_rows()
+            .into_iter()
             .find(|g| g.id == self.selected_guild)
-            .unwrap_or(&demo::GUILDS[0]);
+            .map(|g| g.name)
+            .unwrap_or_else(|| "Gumicord".to_owned());
 
         let mut list = UiNode::new(NodeId::NavChannelList)
-            .child(UiNode::text(NodeId::NavChannelListHeader, guild.name))
+            .child(UiNode::text(NodeId::NavChannelListHeader, title))
             .child(UiNode::text(
                 NodeId::NavChannelListCategory,
                 "テキストチャンネル",
             ));
 
-        for c in demo::CHANNELS {
+        for c in self.channel_rows() {
             let mut item = UiNode::new(NodeId::NavChannelListItem)
                 .with_id_key(c.id)
                 .with_data(c.id)
@@ -461,28 +531,29 @@ impl Gumicord {
     }
 
     fn chat_view(&self) -> UiNode {
-        let channel = demo::CHANNELS
+        let channels = self.channel_rows();
+        let channel = channels
             .iter()
             .find(|c| c.id == self.selected_channel)
-            .unwrap_or(&demo::CHANNELS[0]);
+            .or(channels.first());
+
+        let (id, name, icon, topic) = match channel {
+            Some(c) => (c.id, c.name.clone(), c.icon, c.topic.clone()),
+            None => (0, String::new(), "channel.text", None),
+        };
 
         let header = UiNode::new(NodeId::ChatHeader)
-            .with_data(channel.id)
-            .child(UiNode::icon(NodeId::PrimitiveIcon, channel.icon))
-            .child(UiNode::text(NodeId::ChatHeaderTitle, channel.name).with_data(channel.id))
-            .child(
-                UiNode::text(
-                    NodeId::ChatHeaderTopic,
-                    "自前レンダラの縦通し。テーマ JSON だけで見た目が決まる",
-                )
-                .with_data(channel.id),
-            );
+            .with_data(id)
+            .child(UiNode::icon(NodeId::PrimitiveIcon, icon))
+            .child(UiNode::text(NodeId::ChatHeaderTitle, &name).with_data(id))
+            .child(UiNode::text(NodeId::ChatHeaderTopic, topic.unwrap_or_default()).with_data(id));
 
         // 直前と同じ送信者なら送信者行を繰り返さない。
         // **字下げの量はテーマが決める** (`when.state: "grouped"` の padding)
+        let rows = self.message_rows();
         let mut messages = UiNode::new(NodeId::ChatMessageList);
         let mut prev: Option<&str> = None;
-        for m in self.messages() {
+        for m in &rows {
             messages = messages.child(self.message(m, prev == Some(&*m.author)));
             prev = Some(&m.author);
         }
@@ -493,7 +564,7 @@ impl Gumicord {
             .child(messages)
             .child(UiNode::text(
                 NodeId::ChatTypingIndicator,
-                "  みどり が入力中…",
+                self.status_line(),
             ))
             .child(
                 UiNode::new(NodeId::ChatInput).child(
@@ -504,7 +575,11 @@ impl Gumicord {
                             caret: self.input.caret(),
                             selection: self.input.selection(),
                             composing: self.input.composing(),
-                            placeholder: format!("#{} へメッセージを送信", channel.name),
+                            placeholder: if name.is_empty() {
+                                "メッセージを送信".to_owned()
+                            } else {
+                                format!("#{name} へメッセージを送信")
+                            },
                         },
                     )
                     .with_state_if(self.input_focused, State::Focus),
@@ -512,25 +587,40 @@ impl Gumicord {
             )
     }
 
+    /// 一覧の下に出す 1 行。
+    ///
+    /// ⚠️ **繋がっている間は接続のことを言わない。** 正常をわざわざ知らせると、
+    /// 異常のときの一行が埋もれる
+    fn status_line(&self) -> String {
+        if let Some(hint) = self.live.link().hint() {
+            return format!("  {hint}");
+        }
+        if self.uses_live() {
+            if self.live.is_loading(self.selected_channel) {
+                return "  読み込んでいます…".to_owned();
+            }
+            return String::new();
+        }
+        "  みどり が入力中…".to_owned()
+    }
+
     /// メッセージ 1 件。
     ///
     /// `grouped` なら送信者アイコンと送信者行を出さない。**字下げはテーマが
     /// `when.state: "grouped"` の `padding` で決める。** クライアントが
     /// 空白のノードを挟むと、字下げの量が焼き付いてテーマから揃えられない。
-    fn message(&self, m: &demo::Message, grouped: bool) -> UiNode {
+    fn message(&self, m: &MessageRow, grouped: bool) -> UiNode {
         let body = UiNode::new(NodeId::LayoutColumn)
             .child_if(!grouped, || {
                 UiNode::new(NodeId::ChatMessageHeader)
                     .with_data(m.id)
-                    .child(
-                        UiNode::text(NodeId::ChatMessageHeaderAuthor, &*m.author).with_data(m.id),
-                    )
+                    .child(UiNode::text(NodeId::ChatMessageHeaderAuthor, &m.author).with_data(m.id))
                     .child(
                         UiNode::text(NodeId::ChatMessageHeaderTime, format!("  {}", m.time))
                             .with_data(m.id),
                     )
             })
-            .child(UiNode::text(NodeId::ChatMessageContent, &*m.body).with_data(m.id));
+            .child(UiNode::text(NodeId::ChatMessageContent, &m.body).with_data(m.id));
 
         UiNode::new(NodeId::ChatMessage)
             .with_id_key(m.id)
@@ -539,11 +629,221 @@ impl Gumicord {
             .with_state_if(m.mentioned, State::Mentioned)
             .with_state_if(self.hovered_id(NodeId::ChatMessage, m.id), State::Hover)
             .child_if(!grouped, || {
-                UiNode::text(NodeId::ChatMessageAvatar, demo::initial(&m.author)).with_data(m.id)
+                UiNode::text(NodeId::ChatMessageAvatar, initial(&m.author)).with_data(m.id)
             })
             // 送信者行と本文を縦に積む。`layout.column` はこのためにある
             .child(body)
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  画面に出す行
+//
+//  ⚠️ **demo と本物をここへ寄せる。** 木を組み立てるところが「どちらの
+//  データか」を気にし始めると、分岐が画面のあちこちに散る。
+// ═══════════════════════════════════════════════════════════════════════
+
+struct GuildRow {
+    id: u64,
+    name: String,
+    unread: bool,
+    mentions: u32,
+}
+
+struct ChannelRow {
+    id: u64,
+    name: String,
+    icon: &'static str,
+    topic: Option<String>,
+    unread: bool,
+    mentions: u32,
+}
+
+struct MessageRow {
+    id: u64,
+    author: String,
+    time: String,
+    body: String,
+    mentioned: bool,
+}
+
+impl Gumicord {
+    /// 本物のデータを出す状態か。**demo との分かれ目はここだけである**
+    fn uses_live(&self) -> bool {
+        self.login.session().logged_in().is_some()
+    }
+
+    /// 選んでいるものが実在するように直し、要るものを取りに行く。
+    ///
+    /// ⚠️ **起動直後の選択は demo の ID である。** READY が来た時点で
+    /// そんなギルドは無いので、放っておくと一覧だけ出て中身が空になる。
+    ///
+    /// 戻り値は「画面が変わったか」。取りに行っただけでは変わらない —
+    /// 届いたときに [`Live::poll`] が改めて真を返す
+    fn sync_selection(&mut self) -> bool {
+        if !self.uses_live() {
+            return false;
+        }
+        let mut changed = false;
+
+        let guilds = self.guild_rows();
+        if !guilds.iter().any(|g| g.id == self.selected_guild) {
+            let Some(first) = guilds.first() else {
+                // READY がまだ来ていない。**何も選ばない**
+                return false;
+            };
+            self.selected_guild = first.id;
+            self.selected_channel = 0;
+            changed = true;
+        }
+
+        let channels = self.channel_rows();
+        if !channels.iter().any(|c| c.id == self.selected_channel)
+            && let Some(first) = channels.first()
+        {
+            self.selected_channel = first.id;
+            changed = true;
+        }
+
+        if self.selected_channel != 0 {
+            // 2 回目からは何もしない
+            self.live.open_channel(self.selected_channel);
+        }
+        changed
+    }
+
+    fn guild_rows(&self) -> Vec<GuildRow> {
+        if !self.uses_live() {
+            return demo::GUILDS
+                .iter()
+                .map(|g| GuildRow {
+                    id: g.id,
+                    name: g.name.to_owned(),
+                    unread: g.unread,
+                    mentions: g.mentions,
+                })
+                .collect();
+        }
+
+        self.live
+            .guilds()
+            .iter()
+            .map(|g| GuildRow {
+                id: g.id.get(),
+                name: g.name.clone(),
+                // read-state はまだ無い (C5)。**無いものを在るように見せない**
+                unread: false,
+                mentions: 0,
+            })
+            .collect()
+    }
+
+    fn channel_rows(&self) -> Vec<ChannelRow> {
+        if !self.uses_live() {
+            return demo::CHANNELS
+                .iter()
+                .map(|c| ChannelRow {
+                    id: c.id,
+                    name: c.name.to_owned(),
+                    icon: c.icon,
+                    topic: Some(
+                        "自前レンダラの縦通し。テーマ JSON だけで見た目が決まる".to_owned(),
+                    ),
+                    unread: c.unread,
+                    mentions: c.mentions,
+                })
+                .collect();
+        }
+
+        let Some(guild) = self.live.guild(self.selected_guild) else {
+            return Vec::new();
+        };
+
+        let mut rows: Vec<_> = guild
+            .channels
+            .iter()
+            // M1 で開けるのは文字のチャンネルだけである
+            .filter(|c| c.kind.is_text())
+            .collect();
+        // ⚠️ **position が同じことがある。** そのときは ID 順 —
+        // つまり作られた順になる。並びが毎フレーム変わると読めない
+        rows.sort_by_key(|c| (c.position, c.id.get()));
+
+        rows.into_iter()
+            .map(|c| ChannelRow {
+                id: c.id.get(),
+                name: c.display_name(),
+                icon: c.kind.icon(),
+                topic: c.topic.clone(),
+                unread: false,
+                mentions: 0,
+            })
+            .collect()
+    }
+
+    fn message_rows(&self) -> Vec<MessageRow> {
+        if !self.uses_live() {
+            return demo::MESSAGES
+                .iter()
+                .chain(&self.sent)
+                .map(|m| MessageRow {
+                    id: m.id,
+                    author: m.author.to_string(),
+                    time: m.time.to_string(),
+                    body: m.body.to_string(),
+                    mentioned: m.mentioned,
+                })
+                .collect();
+        }
+
+        let me = self.login.session().logged_in().map(|l| l.me.user.id);
+        self.live
+            .messages(self.selected_channel)
+            .iter()
+            .map(|m| MessageRow {
+                id: m.id.get(),
+                author: m.author.name().to_owned(),
+                time: local_time(&m.timestamp),
+                body: m.content.clone(),
+                // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
+                // いまは**自分への返信かどうかだけ**を見ている
+                mentioned: m
+                    .referenced_message
+                    .as_ref()
+                    .is_some_and(|r| Some(r.author.id) == me),
+            })
+            .collect()
+    }
+}
+
+/// 名前の頭 1 文字。アイコンが無いときの代わりに出す
+fn initial(name: &str) -> String {
+    name.chars().next().map(String::from).unwrap_or_default()
+}
+
+/// ISO 8601 の時刻を現地時刻の `HH:MM` にする。
+///
+/// ⚠️ **Discord が返すのは UTC である。** ずらさずに出すと、日本の利用者に
+/// 9 時間ずれた時刻を見せることになる。
+///
+/// 読めない形が来たら**そのまま返す**。嘘の時刻を作るよりはましである。
+fn local_time(iso: &str) -> String {
+    // "2026-08-22T12:34:56.789000+00:00"
+    let Some((_, time)) = iso.split_once('T') else {
+        return iso.to_owned();
+    };
+    let mut parts = time.split(':');
+    let (Some(h), Some(m)) = (parts.next(), parts.next()) else {
+        return iso.to_owned();
+    };
+    let (Ok(h), Ok(m)) = (h.parse::<i32>(), m.parse::<i32>()) else {
+        return iso.to_owned();
+    };
+
+    let total = h * 60 + m + gumicord_platform::local_utc_offset_minutes();
+    // 日を跨いだぶんを畳む。**負の余りにならないよう rem_euclid を使う**
+    let total = total.rem_euclid(24 * 60);
+    format!("{:02}:{:02}", total / 60, total % 60)
 }
 
 /// スクロールバー。**摘みの大きさと位置はレンダラが決める。**

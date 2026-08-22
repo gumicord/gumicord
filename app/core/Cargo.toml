@@ -18,5 +18,6 @@ gumicord-plugin.workspace = true
 gumicord-render.workspace = true
 gumicord-platform.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

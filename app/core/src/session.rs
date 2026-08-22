@@ -85,12 +85,14 @@ pub enum Session {
 
 /// ログインできた後に手元へ残るもの。
 ///
-/// ⚠️ トークンは [`RestClient`] の中にあり、外へは出さない。
-/// `Debug` も潰してある
+/// ⚠️ **トークンがここにある。** REST は [`RestClient`] が中に持っているが、
+/// Gateway は identify に生のトークンが要るので、別に取り出せる形で置く。
+/// [`Token`] は表示しても中身が出ない型である (`SEC-001`)
 #[derive(Debug, Clone)]
 pub struct LoggedIn {
     pub me: CurrentUser,
     pub client: RestClient,
+    pub token: Token,
 }
 
 impl Session {
@@ -150,10 +152,6 @@ pub struct Login {
     tx: Sender<LoginEvent>,
     /// ログインを飛ばして画面だけ見る。**起動時に一度決まり、途中で変わらない**
     skipped: bool,
-    /// 背景の仕事を載せている土台。
-    ///
-    /// ⚠️ **手放すと走っている仕事が止まる。** ここが持ち主である
-    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl Login {
@@ -183,7 +181,6 @@ impl Login {
             rx,
             tx,
             skipped,
-            runtime: None,
         }
     }
 
@@ -199,22 +196,10 @@ impl Login {
     /// 背景の仕事を始める。**ウィンドウが出る前に呼んでよい。**
     ///
     /// 鍵の生成に 1 秒前後かかるので、早く始めたぶんだけ QR が早く出る。
-    pub fn start(&mut self, waker: Waker) {
+    pub fn start(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
         if self.skipped {
             return;
         }
-
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-        {
-            Ok(r) => r,
-            Err(e) => {
-                self.session = Session::Failed(format!("非同期処理を始められない: {e}"));
-                return;
-            }
-        };
 
         // 鍵束が開けなくても**ログインはできる**。保存だけを諦める
         let store = match SecretStore::new() {
@@ -226,10 +211,9 @@ impl Login {
         };
 
         let tx = self.tx.clone();
-        runtime.spawn(async move {
+        rt.spawn(async move {
             run(tx, waker, store).await;
         });
-        self.runtime = Some(runtime);
     }
 
     /// 溜まっている知らせを**空になるまで**取り込む。変わったら `true`。
@@ -330,10 +314,10 @@ async fn restore(store: Option<&SecretStore>) -> Option<LoggedIn> {
     let token = Token::new(String::from_utf8(raw).ok()?);
     let rest = RestClient::anonymous().ok()?;
 
-    match rest.authenticate(token).await {
+    match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
             tracing::info!(user = %me.user.name(), "保存されたトークンで入った");
-            Some(LoggedIn { me, client })
+            Some(LoggedIn { me, client, token })
         }
         Err(e) => {
             tracing::warn!(%e, "保存されたトークンが通らない。捨ててログインし直す");
@@ -391,7 +375,7 @@ async fn attempt(
                     tracing::warn!(%e, "トークンを保存できなかった。次回もログインが要る");
                 }
 
-                let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client })));
+                let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
                 waker.wake();
                 return Ok(true);
             }
@@ -412,6 +396,20 @@ impl Login {
 
     pub(crate) fn apply_for_test(&mut self, event: LoginEvent) {
         self.apply(event);
+    }
+}
+
+impl Login {
+    /// トークンが無効になった (`FR-004`)。**鍵束から捨ててやり直す。**
+    ///
+    /// ⚠️ 捨てないと、次の起動でも同じ死んだトークンで入ろうとして、
+    /// 同じところで弾かれる。
+    pub fn forget(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
+        if let Ok(store) = SecretStore::new() {
+            let _ = store.clear(TOKEN_KEY);
+        }
+        self.session = Session::Connecting;
+        self.start(rt, waker);
     }
 }
 

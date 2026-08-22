@@ -14,6 +14,7 @@
 //! 仕様: [`spec/09-discord-protocol.md`]
 
 pub mod auth;
+pub mod channel;
 pub mod client;
 pub mod ratelimit;
 pub mod route;

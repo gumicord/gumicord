@@ -108,11 +108,14 @@ impl Route {
 
     // ───────────────────────────────────────────── メッセージ
 
-    /// `GET /channels/:id/messages` (`FR-020`)
-    pub fn messages(channel: ChannelId) -> Self {
+    /// `GET /channels/:id/messages` (`FR-020`)。
+    ///
+    /// ⚠️ **件数は経路に載るが、バケットの鍵には入れない。** 入れると
+    /// 件数を変えるたびに別のバケットを覚えることになり、制限を共有できない
+    pub fn messages(channel: ChannelId, limit: u8) -> Self {
         Self::scoped(
             Method::Get,
-            format!("/channels/{channel}/messages"),
+            format!("/channels/{channel}/messages?limit={limit}"),
             format!("/channels/{channel}/messages"),
         )
     }
@@ -186,7 +189,7 @@ mod tests {
     fn the_method_is_part_of_the_bucket() {
         let ch = ChannelId::from(1u64);
         assert_ne!(
-            Route::messages(ch).bucket_key,
+            Route::messages(ch, 50).bucket_key,
             Route::create_message(ch).bucket_key
         );
     }
