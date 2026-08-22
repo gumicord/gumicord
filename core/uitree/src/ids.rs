@@ -153,6 +153,7 @@ define_node_ids! {
     NavGuildListItemIcon,     "nav.guild_list.item.icon",        Guild,   Core,   "ギルドアイコン";
     NavGuildListItemBadge,    "nav.guild_list.item.badge",       Guild,   Core,   "未読・メンション数 (FR-042)";
     NavGuildListFolder,       "nav.guild_list.folder",           None,    Core,   "サーバフォルダ。押すと開閉する";
+    NavGuildListFolderIcon,   "nav.guild_list.folder.icon",      None,    Core,   "開いているフォルダの目印";
     NavChannelList,           "nav.channel_list",                None,    Core,   "チャンネル一覧 (FR-011)";
     NavChannelListHeader,     "nav.channel_list.header",         None,    Core,   "ギルド名などの見出し";
     NavChannelListCategory,   "nav.channel_list.category",       Category, Core,  "カテゴリ (FR-011)";

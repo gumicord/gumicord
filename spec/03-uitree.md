@@ -223,6 +223,7 @@ M1 で公開するフィールド。
 | `nav.guild_list.item.icon` | `GuildData` | ギルドアイコン |
 | `nav.guild_list.item.badge` | `GuildData` | 未読・メンション数 (FR-042) |
 | `nav.guild_list.folder` | — | サーバフォルダ。押すと開閉する |
+| `nav.guild_list.folder.icon` | — | 開いているフォルダの目印 |
 | `nav.channel_list` | — | チャンネル一覧 (FR-011) |
 | `nav.channel_list.header` | — | ギルド名などの見出し |
 | `nav.channel_list.category` | `CategoryData` | カテゴリ (FR-011) |
@@ -292,7 +293,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 71 個** (中核 50 / プラグインも生成可 21)。
+**合計 72 個** (中核 51 / プラグインも生成可 21)。
 
 <!-- END GENERATED: node-ids -->
 

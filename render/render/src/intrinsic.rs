@@ -174,9 +174,13 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
 
         // ── nav.* — ギルド一覧は内容 (48px の丸) が幅を決める
         NavGuildList => Intrinsic::column().cross(Cross::Start).scrollable(),
-        NavGuildListHome | NavGuildListItem | NavGuildListItemIcon | NavGuildListFolder => {
+        NavGuildListHome | NavGuildListItem | NavGuildListItemIcon | NavGuildListFolderIcon => {
             Intrinsic::stack().w(48.0).h(48.0)
         }
+        // ⚠️ **フォルダは中身を抱える入れ物である。** 開いているときは
+        // 目印と中のサーバが縦に並び、**その背景が 1 枚で後ろを通る**。
+        // 高さは中身が決めるので、ここでは決めない
+        NavGuildListFolder => Intrinsic::column().cross(Cross::Center).w(48.0),
         NavGuildListItemBadge => Intrinsic::row(),
 
         NavChannelList | NavDmList => Intrinsic::column()

@@ -144,23 +144,32 @@
       "select": "nav.guild_list.folder",
       "style": {
         "width": 48,
+        "radius": "$radius.lg",
+        "background": "$color.bg.hover",
+        "padding": [0, 0, 4, 0],
+        "gap": "$space.1"
+      }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "collapsed" },
+      "style": {
         "height": 48,
         "radius": "$radius.md",
         "background": "$color.bg.raised",
-        "color": "$color.text.secondary",
-        "font": { "size": 26, "lineHeight": 26 },
+        "borderColor": "$color.border",
+        "borderWidth": 1,
         "padding": [6, 6, 6, 6]
       }
     },
     {
       "select": "nav.guild_list.folder",
       "when": { "state": "hover" },
-      "style": { "background": "$color.bg.hover", "color": "$color.text.primary" }
+      "style": { "background": "$color.bg.selected" }
     },
     {
-      "select": "nav.guild_list.folder",
-      "when": { "state": "collapsed" },
-      "style": { "borderColor": "$color.border", "borderWidth": 1 }
+      "select": "nav.guild_list.folder.icon",
+      "style": { "color": "$color.text.secondary", "font": { "size": 26, "lineHeight": 26 } }
     },
     {
       "select": "nav.guild_list.item.badge",
