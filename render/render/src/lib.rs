@@ -29,6 +29,7 @@ pub use geom::{Rect, Size};
 pub use gpu::{GpuError, Presented};
 pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
 pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState};
+pub use text::ImageData;
 
 use gumicord_uitree::{Key, NodeId, UiNode};
 
@@ -285,3 +286,21 @@ impl Renderer {
 /// 最初のフレームが出るまでの色。テーマの背景がすぐ上に載るので、
 /// これが見えるのは起動直後の一瞬だけである
 const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+impl Renderer {
+    /// 取ってきた画像をアトラスへ入れる。
+    ///
+    /// ⚠️ **レンダラは網に触らない。** 取得も復号もアプリの仕事で、ここへ
+    /// 来るのは既に RGBA になったものだけである
+    /// ([`spec/02-architecture.md`])。
+    ///
+    /// 入らなければ黙って諦める。**絵が出ないだけで、他は何も壊れない**
+    pub fn put_image(&mut self, image: &crate::text::ImageData) {
+        self.text.put_image(&self.gpu.queue, image);
+    }
+
+    /// その画像を既に持っているか。**取りに行くかの判断に使う**
+    pub fn has_image(&self, url: &str) -> bool {
+        self.text.has_image(url)
+    }
+}

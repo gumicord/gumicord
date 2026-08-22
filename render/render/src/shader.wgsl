@@ -92,7 +92,8 @@ struct GlyphInst {
     @location(0) rect: vec4<f32>,   // x, y, w, h (物理px)
     @location(1) uv: vec4<f32>,     // u0, v0, u1, v1
     @location(2) color: vec4<f32>,
-    @location(3) flags: f32,        // 1.0 = カラー絵文字
+    @location(3) flags: f32,        // 1.0 = カラー絵文字・画像
+    @location(4) radius: f32,       // 角の半径 (物理px)。0 なら切らない
 };
 
 struct GlyphOut {
@@ -100,6 +101,9 @@ struct GlyphOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) flags: f32,
+    @location(3) local: vec2<f32>,
+    @location(4) half_size: vec2<f32>,
+    @location(5) radius: f32,
 };
 
 @vertex
@@ -110,16 +114,32 @@ fn vs_text(@builtin(vertex_index) vi: u32, inst: GlyphInst) -> GlyphOut {
     out.uv = mix(inst.uv.xy, inst.uv.zw, corner);
     out.color = inst.color;
     out.flags = inst.flags;
+    out.local = (corner - vec2<f32>(0.5, 0.5)) * inst.rect.zw;
+    out.half_size = inst.rect.zw * 0.5;
+    // 半径は短辺の半分を超えられない。**超えさせると円が壊れる**
+    out.radius = min(inst.radius, min(inst.rect.z, inst.rect.w) * 0.5);
     return out;
 }
 
 @fragment
 fn fs_text(in: GlyphOut) -> @location(0) vec4<f32> {
     let tex = textureSample(atlas_tex, atlas_smp, in.uv);
+
+    // 角丸で切り抜く。**丸いアバターはこれで作る。**
+    //
+    // ⚠️ シザー矩形では丸く切れない。切り取りは矩形しか表せないので、
+    // 円形は形そのものを描く側が持つしかない
+    var clip = 1.0;
+    if (in.radius > 0.0) {
+        let d = sd_round_box(in.local, in.half_size, in.radius);
+        let aa = max(fwidth(d), 0.0001);
+        clip = 1.0 - smoothstep(-aa, aa, d);
+    }
+
     if (in.flags > 0.5) {
-        // カラー絵文字: テクスチャの色をそのまま使う
-        return vec4<f32>(tex.rgb, tex.a * in.color.a);
+        // カラー絵文字と画像: テクスチャの色をそのまま使う
+        return vec4<f32>(tex.rgb, tex.a * in.color.a * clip);
     }
     // マスクグリフ: アルファのみ使い、色は指定色
-    return vec4<f32>(in.color.rgb, in.color.a * tex.a);
+    return vec4<f32>(in.color.rgb, in.color.a * tex.a * clip);
 }

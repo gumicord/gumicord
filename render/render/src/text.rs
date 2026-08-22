@@ -589,6 +589,8 @@ enum AtlasKey {
     Glyph(CacheKey),
     /// アイコン名と、描く物理ピクセルの大きさ
     Icon(&'static str, u32),
+    /// 取ってきた画像。**URL の指紋で引く**
+    Image(u64),
 }
 
 /// アトラスへ詰めるときの、絵そのもの以外の情報。
@@ -995,5 +997,79 @@ mod fit_tests {
         assert_eq!(s.fit_single_line("あ", &font, 0.0), "あ");
         assert_eq!(s.fit_single_line("あいうえお", &font, 1.0), "…");
         assert_eq!(s.fit_single_line("", &font, 100.0), "");
+    }
+}
+
+/// 取ってきた画像 1 枚。**画素はアプリが用意する。**
+///
+/// ⚠️ レンダラは網に触らない ([`spec/02-architecture.md`])。ここへ来るのは
+/// 既に取得も復号も済んだ RGBA である。
+#[derive(Debug, Clone)]
+pub struct ImageData {
+    /// 取り出し元。**同じ URL なら同じ絵である**
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA8。長さは `width * height * 4`
+    pub rgba: Vec<u8>,
+}
+
+/// URL の指紋。**アトラスの鍵にする。**
+///
+/// ⚠️ 文字列そのものを鍵にすると、フレームごとに複製することになる。
+/// URL は 100 文字を超えることがあり、1 フレームに何十個も引く
+pub fn image_key(url: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    url.hash(&mut h);
+    h.finish()
+}
+
+impl TextEngine {
+    /// 取ってきた画像をアトラスへ入れる。**同じ URL は 1 度だけ入る。**
+    ///
+    /// 入らなければ (アトラスが溢れていれば) `false`。呼び出し側は
+    /// **諦めてよい** — 絵が出ないだけで、他は何も壊れない
+    pub fn put_image(&mut self, queue: &wgpu::Queue, image: &ImageData) -> bool {
+        let key = AtlasKey::Image(image_key(&image.url));
+        if self.atlas.entries.contains_key(&key) {
+            return true;
+        }
+        if image.rgba.len() != (image.width as usize) * (image.height as usize) * 4 {
+            tracing::warn!(url = %image.url, "画素の数が大きさと合わない");
+            return false;
+        }
+
+        let entry = self.atlas.insert(
+            queue,
+            image.width,
+            image.height,
+            &image.rgba,
+            Placement {
+                left: 0,
+                top: 0,
+                // 画像は色そのものを使う。文字のように色を掛けない
+                is_color: true,
+            },
+        );
+        self.atlas.entries.insert(key, entry);
+        entry.is_some()
+    }
+
+    /// 既にアトラスに入っている画像。**無ければ `None`** で、
+    /// 呼び出し側は何も描かない
+    pub fn image(&self, url: &str) -> Option<GlyphEntry> {
+        self.atlas
+            .entries
+            .get(&AtlasKey::Image(image_key(url)))
+            .copied()
+            .flatten()
+    }
+
+    /// その画像を持っているか。**取りに行くかどうかの判断に使う**
+    pub fn has_image(&self, url: &str) -> bool {
+        self.atlas
+            .entries
+            .contains_key(&AtlasKey::Image(image_key(url)))
     }
 }

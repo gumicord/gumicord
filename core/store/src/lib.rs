@@ -218,6 +218,17 @@ impl Store {
         false
     }
 
+    /// そのサーバのアイコンの URL。**設定していなければ `None`**
+    ///
+    /// ⚠️ **動くアイコンも静止画として頼む** (`User::avatar_url` と同じ)。
+    /// 読めない形を頼んで何も出せないほうが悪い
+    pub fn guild_icon_url(&self, id: GuildId, size: u16) -> Option<String> {
+        let hash = self.guilds.get(&id)?.icon.as_ref()?;
+        Some(format!(
+            "https://cdn.discordapp.com/icons/{id}/{hash}.png?size={size}"
+        ))
+    }
+
     pub fn guild(&self, id: GuildId) -> Option<&GuildRow> {
         self.guilds.get(&id)
     }

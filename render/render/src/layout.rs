@@ -242,6 +242,8 @@ impl<'a> Cx<'a, '_, '_> {
                 let s = ResolvedFont::from_style(&node.style).size();
                 Size::new(s, s)
             }
+            // 画像は入れ物いっぱいに広がる。**内容から大きさは決まらない**
+            Content::Image(_) => Size::ZERO,
             // QR は正方形で、**入れ物いっぱいに広がる**。
             // 内容から大きさは決まらないので、与えられた分を使う
             Content::Qr(_) => {

@@ -56,15 +56,17 @@ impl User {
         self.display_name.as_deref().unwrap_or(&self.username)
     }
 
-    /// アバター画像の URL。設定していなければ `None`
+    /// アバター画像の URL。設定していなければ `None`。
     ///
-    /// `size` は 2 の冪 (16〜4096)。Discord がその大きさで返す
+    /// `size` は 2 の冪 (16〜4096)。Discord がその大きさで返す。
+    ///
+    /// ⚠️ **動くアバターも静止画として頼む。** `a_` で始まる印は GIF だが、
+    /// `.png` を頼めば 1 コマ目が PNG で返る。動かす仕組みは別の話であり、
+    /// **読めない形を頼んで何も出せないほうが悪い**
     pub fn avatar_url(&self, size: u16) -> Option<String> {
         let hash = self.avatar.as_ref()?;
-        // アニメーション付きは a_ で始まる
-        let ext = if hash.starts_with("a_") { "gif" } else { "png" };
         Some(format!(
-            "https://cdn.discordapp.com/avatars/{}/{hash}.{ext}?size={size}",
+            "https://cdn.discordapp.com/avatars/{}/{hash}.png?size={size}",
             self.id
         ))
     }
@@ -154,9 +156,9 @@ impl From<RawGuild> for Guild {
 impl Guild {
     pub fn icon_url(&self, size: u16) -> Option<String> {
         let hash = self.icon.as_ref()?;
-        let ext = if hash.starts_with("a_") { "gif" } else { "png" };
+        // ⚠️ **動くアイコンも静止画として頼む** (User::avatar_url と同じ)
         Some(format!(
-            "https://cdn.discordapp.com/icons/{}/{hash}.{ext}?size={size}",
+            "https://cdn.discordapp.com/icons/{}/{hash}.png?size={size}",
             self.id
         ))
     }
@@ -416,14 +418,18 @@ mod tests {
         assert!(c.kind.is_text());
     }
 
-    /// アニメーション付きのアバターは gif で取る
+    /// ⚠️ **動くアバターも png で頼む。**
+    ///
+    /// `a_` で始まる印は GIF だが、`.png` を頼めば 1 コマ目が PNG で返る。
+    /// 読める形を頼まないと、**動かないどころか何も出せない** (R5 が読むのは
+    /// PNG だけである)
     #[test]
-    fn animated_avatars_use_gif() {
+    fn even_animated_avatars_are_requested_as_png() {
         let mut u: User = serde_json::from_str(r#"{"id":"7","username":"x"}"#).unwrap();
         assert_eq!(u.avatar_url(64), None, "設定していなければ URL は無い");
 
         u.avatar = Some("a_abc".into());
-        assert!(u.avatar_url(64).unwrap().ends_with("a_abc.gif?size=64"));
+        assert!(u.avatar_url(64).unwrap().ends_with("a_abc.png?size=64"));
 
         u.avatar = Some("abc".into());
         assert!(u.avatar_url(64).unwrap().ends_with("abc.png?size=64"));

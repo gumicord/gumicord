@@ -111,6 +111,12 @@ impl RestClient {
         }
     }
 
+    /// ⚠️ **トークンを付けない生の HTTP。** CDN から画像を取るときだけ使う。
+    /// 付ける必要がないところへ送らないため
+    pub(crate) fn raw_http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     pub fn is_authenticated(&self) -> bool {
         self.token.is_some()
     }

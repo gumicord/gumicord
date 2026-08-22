@@ -106,12 +106,18 @@ impl DrawList {
         self.extend_run(RunKind::Rect, first, scissor);
     }
 
+    /// テクスチャ付きクアッドを 1 個積む。
+    ///
+    /// `radius` が 0 より大きければ**角丸で切り抜く**。丸いアバターは
+    /// これで作る — シザー矩形では丸く切れない
+    #[allow(clippy::too_many_arguments)]
     fn push_glyph(
         &mut self,
         r: [f32; 4],
         uv: [f32; 4],
         color: [f32; 4],
         is_color: bool,
+        radius: f32,
         scissor: Option<[u32; 4]>,
     ) {
         let first = self.glyph_count();
@@ -129,7 +135,7 @@ impl DrawList {
             color[2],
             color[3],
             if is_color { 1.0 } else { 0.0 },
-            0.0,
+            radius,
             0.0,
             0.0,
         ]);
@@ -256,6 +262,9 @@ pub fn build(
                     caret_visible,
                 );
             }
+            Content::Image(url) => draw_image(
+                &mut dl, text, placed, url, opacity, scale, radius_px, scissor,
+            ),
             Content::Qr(data) => draw_qr(&mut dl, placed, data, opacity, scale, scissor),
             _ => {}
         }
@@ -299,7 +308,7 @@ fn draw_icon(
     let y = box_px[1] + ((box_px[3] - size) * 0.5).round();
 
     let color = linear(style.color.unwrap_or(FALLBACK_TEXT), opacity);
-    dl.push_glyph([x, y, size, size], e.uv, color, e.is_color, scissor);
+    dl.push_glyph([x, y, size, size], e.uv, color, e.is_color, 0.0, scissor);
 }
 
 fn draw_background(
@@ -656,7 +665,7 @@ fn draw_glyph_run(
     });
 
     for (r, uv, is_color) in out {
-        dl.push_glyph(r, uv, color, is_color, scissor);
+        dl.push_glyph(r, uv, color, is_color, 0.0, scissor);
     }
 }
 
@@ -683,6 +692,69 @@ fn draw_text(
     }
 
     draw_glyph_run(dl, text, queue, placed, s, color, scale, scissor);
+}
+
+/// 取ってきた画像を 1 枚描く。
+///
+/// # 入れ物いっぱいに、比を保って、はみ出しは切る
+///
+/// アバターは正方形の枠に収まるが、**元の絵が正方形とは限らない**。
+/// 引き伸ばすと人の顔が歪むので、短いほうに合わせて拡大し、長いほうの端を
+/// 切る。
+///
+/// ⚠️ **切るのはテクスチャ座標で行う。** シザー矩形で切ると角丸と両立できない。
+///
+/// # まだ手元に無ければ何も描かない
+///
+/// 取ってくるのはアプリの仕事である ([`spec/02-architecture.md`])。
+/// **ここで待たない。** 届いた次のフレームで出る
+#[allow(clippy::too_many_arguments)]
+fn draw_image(
+    dl: &mut DrawList,
+    text: &TextEngine,
+    placed: &crate::layout::Placed<'_>,
+    url: &str,
+    opacity: f32,
+    scale: f32,
+    radius_px: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    let Some(e) = text.image(url) else { return };
+    let box_px = snap(placed.inner, scale);
+    if box_px[2] <= 0.0 || box_px[3] <= 0.0 {
+        return;
+    }
+
+    // 絵の縦横比と枠の縦横比を比べ、はみ出すほうを切る
+    let (uw, uh) = (e.uv[2] - e.uv[0], e.uv[3] - e.uv[1]);
+    let want = box_px[2] / box_px[3];
+    let have = if e.h > 0 {
+        e.w as f32 / e.h as f32
+    } else {
+        want
+    };
+
+    let (mut u0, mut v0, mut u1, mut v1) = (e.uv[0], e.uv[1], e.uv[2], e.uv[3]);
+    if have > want {
+        // 絵のほうが横長。左右を切る
+        let cut = uw * (1.0 - want / have) * 0.5;
+        u0 += cut;
+        u1 -= cut;
+    } else if have < want {
+        // 絵のほうが縦長。上下を切る
+        let cut = uh * (1.0 - have / want) * 0.5;
+        v0 += cut;
+        v1 -= cut;
+    }
+
+    dl.push_glyph(
+        box_px,
+        [u0, v0, u1, v1],
+        [1.0, 1.0, 1.0, opacity],
+        true,
+        radius_px,
+        scissor,
+    );
 }
 
 #[cfg(test)]

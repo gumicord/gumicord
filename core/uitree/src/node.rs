@@ -34,6 +34,13 @@ pub enum Content {
     /// やめてテクスチャにしたときに、UITree 側を変えずに済ませるためである。
     /// **知らない名前は誤りではない**。描かずに進む。
     Icon(String),
+    /// 画像。**中身ではなく取り出し元の URL を持つ。**
+    ///
+    /// ⚠️ **UITree に画素を載せない。** 木は毎フレーム組み直されるので、
+    /// 画素を持たせると 1 フレームごとに数 MB を複製することになる。
+    /// 取ってくるのも復号するのもアプリの仕事で、レンダラは**既に手元に
+    /// あるものだけを描く** (無ければ何も描かない)
+    Image(String),
     /// QR コード ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
     ///
     /// **中身の文字列だけを持つ。** 符号化も描画もレンダラの仕事である。
@@ -71,6 +78,13 @@ impl Content {
             Content::Text(s) => Some(s),
             Content::Editable(e) if e.text.is_empty() => Some(&e.placeholder),
             Content::Editable(e) => Some(&e.text),
+            _ => None,
+        }
+    }
+
+    pub fn as_image(&self) -> Option<&str> {
+        match self {
+            Content::Image(url) => Some(url),
             _ => None,
         }
     }
@@ -159,6 +173,11 @@ impl UiNode {
     /// アイコンを持つノード。
     pub fn icon(id: NodeId, name: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Icon(name.into()))
+    }
+
+    /// 画像を持つノード。**中身ではなく URL** である
+    pub fn image(id: NodeId, url: impl Into<String>) -> Self {
+        UiNode::new(id).with_content(Content::Image(url.into()))
     }
 
     /// QR コードを持つノード。中身は符号化する前の文字列である

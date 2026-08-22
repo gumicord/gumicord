@@ -244,6 +244,12 @@ impl Gpu {
                         offset: 48,
                         shader_location: 3,
                     },
+                    // 角の半径 (物理 px)。**丸いアバターのために要る**
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32,
+                        offset: 52,
+                        shader_location: 4,
+                    },
                 ],
             },
         );

@@ -123,6 +123,15 @@ pub trait Application {
     /// である。
     fn start(&mut self, _waker: Waker) {}
 
+    /// 取ってきた画像を引き取る。**描く直前に呼ばれる。**
+    ///
+    /// ⚠️ **レンダラは網に触らない** ([`spec/02-architecture.md`])。
+    /// 取得も復号もアプリの仕事で、ここを通って画素だけが渡る。
+    /// 渡したものは**アプリの手元から消えてよい** — アトラスへ入る
+    fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
+        Vec::new()
+    }
+
     /// [`Waker::wake`] で起こされた。溜まった知らせを取り込む。
     /// 再描画が要るなら `true`。
     ///
@@ -458,9 +467,15 @@ impl Host {
         }
 
         let caret_on = self.caret_on;
+        // ⚠️ **描く前に入れる。** このフレームで使えるようにするため
+        let images = self.app.take_images();
+
         let (stats, backend) = {
             let Some(r) = &mut self.renderer else { return };
             r.set_caret_visible(caret_on);
+            for image in &images {
+                r.put_image(image);
+            }
             let cx = FrameCx {
                 viewport: r.viewport(),
                 scale: r.scale(),

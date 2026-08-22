@@ -52,6 +52,7 @@
 //! 仕様: [`spec/02-architecture.md`]
 
 pub mod demo;
+pub mod images;
 pub mod live;
 pub mod session;
 
@@ -77,6 +78,13 @@ const DEFAULT_THEME: &str = include_str!("../../../examples/themes/midnight/them
 /// テーマ作成時に見比べるためのもので、設定画面とホットリロード
 /// (`EXT-015`, E2) ができたら消える。
 const THEME_ENV: &str = "GUMICORD_THEME";
+
+/// サーバアイコンとアバターを CDN に頼むときの辺の長さ。
+///
+/// ⚠️ **2 の冪でないと Discord が丸める。** 画面の 2 倍まで見込んで
+/// 大きめに取り、実際に使う大きさへはこちらで縮める
+const ICON_PX: u16 = 128;
+const AVATAR_PX: u16 = 128;
 
 /// ポインタが乗ったときに反応するノード。
 ///
@@ -166,6 +174,10 @@ pub struct Gumicord {
     input: TextDocument,
     /// demo のときにこの場で送ったもの。**本物では使わない**
     sent: Vec<demo::Message>,
+    /// 絵を取ってくるもの (R5)
+    images: images::Images,
+    /// この木で要る絵の URL。**描く直前に取りに行く**
+    wanted_images: Vec<String>,
 }
 
 impl Gumicord {
@@ -213,6 +225,8 @@ impl Gumicord {
             input_focused: false,
             input: TextDocument::new(),
             sent: Vec::new(),
+            images: images::Images::new(),
+            wanted_images: Vec::new(),
         }
     }
 
@@ -281,6 +295,18 @@ impl Application for Gumicord {
         self.runtime = Some(runtime);
     }
 
+    /// 取ってきた絵を渡す。**描く直前に呼ばれる。**
+    ///
+    /// ⚠️ ここで**要る絵を注文する**。木を組んだ直後なので、いま画面に
+    /// 出ているものが分かっている。一覧を先読みして全部取りに行くと、
+    /// 何百枚も要求することになる
+    fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
+        for url in std::mem::take(&mut self.wanted_images) {
+            self.images.request(&url);
+        }
+        self.images.take()
+    }
+
     /// 背景の知らせを取り込む。**ここが唯一の入り口である。**
     fn wake(&mut self) -> bool {
         let mut changed = self.login.poll();
@@ -301,6 +327,8 @@ impl Application for Gumicord {
                 waker.clone(),
             );
             self.live.set_me(me);
+            self.images
+                .start(rt.handle(), l.client.clone(), waker.clone());
         }
 
         // `FR-004`: Gateway にトークンを弾かれた。**捨ててログイン画面へ戻す**
@@ -312,6 +340,7 @@ impl Application for Gumicord {
             // `SEC-021`: **キャッシュも残さない。** 残すと、次に別の人が
             // この機械を使ったときに前の人のメッセージが読める
             self.live.forget_everything();
+            self.images.forget_everything();
             changed = true;
         }
 
@@ -422,6 +451,14 @@ impl Application for Gumicord {
     fn build(&mut self, cx: &FrameCx) -> UiNode {
         // [3] UITree 構築
         let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
+
+        // 描くのに要る絵を集める。**木を組んだ直後だから分かる**
+        self.wanted_images.clear();
+        tree.walk(&mut |n, _| {
+            if let Some(url) = n.content.as_image() {
+                self.wanted_images.push(url.to_owned());
+            }
+        });
 
         // [5] テーマ解決
         match &self.theme {
@@ -543,7 +580,7 @@ impl Gumicord {
             }
 
             list = list.child(
-                UiNode::text(NodeId::NavGuildListItem, initial(&g.name))
+                face(NodeId::NavGuildListItem, g.icon.as_deref(), &g.name)
                     .with_id_key(g.id)
                     .with_data(g.id)
                     .with_state_if(g.id == self.selected_guild, State::Selected)
@@ -705,7 +742,7 @@ impl Gumicord {
             .with_state_if(m.mentioned, State::Mentioned)
             .with_state_if(self.hovered_id(NodeId::ChatMessage, m.id), State::Hover)
             .child_if(!grouped, || {
-                UiNode::text(NodeId::ChatMessageAvatar, initial(&m.author)).with_data(m.id)
+                face(NodeId::ChatMessageAvatar, m.avatar.as_deref(), &m.author).with_data(m.id)
             })
             // 送信者行と本文を縦に積む。`layout.column` はこのためにある
             .child(body)
@@ -722,6 +759,8 @@ impl Gumicord {
 struct GuildRow {
     id: u64,
     name: String,
+    /// アイコンの URL。**無ければ頭文字を出す**
+    icon: Option<String>,
     unread: bool,
     mentions: u32,
     /// フォルダの見出しなら、そのフォルダの識別子
@@ -746,6 +785,8 @@ struct ChannelRow {
 struct MessageRow {
     id: u64,
     author: String,
+    /// アバターの URL。**無ければ頭文字を出す**
+    avatar: Option<String>,
     time: String,
     body: String,
     mentioned: bool,
@@ -814,6 +855,7 @@ impl Gumicord {
         let bare = |id: u64, name: String, unread: bool, mentions: u32| GuildRow {
             id,
             name,
+            icon: None,
             unread,
             mentions,
             folder_of_own: None,
@@ -839,6 +881,8 @@ impl Gumicord {
                     id,
                     // 名前が無いフォルダもある。**中身の名前で代わりにする**
                     name: row.name.clone().unwrap_or_else(|| self.folder_label(row)),
+                    // フォルダ自体に絵は無い。**中身の絵を並べるのは M2**
+                    icon: None,
                     unread: false,
                     mentions: 0,
                     folder_of_own: Some(id),
@@ -848,6 +892,7 @@ impl Gumicord {
                 GuildEntry::Guild { row, folder } => GuildRow {
                     id: row.id.get(),
                     name: row.name.clone(),
+                    icon: self.live.store().guild_icon_url(row.id, ICON_PX),
                     // read-state はまだ無い。**無いものを在るように見せない**
                     unread: false,
                     mentions: 0,
@@ -939,6 +984,7 @@ impl Gumicord {
                 .map(|m| MessageRow {
                     id: m.id,
                     author: m.author.to_string(),
+                    avatar: None,
                     time: m.time.to_string(),
                     body: m.body.to_string(),
                     mentioned: m.mentioned,
@@ -954,6 +1000,7 @@ impl Gumicord {
             .map(|m| MessageRow {
                 id: m.id.get(),
                 author: m.author.name().to_owned(),
+                avatar: m.author.avatar_url(AVATAR_PX),
                 time: local_time(&m.timestamp),
                 body: m.content.clone(),
                 // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
@@ -1480,5 +1527,22 @@ mod channel_selection_tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].category);
         assert_eq!(a.openable_rows().len(), 1);
+    }
+}
+
+/// アイコンかアバターを 1 つ作る。
+///
+/// # 絵が無いときは頭文字を出す
+///
+/// ⚠️ **絵が届くまでの間も同じノードである。** 届いてから別のノードに
+/// 差し替えると、`key` が変わって差分更新がやり直しになる。
+///
+/// 絵が「まだ手元に無い」ことはレンダラしか知らないので、ここでは
+/// **URL があるかどうかだけ**で決める。届いていなければレンダラが
+/// 何も描かず、テーマの背景色がそのまま見える。
+fn face(id: NodeId, url: Option<&str>, name: &str) -> UiNode {
+    match url {
+        Some(url) => UiNode::image(id, url),
+        None => UiNode::text(id, initial(name)),
     }
 }

@@ -42,6 +42,39 @@ impl RestClient {
     }
 }
 
+impl RestClient {
+    /// CDN から取ってくる (アバター・サーバアイコン)。
+    ///
+    /// ⚠️ **API ではない。** 認証も要らず、レート制限のバケットも別である。
+    /// トークンを付けないのは、**付ける必要がないところへ送らない**ため。
+    ///
+    /// ⚠️ 大きすぎるものは途中で諦める。CDN が何を返すかはこちらの都合とは
+    /// 無関係で、**画像 1 枚でメモリを食い潰されてはいけない**
+    pub async fn fetch_cdn(&self, url: &str) -> Result<Vec<u8>, RestError> {
+        /// 1 枚の上限 (バイト)。アバターは大きくても数十 KB である
+        const MAX: usize = 4 * 1024 * 1024;
+
+        let response = self.raw_http().get(url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(RestError::Api {
+                status: status.as_u16(),
+                body: String::new(),
+            });
+        }
+
+        let bytes = response.bytes().await?;
+        if bytes.len() > MAX {
+            tracing::warn!(url, len = bytes.len(), "画像が大きすぎる。捨てる");
+            return Err(RestError::Api {
+                status: 0,
+                body: "画像が大きすぎる".to_owned(),
+            });
+        }
+        Ok(bytes.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -78,6 +78,11 @@ base64 = "0.22"
 # QR ログイン (ADR-0007) の QR を描くため。**符号化だけで、描くのは自前**
 qrcode = { version = "0.14", default-features = false }
 
+# 画像 (R5)。**PNG だけを読む。**
+# CDN には .png で頼むので、画像の万能ライブラリは要らない。
+# 添付ファイル (利用者が上げた任意の形式) を出すときに考え直す
+png = "0.18"
+
 # 永続化
 rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 
