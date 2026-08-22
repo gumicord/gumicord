@@ -178,6 +178,8 @@ GUMICORD_THEME=examples/themes/midnight/theme.json cargo run -p gumicord-desktop
 | **ログイン (C4a, P4)** | ✅ QR でログインし、トークンは OS の鍵束へ |
 | **通信 (C2, C3)** | ✅ 本物のサーバ・チャンネル・発言が出る。送れる |
 | 状態の保持 (C5, C6) | ✅ SQLite に残り、次の起動で先に描く |
+| サーバの並び・カテゴリ・入力中 | ✅ Discord と同じ順で並び、カテゴリが出る |
+| サーバフォルダ | ❌ まだ。**順は読めているので、あとは表示だけ** |
 | 未読・既読位置 | ❌ まだ (READY の read_state) |
 | Markdown (C7) | ❌ まだ。素のまま出ます |
 | プラグイン (E4〜E7) | ❌ まだ |
