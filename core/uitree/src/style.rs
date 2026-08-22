@@ -44,7 +44,7 @@ impl Style {
     /// **K1 の実装。** `other` で指定されているプロパティだけを上書きする。
     ///
     /// ```
-    /// # use gumicord_theme::{Style, value::Color};
+    /// # use gumicord_uitree::{Style, value::Color};
     /// let mut a = Style {
     ///     color: Color::parse("#111"),
     ///     radius: Some(8.0),

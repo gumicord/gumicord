@@ -31,9 +31,16 @@
 pub mod cond;
 pub mod diag;
 mod parse;
-pub mod style;
+pub mod resolve;
 pub mod token;
-pub mod value;
+
+// `Style` と値の型は**拡張 ABI のデータ型**であり、テーマ・プラグイン・
+// レンダラの 3 者が触る。定義元は ABI の定義元である `gumicord-uitree` に
+// 置き、ここからは再エクスポートする。
+//
+// テーマ側に置くと、`UiNode` が `Style` を持つ以上
+// `gumicord-uitree` → `gumicord-theme` → `gumicord-uitree` の循環になる。
+pub use gumicord_uitree::{style, value};
 
 use std::collections::HashMap;
 
@@ -44,6 +51,7 @@ use gumicord_uitree::NodeId;
 pub use crate::cond::{ColorScheme, MatchContext, Platform, PlatformSel, When};
 pub use crate::diag::{Diagnostic, Diagnostics, Ignored, Severity};
 pub use crate::parse::{Manifest, Rule};
+pub use crate::resolve::resolve;
 pub use crate::style::Style;
 pub use crate::token::{TokenValue, Tokens};
 pub use crate::value::{AssetKind, AssetRef, Background, Color, Edges, Fit, Font, Shadow};

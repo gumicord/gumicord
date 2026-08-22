@@ -14,8 +14,13 @@
 //! 仕様: [`spec/03-uitree.md`]
 
 pub mod ids;
+pub mod node;
+pub mod style;
+pub mod value;
 
 pub use ids::{DataKind, NodeId, Origin, UnknownNodeId};
+pub use node::{Content, DataRef, UiNode};
+pub use style::Style;
 
 /// ノードの状態。テーマの条件分岐に使う (`EXT-013`)。
 ///

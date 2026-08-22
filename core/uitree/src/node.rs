@@ -1,0 +1,227 @@
+//! UITree のノード。
+//!
+//! 構造は [`spec/03-uitree.md`] 2 章が定める。
+//!
+//! # 仕様の構造体との差分
+//!
+//! 仕様に載る `UiNode` には**中身**がない。`chat.message.content` が
+//! 「本文である」ことは安定 ID が表しているが、**その本文が何という文字列か**は
+//! どのフィールドにも入らない。描画できないので [`Content`] を足している。
+//!
+//! `Content` は拡張 ABI ではない。プラグインは `ui.text()` のような SDK の
+//! 関数を通してのみ中身を作れる ([`spec/05-plugin-api.md`])。
+//!
+//! **レイアウトの方向 (row / column) はここに持たない。** 安定 ID が
+//! 意味を決め、その意味からどう並べるかはレンダラの判断である
+//! ([`spec/06-renderer.md`] 8 章)。テーマがレイアウトを上書きできるように
+//! なるのは `EXT-014` (M2) からで、そのときもここではなくスタイル側に入る。
+
+use crate::ids::{DataKind, NodeId};
+use crate::style::Style;
+use crate::{Key, State, StateSet};
+
+/// ノードが表示する中身。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Content {
+    /// 子ノードだけを持つ。コンテナ
+    #[default]
+    None,
+    /// 文字列。整形はレンダラが行う
+    Text(String),
+}
+
+impl Content {
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Content::Text(s) => Some(s),
+            Content::None => None,
+        }
+    }
+}
+
+/// そのノードが表現しているドメインオブジェクトへの参照
+/// ([`spec/03-uitree.md`] 2.4)。
+///
+/// ⚠️ **公開するのは読み取り専用のスナップショットであり、内部の状態そのもの
+/// ではない。** M1.1 では種別と識別子だけを持つ。フィールドの公開は Store
+/// (C5) ができてから、仕様の表に列挙されたものだけを足す。
+///
+/// **フィールドもまた拡張 ABI である。** 追加は自由だが削除と改名は破壊的変更。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataRef {
+    pub kind: DataKind,
+    /// Discord のスノーフレーク
+    pub id: u64,
+}
+
+/// UITree のノード 1 個。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiNode {
+    /// 安定 ID。拡張 ABI そのもの
+    pub id: NodeId,
+    /// 同じ親の下で同じ `id` を持つノードを区別する鍵
+    pub key: Option<Key>,
+    /// 状態。テーマの条件分岐に使う (`EXT-013`)
+    pub states: StateSet,
+    /// このノードが表現しているドメインオブジェクトへの参照
+    pub data: Option<DataRef>,
+    /// 表示する中身
+    pub content: Content,
+    /// テーマとプラグインによって解決された最終的なスタイル。
+    ///
+    /// **構築時は空である。** パイプラインの [5] と [6] が埋める
+    /// ([`spec/02-architecture.md`])。
+    pub style: Style,
+    pub children: Vec<UiNode>,
+}
+
+impl UiNode {
+    pub fn new(id: NodeId) -> Self {
+        UiNode {
+            id,
+            key: None,
+            states: StateSet::EMPTY,
+            data: None,
+            content: Content::None,
+            style: Style::default(),
+            children: Vec::new(),
+        }
+    }
+
+    /// 文字列を持つノード。
+    pub fn text(id: NodeId, s: impl Into<String>) -> Self {
+        UiNode::new(id).with_content(Content::Text(s.into()))
+    }
+
+    pub fn with_key(mut self, key: Key) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// スノーフレークを鍵にする。リスト項目でもっとも多い形。
+    pub fn with_id_key(mut self, id: u64) -> Self {
+        self.key = Some(Key::Id(id));
+        self
+    }
+
+    pub fn with_state(mut self, state: State) -> Self {
+        self.states = self.states.with(state);
+        self
+    }
+
+    /// 条件つきで状態を立てる。呼び出し側の `if` を減らすためだけのもの。
+    pub fn with_state_if(mut self, cond: bool, state: State) -> Self {
+        if cond {
+            self.states = self.states.with(state);
+        }
+        self
+    }
+
+    pub fn with_states(mut self, states: StateSet) -> Self {
+        self.states = states;
+        self
+    }
+
+    /// ドメインオブジェクトへの参照を付ける。
+    ///
+    /// 種別は安定 ID が決めるので、呼び出し側は識別子だけを渡す。
+    /// `data` を持たない ID に付けようとした場合は**黙って無視する**。
+    /// ここで落とすと、ID の `data` 種別を後から足したときに呼び出し側が
+    /// 壊れるため。
+    pub fn with_data(mut self, id: u64) -> Self {
+        let kind = self.id.data_kind();
+        if kind != DataKind::None {
+            self.data = Some(DataRef { kind, id });
+        }
+        self
+    }
+
+    pub fn with_content(mut self, content: Content) -> Self {
+        self.content = content;
+        self
+    }
+
+    pub fn child(mut self, node: UiNode) -> Self {
+        self.children.push(node);
+        self
+    }
+
+    /// 条件つきで子を足す。
+    pub fn child_if(self, cond: bool, node: impl FnOnce() -> UiNode) -> Self {
+        if cond { self.child(node()) } else { self }
+    }
+
+    pub fn children(mut self, nodes: impl IntoIterator<Item = UiNode>) -> Self {
+        self.children.extend(nodes);
+        self
+    }
+
+    /// 深さ優先・前順の走査。**これが描画順である**
+    /// ([`spec/06-renderer.md`] 7.5)。
+    pub fn walk(&self, f: &mut impl FnMut(&UiNode, usize)) {
+        self.walk_at(0, f);
+    }
+
+    fn walk_at(&self, depth: usize, f: &mut impl FnMut(&UiNode, usize)) {
+        f(self, depth);
+        for c in &self.children {
+            c.walk_at(depth + 1, f);
+        }
+    }
+
+    /// ノードの総数。
+    pub fn count(&self) -> usize {
+        1 + self.children.iter().map(UiNode::count).sum::<usize>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_is_attached_only_where_the_id_declares_it() {
+        // chat.message は MessageData を持つ
+        let m = UiNode::new(NodeId::ChatMessage).with_data(42);
+        assert_eq!(
+            m.data,
+            Some(DataRef {
+                kind: DataKind::Message,
+                id: 42
+            })
+        );
+
+        // layout.row は data を持たない。黙って無視する
+        let r = UiNode::new(NodeId::LayoutRow).with_data(42);
+        assert_eq!(r.data, None);
+    }
+
+    /// 走査順が描画順である。前順であることを固定する
+    #[test]
+    fn walk_is_depth_first_pre_order() {
+        let tree = UiNode::new(NodeId::AppRoot)
+            .child(UiNode::new(NodeId::NavGuildList).child(UiNode::new(NodeId::NavGuildListItem)))
+            .child(UiNode::new(NodeId::ChatView));
+
+        let mut seen = Vec::new();
+        tree.walk(&mut |n, d| seen.push((n.id, d)));
+
+        assert_eq!(
+            seen,
+            vec![
+                (NodeId::AppRoot, 0),
+                (NodeId::NavGuildList, 1),
+                (NodeId::NavGuildListItem, 2),
+                (NodeId::ChatView, 1),
+            ]
+        );
+        assert_eq!(tree.count(), 4);
+    }
+
+    #[test]
+    fn text_content_round_trips() {
+        let n = UiNode::text(NodeId::ChatMessageContent, "こんにちは");
+        assert_eq!(n.content.as_text(), Some("こんにちは"));
+        assert_eq!(UiNode::new(NodeId::ChatView).content.as_text(), None);
+    }
+}
