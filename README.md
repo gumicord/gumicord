@@ -58,7 +58,7 @@ gumicord/
 │  ├─ 08-spike-plan.md      技術検証計画 (完了)
 │  ├─ 09-discord-protocol.md
 │  ├─ schema/               JSON Schema と検証ツール
-│  └─ adr/                  アーキテクチャ決定記録 0001-0006
+│  └─ adr/                  アーキテクチャ決定記録 0001-0007
 │
 ├─ core/          Rust
 │  ├─ model/        ドメイン型

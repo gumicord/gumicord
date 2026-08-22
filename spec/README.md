@@ -29,6 +29,7 @@
 | [0004](adr/0004-semantic-uitree-as-extension-abi.md) | セマンティック UI ツリーを唯一の拡張 ABI とする | 承認 |
 | [0005](adr/0005-ime-strategy.md) | ~~IME テキスト入力層を自前実装する~~ | ❌ 廃止 (0006 が置換) |
 | [0006](adr/0006-windows-ime-via-winit.md) | Windows のテキスト入力は `winit` の IME 経路で足りる | 承認 |
+| [0007](adr/0007-login-paths-and-captcha.md) | ログイン経路を 2 本持ち、captcha は OS に出させる | 承認 |
 
 ## ルール
 
