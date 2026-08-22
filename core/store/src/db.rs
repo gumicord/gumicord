@@ -64,6 +64,8 @@ pub struct Snapshot {
     pub last_channel: Option<ChannelId>,
     /// `last_channel` のメッセージ。古い順
     pub messages: Vec<Message>,
+    /// 利用者が並べた順。**空なら分からないということ**
+    pub guild_order: Vec<GuildId>,
 }
 
 /// 書き込みスレッドへ送る仕事。
@@ -74,6 +76,7 @@ enum Job {
         list: Vec<Message>,
     },
     LastChannel(ChannelId),
+    GuildOrder(String),
     /// 読み出し。**返す先は呼んだ側が渡す**
     Load {
         channel: ChannelId,
@@ -277,10 +280,29 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
         None => Vec::new(),
     };
 
+    // ⚠️ **順も戻す。** これが無いと、キャッシュから描いた最初の一瞬だけ
+    // 順が違い、READY が届いた瞬間に一覧が跳ねる
+    let guild_order: Vec<GuildId> = conn
+        .query_row(
+            "SELECT value FROM state WHERE key = 'guild_order'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .into_iter()
+        .flat_map(|s| {
+            s.split(',')
+                .filter(|p| !p.is_empty())
+                .map(|p| parse_id(p.to_owned()))
+                .collect::<Vec<GuildId>>()
+        })
+        .collect();
+
     Ok(Snapshot {
         guilds,
         last_channel,
         messages,
+        guild_order,
     })
 }
 
@@ -345,6 +367,14 @@ fn run(conn: &rusqlite::Connection, job: Job) -> rusqlite::Result<()> {
             // ⚠️ 読めなくても必ず呼び戻す。**返事が来ないと画面が
             // 「読み込み中」のまま止まる**
             then(read_messages(conn, channel).unwrap_or_default());
+            Ok(())
+        }
+        Job::GuildOrder(joined) => {
+            conn.execute(
+                "INSERT INTO state(key, value) VALUES('guild_order', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [joined],
+            )?;
             Ok(())
         }
         Job::LastChannel(ch) => {
@@ -476,6 +506,21 @@ impl Db {
         if self.tx.send(Job::Barrier(tx)).is_ok() {
             let _ = rx.recv();
         }
+    }
+}
+
+impl Db {
+    /// 並び順を残す。
+    ///
+    /// ⚠️ **これが無いと、次の起動でキャッシュから描いたときだけ順が違う。**
+    /// READY が届いた瞬間に正しい順へ飛ぶので、起動のたびに一覧が跳ねる
+    pub fn save_guild_order(&self, order: &[GuildId]) {
+        let joined = order
+            .iter()
+            .map(|g| g.get().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.send(Job::GuildOrder(joined));
     }
 }
 

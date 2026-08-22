@@ -60,6 +60,7 @@ use std::borrow::Cow;
 use gumicord_model::{ChannelId, GuildId};
 use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
+use gumicord_store::ChannelEntry;
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 use live::Live;
@@ -170,8 +171,21 @@ impl Gumicord {
     pub fn new() -> Self {
         // ⚠️ **ここでキャッシュを読む。** 最初のフレームに間に合わせるため
         // で、これが `NFR-011` と C6 の実体である
-        let live = Live::new();
+        Gumicord::with(Login::new(), Live::new())
+    }
 
+    /// ログインを飛ばし、[`demo`] の固定データで画面を組む。
+    ///
+    /// レンダラやテーマを触るのに毎回スマホを出すのは馬鹿らしい。
+    /// `GUMICORD_SKIP_LOGIN=1` で起動したときと同じ状態になる。
+    ///
+    /// ⚠️ **キャッシュも開かない。** 本物のデータが混ざると、
+    /// 「demo を見ている」という前提が崩れる
+    pub fn demo() -> Self {
+        Gumicord::with(Login::skipped(), Live::without_cache())
+    }
+
+    fn with(login: Login, live: Live) -> Self {
         // 前回開いていたチャンネルを、そのギルドごと復元する
         let (guild, channel) = match live.last_channel() {
             Some(ch) => {
@@ -190,7 +204,7 @@ impl Gumicord {
             theme: load_theme(),
             runtime: None,
             waker: None,
-            login: Login::new(),
+            login,
             live,
             hovered: None,
             selected_guild: guild,
@@ -198,18 +212,6 @@ impl Gumicord {
             input_focused: false,
             input: TextDocument::new(),
             sent: Vec::new(),
-        }
-    }
-
-    /// ログインを飛ばし、[`demo`] の固定データで画面を組む。
-    ///
-    /// レンダラやテーマを触るのに毎回スマホを出すのは馬鹿らしい。
-    /// `GUMICORD_SKIP_LOGIN=1` で起動したときと同じ状態になる。
-    /// **本物のデータは出ない。**
-    pub fn demo() -> Self {
-        Gumicord {
-            login: Login::skipped(),
-            ..Gumicord::new()
         }
     }
 
@@ -541,13 +543,16 @@ impl Gumicord {
             .unwrap_or_else(|| "Gumicord".to_owned());
 
         let mut list = UiNode::new(NodeId::NavChannelList)
-            .child(UiNode::text(NodeId::NavChannelListHeader, title))
-            .child(UiNode::text(
-                NodeId::NavChannelListCategory,
-                "テキストチャンネル",
-            ));
+            .child(UiNode::text(NodeId::NavChannelListHeader, title));
 
         for c in self.channel_rows() {
+            // カテゴリは見出しである。**押しても開かないので、当たりも作らない**
+            if c.category {
+                list = list
+                    .child(UiNode::text(NodeId::NavChannelListCategory, c.name).with_id_key(c.id));
+                continue;
+            }
+
             let mut item = UiNode::new(NodeId::NavChannelListItem)
                 .with_id_key(c.id)
                 .with_data(c.id)
@@ -638,10 +643,11 @@ impl Gumicord {
             return format!("  {hint}");
         }
         if self.uses_live() {
-            if self.live.is_loading(ChannelId::from(self.selected_channel)) {
+            let channel = ChannelId::from(self.selected_channel);
+            if self.live.is_loading(channel) {
                 return "  読み込んでいます…".to_owned();
             }
-            return String::new();
+            return typing_line(&self.live.typing_in(channel));
         }
         "  みどり が入力中…".to_owned()
     }
@@ -699,6 +705,8 @@ struct ChannelRow {
     topic: Option<String>,
     unread: bool,
     mentions: u32,
+    /// カテゴリの見出し。**押しても開かない**
+    category: bool,
 }
 
 struct MessageRow {
@@ -760,8 +768,10 @@ impl Gumicord {
 
         if self.selected_channel != 0 {
             // 2 回目からは何もしない
-            self.live
-                .open_channel(ChannelId::from(self.selected_channel));
+            self.live.open_channel(
+                GuildId::from(self.selected_guild),
+                ChannelId::from(self.selected_channel),
+            );
         }
         changed
     }
@@ -806,22 +816,36 @@ impl Gumicord {
                     ),
                     unread: c.unread,
                     mentions: c.mentions,
+                    category: false,
                 })
                 .collect();
         }
 
-        // ⚠️ 文字のチャンネルへの絞り込みと並べ替えは [`Store`] が済ませている。
+        // ⚠️ 絞り込みも並べ替えもカテゴリの入れ子も [`Store`] が済ませている。
         // **画面が毎フレーム並べ替えると、フレームごとに順が揺れうる**
         self.live
             .store()
-            .channels_of(GuildId::from(self.selected_guild))
-            .map(|c| ChannelRow {
-                id: c.id.get(),
-                name: c.display_name(),
-                icon: c.kind.icon(),
-                topic: c.topic.clone(),
-                unread: false,
-                mentions: 0,
+            .entries_of(GuildId::from(self.selected_guild))
+            .map(|e| match e {
+                ChannelEntry::Category(c) => ChannelRow {
+                    id: c.id.get(),
+                    name: c.display_name(),
+                    icon: "",
+                    topic: None,
+                    unread: false,
+                    mentions: 0,
+                    category: true,
+                },
+                ChannelEntry::Channel(c) => ChannelRow {
+                    id: c.id.get(),
+                    name: c.display_name(),
+                    icon: c.kind.icon(),
+                    topic: c.topic.clone(),
+                    // read-state はまだ無い。**無いものを在るように見せない**
+                    unread: false,
+                    mentions: 0,
+                    category: false,
+                },
             })
             .collect()
     }
@@ -1156,10 +1180,7 @@ mod login_tests {
     /// ⚠️ `Gumicord::new()` は `GUMICORD_SKIP_LOGIN` を読む。**開発機の
     /// 環境変数で試験の結果が変わってはいけない**ので、ここで潰す
     fn pending() -> Gumicord {
-        Gumicord {
-            login: Login::fresh_for_test(),
-            ..Gumicord::new()
-        }
+        Gumicord::with(Login::fresh_for_test(), Live::without_cache())
     }
 
     fn ids(tree: &UiNode) -> Vec<NodeId> {
@@ -1263,5 +1284,46 @@ mod login_tests {
         let login = Login::fresh_for_test();
         assert!(!login.shows_main());
         assert!(login.session().qr().is_none());
+    }
+}
+
+/// 「入力中」の一行を組み立てる。
+///
+/// ⚠️ **名前を全部並べない。** 賑やかなサーバでは 10 人が同時に打つことが
+/// あり、そのまま並べると一行に収まらず、他の表示を押し出す。
+/// Discord も 3 人までで打ち切る。
+fn typing_line(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => format!("  {a} が入力中…"),
+        [a, b] => format!("  {a} と {b} が入力中…"),
+        [a, b, c] => format!("  {a}、{b}、{c} が入力中…"),
+        [a, b, rest @ ..] => format!("  {a}、{b} ほか {} 人が入力中…", rest.len()),
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    /// 誰も打っていなければ**何も出さない**
+    #[test]
+    fn nobody_typing_says_nothing() {
+        assert_eq!(typing_line(&[]), "");
+    }
+
+    #[test]
+    fn one_and_two_and_three_are_named() {
+        assert_eq!(typing_line(&["あ"]), "  あ が入力中…");
+        assert_eq!(typing_line(&["あ", "い"]), "  あ と い が入力中…");
+        assert_eq!(typing_line(&["あ", "い", "う"]), "  あ、い、う が入力中…");
+    }
+
+    /// ⚠️ **賑やかなサーバでも一行に収まる。**
+    /// 全部並べると他の表示を押し出す
+    #[test]
+    fn a_crowd_is_summarised() {
+        let many = ["あ", "い", "う", "え", "お", "か"];
+        assert_eq!(typing_line(&many), "  あ、い ほか 4 人が入力中…");
     }
 }

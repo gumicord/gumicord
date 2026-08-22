@@ -56,7 +56,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use gumicord_model::{CurrentUser, Guild, Token};
+use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, Token};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
@@ -134,6 +134,27 @@ pub struct Ready {
     /// READY 全体が読めなくなり、Gateway が永久に繋ぎ直し続けた**ことがある
     #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
     pub guilds: Vec<Guild>,
+    /// 利用者の設定。**中身は base64 された protobuf** である。
+    ///
+    /// ここにサーバの並び順が入っている ([`crate::guild_order`])
+    #[serde(default)]
+    pub user_settings_proto: Option<String>,
+}
+
+impl Ready {
+    /// 利用者が Discord で並べ替えたサーバの順。
+    ///
+    /// ⚠️ **名前順で出してはいけない。** 自分で並べた順以外で並ぶと、
+    /// 「自分のサーバ一覧ではない」ものになる。
+    ///
+    /// 取り出せなければ空。呼び出し側は READY の順に落とす
+    pub fn guild_order(&self) -> Vec<GuildId> {
+        let Some(proto) = &self.user_settings_proto else {
+            return Vec::new();
+        };
+        let known = self.guilds.iter().map(|g| g.id.get()).collect();
+        crate::guild_order::from_settings_proto(proto, &known)
+    }
 }
 
 /// 接続を保ち続けるもの。
@@ -145,6 +166,55 @@ pub struct Gateway {
     backoff: Duration,
     /// 次に返す `Reconnecting`。`next` の頭で吐き出す
     pending_notice: Option<Event>,
+    /// 見ているギルドと、その中で開いているチャンネル。
+    ///
+    /// ⚠️ **繋ぎ直すたびに送り直す。** 購読は接続に紐づく
+    wanted: std::collections::HashMap<GuildId, ChannelId>,
+    requests: tokio::sync::mpsc::UnboundedReceiver<(GuildId, ChannelId)>,
+}
+
+/// 「このチャンネルを見ている」と Gateway へ伝える手。
+///
+/// # なぜ要るのか
+///
+/// ⚠️ **利用者トークンでは、黙っていても `MESSAGE_CREATE` は来ない。**
+///
+/// READY のギルドには `"lazy": true` が付いている。公式クライアントは
+/// 画面に出ているギルドだけを `op 14` で購読し、Discord はそのギルドの
+/// 出来事だけを送る。**何百のサーバに入っている利用者へ全部送るのは、
+/// 双方にとって無駄だからである。**
+///
+/// 購読しないと、新着も入力中の表示も一切届かない。
+#[derive(Clone, Debug)]
+pub struct Subscriptions {
+    tx: tokio::sync::mpsc::UnboundedSender<(GuildId, ChannelId)>,
+}
+
+impl Subscriptions {
+    /// そのギルドの、そのチャンネルを見ていると伝える。
+    ///
+    /// **何度呼んでもよい。** 同じものは送り直されるだけである
+    pub fn watch(&self, guild: GuildId, channel: ChannelId) {
+        let _ = self.tx.send((guild, channel));
+    }
+}
+
+/// `op 14` — 見ているものを伝える。
+///
+/// `channels` の `[[0, 99]]` は「メンバー一覧の 0〜99 番目が要る」という
+/// 意味である。**メンバー一覧はまだ出さないが、この形でないと
+/// 購読が成立しない。**
+fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
+    json!({
+        "op": OP_GUILD_SUBSCRIBE,
+        "d": {
+            "guild_id": guild.get().to_string(),
+            "typing": true,
+            "threads": false,
+            "activities": true,
+            "channels": { channel.get().to_string(): [[0, 99]] },
+        },
+    })
 }
 
 impl core::fmt::Debug for Gateway {
@@ -165,14 +235,35 @@ struct SessionInfo {
 }
 
 impl Gateway {
-    pub fn new(token: Token) -> Self {
-        Gateway {
-            token,
-            conn: None,
-            session: None,
-            backoff: BACKOFF_MIN,
-            pending_notice: None,
+    /// 繋ぐものと、外から購読を頼む手を作る。
+    pub fn new(token: Token) -> (Self, Subscriptions) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            Gateway {
+                token,
+                conn: None,
+                session: None,
+                backoff: BACKOFF_MIN,
+                pending_notice: None,
+                wanted: std::collections::HashMap::new(),
+                requests: rx,
+            },
+            Subscriptions { tx },
+        )
+    }
+
+    /// 頼まれている購読を全部送り直す。
+    ///
+    /// ⚠️ **繋ぎ直すたびに送る。** 購読は接続に紐づくので、resume でも
+    /// identify でも、新しい接続には引き継がれない
+    async fn resend_subscriptions(&mut self) -> Result<(), GatewayError> {
+        let Some(conn) = self.conn.as_mut() else {
+            return Ok(());
+        };
+        for (guild, channel) in self.wanted.clone() {
+            conn.send(subscribe(guild, channel)).await?;
         }
+        Ok(())
     }
 
     /// 次の出来事まで進める。
@@ -207,10 +298,20 @@ impl Gateway {
             }
 
             let conn = self.conn.as_mut().expect("直前に開いた");
-            match conn.pump(&mut self.session).await {
+            match conn
+                .pump(&mut self.session, &mut self.requests, &mut self.wanted)
+                .await
+            {
                 Ok(Some(event)) => {
                     // 何か届いたということは繋がっている。待ち時間を戻す
                     self.backoff = BACKOFF_MIN;
+                    // ⚠️ **購読は接続に紐づく。** 繋ぎ直したら送り直さないと、
+                    // 新着も入力中の表示も二度と来ない
+                    if matches!(event, Event::Ready(_) | Event::Resumed)
+                        && let Err(e) = self.resend_subscriptions().await
+                    {
+                        tracing::warn!(error = %e, "購読を送り直せなかった");
+                    }
                     return event;
                 }
                 // 心拍など、内部で片付いたもの
@@ -295,6 +396,8 @@ const OP_RECONNECT: u8 = 7;
 const OP_INVALID_SESSION: u8 = 9;
 const OP_HELLO: u8 = 10;
 const OP_HEARTBEAT_ACK: u8 = 11;
+/// 見ているギルドとチャンネルを伝える。**利用者トークンでは必須**
+const OP_GUILD_SUBSCRIBE: u8 = 14;
 
 #[derive(Debug, Deserialize)]
 struct Payload {
@@ -418,17 +521,35 @@ impl Connection {
     }
 
     /// 1 歩進める。返すものが無ければ `Ok(None)`。
+    ///
+    /// ⚠️ **ここで待つものは全部 cancel-safe でなければならない。**
+    /// `select!` は負けたほうの未来を捨てるので、送信の途中で捨てられると
+    /// WebSocket の書き込みが半端なところで切れる。だから**送るのは
+    /// 勝ったあと**にしかしない。
     async fn pump(
         &mut self,
         session: &mut Option<SessionInfo>,
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<(GuildId, ChannelId)>,
+        wanted: &mut std::collections::HashMap<GuildId, ChannelId>,
     ) -> Result<Option<Event>, GatewayError> {
         if let Some(payload) = self.queued.pop_front() {
             return self.handle(payload, session).await;
         }
 
-        tokio::select! {
-            // 心拍の番
-            _ = tokio::time::sleep_until(self.next_beat) => {
+        enum Step {
+            Beat,
+            Received(Option<()>),
+            Watch(Option<(GuildId, ChannelId)>),
+        }
+
+        let step = tokio::select! {
+            _ = tokio::time::sleep_until(self.next_beat) => Step::Beat,
+            got = self.recv() => Step::Received(got?),
+            got = requests.recv() => Step::Watch(got),
+        };
+
+        match step {
+            Step::Beat => {
                 if !self.acked {
                     // ⚠️ 網が切れても TCP はすぐには気付かない。
                     // **これが唯一の検知手段である**
@@ -436,15 +557,20 @@ impl Connection {
                 }
                 self.acked = false;
                 self.next_beat = tokio::time::Instant::now() + self.heartbeat;
-                self.send(json!({ "op": OP_HEARTBEAT, "d": self.last_seq })).await?;
+                self.send(json!({ "op": OP_HEARTBEAT, "d": self.last_seq }))
+                    .await?;
                 Ok(None)
             }
-            got = self.recv() => {
-                match got? {
-                    Some(()) => Ok(None),
-                    None => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
-                }
+            Step::Received(Some(())) => Ok(None),
+            Step::Received(None) => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
+            Step::Watch(Some((guild, channel))) => {
+                wanted.insert(guild, channel);
+                tracing::debug!(%guild, %channel, "購読する");
+                self.send(subscribe(guild, channel)).await?;
+                Ok(None)
             }
+            // 頼む側が居なくなった。**接続を切る理由にはならない**
+            Step::Watch(None) => Ok(None),
         }
     }
 
@@ -692,7 +818,7 @@ mod tests {
     /// 待ち時間は倍々に伸び、**上限で止まる**
     #[test]
     fn the_backoff_grows_but_is_capped() {
-        let mut g = Gateway::new(Token::new("x"));
+        let (mut g, _subs) = Gateway::new(Token::new("x"));
         assert_eq!(g.grow_backoff(), BACKOFF_MIN);
         assert_eq!(g.grow_backoff(), BACKOFF_MIN * 2);
         assert_eq!(g.grow_backoff(), BACKOFF_MIN * 4);
@@ -706,7 +832,7 @@ mod tests {
     /// ⚠️ **トークンが Debug に出ない** (`SEC-001`)
     #[test]
     fn the_token_never_appears_in_debug() {
-        let g = Gateway::new(Token::new("mfa.SUPER_SECRET"));
+        let (g, _subs) = Gateway::new(Token::new("mfa.SUPER_SECRET"));
         let shown = format!("{g:?}");
         assert!(
             !shown.contains("SUPER_SECRET"),

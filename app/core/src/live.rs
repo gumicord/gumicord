@@ -34,8 +34,8 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use gumicord_gateway::{Event, Fatal, Gateway, Ready};
-use gumicord_model::{ChannelId, Guild, Message, Token};
+use gumicord_gateway::{Event, Fatal, Gateway, Ready, Subscriptions};
+use gumicord_model::{ChannelId, Guild, GuildId, Message, Token, UserId};
 use gumicord_platform::Waker;
 use gumicord_rest::RestClient;
 use gumicord_store::{Db, GuildRow, Store};
@@ -45,6 +45,20 @@ use gumicord_store::{Db, GuildRow, Store};
 /// Discord の API の上限が 100。50 にしてあるのは、**開いた瞬間に見える分
 /// より少し多い**あたりで、往復を待たせないため
 const BACKLOG: u8 = 50;
+
+/// いま入力中の人が消えるまでの時間。
+///
+/// Discord は 10 秒で消し、まだ打っていれば `TYPING_START` を送り直す。
+/// **こちらが先に消してしまうと、打っている最中に表示が点滅する**
+const TYPING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 入力中の人 1 人。
+#[derive(Debug, Clone)]
+struct Typist {
+    user: UserId,
+    name: String,
+    at: std::time::Instant,
+}
 
 /// Gateway との繋がり具合。**画面に出すためのものである。**
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +105,12 @@ pub enum LiveEvent {
         channel: ChannelId,
         list: Vec<Message>,
     },
+    /// 誰かが打ち始めた
+    Typing {
+        channel: ChannelId,
+        user: UserId,
+        name: String,
+    },
     Link(Link),
     /// トークンが弾かれた (`FR-004`)。**鍵束もキャッシュも捨てる**
     TokenRejected,
@@ -115,6 +135,10 @@ pub struct Live {
     rejected: bool,
     /// 前回開いていたチャンネル (`NFR-011`)
     last_channel: Option<ChannelId>,
+    /// 「見ている」と Gateway へ伝える手。**これが無いと新着が来ない**
+    subs: Option<Subscriptions>,
+    /// チャンネルごとの、いま入力中の人。**残さない。消えてよいもの**
+    typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
 }
 
 impl Live {
@@ -123,7 +147,7 @@ impl Live {
     /// ⚠️ ここは同期に読む。最初のフレームに要るものなので、待たないと
     /// 「一瞬空っぽの画面」が出る。実測で数 ms しかかからない
     pub fn new() -> Self {
-        let mut live = Live::empty();
+        let mut live = Live::without_cache();
 
         match gumicord_store::default_path().and_then(|p| Db::open(&p)) {
             Ok((db, snapshot)) => {
@@ -133,6 +157,9 @@ impl Live {
                     "キャッシュから読み込んだ"
                 );
                 live.store.replace_guilds(snapshot.guilds);
+                if !snapshot.guild_order.is_empty() {
+                    live.store.set_preferred_order(snapshot.guild_order);
+                }
                 live.last_channel = snapshot.last_channel;
                 if let Some(ch) = snapshot.last_channel {
                     // ⚠️ **取りに行った印は付けない。** 繋がったら REST で
@@ -149,8 +176,10 @@ impl Live {
         live
     }
 
-    /// キャッシュを開かない空の状態。**試験と、キャッシュ無しの起動で使う**
-    fn empty() -> Self {
+    /// キャッシュを開かない。**demo と試験で使う。**
+    ///
+    /// ⚠️ 試験から `Live::new()` を呼ぶと、**開発機の本物のキャッシュを触る**
+    pub fn without_cache() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Live {
             tx,
@@ -165,6 +194,8 @@ impl Live {
             requested: HashSet::new(),
             rejected: false,
             last_channel: None,
+            subs: None,
+            typing: std::collections::HashMap::new(),
         }
     }
 
@@ -229,18 +260,43 @@ impl Live {
         self.waker = Some(waker.clone());
         self.link = Link::Connecting;
 
+        let (gateway, subs) = Gateway::new(token);
+        self.subs = Some(subs);
+
         let tx = self.tx.clone();
-        rt.spawn(async move { pump(Gateway::new(token), tx, waker).await });
+        rt.spawn(async move { pump(gateway, tx, waker).await });
+    }
+
+    /// そのチャンネルで**いま入力中の人**。
+    ///
+    /// ⚠️ 期限切れはここで落とす。時間で消えるものを状態として持つと、
+    /// 「消す」ための仕掛けがもう 1 つ要る
+    pub fn typing_in(&self, channel: ChannelId) -> Vec<&str> {
+        let now = std::time::Instant::now();
+        self.typing
+            .get(&channel)
+            .into_iter()
+            .flatten()
+            .filter(|t| now.duration_since(t.at) < TYPING_TTL)
+            .map(|t| &*t.name)
+            .collect()
     }
 
     /// そのチャンネルを開く。**キャッシュを先に出し、REST で追いかける。**
     ///
     /// ⚠️ 取りに行ったこと自体を覚えておかないと、選び直すたびに叩いて
     /// レート制限に当たる
-    pub fn open_channel(&mut self, channel: ChannelId) {
+    pub fn open_channel(&mut self, guild: GuildId, channel: ChannelId) {
         if let Some(db) = &self.db {
             db.save_last_channel(channel);
         }
+
+        // ⚠️ **毎回伝える。** 見ているチャンネルが変わったことを言わないと、
+        // そのチャンネルの新着も入力中の表示も来ない
+        if let Some(subs) = &self.subs {
+            subs.watch(guild, channel);
+        }
+
         if !self.requested.insert(channel) {
             return;
         }
@@ -327,8 +383,31 @@ impl Live {
         match event {
             LiveEvent::Ready(ready) => {
                 self.link = Link::Up;
+                // ⚠️ **順を先に取る。** ギルドを差し替えると `ready` が動く
+                let order = ready.guild_order();
                 self.store.replace_guilds(ready.guilds);
+                if !order.is_empty() {
+                    self.store.set_preferred_order(order);
+                }
                 self.save_guilds();
+                true
+            }
+            LiveEvent::Typing {
+                channel,
+                user,
+                name,
+            } => {
+                let list = self.typing.entry(channel).or_default();
+                let now = std::time::Instant::now();
+                match list.iter_mut().find(|t| t.user == user) {
+                    // 打ち続けている。**時刻だけ延ばす**
+                    Some(t) => t.at = now,
+                    None => list.push(Typist {
+                        user,
+                        name,
+                        at: now,
+                    }),
+                }
                 true
             }
             LiveEvent::GuildChanged(g) => {
@@ -397,6 +476,7 @@ impl Live {
             })
             .collect();
         db.save_guilds(guilds);
+        db.save_guild_order(self.store.order());
     }
 }
 
@@ -432,6 +512,18 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                     Ok(g) => send(LiveEvent::GuildChanged(Box::new(g))),
                     Err(e) => tracing::warn!(%e, "{kind} を読めなかった"),
                 },
+                "TYPING_START" => {
+                    if let Some(e) = typing_event(&data) {
+                        send(e);
+                        // ⚠️ **消えるときにも描き直しが要る。** 期限は時間で
+                        // 切れるので、放っておくと誰も起こしに来ない
+                        let waker = waker.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(TYPING_TTL).await;
+                            waker.wake();
+                        });
+                    }
+                }
                 _ => {}
             },
             Event::Reconnecting { reason, .. } => send(LiveEvent::Link(Link::Reconnecting(reason))),
@@ -447,6 +539,36 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
     }
 }
 
+/// `TYPING_START` から「誰がどこで打っているか」を取り出す。
+///
+/// ⚠️ **名前の在処が 3 通りある。**
+///
+/// ```text
+///   member.nick             サーバでの表示名。あればこれ
+///   member.user.global_name 表示名
+///   member.user.username    最後の頼み
+/// ```
+///
+/// DM には `member` が無い。名前が分からなければ**出さない** —
+/// 「誰かが入力中」とだけ出しても、利用者にできることが増えない
+fn typing_event(data: &serde_json::Value) -> Option<LiveEvent> {
+    let channel = data.get("channel_id")?.as_str()?.parse::<u64>().ok()?;
+    let user = data.get("user_id")?.as_str()?.parse::<u64>().ok()?;
+
+    let member = data.get("member")?;
+    let name = member
+        .get("nick")
+        .and_then(|v| v.as_str())
+        .or_else(|| member.pointer("/user/global_name").and_then(|v| v.as_str()))
+        .or_else(|| member.pointer("/user/username").and_then(|v| v.as_str()))?;
+
+    Some(LiveEvent::Typing {
+        channel: ChannelId::from(channel),
+        user: UserId::from(user),
+        name: name.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,7 +576,7 @@ mod tests {
 
     /// ⚠️ [`Live::new`] は**実際のキャッシュを開く**。試験では使わない
     fn live() -> Live {
-        Live::empty()
+        Live::without_cache()
     }
 
     fn ch() -> ChannelId {

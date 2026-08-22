@@ -57,8 +57,20 @@ pub struct Store {
     channels: HashMap<ChannelId, Channel>,
     /// チャンネルごとのメッセージ。**古い順**
     messages: HashMap<ChannelId, Vec<Message>>,
-    /// 名前順に並べたギルドの識別子。**毎フレーム並べ替えないため**
+    /// 画面に出す順。**毎フレーム並べ替えないため、ここに持つ**
     order: Vec<GuildId>,
+    /// 利用者が Discord で並べた順 (`user_settings_proto` 由来)
+    preferred: Vec<GuildId>,
+    /// 届いた順。**並び順が分からないものはこの順で後ろに続く**
+    arrival: Vec<GuildId>,
+}
+
+/// チャンネル一覧の 1 行。**見出しか、開けるものか。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelEntry<'a> {
+    /// カテゴリの見出し。**押しても開かない**
+    Category(&'a Channel),
+    Channel(&'a Channel),
 }
 
 /// ギルドのうち、チャンネル以外の部分。
@@ -74,7 +86,7 @@ impl Store {
         Store::default()
     }
 
-    /// 画面に出す順のギルド。**名前順**
+    /// 画面に出す順のギルド。**利用者が並べた順が先、残りは届いた順**
     pub fn guilds(&self) -> impl Iterator<Item = &GuildRow> {
         self.order.iter().filter_map(|id| self.guilds.get(id))
     }
@@ -87,13 +99,75 @@ impl Store {
         self.channels.get(&id)
     }
 
-    /// そのギルドの、文字を読み書きできるチャンネル。**並び順つき**
+    /// そのギルドの、**開けるチャンネルだけ**。並び順つき。
+    ///
+    /// カテゴリは含まない。選択の対象になるものだけが要るときに使う
     pub fn channels_of(&self, guild: GuildId) -> impl Iterator<Item = &Channel> {
-        self.guild_channels
-            .get(&guild)
+        self.entries_of(guild).filter_map(|e| match e {
+            ChannelEntry::Channel(c) => Some(c),
+            ChannelEntry::Category(_) => None,
+        })
+    }
+
+    /// 一覧に出す順の、カテゴリとチャンネル。
+    ///
+    /// # 並び順は Discord の規則に従う
+    ///
+    /// ```text
+    ///   カテゴリに属さないチャンネル   position 順
+    ///   カテゴリ A                      position 順
+    ///     └ その中のチャンネル          position 順
+    ///   カテゴリ B
+    ///     └ …
+    /// ```
+    ///
+    /// ⚠️ **position は重複する。** 同じ値なら識別子順 — つまり作られた順に
+    /// 倒す。ここが崩れると並びが毎フレーム変わって読めない
+    pub fn entries_of(&self, guild: GuildId) -> impl Iterator<Item = ChannelEntry<'_>> {
+        let ids = self.guild_channels.get(&guild).cloned().unwrap_or_default();
+        let all: Vec<&Channel> = ids.iter().filter_map(|id| self.channels.get(id)).collect();
+
+        fn sorted(mut v: Vec<&Channel>) -> Vec<&Channel> {
+            v.sort_by_key(|c| (c.position, c.id.get()));
+            v
+        }
+
+        let mut out: Vec<ChannelEntry<'_>> = Vec::with_capacity(all.len());
+
+        // [1] カテゴリの外にあるもの
+        out.extend(
+            sorted(
+                all.iter()
+                    .copied()
+                    .filter(|c| !c.kind.is_category() && c.parent_id.is_none())
+                    .collect(),
+            )
             .into_iter()
-            .flatten()
-            .filter_map(|id| self.channels.get(id))
+            .map(ChannelEntry::Channel),
+        );
+
+        // [2] カテゴリと、その中身
+        for cat in sorted(
+            all.iter()
+                .copied()
+                .filter(|c| c.kind.is_category())
+                .collect(),
+        ) {
+            let children = sorted(
+                all.iter()
+                    .copied()
+                    .filter(|c| !c.kind.is_category() && c.parent_id == Some(cat.id))
+                    .collect(),
+            );
+            // ⚠️ **空のカテゴリは出さない。** 見出しだけが浮くことになる。
+            // 権限で中身が見えないカテゴリは実際にこうなる
+            if children.is_empty() {
+                continue;
+            }
+            out.push(ChannelEntry::Category(cat));
+            out.extend(children.into_iter().map(ChannelEntry::Channel));
+        }
+        out.into_iter()
     }
 
     /// そのチャンネルのメッセージ。**まだ読んでいなければ空**
@@ -115,6 +189,7 @@ impl Store {
         self.guilds.clear();
         self.guild_channels.clear();
         self.channels.clear();
+        self.arrival.clear();
         for g in guilds {
             self.upsert_guild(g);
         }
@@ -132,12 +207,12 @@ impl Store {
 
         // ⚠️ **並び順は position、同じなら識別子順。** position が同じ
         // チャンネルは実在するので、そこで崩れると並びが毎フレーム変わる
-        let mut channels: Vec<Channel> = guild
+        let channels: Vec<Channel> = guild
             .channels
             .into_iter()
-            .filter(|c| c.kind.is_text())
+            // ⚠️ **カテゴリも保つ。** 見出しに要る。並べ替えは entries_of が行う
+            .filter(|c| c.kind.is_text() || c.kind.is_category())
             .collect();
-        channels.sort_by_key(|c| (c.position, c.id.get()));
 
         // ⚠️ 更新のときにチャンネルが空なら、**前のものを残す**。
         // GUILD_UPDATE は名前だけを持ってくることがある
@@ -149,6 +224,10 @@ impl Store {
             self.guild_channels.insert(id, ids);
         }
 
+        // 届いた順を覚える。**並び順が分からないものはこの順に落とす**
+        if !self.arrival.contains(&id) {
+            self.arrival.push(id);
+        }
         self.guilds.insert(
             id,
             GuildRow {
@@ -183,23 +262,40 @@ impl Store {
         true
     }
 
-    /// 名前順に並べ直す。同名のギルドは実在するので識別子順に倒す
+    /// 利用者が Discord で並べ替えた順を教える。
+    ///
+    /// ⚠️ **名前順ではない。** 自分で並べた順以外で出すと、
+    /// 「自分のサーバ一覧ではない」ものになる。
+    ///
+    /// ここに無いギルドは、届いた順で後ろに続く
+    pub fn set_preferred_order(&mut self, order: Vec<GuildId>) {
+        self.preferred = order;
+        self.resort();
+    }
+
+    /// いまの並び順。**そのまま保存して次の起動で戻せる**
+    pub fn order(&self) -> &[GuildId] {
+        &self.order
+    }
+
+    /// 並べ直す。
+    ///
+    /// **利用者が並べた順が先、残りは届いた順。** どちらにも名前は使わない
     fn resort(&mut self) {
-        self.order = self.guilds.keys().copied().collect();
-        let mut keyed: Vec<(String, GuildId)> = self
-            .order
+        let rank: HashMap<GuildId, usize> = self
+            .preferred
             .iter()
-            .map(|id| {
-                let name = self
-                    .guilds
-                    .get(id)
-                    .map(|g| g.name.clone())
-                    .unwrap_or_default();
-                (name, *id)
-            })
+            .enumerate()
+            .map(|(i, id)| (*id, i))
             .collect();
-        keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.get().cmp(&b.1.get())));
-        self.order = keyed.into_iter().map(|(_, id)| id).collect();
+
+        let mut ids: Vec<GuildId> = self.arrival.to_vec();
+        ids.retain(|id| self.guilds.contains_key(id));
+
+        // ⚠️ **安定な並べ替えを使う。** 順が決まっていないもの同士は
+        // 届いた順のままでいてほしい
+        ids.sort_by_key(|id| rank.get(id).copied().unwrap_or(usize::MAX));
+        self.order = ids;
     }
 }
 
@@ -253,9 +349,10 @@ mod tests {
         }
     }
 
-    /// ギルドは名前順、チャンネルは position 順
+    /// ⚠️ **ギルドは名前順ではない。** 届いた順のまま出す。
+    /// チャンネルは position 順
     #[test]
-    fn everything_comes_out_in_a_stable_order() {
+    fn guilds_keep_their_arrival_order_and_channels_sort_by_position() {
         let mut s = Store::new();
         s.replace_guilds(vec![
             guild(2, "ばなな", &[(20, "ろ", 1), (21, "い", 0)]),
@@ -263,13 +360,111 @@ mod tests {
         ]);
 
         let names: Vec<_> = s.guilds().map(|g| &*g.name).collect();
-        assert_eq!(names, vec!["あんず", "ばなな"]);
+        assert_eq!(names, vec!["ばなな", "あんず"], "勝手に名前で並べている");
 
         let chans: Vec<_> = s
             .channels_of(GuildId::from(2u64))
             .map(|c| c.name.as_deref().unwrap_or(""))
             .collect();
         assert_eq!(chans, vec!["い", "ろ"], "position 順になっていない");
+    }
+
+    /// 利用者が並べた順が勝つ。**ここに無いものは届いた順で後ろに続く**
+    #[test]
+    fn the_users_own_order_wins() {
+        let mut s = Store::new();
+        s.replace_guilds(vec![
+            guild(1, "いち", &[]),
+            guild(2, "に", &[]),
+            guild(3, "さん", &[]),
+        ]);
+
+        // 3 と 1 だけを並べた。2 は指定が無い
+        s.set_preferred_order(vec![GuildId::from(3u64), GuildId::from(1u64)]);
+
+        let names: Vec<_> = s.guilds().map(|g| &*g.name).collect();
+        assert_eq!(names, vec!["さん", "いち", "に"]);
+    }
+
+    /// 並び順に、もう居ないギルドが混ざっていても壊れない。
+    /// **保存した順を次の起動で使うので、抜けたサーバが残りうる**
+    #[test]
+    fn a_stale_order_does_not_resurrect_guilds() {
+        let mut s = Store::new();
+        s.replace_guilds(vec![guild(1, "いち", &[])]);
+        s.set_preferred_order(vec![GuildId::from(9u64), GuildId::from(1u64)]);
+
+        let names: Vec<_> = s.guilds().map(|g| &*g.name).collect();
+        assert_eq!(names, vec!["いち"]);
+        assert_eq!(s.order().len(), 1);
+    }
+
+    /// カテゴリは見出しとして出て、その中身が続く
+    #[test]
+    fn categories_come_out_as_headings_with_their_channels() {
+        use gumicord_model::ChannelKind;
+
+        let mut g = guild(1, "テスト", &[(10, "そとがわ", 0)]);
+        g.channels.push(Channel {
+            id: 20u64.into(),
+            kind: ChannelKind::GuildCategory,
+            name: Some("カテゴリ".to_owned()),
+            guild_id: Some(1u64.into()),
+            parent_id: None,
+            position: 1,
+            topic: None,
+            nsfw: false,
+            recipients: Vec::new(),
+        });
+        g.channels.push(Channel {
+            id: 21u64.into(),
+            kind: ChannelKind::GuildText,
+            name: Some("なかみ".to_owned()),
+            guild_id: Some(1u64.into()),
+            parent_id: Some(20u64.into()),
+            position: 0,
+            topic: None,
+            nsfw: false,
+            recipients: Vec::new(),
+        });
+
+        let mut s = Store::new();
+        s.replace_guilds(vec![g]);
+
+        let got: Vec<String> = s
+            .entries_of(GuildId::from(1u64))
+            .map(|e| match e {
+                ChannelEntry::Category(c) => format!("[{}]", c.display_name()),
+                ChannelEntry::Channel(c) => c.display_name(),
+            })
+            .collect();
+        assert_eq!(got, vec!["そとがわ", "[カテゴリ]", "なかみ"]);
+
+        // 見出しは開けるものではない
+        assert_eq!(s.channels_of(GuildId::from(1u64)).count(), 2);
+    }
+
+    /// **空のカテゴリは出さない。** 見出しだけが浮くことになる
+    #[test]
+    fn an_empty_category_is_not_shown() {
+        use gumicord_model::ChannelKind;
+
+        let mut g = guild(1, "テスト", &[]);
+        g.channels.push(Channel {
+            id: 20u64.into(),
+            kind: ChannelKind::GuildCategory,
+            name: Some("からっぽ".to_owned()),
+            guild_id: Some(1u64.into()),
+            parent_id: None,
+            position: 0,
+            topic: None,
+            nsfw: false,
+            recipients: Vec::new(),
+        });
+
+        let mut s = Store::new();
+        s.replace_guilds(vec![g]);
+        assert_eq!(s.entries_of(GuildId::from(1u64)).count(), 0);
     }
 
     /// **チャンネルは 1 箇所にしかない。** 同じものが 2 つの形で存在すると、

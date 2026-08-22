@@ -15,10 +15,11 @@
 //! 仕様: [`spec/09-discord-protocol.md`]
 
 pub mod gateway;
+pub mod guild_order;
 pub mod remote_auth;
 pub mod zstd_stream;
 
-pub use gateway::{Event, Fatal, Gateway, GatewayError, Ready};
+pub use gateway::{Event, Fatal, Gateway, GatewayError, Ready, Subscriptions};
 pub use remote_auth::{RemoteAuth, RemoteAuthError, RemoteAuthEvent, ScannedUser};
 pub use zstd_stream::ZstdStream;
 

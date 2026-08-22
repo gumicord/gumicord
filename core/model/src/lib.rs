@@ -233,6 +233,11 @@ impl ChannelKind {
         )
     }
 
+    /// 見出しであって、開けるものではない
+    pub const fn is_category(self) -> bool {
+        matches!(self, ChannelKind::GuildCategory)
+    }
+
     /// レンダラのアイコン名 (`gumicord_render::icon`)
     pub const fn icon(self) -> &'static str {
         match self {
