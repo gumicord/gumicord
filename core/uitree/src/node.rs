@@ -28,14 +28,32 @@ pub enum Content {
     None,
     /// 文字列。整形はレンダラが行う
     Text(String),
+    /// アイコン。**名前で指す。**
+    ///
+    /// 何が描かれるかはレンダラが決める。名前で指すのは、字として描くのを
+    /// やめてテクスチャにしたときに、UITree 側を変えずに済ませるためである。
+    /// **知らない名前は誤りではない**。描かずに進む。
+    Icon(String),
 }
 
 impl Content {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Content::Text(s) => Some(s),
-            Content::None => None,
+            _ => None,
         }
+    }
+
+    pub fn as_icon(&self) -> Option<&str> {
+        match self {
+            Content::Icon(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// 子ではなく自分自身が何かを描くか。レイアウトが葉として扱う判断に使う
+    pub fn is_leaf(&self) -> bool {
+        !matches!(self, Content::None)
     }
 }
 
@@ -91,6 +109,11 @@ impl UiNode {
     /// 文字列を持つノード。
     pub fn text(id: NodeId, s: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Text(s.into()))
+    }
+
+    /// アイコンを持つノード。
+    pub fn icon(id: NodeId, name: impl Into<String>) -> Self {
+        UiNode::new(id).with_content(Content::Icon(name.into()))
     }
 
     pub fn with_key(mut self, key: Key) -> Self {

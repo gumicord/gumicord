@@ -20,6 +20,7 @@
 pub mod draw;
 pub mod geom;
 pub mod gpu;
+pub mod icon;
 pub mod intrinsic;
 pub mod layout;
 pub mod text;

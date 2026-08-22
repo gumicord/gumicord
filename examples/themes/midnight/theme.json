@@ -67,6 +67,10 @@
     },
     {
       "select": "chrome.titlebar.control",
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "chrome.titlebar.control",
       "when": { "state": "hover" },
       "style": { "background": "$color.bg.hover" }
     },
@@ -122,6 +126,7 @@
       "style": {
         "radius": "$radius.sm",
         "padding": [6, 8, 6, 8],
+        "gap": 6,
         "color": "$color.text.secondary"
       }
     },
@@ -172,6 +177,7 @@
         "borderWidth": 1,
         "padding": [0, 16, 0, 16],
         "height": 48,
+        "gap": 8,
         "shadow": "$shadow.raised"
       }
     },

@@ -16,7 +16,7 @@ pub struct Guild {
 
 pub struct Channel {
     pub id: u64,
-    /// 種別を表す 1 文字。画像経路 (R5) ができるまでの代用
+    /// 種別を表すアイコンの名前 (`gumicord_render::icon`)
     pub icon: &'static str,
     pub name: &'static str,
     pub unread: bool,
@@ -62,42 +62,42 @@ pub const GUILDS: &[Guild] = &[
 pub const CHANNELS: &[Channel] = &[
     Channel {
         id: 10,
-        icon: "#",
+        icon: "channel.text",
         name: "はじめに",
         unread: false,
         mentions: 0,
     },
     Channel {
         id: 11,
-        icon: "#",
+        icon: "channel.text",
         name: "雑談",
         unread: true,
         mentions: 0,
     },
     Channel {
         id: 12,
-        icon: "#",
+        icon: "channel.text",
         name: "開発",
         unread: true,
         mentions: 2,
     },
     Channel {
         id: 13,
-        icon: "#",
+        icon: "channel.text",
         name: "テーマ作成",
         unread: false,
         mentions: 0,
     },
     Channel {
         id: 14,
-        icon: "#",
+        icon: "channel.text",
         name: "プラグイン",
         unread: false,
         mentions: 0,
     },
     Channel {
         id: 15,
-        icon: "#",
+        icon: "channel.text",
         name: "バグ報告",
         unread: false,
         mentions: 0,

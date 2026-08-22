@@ -225,14 +225,56 @@ pub fn build(
 
         draw_background(&mut dl, style, rect, radius_px, opacity, scale, scissor);
 
-        if let Content::Text(s) = &node.content
-            && !s.is_empty()
-        {
-            draw_text(&mut dl, text, queue, placed, s, opacity, scale, scissor);
+        match &node.content {
+            Content::Text(s) if !s.is_empty() => {
+                draw_text(&mut dl, text, queue, placed, s, opacity, scale, scissor);
+            }
+            Content::Icon(name) => {
+                draw_icon(&mut dl, text, queue, placed, name, opacity, scale, scissor);
+            }
+            _ => {}
         }
     }
 
     dl
+}
+
+/// アイコンを 1 個描く。
+///
+/// **整数のピクセルに合わせる。** アイコンは物理ピクセルちょうどの大きさで
+/// ラスタライズしてあるので、半端な位置に置くと折角の輪郭がぼやける。
+#[allow(clippy::too_many_arguments)]
+fn draw_icon(
+    dl: &mut DrawList,
+    text: &mut TextEngine,
+    queue: &wgpu::Queue,
+    placed: &crate::layout::Placed<'_>,
+    name: &str,
+    opacity: f32,
+    scale: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    let style = &placed.node.style;
+    let inner = placed.inner;
+
+    // 文字と同じ大きさを基準にし、入れ物からはみ出さないところまで詰める
+    let logical = ResolvedFont::from_style(style)
+        .size()
+        .min(inner.w)
+        .min(inner.h);
+    let size = (logical * scale).round().max(1.0);
+
+    let Some(e) = text.icon(queue, name, size as u32) else {
+        // 知らない名前。描かずに進む
+        return;
+    };
+
+    let box_px = snap(inner, scale);
+    let x = box_px[0] + ((box_px[2] - size) * 0.5).round();
+    let y = box_px[1] + ((box_px[3] - size) * 0.5).round();
+
+    let color = linear(style.color.unwrap_or(FALLBACK_TEXT), opacity);
+    dl.push_glyph([x, y, size, size], e.uv, color, e.is_color, scissor);
 }
 
 fn draw_background(

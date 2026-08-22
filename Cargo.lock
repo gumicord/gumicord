@@ -1245,8 +1245,10 @@ dependencies = [
  "cosmic-text",
  "gumicord-uitree",
  "pollster",
+ "sys-locale",
  "thiserror 2.0.20",
  "tracing",
+ "unicode-script",
  "wgpu",
 ]
 

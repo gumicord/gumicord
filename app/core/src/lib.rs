@@ -211,8 +211,10 @@ impl Gumicord {
     /// ボタンは `key` の [`Key::Slot`] で区別する。プラットフォーム層は
     /// この文字列だけを見てウィンドウ操作へつなぐ。
     fn titlebar(&self) -> UiNode {
-        let button = |slot: &'static str, glyph: &str| {
-            UiNode::text(NodeId::ChromeTitlebarControl, glyph)
+        // ⚠️ 字ではなくアイコンで描く。`−` `□` `✕` を文字として並べると
+        // 太さも大きさも書体任せになり、3 つ並べたときに揃わない
+        let button = |slot: &'static str, icon: &str| {
+            UiNode::icon(NodeId::ChromeTitlebarControl, icon)
                 .with_key(Key::Slot(slot))
                 .with_state_if(
                     self.is_hovered(NodeId::ChromeTitlebarControl, Some(&Key::Slot(slot))),
@@ -224,9 +226,9 @@ impl Gumicord {
             .child(UiNode::text(NodeId::ChromeTitlebarTitle, "  Gumicord"))
             .child(
                 UiNode::new(NodeId::ChromeTitlebarControls)
-                    .child(button("minimize", "\u{2013}"))
-                    .child(button("maximize", "\u{25a1}"))
-                    .child(button("close", "\u{2715}")),
+                    .child(button("minimize", "window.minimize"))
+                    .child(button("maximize", "window.maximize"))
+                    .child(button("close", "window.close")),
             )
     }
 
@@ -279,7 +281,7 @@ impl Gumicord {
                     self.hovered_id(NodeId::NavChannelListItem, c.id),
                     State::Hover,
                 )
-                .child(UiNode::text(NodeId::NavChannelListItemIcon, c.icon).with_data(c.id))
+                .child(UiNode::icon(NodeId::NavChannelListItemIcon, c.icon).with_data(c.id))
                 .child(UiNode::text(NodeId::NavChannelListItemName, c.name).with_data(c.id));
 
             if c.mentions > 0 {
@@ -301,14 +303,12 @@ impl Gumicord {
 
         let header = UiNode::new(NodeId::ChatHeader)
             .with_data(channel.id)
-            .child(
-                UiNode::text(NodeId::ChatHeaderTitle, format!("# {}", channel.name))
-                    .with_data(channel.id),
-            )
+            .child(UiNode::icon(NodeId::PrimitiveIcon, channel.icon))
+            .child(UiNode::text(NodeId::ChatHeaderTitle, channel.name).with_data(channel.id))
             .child(
                 UiNode::text(
                     NodeId::ChatHeaderTopic,
-                    "  自前レンダラの縦通し。テーマ JSON だけで見た目が決まる",
+                    "自前レンダラの縦通し。テーマ JSON だけで見た目が決まる",
                 )
                 .with_data(channel.id),
             );

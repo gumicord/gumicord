@@ -44,6 +44,9 @@ gumicord-app = { path = "app/core" }
 wgpu = "30"
 winit = "0.30"
 cosmic-text = "0.19"
+# フォントのフォールバックを自前で持つために要る (Han 統合への対処)
+unicode-script = "0.5"
+sys-locale = "0.3"
 accesskit = "0.24"
 accesskit_winit = "0.33"
 bytemuck = "1"

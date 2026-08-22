@@ -25,17 +25,125 @@
 
 use std::collections::HashMap;
 
+use cosmic_text::fontdb;
 use cosmic_text::{
-    Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping, Style as FontStyle, SwashCache,
-    SwashContent, Weight, Wrap,
+    Attrs, Buffer, CacheKey, Fallback, Family, FontSystem, Metrics, PlatformFallback, Shaping,
+    Style as FontStyle, SwashCache, SwashContent, Weight, Wrap,
 };
 use gumicord_uitree::Style;
 use gumicord_uitree::value::Font;
+use unicode_script::Script;
 
 use crate::geom::Size;
+use crate::icon;
 
 /// アトラス 1 ページの一辺 (物理 px)
 pub const ATLAS_SIZE: u32 = 2048;
+
+/// クライアント同梱の本文フォント。**同梱する理由は 3 つある。**
+///
+/// | | |
+/// |---|---|
+/// | `EXT-020` | システムフォント任せだと環境ごとに書体が変わる |
+/// | `NFR-001` | いずれ起動時のシステムフォント列挙 (S2 実測 360ms) を外すため |
+/// | 見た目 | OS の既定 sans-serif は UI 用に設計されていない |
+///
+/// Inter (SIL OFL 1.1、[`assets/fonts/README.md`] に出処)。**可変フォント
+/// 1 本で Thin〜Black を賄う。** cosmic-text 0.19 が `wght` 軸に対応して
+/// いるので、静的インスタンスを重さのぶんだけ持つ必要がない。
+///
+/// ⚠️ **CJK は同梱していない。** Noto Sans JP を足すとバイナリが倍以上に
+/// なるため、判断を分けた ([`spec/06-renderer.md`] 6.4)。日本語はいまも
+/// システムフォントへのフォールバックで描いている。
+const BUNDLED_SANS: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
+
+/// 同梱フォントのファミリ名。`Family::SansSerif` の解決先にする
+const BUNDLED_SANS_FAMILY: &str = "Inter";
+
+/// 日本語のフォールバック先。**優先順**に並べる。
+///
+/// cosmic-text の Windows 用の表は `"Yu Gothic"` の 1 つしか持たない。
+/// UI 用に調整された `Yu Gothic UI` を先に試し、古い環境のために `Meiryo` も
+/// 見る。macOS / Linux / Android の名前を続けてあるのは、**同じ順序で同じ
+/// 結果になってほしい**からである (`EXT-020`)。
+///
+/// ⚠️ これはあくまで「システムにあれば使う」一覧である。同じ書体が全環境に
+/// あるわけではないので、`EXT-020` を厳密に満たすには日本語フォントの同梱が
+/// 要る ([`assets/fonts/README.md`])。
+const JAPANESE_FALLBACK: &[&str] = &[
+    // Windows
+    "Yu Gothic UI",
+    "Yu Gothic",
+    "Meiryo",
+    // macOS / iOS
+    "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN",
+    // Linux / Android
+    "Noto Sans CJK JP",
+    "Noto Sans JP",
+];
+
+/// フォントのフォールバック順を決める。
+///
+/// # なぜ自前で持つのか
+///
+/// **漢字は Han 統合により、同じ符号位置でも言語によって字形が違う。**
+/// cosmic-text の判定は locale の**完全一致**で、`"ja"` / `"ko"` /
+/// `"zh-HK"` / `"zh-TW"` / それ以外 の 5 択しかない。Windows が返す
+/// `"ja-JP"` はどれにも当たらず、既定の `Microsoft YaHei UI`
+/// (簡体字中国語) に落ちる。結果、日本語の文章が中国語の書体で描かれる。
+///
+/// locale の正規化 ([`normalize_locale`]) だけでも直るが、それでも
+/// 頼れるのは `Yu Gothic` 1 つだけになる。ここで一覧ごと持ち替える。
+#[derive(Debug)]
+struct GumicordFallback;
+
+impl Fallback for GumicordFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        PlatformFallback.common_fallback()
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        PlatformFallback.forbidden_fallback()
+    }
+
+    fn script_fallback(&self, script: Script, locale: &str) -> &[&'static str] {
+        let han_unified = matches!(script, Script::Han | Script::Hiragana | Script::Katakana);
+        // 中国語・韓国語の利用者にまで日本語の字形を出すのは誤りなので、
+        // そこはプラットフォームの判断に任せる
+        if han_unified && !locale.starts_with("zh") && !locale.starts_with("ko") {
+            return JAPANESE_FALLBACK;
+        }
+        PlatformFallback.script_fallback(script, locale)
+    }
+}
+
+/// cosmic-text の Han 統合の判定に通る形へ locale を整える。
+///
+/// 判定が完全一致なので、`"ja-JP"` や `"ja_JP.UTF-8"` はそのままでは
+/// 当たらない。**地域まで見る必要があるのは中国語だけ**なので、それ以外は
+/// 主言語タグへ切り詰める。
+fn normalize_locale(locale: &str) -> String {
+    let tag = locale.replace('_', "-");
+    // "ja-JP.UTF-8" のような形も来る
+    let tag = tag.split('.').next().unwrap_or("");
+    let mut parts = tag.split('-');
+    let lang = parts.next().unwrap_or("").to_ascii_lowercase();
+
+    if lang != "zh" {
+        return lang;
+    }
+
+    // 繁体か簡体かは文字体系か地域で決まる
+    for p in parts {
+        match p.to_ascii_uppercase().as_str() {
+            "HANT" | "TW" => return "zh-TW".to_owned(),
+            "HK" | "MO" => return "zh-HK".to_owned(),
+            _ => {}
+        }
+    }
+    "zh-CN".to_owned()
+}
 
 /// テーマが何も言わなかったときの本文の大きさ (論理 px)
 pub const DEFAULT_FONT_SIZE: f32 = 15.0;
@@ -156,11 +264,30 @@ pub struct Shaper {
 impl Shaper {
     /// ⚠️ `FontSystem::new()` はシステムフォントを列挙する。S2 の実測で
     /// **初回 360ms** かかった。`NFR-001` (コールドスタート 500ms) に対して
-    /// 致命的であり、同梱フォント先行 + 背景列挙へ移す必要がある
-    /// (ロードマップ R4)。まだやっていない。
+    /// 致命的である。
+    ///
+    /// R4 の残りはここである。同梱フォントだけで整形を始め、列挙は
+    /// 背景スレッドへ回して、終わったらフォールバックの要るテキストだけを
+    /// 整形し直す ([`spec/06-renderer.md`] 6.3)。**いまは列挙を待っている。**
+    /// CJK のフォールバックがシステムフォント頼みで、待たないと日本語が
+    /// 出ないためである。
     pub fn new(scale: f32) -> Self {
+        let raw = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned());
+        let locale = normalize_locale(&raw);
+        tracing::debug!(%raw, %locale, "フォントの locale");
+
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        db.load_font_data(BUNDLED_SANS.to_vec());
+        // テーマが `family` を書かなければ `Family::SansSerif` になる。
+        // その解決先を同梱フォントへ向けておくと、テーマ側は何も書かなくてよい
+        db.set_sans_serif_family(BUNDLED_SANS_FAMILY);
+
+        let font_system =
+            FontSystem::new_with_locale_and_db_and_fallback(locale, db, GumicordFallback);
+
         Shaper {
-            font_system: FontSystem::new(),
+            font_system,
             swash: SwashCache::new(),
             shaped: HashMap::new(),
             scale,
@@ -327,7 +454,7 @@ impl TextEngine {
 
         let s = &shaped[&key];
         for g in &s.glyphs {
-            if let Some(e) = atlas.get(queue, font_system, swash, g.cache_key)
+            if let Some(e) = atlas.glyph(queue, font_system, swash, g.cache_key)
                 && e.w != 0
             {
                 f(&e, g.x, g.y);
@@ -336,7 +463,15 @@ impl TextEngine {
         s.size
     }
 
-    /// アトラスに載っているグリフの数。性能の目安に使う
+    /// アイコンをアトラスへ載せて位置を返す。`size_px` は物理ピクセル。
+    ///
+    /// 知らない名前には `None` を返す。**誤りではない** ([`crate::icon`])。
+    pub fn icon(&mut self, queue: &wgpu::Queue, name: &str, size_px: u32) -> Option<GlyphEntry> {
+        let (name, def) = icon::lookup(name)?;
+        self.atlas.icon(queue, name, def, size_px)
+    }
+
+    /// アトラスに載っているものの数。性能の目安に使う
     pub fn glyph_count(&self) -> usize {
         self.atlas.uploaded
     }
@@ -349,10 +484,42 @@ impl TextEngine {
 /// ⚠️ **1 ページしかない。** 溢れたらそのグリフを描かない。
 /// 複数ページ化と LRU 回収はロードマップ R3 で、まだやっていない。
 /// 2048² に 20px 級のグリフなら 1 万個ほど入るので、M1.1 の範囲では溢れない。
+/// アトラスに載るものの鍵。
+///
+/// **グリフとアイコンで texture を分けない。** 分けるとパイプラインの切り替えが
+/// 増え、描画順を保ったまま束ねられる範囲が狭くなる。どちらも
+/// 「RGBA8 のマスクをテクスチャ付きクアッドで描く」ものなので、同じ 1 枚に
+/// 詰めればよい。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AtlasKey {
+    Glyph(CacheKey),
+    /// アイコン名と、描く物理ピクセルの大きさ
+    Icon(&'static str, u32),
+}
+
+/// アトラスへ詰めるときの、絵そのもの以外の情報。
+#[derive(Debug, Clone, Copy)]
+struct Placement {
+    /// ペン位置からのずれ (物理 px)
+    left: i32,
+    top: i32,
+    /// カラー絵文字なら真
+    is_color: bool,
+}
+
+impl Placement {
+    /// アイコンは正方形で、ペン位置からのずれを持たない
+    const ICON: Placement = Placement {
+        left: 0,
+        top: 0,
+        is_color: false,
+    };
+}
+
 struct Atlas {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-    entries: HashMap<CacheKey, Option<GlyphEntry>>,
+    entries: HashMap<AtlasKey, Option<GlyphEntry>>,
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
@@ -389,22 +556,41 @@ impl Atlas {
         }
     }
 
-    fn get(
+    fn glyph(
         &mut self,
         queue: &wgpu::Queue,
         font_system: &mut FontSystem,
         swash: &mut SwashCache,
         key: CacheKey,
     ) -> Option<GlyphEntry> {
-        if let Some(e) = self.entries.get(&key) {
+        let k = AtlasKey::Glyph(key);
+        if let Some(e) = self.entries.get(&k) {
             return *e;
         }
-        let entry = self.rasterize(queue, font_system, swash, key);
-        self.entries.insert(key, entry);
+        let entry = self.rasterize_glyph(queue, font_system, swash, key);
+        self.entries.insert(k, entry);
         entry
     }
 
-    fn rasterize(
+    /// アイコンを載せる。`size` は物理ピクセルでの一辺。
+    fn icon(
+        &mut self,
+        queue: &wgpu::Queue,
+        name: &'static str,
+        def: &icon::IconDef,
+        size: u32,
+    ) -> Option<GlyphEntry> {
+        let k = AtlasKey::Icon(name, size);
+        if let Some(e) = self.entries.get(&k) {
+            return *e;
+        }
+        // アイコンは正方形で、ペン位置からのずれを持たない
+        let entry = self.insert(queue, size, size, &def.rasterize(size), Placement::ICON);
+        self.entries.insert(k, entry);
+        entry
+    }
+
+    fn rasterize_glyph(
         &mut self,
         queue: &wgpu::Queue,
         font_system: &mut FontSystem,
@@ -452,6 +638,37 @@ impl Atlas {
             }
         }
 
+        self.insert(
+            queue,
+            w,
+            h,
+            &rgba,
+            Placement {
+                left: p.left,
+                top: p.top,
+                is_color,
+            },
+        )
+    }
+
+    /// RGBA8 の絵をアトラスへ詰める。**グリフもアイコンもここを通る。**
+    fn insert(
+        &mut self,
+        queue: &wgpu::Queue,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        p: Placement,
+    ) -> Option<GlyphEntry> {
+        let Placement {
+            left,
+            top,
+            is_color,
+        } = p;
+        if w == 0 || h == 0 || self.full {
+            return None;
+        }
+
         // 棚詰め。1px 空けて隣のグリフのにじみを防ぐ
         const PAD: u32 = 1;
         if self.cursor_x + w + PAD > ATLAS_SIZE {
@@ -473,7 +690,7 @@ impl Atlas {
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(w * 4),
@@ -498,8 +715,8 @@ impl Atlas {
                 (x + w) as f32 / s,
                 (y + h) as f32 / s,
             ],
-            left: p.left,
-            top: p.top,
+            left,
+            top,
             w,
             h,
             is_color,
@@ -510,6 +727,42 @@ impl Atlas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cosmic-text の Han 統合の判定は完全一致なので、そこへ通る形に
+    /// なっていること。**ここが崩れると日本語が中国語の書体で描かれる。**
+    #[test]
+    fn locale_is_normalised_for_han_unification() {
+        assert_eq!(normalize_locale("ja-JP"), "ja");
+        assert_eq!(normalize_locale("ja_JP.UTF-8"), "ja");
+        assert_eq!(normalize_locale("ja"), "ja");
+        assert_eq!(normalize_locale("en-US"), "en");
+        assert_eq!(normalize_locale("ko-KR"), "ko");
+
+        // 中国語だけは地域・文字体系まで見ないと繁体/簡体が決まらない
+        assert_eq!(normalize_locale("zh-CN"), "zh-CN");
+        assert_eq!(normalize_locale("zh-TW"), "zh-TW");
+        assert_eq!(normalize_locale("zh-Hant-TW"), "zh-TW");
+        assert_eq!(normalize_locale("zh-Hans-CN"), "zh-CN");
+        assert_eq!(normalize_locale("zh-HK"), "zh-HK");
+        assert_eq!(normalize_locale("zh-MO"), "zh-HK");
+    }
+
+    /// 日本語の利用者に中国語の字形を出さない。
+    /// 逆に、中国語・韓国語の利用者から字形を横取りもしない
+    #[test]
+    fn han_scripts_fall_back_by_locale() {
+        let f = GumicordFallback;
+        assert_eq!(f.script_fallback(Script::Han, "ja"), JAPANESE_FALLBACK);
+        assert_eq!(f.script_fallback(Script::Hiragana, "ja"), JAPANESE_FALLBACK);
+        assert_eq!(f.script_fallback(Script::Katakana, "en"), JAPANESE_FALLBACK);
+
+        assert_ne!(f.script_fallback(Script::Han, "zh-CN"), JAPANESE_FALLBACK);
+        assert_ne!(f.script_fallback(Script::Han, "zh-TW"), JAPANESE_FALLBACK);
+        assert_ne!(f.script_fallback(Script::Han, "ko"), JAPANESE_FALLBACK);
+
+        // 漢字圏以外は横取りしない
+        assert_ne!(f.script_fallback(Script::Arabic, "ja"), JAPANESE_FALLBACK);
+    }
 
     #[test]
     fn font_defaults_come_from_the_body_style() {

@@ -191,18 +191,24 @@ impl<'a> Cx<'a, '_, '_> {
         )
     }
 
-    /// 内容 (テキストか子) の大きさ。余白を含まない。
+    /// 内容 (テキスト・アイコン・子) の大きさ。余白を含まない。
     fn measure_content(&mut self, node: &UiNode, it: &Intrinsic, inner: Size) -> Size {
-        if let Content::Text(s) = &node.content {
-            let font = ResolvedFont::from_style(&node.style);
-            // 折り返し幅が無限なら折り返さない
-            let max_w = inner.w.is_finite().then_some(inner.w);
-            return self.text.measure(s, &font, max_w);
+        match &node.content {
+            Content::Text(s) => {
+                let font = ResolvedFont::from_style(&node.style);
+                // 折り返し幅が無限なら折り返さない
+                let max_w = inner.w.is_finite().then_some(inner.w);
+                self.text.measure(s, &font, max_w)
+            }
+            // アイコンは正方形で、文字と同じ大きさにする。
+            // 行の中に混ぜたときに揃うのが自然なため
+            Content::Icon(_) => {
+                let s = ResolvedFont::from_style(&node.style).size();
+                Size::new(s, s)
+            }
+            Content::None if node.children.is_empty() => Size::ZERO,
+            Content::None => self.size_children(node, it, inner).1,
         }
-        if node.children.is_empty() {
-            return Size::ZERO;
-        }
-        self.size_children(node, it, inner).1
     }
 
     /// 子の大きさを主軸の規則に従って決める。
@@ -352,9 +358,9 @@ impl<'a> Cx<'a, '_, '_> {
             inner,
         });
 
-        // テキストノードは葉として扱う。
+        // 自分で何かを描くノードは葉として扱う。
         // 子を持たせた場合は無視する (Markdown の子ノードは M1.1 の範囲外)
-        if matches!(node.content, Content::Text(_)) || node.children.is_empty() {
+        if node.content.is_leaf() || node.children.is_empty() {
             return;
         }
 
