@@ -20,6 +20,7 @@ pub mod remote_auth;
 pub mod zstd_stream;
 
 pub use gateway::{Event, Fatal, Gateway, GatewayError, Ready, Subscriptions};
+pub use guild_order::Folder;
 pub use remote_auth::{RemoteAuth, RemoteAuthError, RemoteAuthEvent, ScannedUser};
 pub use zstd_stream::ZstdStream;
 

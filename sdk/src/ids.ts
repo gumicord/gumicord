@@ -22,6 +22,7 @@ export type NodeId =
   | "nav.guild_list.item"
   | "nav.guild_list.item.icon"
   | "nav.guild_list.item.badge"
+  | "nav.guild_list.folder"
   | "nav.channel_list"
   | "nav.channel_list.header"
   | "nav.channel_list.category"

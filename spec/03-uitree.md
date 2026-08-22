@@ -116,9 +116,15 @@ nav.guild_list
 | `unread` | 未読がある |
 | `mentioned` | メンションされている |
 | `loading` | 読み込み中 |
-| `grouped` | 直前と同じ送信者の続き |
+| `grouped` | 直前と同じ送信者の続き / フォルダの中にいるサーバ |
+| `collapsed` | 折り畳まれていて中身が出ていない (サーバフォルダ) |
 
 複数が同時に立ちうる。テーマ側での優先順位は [04-theme.md](04-theme.md) が定義する。
+
+> **`grouped` をサーバフォルダにも使う理由は `chat.message` と同じである。**
+> フォルダの中にいるサーバを字下げするために、クライアントが空白のノードを挟むと、
+> **字下げの量が焼き付いてテーマから揃えられない。** 状態にしておけば
+> `when.state: "grouped"` で `margin` を書ける。
 
 > **`grouped` を状態にした理由。** 連投されたメッセージで送信者行を繰り返さないのは、Discord 系のクライアントでは当たり前の見せ方である。
 > 「アイコンの幅だけ字下げする」をテーマから指定できないと、字下げの量がクライアントに焼き付いてテーマが揃えられない。
@@ -216,6 +222,7 @@ M1 で公開するフィールド。
 | `nav.guild_list.item` | `GuildData` | ギルド 1 個 (FR-010) |
 | `nav.guild_list.item.icon` | `GuildData` | ギルドアイコン |
 | `nav.guild_list.item.badge` | `GuildData` | 未読・メンション数 (FR-042) |
+| `nav.guild_list.folder` | — | サーバフォルダ。押すと開閉する |
 | `nav.channel_list` | — | チャンネル一覧 (FR-011) |
 | `nav.channel_list.header` | — | ギルド名などの見出し |
 | `nav.channel_list.category` | `CategoryData` | カテゴリ (FR-011) |
@@ -285,7 +292,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 70 個** (中核 49 / プラグインも生成可 21)。
+**合計 71 個** (中核 50 / プラグインも生成可 21)。
 
 <!-- END GENERATED: node-ids -->
 

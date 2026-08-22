@@ -60,7 +60,7 @@ use std::borrow::Cow;
 use gumicord_model::{ChannelId, GuildId};
 use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
-use gumicord_store::ChannelEntry;
+use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 use live::Live;
@@ -85,6 +85,7 @@ const THEME_ENV: &str = "GUMICORD_THEME";
 const INTERACTIVE: &[NodeId] = &[
     NodeId::NavGuildListHome,
     NodeId::NavGuildListItem,
+    NodeId::NavGuildListFolder,
     NodeId::NavChannelListItem,
     NodeId::NavDmListItem,
     NodeId::ChatMessage,
@@ -343,6 +344,11 @@ impl Application for Gumicord {
         // 手前から見て、最初に見つかった選択対象だけを処理する
         for h in hits {
             match (h.id, &h.key) {
+                // フォルダは開閉するだけ。**サーバを選び直さない**
+                (NodeId::NavGuildListFolder, Some(Key::Id(id))) => {
+                    self.live.toggle_folder(*id);
+                    changed = true;
+                }
                 (NodeId::NavGuildListItem, Some(Key::Id(id))) => {
                     if self.selected_guild == *id {
                         break;
@@ -522,6 +528,20 @@ impl Gumicord {
         );
 
         for g in self.guild_rows() {
+            // フォルダの見出し。**押すと開閉する**
+            if let Some(folder) = g.folder_of_own {
+                list = list.child(
+                    UiNode::text(NodeId::NavGuildListFolder, initial(&g.name))
+                        .with_id_key(folder)
+                        .with_state_if(g.collapsed, State::Collapsed)
+                        .with_state_if(
+                            self.hovered_id(NodeId::NavGuildListFolder, folder),
+                            State::Hover,
+                        ),
+                );
+                continue;
+            }
+
             list = list.child(
                 UiNode::text(NodeId::NavGuildListItem, initial(&g.name))
                     .with_id_key(g.id)
@@ -529,6 +549,10 @@ impl Gumicord {
                     .with_state_if(g.id == self.selected_guild, State::Selected)
                     .with_state_if(g.unread, State::Unread)
                     .with_state_if(g.mentions > 0, State::Mentioned)
+                    // ⚠️ **フォルダの中にいることは状態で伝える。**
+                    // 空白のノードを挟むと、字下げの量が焼き付いてテーマから
+                    // 揃えられなくなる (`chat.message` の grouped と同じ考え)
+                    .with_state_if(g.in_folder, State::Grouped)
                     .with_state_if(
                         self.hovered_id(NodeId::NavGuildListItem, g.id),
                         State::Hover,
@@ -700,6 +724,12 @@ struct GuildRow {
     name: String,
     unread: bool,
     mentions: u32,
+    /// フォルダの見出しなら、そのフォルダの識別子
+    folder_of_own: Option<u64>,
+    /// フォルダの中にいるか。**字下げはテーマが決める**
+    in_folder: bool,
+    /// 閉じているフォルダか
+    collapsed: bool,
 }
 
 struct ChannelRow {
@@ -781,30 +811,65 @@ impl Gumicord {
     }
 
     fn guild_rows(&self) -> Vec<GuildRow> {
+        let bare = |id: u64, name: String, unread: bool, mentions: u32| GuildRow {
+            id,
+            name,
+            unread,
+            mentions,
+            folder_of_own: None,
+            in_folder: false,
+            collapsed: false,
+        };
+
         if !self.uses_live() {
             return demo::GUILDS
                 .iter()
-                .map(|g| GuildRow {
-                    id: g.id,
-                    name: g.name.to_owned(),
-                    unread: g.unread,
-                    mentions: g.mentions,
-                })
+                .map(|g| bare(g.id, g.name.to_owned(), g.unread, g.mentions))
                 .collect();
         }
 
-        // ⚠️ 落ちているギルドは [`Store`] が既に落としている。
-        // ここには出せるものだけが来る
+        // ⚠️ 落ちているギルドも、フォルダの入れ子も [`Store`] が済ませている。
+        // ここには**出せるものが出す順に**来る
         self.live
-            .guilds()
-            .map(|g| GuildRow {
-                id: g.id.get(),
-                name: g.name.clone(),
-                // read-state はまだ無い。**無いものを在るように見せない**
-                unread: false,
-                mentions: 0,
+            .store()
+            .guild_entries()
+            .into_iter()
+            .map(|e| match e {
+                GuildEntry::Folder(f) => GuildRow {
+                    id: f.id,
+                    // 名前が無いフォルダもある。**中身の名前で代わりにする**
+                    name: f.name.clone().unwrap_or_else(|| self.folder_label(f)),
+                    unread: false,
+                    mentions: 0,
+                    folder_of_own: Some(f.id),
+                    in_folder: false,
+                    collapsed: self.live.store().is_collapsed(f.id),
+                },
+                GuildEntry::Guild { row, folder } => GuildRow {
+                    id: row.id.get(),
+                    name: row.name.clone(),
+                    // read-state はまだ無い。**無いものを在るように見せない**
+                    unread: false,
+                    mentions: 0,
+                    folder_of_own: None,
+                    in_folder: folder.is_some(),
+                    collapsed: false,
+                },
             })
             .collect()
+    }
+
+    /// 名前を付けていないフォルダの見出し。
+    ///
+    /// Discord は中身のサーバ名を並べて出す。**空欄を出すよりよい**
+    fn folder_label(&self, folder: &gumicord_store::FolderRow) -> String {
+        folder
+            .guilds
+            .iter()
+            .filter_map(|id| self.live.store().guild(*id))
+            .map(|g| &*g.name)
+            .collect::<Vec<_>>()
+            .join("、")
     }
 
     fn channel_rows(&self) -> Vec<ChannelRow> {

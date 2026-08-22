@@ -174,7 +174,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
 
         // ── nav.* — ギルド一覧は内容 (48px の丸) が幅を決める
         NavGuildList => Intrinsic::column().cross(Cross::Start).scrollable(),
-        NavGuildListHome | NavGuildListItem | NavGuildListItemIcon => {
+        NavGuildListHome | NavGuildListItem | NavGuildListItemIcon | NavGuildListFolder => {
             Intrinsic::stack().w(48.0).h(48.0)
         }
         NavGuildListItemBadge => Intrinsic::row(),

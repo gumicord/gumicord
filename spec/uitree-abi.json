@@ -18,6 +18,7 @@
     "nav.guild_list.item": "GuildData",
     "nav.guild_list.item.icon": "GuildData",
     "nav.guild_list.item.badge": "GuildData",
+    "nav.guild_list.folder": "none",
     "nav.channel_list": "none",
     "nav.channel_list.header": "none",
     "nav.channel_list.category": "CategoryData",

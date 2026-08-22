@@ -142,7 +142,8 @@
         "unread",
         "mentioned",
         "loading",
-        "grouped"
+        "grouped",
+        "collapsed"
       ]
     },
 

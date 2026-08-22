@@ -121,6 +121,32 @@
       "style": { "width": 40, "height": 40 }
     },
     {
+      "select": "nav.guild_list.item",
+      "when": { "state": "grouped" },
+      "style": { "width": 40, "height": 40 }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "style": {
+        "width": 48,
+        "height": 48,
+        "radius": "$radius.md",
+        "background": "$color.bg.raised",
+        "color": "$color.text.secondary",
+        "font": "$font.small"
+      }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.bg.hover", "color": "$color.text.primary" }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "collapsed" },
+      "style": { "borderColor": "$color.border", "borderWidth": 1 }
+    },
+    {
       "select": "nav.guild_list.item.badge",
       "style": {
         "background": "$color.danger",

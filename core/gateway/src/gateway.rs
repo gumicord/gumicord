@@ -152,8 +152,19 @@ impl Ready {
         let Some(proto) = &self.user_settings_proto else {
             return Vec::new();
         };
-        let known = self.guilds.iter().map(|g| g.id.get()).collect();
-        crate::guild_order::from_settings_proto(proto, &known)
+        crate::guild_order::from_settings_proto(proto, &self.known_guilds())
+    }
+
+    /// サーバ一覧のフォルダ。**中身が 1 つのただのサーバも混ざる**
+    pub fn guild_folders(&self) -> Vec<crate::guild_order::Folder> {
+        let Some(proto) = &self.user_settings_proto else {
+            return Vec::new();
+        };
+        crate::guild_order::folders_from_settings_proto(proto, &self.known_guilds())
+    }
+
+    fn known_guilds(&self) -> std::collections::HashSet<u64> {
+        self.guilds.iter().map(|g| g.id.get()).collect()
     }
 }
 

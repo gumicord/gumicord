@@ -66,6 +66,10 @@ pub struct Snapshot {
     pub messages: Vec<Message>,
     /// 利用者が並べた順。**空なら分からないということ**
     pub guild_order: Vec<GuildId>,
+    /// サーバ一覧のフォルダ
+    pub folders: Vec<crate::FolderRow>,
+    /// 閉じているフォルダ。**開き直すのは利用者の仕事ではない**
+    pub collapsed: Vec<u64>,
 }
 
 /// 書き込みスレッドへ送る仕事。
@@ -77,6 +81,8 @@ enum Job {
     },
     LastChannel(ChannelId),
     GuildOrder(String),
+    /// `state` の表へ 1 行置く
+    State(&'static str, String),
     /// 読み出し。**返す先は呼んだ側が渡す**
     Load {
         channel: ChannelId,
@@ -298,11 +304,26 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
         })
         .collect();
 
+    let folders: Vec<crate::FolderRow> = read_state(conn, "folders")
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let collapsed: Vec<u64> = read_state(conn, "collapsed")
+        .into_iter()
+        .flat_map(|s| {
+            s.split(',')
+                .filter_map(|p| p.parse::<u64>().ok())
+                .collect::<Vec<u64>>()
+        })
+        .collect();
+
     Ok(Snapshot {
         guilds,
         last_channel,
         messages,
         guild_order,
+        folders,
+        collapsed,
     })
 }
 
@@ -367,6 +388,14 @@ fn run(conn: &rusqlite::Connection, job: Job) -> rusqlite::Result<()> {
             // ⚠️ 読めなくても必ず呼び戻す。**返事が来ないと画面が
             // 「読み込み中」のまま止まる**
             then(read_messages(conn, channel).unwrap_or_default());
+            Ok(())
+        }
+        Job::State(key, value) => {
+            conn.execute(
+                "INSERT INTO state(key, value) VALUES(?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )?;
             Ok(())
         }
         Job::GuildOrder(joined) => {
@@ -522,6 +551,39 @@ impl Db {
             .join(",");
         self.send(Job::GuildOrder(joined));
     }
+}
+
+impl Db {
+    /// フォルダを残す。**JSON 1 行で置く。**
+    ///
+    /// ⚠️ 表を切るほどの量ではない。フォルダは多くても数十で、
+    /// 検索も結合もしない。**中身が小さくて、まとめてしか読まないものに
+    /// 正規化した表を与えても、面倒が増えるだけである**
+    pub fn save_folders(&self, folders: &[crate::FolderRow]) {
+        let json = serde_json::to_string(folders).unwrap_or_else(|_| "[]".to_owned());
+        self.send(Job::State("folders", json));
+    }
+
+    /// 閉じているフォルダを残す。
+    ///
+    /// ⚠️ **開き直すのは利用者の仕事ではない。** 覚えていないと、
+    /// 起動するたびに畳み直すことになる
+    pub fn save_collapsed(&self, ids: &[u64]) {
+        let joined = ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.send(Job::State("collapsed", joined));
+    }
+}
+
+/// `state` の表から 1 行読む。**無ければ `None`**
+fn read_state(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM state WHERE key = ?1", [key], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
 }
 
 #[cfg(test)]

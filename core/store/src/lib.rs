@@ -63,6 +63,31 @@ pub struct Store {
     preferred: Vec<GuildId>,
     /// 届いた順。**並び順が分からないものはこの順で後ろに続く**
     arrival: Vec<GuildId>,
+    /// サーバ一覧のフォルダ。**空なら折り畳みは無い**
+    folders: Vec<FolderRow>,
+    /// 閉じているフォルダ。**残す** — 開き直すのは利用者の仕事ではない
+    collapsed: std::collections::HashSet<u64>,
+}
+
+/// サーバ一覧の 1 行。**フォルダか、サーバか。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuildEntry<'a> {
+    /// フォルダの見出し。**押すと開閉する**
+    Folder(&'a FolderRow),
+    Guild {
+        row: &'a GuildRow,
+        /// どのフォルダの中にいるか。外にいれば `None`
+        folder: Option<u64>,
+    },
+}
+
+/// サーバ一覧のフォルダ 1 つ。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FolderRow {
+    pub id: u64,
+    /// 付けていなければ `None`。**画面が中身の名前を並べて出す**
+    pub name: Option<String>,
+    pub guilds: Vec<GuildId>,
 }
 
 /// チャンネル一覧の 1 行。**見出しか、開けるものか。**
@@ -89,6 +114,92 @@ impl Store {
     /// 画面に出す順のギルド。**利用者が並べた順が先、残りは届いた順**
     pub fn guilds(&self) -> impl Iterator<Item = &GuildRow> {
         self.order.iter().filter_map(|id| self.guilds.get(id))
+    }
+
+    /// サーバ一覧に出す順の、フォルダとサーバ。
+    ///
+    /// ```text
+    ///   [フォルダ]        押すと開閉する
+    ///     サーバ          開いていれば
+    ///     サーバ
+    ///   サーバ            フォルダの外
+    /// ```
+    ///
+    /// ⚠️ **閉じているフォルダの中身は出さない。** 出すと折り畳む意味がない。
+    ///
+    /// フォルダを 1 つも持っていない利用者では、ただのサーバの列になる
+    pub fn guild_entries(&self) -> Vec<GuildEntry<'_>> {
+        let mut out = Vec::new();
+
+        // フォルダを知らないなら、並び順のまま平らに出す
+        if self.folders.is_empty() {
+            out.extend(
+                self.guilds()
+                    .map(|row| GuildEntry::Guild { row, folder: None }),
+            );
+            return out;
+        }
+
+        for folder in &self.folders {
+            // ⚠️ **中身が 1 つでも、フォルダとして作られたものは折り畳める。**
+            // 「ただのサーバ」は最初からここに入っていない
+            out.push(GuildEntry::Folder(folder));
+            if self.collapsed.contains(&folder.id) {
+                continue;
+            }
+            out.extend(folder.guilds.iter().filter_map(|id| {
+                self.guilds.get(id).map(|row| GuildEntry::Guild {
+                    row,
+                    folder: Some(folder.id),
+                })
+            }));
+        }
+
+        // どのフォルダにも入っていないもの。**並び順のまま後ろに続く**
+        let in_folder: std::collections::HashSet<GuildId> = self
+            .folders
+            .iter()
+            .flat_map(|f| f.guilds.iter().copied())
+            .collect();
+        out.extend(
+            self.guilds()
+                .filter(|row| !in_folder.contains(&row.id))
+                .map(|row| GuildEntry::Guild { row, folder: None }),
+        );
+        out
+    }
+
+    /// フォルダを教える。**中身が 1 つのただのサーバは弾いてから渡すこと。**
+    pub fn set_folders(&mut self, folders: Vec<FolderRow>) {
+        self.folders = folders;
+    }
+
+    pub fn folders(&self) -> &[FolderRow] {
+        &self.folders
+    }
+
+    /// 閉じているフォルダ。**保存して次の起動で戻す**
+    pub fn collapsed(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.collapsed.iter().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub fn is_collapsed(&self, id: u64) -> bool {
+        self.collapsed.contains(&id)
+    }
+
+    pub fn set_collapsed(&mut self, ids: impl IntoIterator<Item = u64>) {
+        self.collapsed = ids.into_iter().collect();
+    }
+
+    /// 開閉を切り替える。**開いたか閉じたかを返す**
+    pub fn toggle_folder(&mut self, id: u64) -> bool {
+        if !self.collapsed.insert(id) {
+            self.collapsed.remove(&id);
+            return true;
+        }
+        false
     }
 
     pub fn guild(&self, id: GuildId) -> Option<&GuildRow> {
@@ -541,5 +652,114 @@ mod tests {
         assert!(s.push_message(message(1, 10)));
         assert!(!s.push_message(message(1, 10)));
         assert_eq!(s.messages(ch).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    fn store() -> Store {
+        let mut s = Store::new();
+        s.replace_guilds(vec![
+            Guild {
+                id: 1u64.into(),
+                name: "いち".to_owned(),
+                icon: None,
+                unavailable: false,
+                channels: Vec::new(),
+            },
+            Guild {
+                id: 2u64.into(),
+                name: "に".to_owned(),
+                icon: None,
+                unavailable: false,
+                channels: Vec::new(),
+            },
+            Guild {
+                id: 3u64.into(),
+                name: "さん".to_owned(),
+                icon: None,
+                unavailable: false,
+                channels: Vec::new(),
+            },
+        ]);
+        s
+    }
+
+    fn folder(id: u64, guilds: &[u64]) -> FolderRow {
+        FolderRow {
+            id,
+            name: Some(format!("フォルダ{id}")),
+            guilds: guilds.iter().map(|g| GuildId::from(*g)).collect(),
+        }
+    }
+
+    fn shape(s: &Store) -> Vec<String> {
+        s.guild_entries()
+            .into_iter()
+            .map(|e| match e {
+                GuildEntry::Folder(f) => format!("[{}]", f.name.as_deref().unwrap_or("")),
+                GuildEntry::Guild {
+                    row,
+                    folder: Some(_),
+                } => format!("  {}", row.name),
+                GuildEntry::Guild { row, folder: None } => row.name.clone(),
+            })
+            .collect()
+    }
+
+    /// フォルダを知らないなら、ただの列である
+    #[test]
+    fn without_folders_it_is_a_flat_list() {
+        let s = store();
+        assert_eq!(shape(&s), vec!["いち", "に", "さん"]);
+    }
+
+    /// フォルダの中身は、そのフォルダの下に付く
+    #[test]
+    fn guilds_sit_under_their_folder() {
+        let mut s = store();
+        s.set_folders(vec![folder(10, &[2, 3])]);
+
+        // ⚠️ フォルダに入っていない「いち」は後ろに続く
+        assert_eq!(shape(&s), vec!["[フォルダ10]", "  に", "  さん", "いち"]);
+    }
+
+    /// ⚠️ **閉じたら中身は出さない。** 出すと折り畳む意味がない
+    #[test]
+    fn a_collapsed_folder_hides_its_guilds() {
+        let mut s = store();
+        s.set_folders(vec![folder(10, &[2, 3])]);
+
+        assert!(!s.toggle_folder(10), "閉じたはず");
+        assert_eq!(shape(&s), vec!["[フォルダ10]", "いち"]);
+
+        assert!(s.toggle_folder(10), "開いたはず");
+        assert_eq!(shape(&s).len(), 4);
+    }
+
+    /// 抜けたサーバがフォルダに残っていても、一覧には出さない
+    #[test]
+    fn a_folder_referring_to_a_missing_guild_skips_it() {
+        let mut s = store();
+        s.set_folders(vec![folder(10, &[2, 999])]);
+        assert_eq!(shape(&s), vec!["[フォルダ10]", "  に", "いち", "さん"]);
+    }
+
+    /// 閉じている印は**保存して戻せる**
+    #[test]
+    fn the_collapsed_set_round_trips() {
+        let mut s = store();
+        s.set_folders(vec![folder(10, &[2]), folder(20, &[3])]);
+        s.toggle_folder(20);
+
+        let saved = s.collapsed();
+        assert_eq!(saved, vec![20]);
+
+        let mut again = store();
+        again.set_folders(vec![folder(10, &[2]), folder(20, &[3])]);
+        again.set_collapsed(saved);
+        assert_eq!(shape(&again), shape(&s));
     }
 }

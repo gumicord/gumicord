@@ -156,6 +156,13 @@ pub fn from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> Vec<Guil
 //  並ぶ。だから折り畳みを無視して平らに読めば、それが一覧の順である。
 // ═══════════════════════════════════════════════════════════════════════
 
+/// `GuildFolder.id` (Int64Value)
+const F_FOLDER_ID: u64 = 2;
+/// `GuildFolder.name` (StringValue)
+const F_FOLDER_NAME: u64 = 3;
+/// 包みの中身。`Int64Value.value` などは全部これ
+const WRAPPED_VALUE: u64 = 1;
+
 /// `PreloadedUserSettings.guild_folders`
 const F_GUILD_FOLDERS: u64 = 14;
 /// `GuildFolders.folders`
@@ -177,6 +184,117 @@ fn by_documented_path(bytes: &[u8]) -> Vec<u64> {
         }
     }
     out
+}
+
+/// サーバ一覧のフォルダ 1 つ。
+///
+/// ⚠️ **フォルダに入れていないサーバも、中身が 1 つのフォルダとして来る。**
+/// 区別は `id` があるかどうかで付く。無ければ「ただのサーバ」である。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    /// フォルダの識別子。**無ければフォルダではない**
+    pub id: Option<u64>,
+    /// 付けていなければ `None`。Discord は中身の名前を並べて出す
+    pub name: Option<String>,
+    /// 中身。**並び順つき**
+    pub guilds: Vec<GuildId>,
+}
+
+impl Folder {
+    /// 本当にフォルダか。**中身が 1 つのただのサーバと区別する**
+    pub fn is_folder(&self) -> bool {
+        self.id.is_some()
+    }
+}
+
+/// `user_settings_proto` からフォルダを順に取り出す。
+///
+/// `known` に無いサーバは落とす。**抜けたサーバが並び順にだけ残っている
+/// ことがある。**
+pub fn folders_from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> Vec<Folder> {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(proto_base64) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for folders in blocks(&bytes, F_GUILD_FOLDERS) {
+        for body in blocks(folders, F_FOLDERS) {
+            let guilds: Vec<GuildId> = blocks(body, F_GUILD_IDS)
+                .into_iter()
+                .flat_map(fixed64s)
+                .filter(|id| known.contains(id))
+                .map(GuildId::from)
+                .collect();
+
+            // 中身が全部消えたフォルダは出さない。**空の入れ物が残る**
+            if guilds.is_empty() {
+                continue;
+            }
+            out.push(Folder {
+                id: wrapped_varint(body, F_FOLDER_ID),
+                name: wrapped_string(body, F_FOLDER_NAME),
+                guilds,
+            });
+        }
+    }
+    out
+}
+
+/// `google.protobuf.Int64Value` などの包みの中の数値。
+///
+/// ⚠️ **包みは「中身が 1 つのメッセージ」である。** 値そのものではない。
+/// `optional` を「未設定」と「0」で区別するために、Discord がこの形を使う
+fn wrapped_varint(body: &[u8], field: u64) -> Option<u64> {
+    let inner = blocks(body, field).into_iter().next()?;
+    varint_field(inner, WRAPPED_VALUE)
+}
+
+fn wrapped_string(body: &[u8], field: u64) -> Option<String> {
+    let inner = blocks(body, field).into_iter().next()?;
+    let raw = blocks(inner, WRAPPED_VALUE).into_iter().next()?;
+    // ⚠️ **不正な UTF-8 で落とさない。** 名前は利用者が付ける
+    Some(String::from_utf8_lossy(raw).into_owned())
+}
+
+/// その番号を持つ可変長整数のフィールド。
+fn varint_field(mut buf: &[u8], field: u64) -> Option<u64> {
+    while !buf.is_empty() {
+        let (key, rest) = varint(buf)?;
+        buf = rest;
+        let (num, wire) = (key >> 3, key & 7);
+
+        match wire {
+            0 => {
+                let (v, rest) = varint(buf)?;
+                buf = rest;
+                if num == field {
+                    return Some(v);
+                }
+            }
+            1 => {
+                if buf.len() < 8 {
+                    return None;
+                }
+                buf = &buf[8..];
+            }
+            2 => {
+                let (len, rest) = varint(buf)?;
+                let len = len as usize;
+                if rest.len() < len {
+                    return None;
+                }
+                buf = &rest[len..];
+            }
+            5 => {
+                if buf.len() < 4 {
+                    return None;
+                }
+                buf = &buf[4..];
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// その番号を持つ「長さ付きの塊」を順に返す。
@@ -370,7 +488,7 @@ mod tests {
     }
 
     /// 可変長整数を 1 つ書く
-    fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    pub(super) fn put_varint(out: &mut Vec<u8>, mut v: u64) {
         loop {
             let mut byte = (v & 0x7f) as u8;
             v >>= 7;
@@ -543,7 +661,7 @@ fn count_encodings(bytes: &[u8], known: &HashSet<u64>) -> (usize, usize, usize) 
 mod documented_path_tests {
     use super::*;
 
-    fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    pub(super) fn put_varint(out: &mut Vec<u8>, mut v: u64) {
         loop {
             let mut byte = (v & 0x7f) as u8;
             v >>= 7;
@@ -557,7 +675,7 @@ mod documented_path_tests {
         }
     }
 
-    fn block(field: u64, body: &[u8]) -> Vec<u8> {
+    pub(super) fn block(field: u64, body: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         put_varint(&mut out, field << 3 | 2);
         put_varint(&mut out, body.len() as u64);
@@ -566,7 +684,7 @@ mod documented_path_tests {
     }
 
     /// `repeated fixed64` を詰めた形で書く
-    fn packed_ids(ids: &[u64]) -> Vec<u8> {
+    pub(super) fn packed_ids(ids: &[u64]) -> Vec<u8> {
         ids.iter().flat_map(|id| id.to_le_bytes()).collect()
     }
 
@@ -618,5 +736,82 @@ mod documented_path_tests {
             .map(|g| g.get())
             .collect();
         assert_eq!(got, vec![10, 20]);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::documented_path_tests::{block, packed_ids, put_varint};
+    use super::*;
+
+    /// 包み (`Int64Value` など) を 1 つ書く
+    fn wrapped_num(field: u64, v: u64) -> Vec<u8> {
+        let mut inner = Vec::new();
+        put_varint(&mut inner, WRAPPED_VALUE << 3);
+        put_varint(&mut inner, v);
+        block(field, &inner)
+    }
+
+    fn wrapped_str(field: u64, s: &str) -> Vec<u8> {
+        let inner = block(WRAPPED_VALUE, s.as_bytes());
+        block(field, &inner)
+    }
+
+    fn settings(folders: &[(Option<u64>, Option<&str>, &[u64])]) -> String {
+        let mut inner = Vec::new();
+        for (id, name, ids) in folders {
+            let mut body = block(F_GUILD_IDS, &packed_ids(ids));
+            if let Some(id) = id {
+                body.extend(wrapped_num(F_FOLDER_ID, *id));
+            }
+            if let Some(name) = name {
+                body.extend(wrapped_str(F_FOLDER_NAME, name));
+            }
+            inner.extend(block(F_FOLDERS, &body));
+        }
+        base64::engine::general_purpose::STANDARD.encode(block(F_GUILD_FOLDERS, &inner))
+    }
+
+    /// ⚠️ **フォルダに入れていないサーバも、中身が 1 つのフォルダとして来る。**
+    /// 区別は識別子があるかどうかで付く
+    #[test]
+    fn a_bare_guild_is_not_a_folder() {
+        let known: HashSet<u64> = [10, 20, 30].into_iter().collect();
+        let proto = settings(&[(Some(1), Some("しごと"), &[20, 30]), (None, None, &[10])]);
+
+        let got = folders_from_settings_proto(&proto, &known);
+        assert_eq!(got.len(), 2);
+
+        assert!(got[0].is_folder());
+        assert_eq!(got[0].name.as_deref(), Some("しごと"));
+        assert_eq!(got[0].guilds.len(), 2);
+
+        assert!(!got[1].is_folder(), "ただのサーバをフォルダ扱いしている");
+        assert!(got[1].name.is_none());
+    }
+
+    /// 名前を付けていないフォルダもある。**識別子はある**
+    #[test]
+    fn a_folder_without_a_name_is_still_a_folder() {
+        let known: HashSet<u64> = [10, 20].into_iter().collect();
+        let proto = settings(&[(Some(7), None, &[10, 20])]);
+
+        let got = folders_from_settings_proto(&proto, &known);
+        assert!(got[0].is_folder());
+        assert!(got[0].name.is_none());
+    }
+
+    /// 中身が全部抜けたフォルダは出さない。**空の入れ物が残る**
+    #[test]
+    fn a_folder_that_lost_all_its_guilds_is_dropped() {
+        let known: HashSet<u64> = [10].into_iter().collect();
+        let proto = settings(&[
+            (Some(1), Some("からっぽ"), &[998, 999]),
+            (None, None, &[10]),
+        ]);
+
+        let got = folders_from_settings_proto(&proto, &known);
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].is_folder());
     }
 }

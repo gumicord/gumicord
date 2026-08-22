@@ -162,6 +162,8 @@ impl Live {
                 if !snapshot.guild_order.is_empty() {
                     live.store.set_preferred_order(snapshot.guild_order);
                 }
+                live.store.set_folders(snapshot.folders);
+                live.store.set_collapsed(snapshot.collapsed);
                 live.last_channel = snapshot.last_channel;
                 if let Some(ch) = snapshot.last_channel {
                     // ⚠️ **取りに行った印は付けない。** 繋がったら REST で
@@ -379,6 +381,39 @@ impl Live {
         self.last_channel = None;
     }
 
+    /// 届いたフォルダを Store へ入れる。
+    ///
+    /// ⚠️ **中身が 1 つのただのサーバは弾く。** Discord はフォルダに入れて
+    /// いないサーバも「中身が 1 つのフォルダ」として送ってくるので、
+    /// そのまま入れると一覧が入れ物だらけになる
+    fn apply_folders(&mut self, folders: Vec<gumicord_gateway::Folder>) {
+        let rows: Vec<gumicord_store::FolderRow> = folders
+            .into_iter()
+            .filter(|f| f.is_folder())
+            .map(|f| gumicord_store::FolderRow {
+                id: f.id.unwrap_or_default(),
+                name: f.name,
+                guilds: f.guilds,
+            })
+            .collect();
+
+        if let Some(db) = &self.db {
+            db.save_folders(&rows);
+        }
+        self.store.set_folders(rows);
+    }
+
+    /// フォルダの開閉を切り替え、**残す**。
+    ///
+    /// ⚠️ 開き直すのは利用者の仕事ではない。閉じたことを覚えていないと、
+    /// 起動するたびに畳み直すことになる
+    pub fn toggle_folder(&mut self, id: u64) {
+        self.store.toggle_folder(id);
+        if let Some(db) = &self.db {
+            db.save_collapsed(&self.store.collapsed());
+        }
+    }
+
     /// 溜まっている知らせを**空になるまで**取り込む。変わったら `true`。
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
@@ -397,10 +432,12 @@ impl Live {
                 // ⚠️ **順を先に取る。** ギルドを差し替えると `ready` が動く
                 self.me = Some(ready.user.user.id);
                 let order = ready.guild_order();
+                let folders = ready.guild_folders();
                 self.store.replace_guilds(ready.guilds);
                 if !order.is_empty() {
                     self.store.set_preferred_order(order);
                 }
+                self.apply_folders(folders);
                 self.save_guilds();
                 true
             }

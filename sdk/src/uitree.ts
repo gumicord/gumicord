@@ -21,7 +21,8 @@ export type NodeState =
   | "unread"
   | "mentioned"
   | "loading"
-  | "grouped";
+  | "grouped"
+  | "collapsed";
 
 /**
  * プラグインが自分の名前空間に作る ID。

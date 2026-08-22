@@ -37,6 +37,10 @@ pub enum State {
     Loading,
     /// 直前と同じ送信者が続いている (`EXT-003` により v1.1 で追加)
     Grouped,
+    /// 折り畳まれていて、中身が出ていない。
+    ///
+    /// サーバフォルダに使う (`EXT-003` により v1.2 で追加)
+    Collapsed,
 }
 
 impl State {
@@ -50,6 +54,7 @@ impl State {
         State::Mentioned,
         State::Loading,
         State::Grouped,
+        State::Collapsed,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -63,6 +68,7 @@ impl State {
             Self::Mentioned => "mentioned",
             Self::Loading => "loading",
             Self::Grouped => "grouped",
+            Self::Collapsed => "collapsed",
         }
     }
 }
