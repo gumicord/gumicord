@@ -186,6 +186,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
         first_frame: true,
+        started: std::time::Instant::now(),
         blink: crate::clock::caret_blink_interval(),
         caret_on: true,
         next_blink: std::time::Instant::now(),
@@ -218,6 +219,8 @@ struct Host {
     /// IME を許可しているか。切り替えたときだけ OS へ伝える
     ime_allowed: bool,
     first_frame: bool,
+    /// `run` に入った時刻。**最初のフレームまでを測る** (`NFR-001`)
+    started: std::time::Instant,
     /// キャレットの点滅の間隔。`None` は**点滅させない設定**である
     blink: Option<std::time::Duration>,
     /// いまキャレットが見えている拍か
@@ -501,6 +504,9 @@ impl Host {
                 rects = stats.rects,
                 glyphs = stats.glyphs,
                 draw_calls = stats.draw_calls,
+                // `NFR-001` はコールドスタート 500 ms を求める。
+                // **測れる形にしておかないと、守れているかが分からない**
+                ms = self.started.elapsed().as_millis() as u64,
                 "最初のフレームを描いた"
             );
         }
