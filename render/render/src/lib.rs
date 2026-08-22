@@ -26,7 +26,7 @@ pub mod layout;
 pub mod text;
 
 pub use geom::{Rect, Size};
-pub use gpu::GpuError;
+pub use gpu::{GpuError, Presented};
 pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
 pub use layout::{SCROLL_TO_END, ScrollState};
 
@@ -36,13 +36,15 @@ use crate::gpu::Gpu;
 use crate::text::TextEngine;
 
 /// 1 フレームで何を描いたか。性能の見張りに使う。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameStats {
     pub nodes: usize,
     pub rects: u32,
     pub glyphs: u32,
     /// draw の発行回数。パイプラインか切り取りが変わるたびに増える
     pub draw_calls: usize,
+    /// 実際に表示できたか。`Failed` ならもう一度描き直しを要求する
+    pub presented: Presented,
 }
 
 /// 当たり判定の結果 1 件。
@@ -178,15 +180,13 @@ impl Renderer {
             self.gpu.size(),
         );
 
-        let stats = FrameStats {
+        FrameStats {
             nodes: layout.placed.len(),
             rects: dl.rect_count(),
             glyphs: dl.glyph_count(),
             draw_calls: dl.runs.len(),
-        };
-
-        self.gpu.submit(&dl, &self.atlas_bind, CLEAR);
-        stats
+            presented: self.gpu.submit(&dl, &self.atlas_bind, CLEAR),
+        }
     }
 
     /// 点の上にあるノードを手前から順に。座標は**論理 px**。

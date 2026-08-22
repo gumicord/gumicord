@@ -28,6 +28,17 @@ pub enum GpuError {
     Incompatible,
 }
 
+/// 1 フレームを表示できたか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presented {
+    /// 表示した
+    Yes,
+    /// 描く必要がなかった (最小化・隠れている)。**再試行しない**
+    Skipped,
+    /// 表示できなかった。**もう一度描き直しを要求する必要がある**
+    Failed,
+}
+
 /// 最初に確保するインスタンス数。足りなくなったら倍にして作り直す
 const INITIAL_RECTS: usize = 4096;
 const INITIAL_GLYPHS: usize = 16384;
@@ -298,22 +309,52 @@ impl Gpu {
         })
     }
 
-    /// 描画コマンドを送り、表示する。
+    /// 描き先のテクスチャを取る。
+    ///
+    /// ⚠️ **リサイズの直後は `Outdated` がほぼ必ず返る。** そこで諦めて
+    /// 帰ると、`ControlFlow::Wait` では次の入力まで窓が空白のままになる
+    /// (実際に「窓の大きさを変えると真っ黒になったまま戻らない」が起きた)。
+    /// 再構成したその場でもう一度だけ試す。
+    fn acquire(&mut self) -> Result<wgpu::SurfaceTexture, Presented> {
+        for attempt in 0..2 {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => return Ok(f),
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    self.surface.configure(&self.device, &self.config);
+                    if attempt == 1 {
+                        tracing::debug!("再構成してもサーフェスを取れなかった");
+                    }
+                }
+                // 最小化・隠れている。**描き直しを要求してはならない。**
+                // 要求すると隠れている間じゅう回り続ける (NFR-005)
+                wgpu::CurrentSurfaceTexture::Occluded => return Err(Presented::Skipped),
+                other => {
+                    tracing::warn!(?other, "サーフェスを取得できなかった");
+                    return Err(Presented::Skipped);
+                }
+            }
+        }
+        Err(Presented::Failed)
+    }
+
+    /// 描画コマンドを送り、表示する。**表示できたかを返す。**
     ///
     /// `clear` はどの色で塗りつぶすか。テーマの `app.window` の背景色を渡す。
-    pub fn submit(&mut self, dl: &DrawList, atlas_bind: &wgpu::BindGroup, clear: [f32; 4]) {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Occluded => return,
-            other => {
-                tracing::warn!(?other, "サーフェスを取得できなかった");
-                return;
-            }
+    ///
+    /// **偽を返したら、呼び出し側はもう一度描き直しを要求する必要がある。**
+    /// `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が来るまで
+    /// 窓が空白のままになる。
+    #[must_use]
+    pub fn submit(
+        &mut self,
+        dl: &DrawList,
+        atlas_bind: &wgpu::BindGroup,
+        clear: [f32; 4],
+    ) -> Presented {
+        let frame = match self.acquire() {
+            Ok(f) => f,
+            Err(why) => return why,
         };
 
         self.ensure_capacity(dl);
@@ -413,6 +454,7 @@ impl Gpu {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+        Presented::Yes
     }
 
     fn ensure_capacity(&mut self, dl: &DrawList) {

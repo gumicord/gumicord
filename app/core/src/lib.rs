@@ -66,6 +66,55 @@ const INTERACTIVE: &[NodeId] = &[
     NodeId::PrimitiveButton,
 ];
 
+/// 画面に出すペインの数 (`PLT-046`)。
+///
+/// # なぜ幅で決めるのか
+///
+/// **プラットフォームではなく幅で決める。** 縦持ちのタブレットと横に細くした
+/// デスクトップの窓は、同じ扱いでよい。プラットフォームで分けると、
+/// 「Windows だが幅 500px」に答えられない。
+///
+/// テーマ側も同じ考えで、`when.maxWidth` が使える (`midnight` は
+/// `chat.message` の余白をこれで詰めている)。**ここはその構造版**である。
+///
+/// ⚠️ **ペインを隠すだけで、戻る手段はまだない。** 触って切り替える操作は
+/// M1.2 の X1 でナビゲーション状態と一緒に入る。いまは窓を広げれば戻る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panes {
+    /// ギルド + チャンネル + チャット
+    Three,
+    /// チャンネル + チャット
+    Two,
+    /// チャットのみ
+    One,
+}
+
+impl Panes {
+    /// 3 ペインを保てる下限 (論理 px)。
+    /// ギルド 64 + チャンネル 240 に、チャットが窮屈にならない幅を足した値
+    const THREE: f32 = 900.0;
+    /// 2 ペインを保てる下限。これを割ると一覧が本文を圧迫する
+    const TWO: f32 = 600.0;
+
+    pub fn for_width(w: f32) -> Self {
+        if w >= Self::THREE {
+            Panes::Three
+        } else if w >= Self::TWO {
+            Panes::Two
+        } else {
+            Panes::One
+        }
+    }
+
+    pub fn guilds(self) -> bool {
+        self == Panes::Three
+    }
+
+    pub fn channels(self) -> bool {
+        self != Panes::One
+    }
+}
+
 /// アプリケーションの状態と、そこから UITree を組み立てる責務。
 pub struct Gumicord {
     theme: Option<Theme>,
@@ -176,7 +225,7 @@ impl Application for Gumicord {
     /// [4] と [6] (プラグインの介入) はまだない。入るのはこの間である。
     fn build(&mut self, cx: &FrameCx) -> UiNode {
         // [3] UITree 構築
-        let mut tree = self.build_tree();
+        let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
 
         // [5] テーマ解決
         match &self.theme {
@@ -193,16 +242,16 @@ impl Application for Gumicord {
 impl Gumicord {
     /// ⚠️ 毎フレーム木を丸ごと組み直している。差分構築 (B2 の残件) は
     /// レンダラ側の要求が固まってから入れる。
-    fn build_tree(&self) -> UiNode {
+    fn build_tree(&self, panes: Panes) -> UiNode {
+        let main = UiNode::new(NodeId::AppScreenMain)
+            .child_if(panes.guilds(), || self.guild_list())
+            .child_if(panes.channels(), || self.channel_list())
+            .child(self.chat_view());
+
         UiNode::new(NodeId::AppRoot).child(
-            UiNode::new(NodeId::AppWindow).child(self.titlebar()).child(
-                UiNode::new(NodeId::AppScreen).child(
-                    UiNode::new(NodeId::AppScreenMain)
-                        .child(self.guild_list())
-                        .child(self.channel_list())
-                        .child(self.chat_view()),
-                ),
-            ),
+            UiNode::new(NodeId::AppWindow)
+                .child(self.titlebar())
+                .child(UiNode::new(NodeId::AppScreen).child(main)),
         )
     }
 
@@ -388,7 +437,7 @@ mod tests {
     fn the_tree_reflects_the_selection() {
         let mut a = app();
         a.selected_channel = demo::CHANNELS[2].id;
-        let tree = a.build_tree();
+        let tree = a.build_tree(Panes::Three);
 
         let mut selected = Vec::new();
         tree.walk(&mut |n, _| {
@@ -431,5 +480,67 @@ mod tests {
             clip: None,
         };
         assert!(!a.pressed(std::slice::from_ref(&hit)));
+    }
+}
+
+#[cfg(test)]
+mod responsive_tests {
+    use super::*;
+
+    fn panes_in(tree: &UiNode) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        tree.walk(&mut |n, _| {
+            if matches!(
+                n.id,
+                NodeId::NavGuildList | NodeId::NavChannelList | NodeId::ChatView
+            ) {
+                out.push(n.id);
+            }
+        });
+        out
+    }
+
+    /// 幅で段が切り替わること。境界のちょうどの値は広いほうに入る
+    #[test]
+    fn panes_are_chosen_by_width() {
+        assert_eq!(Panes::for_width(1280.0), Panes::Three);
+        assert_eq!(Panes::for_width(900.0), Panes::Three);
+        assert_eq!(Panes::for_width(899.0), Panes::Two);
+        assert_eq!(Panes::for_width(600.0), Panes::Two);
+        assert_eq!(Panes::for_width(599.0), Panes::One);
+        assert_eq!(Panes::for_width(320.0), Panes::One);
+    }
+
+    /// 狭くしても**チャットは必ず残る**。
+    /// 何も出ない幅があってはいけない
+    #[test]
+    fn the_chat_view_never_disappears() {
+        let a = Gumicord::new();
+        for w in [320.0, 599.0, 600.0, 899.0, 900.0, 1920.0] {
+            let tree = a.build_tree(Panes::for_width(w));
+            assert!(
+                panes_in(&tree).contains(&NodeId::ChatView),
+                "幅 {w} でチャットが消えた"
+            );
+        }
+    }
+
+    #[test]
+    fn narrower_windows_drop_panes_from_the_left() {
+        let a = Gumicord::new();
+
+        assert_eq!(
+            panes_in(&a.build_tree(Panes::Three)),
+            vec![
+                NodeId::NavGuildList,
+                NodeId::NavChannelList,
+                NodeId::ChatView
+            ]
+        );
+        assert_eq!(
+            panes_in(&a.build_tree(Panes::Two)),
+            vec![NodeId::NavChannelList, NodeId::ChatView]
+        );
+        assert_eq!(panes_in(&a.build_tree(Panes::One)), vec![NodeId::ChatView]);
     }
 }

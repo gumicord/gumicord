@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use gumicord_render::{Hit, Renderer, Size};
+use gumicord_render::{Hit, Presented, Renderer, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -89,7 +89,6 @@ pub fn run(app: impl Application + 'static) -> Result<(), PlatformError> {
         renderer: None,
         cursor: (0.0, 0.0),
         zone: Zone::Client,
-        focused: true,
         maximized: false,
         first_frame: true,
     };
@@ -113,7 +112,6 @@ struct Host {
     /// ポインタの位置 (論理 px)
     cursor: (f32, f32),
     zone: Zone,
-    focused: bool,
     maximized: bool,
     first_frame: bool,
 }
@@ -194,18 +192,46 @@ impl Host {
     }
 
     fn redraw(&mut self) {
-        let Some(r) = &mut self.renderer else { return };
-        let cx = FrameCx {
-            viewport: r.viewport(),
-            scale: r.scale(),
-        };
-        let tree = self.app.build(&cx);
-        let stats = r.render(&tree);
+        // ⚠️ **描く直前に窓の実寸からサーフェスを合わせる。**
+        //
+        // `Resized` を取りこぼすとサーフェスの大きさが古いままになり、
+        // `get_current_texture` が `Outdated` を返し続ける。再構成しても
+        // 古い大きさで作り直すだけなので、窓が空白のまま回り続ける。
+        // 実際に「大きさを変えると真っ白のまま戻らない」が起きた。
+        //
+        // `inner_size()` の呼び出しは 1 フレームに 1 回で、大きさが同じなら
+        // `resize` は何もしない。
+        let size = self.window.as_ref().map(|w| w.inner_size());
+        if let (Some(size), Some(r)) = (size, &mut self.renderer) {
+            r.resize(size.width, size.height);
+        }
 
-        if self.first_frame {
+        let (stats, backend) = {
+            let Some(r) = &mut self.renderer else { return };
+            let cx = FrameCx {
+                viewport: r.viewport(),
+                scale: r.scale(),
+            };
+            tracing::trace!(w = cx.viewport.w, h = cx.viewport.h, "描画");
+            let tree = self.app.build(&cx);
+            (r.render(&tree), r.backend())
+        };
+
+        // ⚠️ **表示できなかったら、もう一度描き直しを要求する。**
+        // `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が
+        // 来るまで窓が空白のままになる。リサイズ直後は実際にそうなった。
+        //
+        // 隠れているだけ (`Skipped`) のときは要求しない。要求すると
+        // 最小化している間じゅう回り続ける (`NFR-005`)。
+        if stats.presented == Presented::Failed {
+            self.request_redraw();
+            return;
+        }
+
+        if self.first_frame && stats.presented == Presented::Yes {
             self.first_frame = false;
             tracing::info!(
-                backend = ?r.backend(),
+                ?backend,
                 nodes = stats.nodes,
                 rects = stats.rects,
                 glyphs = stats.glyphs,
@@ -258,6 +284,7 @@ impl ApplicationHandler for Host {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
+                tracing::debug!(w = size.width, h = size.height, "リサイズ");
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
@@ -270,14 +297,6 @@ impl ApplicationHandler for Host {
                     r.set_scale(scale_factor as f32);
                 }
                 self.request_redraw();
-            }
-
-            // NFR-005: 非アクティブの間は描かない
-            WindowEvent::Focused(f) => {
-                self.focused = f;
-                if f {
-                    self.request_redraw();
-                }
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -360,8 +379,14 @@ impl ApplicationHandler for Host {
                 }
             }
 
-            // NFR-005: 非アクティブなら描かない。ただし最初の 1 枚は必ず出す
-            WindowEvent::RedrawRequested if self.focused || self.first_frame => self.redraw(),
+            // ⚠️ **ここでフォーカスを見てはならない。** 非アクティブな窓でも、
+            // 大きさが変わったり内容が変わったりすれば描き直す必要がある。
+            // 見ないと、隣に並べた窓が空白のままになる。
+            //
+            // `NFR-005` (非アクティブ時に描画を止める) を満たしているのは
+            // `ControlFlow::Wait` と「変化したときだけ再描画を要求する」ほうで
+            // あって、ここではない。何も起きなければそもそも呼ばれない。
+            WindowEvent::RedrawRequested => self.redraw(),
 
             _ => {}
         }
