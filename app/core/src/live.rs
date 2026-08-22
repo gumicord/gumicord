@@ -1,41 +1,44 @@
-//! 本物の Discord のデータ。Gateway (C2) と REST (C3) の結線。
+//! 本物の Discord のデータ。Store (C5) / Gateway (C2) / REST (C3) の結線。
 //!
-//! # ⚠️ これは Store (C5) ではない
-//!
-//! 正規化も永続化もしていない。**チャンネルごとにメッセージの列を持っている
-//! だけ**である。C5 が入ったらここは消えて、Store への薄い橋になる。
-//!
-//! いまここにある割り切り:
-//!
-//! | 割り切り | C5 で直る |
-//! |---|---|
-//! | ギルドとチャンネルを丸ごと持つ | 正規化する |
-//! | メッセージは開いたチャンネルの分だけ | LRU で退避する |
-//! | 再起動で全部消える | SQLite に置く |
-//! | 未読も既読位置も無い | read-state を持つ |
-//!
-//! # 取ってくるのは REST、追いかけるのは Gateway
+//! # 3 つの出所を 1 つの状態に落とす
 //!
 //! ```text
-//!   チャンネルを開いた ──▶ GET /channels/:id/messages   過去 50 件
-//!   MESSAGE_CREATE     ──▶ 末尾に足す                   これから来る分
+//!   キャッシュ (SQLite)  ──▶ ┐
+//!   REST (過去 50 件)    ──▶ ├─▶ Store ──▶ 画面
+//!   Gateway (これから)   ──▶ ┘
 //! ```
 //!
-//! **どちらか片方では成立しない。** Gateway は繋いだ後のものしか運ばず、
-//! REST は繋いだ後のものを追いかけられない。
+//! **どれか 1 つでは成立しない。**
+//!
+//! - キャッシュは**すぐ出る**が古い
+//! - REST は正しいが**往復を待つ**
+//! - Gateway は繋いだ後のものしか運ばない
+//!
+//! チャンネルを開いたら、まずキャッシュを出し、REST が返ったら差し替え、
+//! そこから先は Gateway が追いかける。
+//!
+//! ⚠️ **REST が先に返ったら、後から来たキャッシュで上書きしない。**
+//! 古いもので新しいものを潰すことになる。
+//!
+//! # 起動時はキャッシュから描く (`NFR-011`, C6)
+//!
+//! S4 の実測では Gateway の READY まで 672〜1120 ms かかる。
+//! `NFR-001` (コールドスタート 500 ms) に**入らない**ので、READY を待って
+//! から描くという選択肢は最初から無い。
 //!
 //! # 主スレッドは止めない
 //!
-//! [`crate::session`] と同じ形である。仕事は [`tokio`] の上で進み、
-//! 結果だけがチャネルで戻り、[`Waker`] が主スレッドを起こす。
+//! [`crate::session`] と同じ形である。仕事は [`tokio`] と書き込みスレッドの
+//! 上で進み、結果だけがチャネルで戻り、[`Waker`] が主スレッドを起こす。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gumicord_gateway::{Event, Fatal, Gateway, Ready};
 use gumicord_model::{ChannelId, Guild, Message, Token};
 use gumicord_platform::Waker;
 use gumicord_rest::RestClient;
+use gumicord_store::{Db, GuildRow, Store};
 
 /// 1 チャンネルにつき最初に取ってくる件数。
 ///
@@ -62,8 +65,7 @@ impl Link {
     /// 正常な状態をわざわざ知らせると、異常のときの一行が埋もれる
     pub fn hint(&self) -> Option<String> {
         match self {
-            Link::Up => None,
-            Link::Idle => None,
+            Link::Up | Link::Idle => None,
             Link::Connecting => Some("接続しています…".to_owned()),
             Link::Reconnecting(why) => Some(format!("再接続しています… ({why})")),
             Link::Down(why) => Some(format!("接続できません: {why}")),
@@ -79,13 +81,18 @@ pub enum LiveEvent {
     Posted(Box<Message>),
     /// ギルドの中身が届いた・変わった。**殻だった分がここで埋まる**
     GuildChanged(Box<Guild>),
+    /// キャッシュから読めた分。**REST より先に出る**
+    Cached {
+        channel: ChannelId,
+        list: Vec<Message>,
+    },
     /// REST で取ってきた過去分。**古い順に並べ替えてある**
     Backlog {
         channel: ChannelId,
         list: Vec<Message>,
     },
     Link(Link),
-    /// トークンが弾かれた (`FR-004`)。**鍵束から捨ててログイン画面へ**
+    /// トークンが弾かれた (`FR-004`)。**鍵束もキャッシュも捨てる**
     TokenRejected,
 }
 
@@ -98,18 +105,52 @@ pub struct Live {
     waker: Option<Waker>,
     started: bool,
 
+    store: Store,
+    /// ローカルキャッシュ。**開けなくてもアプリは動く**
+    db: Option<Db>,
     link: Link,
-    guilds: Vec<Guild>,
-    /// チャンネルごとのメッセージ。**古い順**
-    messages: HashMap<u64, Vec<Message>>,
     /// 取りに行った (行っている) チャンネル。**二重に叩かないため**
-    requested: HashSet<u64>,
+    requested: HashSet<ChannelId>,
     /// トークンが弾かれた。アプリが後始末をしたら下ろす
     rejected: bool,
+    /// 前回開いていたチャンネル (`NFR-011`)
+    last_channel: Option<ChannelId>,
 }
 
 impl Live {
+    /// キャッシュを開いて、**前回までの状態を読み込む**。
+    ///
+    /// ⚠️ ここは同期に読む。最初のフレームに要るものなので、待たないと
+    /// 「一瞬空っぽの画面」が出る。実測で数 ms しかかからない
     pub fn new() -> Self {
+        let mut live = Live::empty();
+
+        match gumicord_store::default_path().and_then(|p| Db::open(&p)) {
+            Ok((db, snapshot)) => {
+                tracing::debug!(
+                    guilds = snapshot.guilds.len(),
+                    messages = snapshot.messages.len(),
+                    "キャッシュから読み込んだ"
+                );
+                live.store.replace_guilds(snapshot.guilds);
+                live.last_channel = snapshot.last_channel;
+                if let Some(ch) = snapshot.last_channel {
+                    // ⚠️ **取りに行った印は付けない。** 繋がったら REST で
+                    // 取り直したいので、古いままで固定しない
+                    live.store.set_backlog(ch, snapshot.messages);
+                }
+                live.db = Some(db);
+            }
+            Err(e) => {
+                // キャッシュは速くするためだけのもの。**無くても動く**
+                tracing::warn!(%e, "キャッシュを開けない。毎回取り直す");
+            }
+        }
+        live
+    }
+
+    /// キャッシュを開かない空の状態。**試験と、キャッシュ無しの起動で使う**
+    fn empty() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Live {
             tx,
@@ -118,47 +159,52 @@ impl Live {
             rest: None,
             waker: None,
             started: false,
+            store: Store::new(),
+            db: None,
             link: Link::Idle,
-            guilds: Vec::new(),
-            messages: HashMap::new(),
             requested: HashSet::new(),
             rejected: false,
+            last_channel: None,
         }
+    }
+
+    /// イベントループを起こす手を先に受け取る。
+    ///
+    /// ⚠️ **ログインより前にキャッシュを読むために要る。** 起動直後に開いて
+    /// いる 1 チャンネルは同期に読んであるが、繋がる前に別のチャンネルへ
+    /// 移ったときは、ここが無いとキャッシュが出てこない
+    pub fn attach_waker(&mut self, waker: Waker) {
+        self.waker.get_or_insert(waker);
     }
 
     pub fn link(&self) -> &Link {
         &self.link
     }
 
-    /// 参加しているギルド。**READY が来るまで空である**
-    pub fn guilds(&self) -> &[Guild] {
-        &self.guilds
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
-    /// 名前順に並べる。**READY の順は当てにならない。**
-    ///
-    /// ⚠️ 名前が同じギルドは実在するので、そのときは ID 順に倒す。
-    /// **並びが毎フレーム入れ替わると読めない**
-    fn sort_guilds(&mut self) {
-        self.guilds
-            .sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    /// 前回開いていたチャンネル。**そこを開いた状態で起動する**
+    pub fn last_channel(&self) -> Option<ChannelId> {
+        self.last_channel
     }
 
-    pub fn guild(&self, id: u64) -> Option<&Guild> {
-        self.guilds.iter().find(|g| g.id.get() == id)
+    pub fn guilds(&self) -> impl Iterator<Item = &GuildRow> {
+        self.store.guilds()
     }
 
-    /// そのチャンネルのメッセージ。**まだ取ってきていなければ空**
-    pub fn messages(&self, channel: u64) -> &[Message] {
-        self.messages.get(&channel).map_or(&[], Vec::as_slice)
+    /// キャッシュにも Gateway にも何も無いか
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
     }
 
     /// 取りに行った結果として空なのか、まだ取りに行っていないのか。
     ///
     /// **この区別を画面に出せないと「読み込み中」と「発言なし」が同じに
     /// 見える。** 利用者にはまったく違う意味である
-    pub fn is_loading(&self, channel: u64) -> bool {
-        self.requested.contains(&channel) && !self.messages.contains_key(&channel)
+    pub fn is_loading(&self, channel: ChannelId) -> bool {
+        self.requested.contains(&channel) && !self.store.has_messages(channel)
     }
 
     /// トークンが弾かれたか。**読んだら下りる** (`FR-004`)
@@ -187,33 +233,47 @@ impl Live {
         rt.spawn(async move { pump(Gateway::new(token), tx, waker).await });
     }
 
-    /// そのチャンネルの過去分を取りに行く。**2 回目からは何もしない。**
+    /// そのチャンネルを開く。**キャッシュを先に出し、REST で追いかける。**
     ///
     /// ⚠️ 取りに行ったこと自体を覚えておかないと、選び直すたびに叩いて
     /// レート制限に当たる
-    pub fn open_channel(&mut self, channel: u64) {
+    pub fn open_channel(&mut self, channel: ChannelId) {
+        if let Some(db) = &self.db {
+            db.save_last_channel(channel);
+        }
         if !self.requested.insert(channel) {
             return;
         }
+
+        // [1] キャッシュ。**往復が無いので、繋がる前でも出る**
+        if !self.store.has_messages(channel)
+            && let (Some(db), Some(waker)) = (&self.db, &self.waker)
+        {
+            let (tx, waker) = (self.tx.clone(), waker.clone());
+            db.load_messages(channel, move |list| {
+                let _ = tx.send(LiveEvent::Cached { channel, list });
+                waker.wake();
+            });
+        }
+
+        // [2] REST。**正しいほうで差し替える**
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
-
         let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
-        let id = ChannelId::from(channel);
         rt.spawn(async move {
-            match rest.messages(id, BACKLOG).await {
+            match rest.messages(channel, BACKLOG).await {
                 Ok(mut list) => {
                     // ⚠️ Discord は**新しい順**で返す。画面は古い順に積む
                     list.reverse();
-                    let _ = tx.send(LiveEvent::Backlog { channel: id, list });
+                    let _ = tx.send(LiveEvent::Backlog { channel, list });
                 }
                 Err(e) => {
-                    // 取れなくても画面は動く。**空のまま黙らせない**ために
-                    // 誤りは記録するが、状態は「取りに行った」のままにする
-                    tracing::warn!(%e, channel = %id, "メッセージを取れなかった");
+                    // 取れなくてもキャッシュのぶんは出ている。
+                    // **黙って「読み込み中」のまま止めない**
+                    tracing::warn!(%e, channel = %channel, "メッセージを取れなかった");
                     let _ = tx.send(LiveEvent::Backlog {
-                        channel: id,
+                        channel,
                         list: Vec::new(),
                     });
                 }
@@ -226,18 +286,30 @@ impl Live {
     ///
     /// ⚠️ **画面には足さない。** 送れたら Gateway が `MESSAGE_CREATE` を
     /// 返してくるので、そこで 1 回だけ足る。ここでも足すと二重に出る
-    pub fn send_message(&self, channel: u64, content: String) {
+    pub fn send_message(&self, channel: ChannelId, content: String) {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
         let (rest, waker) = (rest.clone(), waker.clone());
-        let id = ChannelId::from(channel);
         rt.spawn(async move {
-            if let Err(e) = rest.create_message(id, &content).await {
-                tracing::warn!(%e, channel = %id, "送れなかった");
+            if let Err(e) = rest.create_message(channel, &content).await {
+                tracing::warn!(%e, channel = %channel, "送れなかった");
             }
             waker.wake();
         });
+    }
+
+    /// `SEC-021`: ログアウトしたら**キャッシュも認証情報も残さない**。
+    ///
+    /// ⚠️ 残しておくと、次に別の人がその機械を使ったときに前の人の
+    /// メッセージが読める
+    pub fn forget_everything(&mut self) {
+        if let Some(db) = &self.db {
+            db.wipe();
+        }
+        self.store = Store::new();
+        self.requested.clear();
+        self.last_channel = None;
     }
 
     /// 溜まっている知らせを**空になるまで**取り込む。変わったら `true`。
@@ -245,50 +317,86 @@ impl Live {
         let mut changed = false;
         loop {
             match self.rx.try_recv() {
-                Ok(event) => {
-                    self.apply(event);
-                    changed = true;
-                }
+                Ok(event) => changed |= self.apply(event),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return changed,
             }
         }
     }
 
-    fn apply(&mut self, event: LiveEvent) {
+    fn apply(&mut self, event: LiveEvent) -> bool {
         match event {
             LiveEvent::Ready(ready) => {
                 self.link = Link::Up;
-                self.guilds = ready.guilds;
-                self.sort_guilds();
+                self.store.replace_guilds(ready.guilds);
+                self.save_guilds();
+                true
             }
             LiveEvent::GuildChanged(g) => {
-                match self.guilds.iter_mut().find(|x| x.id == g.id) {
-                    // ⚠️ **殻を中身で置き換える。** READY で来るのは
-                    // 識別子だけのことがあり、本体はここで遅れて届く
-                    Some(slot) => *slot = *g,
-                    None => self.guilds.push(*g),
-                }
-                self.sort_guilds();
+                self.store.upsert_guild(*g);
+                self.save_guilds();
+                true
             }
             LiveEvent::Posted(m) => {
-                let channel = m.channel_id.get();
-                // 開いていないチャンネルの分は溜めない。**開いたときに
-                // REST で取ってくるので、ここで持つと二重になる**
-                if let Some(list) = self.messages.get_mut(&channel)
-                    && !list.iter().any(|x| x.id == m.id)
-                {
-                    list.push(*m);
+                let channel = m.channel_id;
+                if !self.store.push_message(*m) {
+                    return false;
                 }
+                // 1 件ずつ書く。**閉じた後も残る**
+                if let (Some(db), Some(last)) = (&self.db, self.store.messages(channel).last()) {
+                    db.save_messages(channel, vec![last.clone()]);
+                }
+                true
+            }
+            // ⚠️ **REST が先に返っていたら採らない。**
+            // 古いもので新しいものを潰すことになる
+            LiveEvent::Cached { channel, list } => {
+                if self.store.has_messages(channel) || list.is_empty() {
+                    return false;
+                }
+                self.store.set_backlog(channel, list);
+                true
             }
             LiveEvent::Backlog { channel, list } => {
-                self.messages.insert(channel.get(), list);
+                // 取れなかった (空) のにキャッシュがあるなら、そちらを残す。
+                // **繋がらないときに履歴が消えるのが一番困る** (`NFR-011`)
+                if list.is_empty() && self.store.has_messages(channel) {
+                    return false;
+                }
+                if let Some(db) = &self.db {
+                    db.save_messages(channel, list.clone());
+                }
+                self.store.set_backlog(channel, list);
+                true
             }
-            LiveEvent::Link(link) => self.link = link,
+            LiveEvent::Link(link) => {
+                let changed = self.link != link;
+                self.link = link;
+                changed
+            }
             LiveEvent::TokenRejected => {
                 self.rejected = true;
                 self.link = Link::Down("トークンが無効になりました".to_owned());
+                true
             }
         }
+    }
+
+    /// ⚠️ **書くのは正規化を解いた形である。** Store の中では
+    /// チャンネルは 1 箇所にしかないので、書き出すときに組み直す
+    fn save_guilds(&self) {
+        let Some(db) = &self.db else { return };
+        let guilds: Vec<Guild> = self
+            .store
+            .guilds()
+            .map(|g| Guild {
+                id: g.id,
+                name: g.name.clone(),
+                icon: g.icon.clone(),
+                unavailable: false,
+                channels: self.store.channels_of(g.id).cloned().collect(),
+            })
+            .collect();
+        db.save_guilds(guilds);
     }
 }
 
@@ -344,10 +452,19 @@ mod tests {
     use super::*;
     use gumicord_model::{MessageId, User, UserId};
 
-    fn message(id: u64, channel: u64, body: &str) -> Message {
+    /// ⚠️ [`Live::new`] は**実際のキャッシュを開く**。試験では使わない
+    fn live() -> Live {
+        Live::empty()
+    }
+
+    fn ch() -> ChannelId {
+        ChannelId::from(10u64)
+    }
+
+    fn message(id: u64, body: &str) -> Message {
         Message {
             id: MessageId::from(id),
-            channel_id: ChannelId::from(channel),
+            channel_id: ch(),
             guild_id: None,
             author: User {
                 id: UserId::from(1u64),
@@ -366,60 +483,74 @@ mod tests {
         }
     }
 
-    /// 「読み込み中」と「発言なし」は**別のものである**
+    /// キャッシュが先に出て、REST が来たら差し替わる
     #[test]
-    fn loading_and_empty_are_distinguishable() {
-        let mut live = Live::new();
-        assert!(!live.is_loading(1), "開く前は読み込み中ではない");
-
-        live.requested.insert(1);
-        assert!(live.is_loading(1));
+    fn the_cache_shows_first_and_rest_replaces_it() {
+        let mut live = live();
+        live.apply(LiveEvent::Cached {
+            channel: ch(),
+            list: vec![message(1, "ふるい")],
+        });
+        assert_eq!(live.store().messages(ch()).len(), 1);
 
         live.apply(LiveEvent::Backlog {
-            channel: ChannelId::from(1u64),
+            channel: ch(),
+            list: vec![message(1, "ふるい"), message(2, "あたらしい")],
+        });
+        let bodies: Vec<_> = live
+            .store()
+            .messages(ch())
+            .iter()
+            .map(|m| &*m.content)
+            .collect();
+        assert_eq!(bodies, vec!["ふるい", "あたらしい"]);
+    }
+
+    /// ⚠️ **REST が先に返っていたらキャッシュで上書きしない。**
+    /// 古いもので新しいものを潰すことになる
+    #[test]
+    fn a_late_cache_does_not_clobber_fresh_data() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(2, "あたらしい")],
+        });
+        let changed = live.apply(LiveEvent::Cached {
+            channel: ch(),
+            list: vec![message(1, "ふるい")],
+        });
+
+        assert!(!changed, "古いもので描き直している");
+        assert_eq!(live.store().messages(ch())[0].content, "あたらしい");
+    }
+
+    /// REST が失敗しても、キャッシュのぶんは消さない。
+    /// **繋がらないときに履歴が消えるのが一番困る** (`NFR-011`)
+    #[test]
+    fn a_failed_fetch_keeps_the_cached_history() {
+        let mut live = live();
+        live.apply(LiveEvent::Cached {
+            channel: ch(),
+            list: vec![message(1, "ふるい")],
+        });
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
             list: Vec::new(),
         });
-        assert!(!live.is_loading(1), "取り終えたら読み込み中ではない");
-        assert!(live.messages(1).is_empty());
+
+        assert_eq!(live.store().messages(ch()).len(), 1, "履歴が消えた");
     }
 
-    /// 新着は末尾に足る
+    /// 何も変わらなければ再描画を要求しない
     #[test]
-    fn a_new_message_lands_at_the_end() {
-        let mut live = Live::new();
+    fn nothing_new_means_no_redraw() {
+        let mut live = live();
         live.apply(LiveEvent::Backlog {
-            channel: ChannelId::from(1u64),
-            list: vec![message(10, 1, "ふるい")],
+            channel: ch(),
+            list: vec![message(1, "やあ")],
         });
-        live.apply(LiveEvent::Posted(Box::new(message(11, 1, "あたらしい"))));
-
-        let got: Vec<_> = live.messages(1).iter().map(|m| &*m.content).collect();
-        assert_eq!(got, vec!["ふるい", "あたらしい"]);
-    }
-
-    /// **同じものを二度足さない。** 自分で送った直後は
-    /// REST の応答と MESSAGE_CREATE が競る
-    #[test]
-    fn the_same_message_is_not_added_twice() {
-        let mut live = Live::new();
-        live.apply(LiveEvent::Backlog {
-            channel: ChannelId::from(1u64),
-            list: Vec::new(),
-        });
-        live.apply(LiveEvent::Posted(Box::new(message(11, 1, "やあ"))));
-        live.apply(LiveEvent::Posted(Box::new(message(11, 1, "やあ"))));
-
-        assert_eq!(live.messages(1).len(), 1);
-    }
-
-    /// 開いていないチャンネルの新着は溜めない。
-    /// **開いたときに REST で取ってくるので、持つと二重になる**
-    #[test]
-    fn messages_for_unopened_channels_are_dropped() {
-        let mut live = Live::new();
-        live.apply(LiveEvent::Posted(Box::new(message(11, 99, "やあ"))));
-        assert!(live.messages(99).is_empty());
-        assert!(!live.is_loading(99));
+        assert!(!live.apply(LiveEvent::Posted(Box::new(message(1, "やあ")))));
+        assert!(live.apply(LiveEvent::Posted(Box::new(message(2, "ふたつめ")))));
     }
 
     /// 繋がっているときは何も出さない。
@@ -434,7 +565,7 @@ mod tests {
     /// トークンが弾かれたことは**一度だけ**伝わる (`FR-004`)
     #[test]
     fn a_rejection_is_reported_once() {
-        let mut live = Live::new();
+        let mut live = live();
         assert!(!live.take_rejection());
 
         live.apply(LiveEvent::TokenRejected);
@@ -442,98 +573,20 @@ mod tests {
         assert!(!live.take_rejection(), "二度目は下りている");
     }
 
-    /// ギルドは名前順に並ぶ。**READY の順は当てにならない**
+    /// `SEC-021`: 忘れたら**何も残らない**
     #[test]
-    fn guilds_are_sorted_by_name() {
-        let mut live = Live::new();
-        live.apply(LiveEvent::Ready(Box::new(Ready {
-            user: serde_json::from_str(r#"{"id":"1","username":"x"}"#).unwrap(),
-            session_id: "s".to_owned(),
-            resume_gateway_url: None,
-            guilds: vec![
-                Guild {
-                    id: 2u64.into(),
-                    name: "ばなな".to_owned(),
-                    icon: None,
-                    unavailable: false,
-                    channels: Vec::new(),
-                },
-                Guild {
-                    id: 1u64.into(),
-                    name: "あんず".to_owned(),
-                    icon: None,
-                    unavailable: false,
-                    channels: Vec::new(),
-                },
-            ],
-        })));
+    fn forgetting_leaves_nothing() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(1, "ひみつ")],
+        });
+        live.requested.insert(ch());
 
-        let names: Vec<_> = live.guilds().iter().map(|g| &*g.name).collect();
-        assert_eq!(names, vec!["あんず", "ばなな"]);
-        assert_eq!(live.link(), &Link::Up);
-    }
-}
-
-#[cfg(test)]
-mod guild_tests {
-    use super::*;
-
-    fn shell(id: u64) -> Guild {
-        Guild {
-            id: id.into(),
-            name: String::new(),
-            icon: None,
-            unavailable: true,
-            channels: Vec::new(),
-        }
-    }
-
-    fn full(id: u64, name: &str) -> Guild {
-        Guild {
-            id: id.into(),
-            name: name.to_owned(),
-            icon: None,
-            unavailable: false,
-            channels: Vec::new(),
-        }
-    }
-
-    /// **殻が中身で置き換わる。** READY で識別子だけ来て、
-    /// 本体は GUILD_CREATE で遅れて届く
-    #[test]
-    fn a_shell_is_replaced_by_the_real_guild() {
-        let mut live = Live::new();
-        live.apply(LiveEvent::Ready(Box::new(Ready {
-            user: serde_json::from_str(r#"{"id":"1","username":"x"}"#).unwrap(),
-            session_id: "s".to_owned(),
-            resume_gateway_url: None,
-            guilds: vec![shell(2)],
-        })));
-        assert_eq!(live.guilds().len(), 1);
-        assert!(live.guilds()[0].unavailable);
-
-        live.apply(LiveEvent::GuildChanged(Box::new(full(2, "ばなな"))));
-        assert_eq!(live.guilds().len(), 1, "同じギルドが二重に並んでいる");
-        assert_eq!(live.guilds()[0].name, "ばなな");
-        assert!(!live.guilds()[0].unavailable);
-    }
-
-    /// 知らないギルドが来たら足す。招待された直後がこれである
-    #[test]
-    fn an_unknown_guild_is_added() {
-        let mut live = Live::new();
-        live.apply(LiveEvent::GuildChanged(Box::new(full(2, "あんず"))));
-        assert_eq!(live.guilds().len(), 1);
-    }
-
-    /// 名前が同じでも並びが安定する。**毎フレーム入れ替わると読めない**
-    #[test]
-    fn guilds_with_the_same_name_keep_a_stable_order() {
-        let mut live = Live::new();
-        live.apply(LiveEvent::GuildChanged(Box::new(full(9, "おなじ"))));
-        live.apply(LiveEvent::GuildChanged(Box::new(full(3, "おなじ"))));
-
-        let ids: Vec<_> = live.guilds().iter().map(|g| g.id.get()).collect();
-        assert_eq!(ids, vec![3, 9]);
+        live.forget_everything();
+        assert!(live.store().messages(ch()).is_empty());
+        assert!(!live.store().has_messages(ch()));
+        assert!(live.is_empty());
+        assert!(!live.is_loading(ch()));
     }
 }

@@ -24,7 +24,7 @@
 //! | 段 | 状態 |
 //! |---|---|
 //! | [1] 入力 | ポインタ・キーボード・IME |
-//! | [2] 状態更新 | ⚠️ **[`live`] が仮に持っている。** Store (C5) ではない |
+//! | [2] 状態更新 | ある。[`gumicord_store`] が正規化して持ち、SQLite に残す |
 //! | [3] UITree 構築 | ある。ただし毎フレーム全体を組み直している |
 //! | [4] [6] プラグイン | ない (E4, E5) |
 //! | [5] テーマ解決 | ある |
@@ -34,10 +34,16 @@
 //! # 画面は 2 通りある
 //!
 //! ```text
-//!   ログインしていない ──▶ app.screen.login   QR を出して待つ
+//!   キャッシュがある   ──▶ app.screen.main    **ログインを待たずに出す**
 //!   ログインした       ──▶ app.screen.main    本物のギルド・チャンネル・発言
+//!   どちらも無い       ──▶ app.screen.login   QR を出して待つ
 //!   GUMICORD_SKIP_LOGIN ─▶ app.screen.main    [`demo`] の固定データ
 //! ```
+//!
+//! ⚠️ **キャッシュがあればログインを待たない** (`NFR-011`, C6)。S4 の実測で
+//! READY まで 672〜1120 ms かかるので、待つと `NFR-001` (500 ms) に入らない。
+//! ログアウトするとキャッシュごと消える (`SEC-021`) ので、**残っていること
+//! 自体が「前回このアカウントで入れていた」証拠**になる。
 //!
 //! **demo と本物の分かれ目は `uses_live()` の 1 箇所だけ**である。木を組み立てる
 //! ところが「どちらのデータか」を気にし始めると、分岐が画面のあちこちに散る。
@@ -51,6 +57,7 @@ pub mod session;
 
 use std::borrow::Cow;
 
+use gumicord_model::{ChannelId, GuildId};
 use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_theme::{MatchContext, Theme};
@@ -161,15 +168,33 @@ pub struct Gumicord {
 
 impl Gumicord {
     pub fn new() -> Self {
+        // ⚠️ **ここでキャッシュを読む。** 最初のフレームに間に合わせるため
+        // で、これが `NFR-011` と C6 の実体である
+        let live = Live::new();
+
+        // 前回開いていたチャンネルを、そのギルドごと復元する
+        let (guild, channel) = match live.last_channel() {
+            Some(ch) => {
+                let guild = live
+                    .store()
+                    .channel(ch)
+                    .and_then(|c| c.guild_id)
+                    .map(|g| g.get())
+                    .unwrap_or(0);
+                (guild, ch.get())
+            }
+            None => (demo::GUILDS[0].id, demo::CHANNELS[1].id),
+        };
+
         Gumicord {
             theme: load_theme(),
             runtime: None,
             waker: None,
             login: Login::new(),
-            live: Live::new(),
+            live,
             hovered: None,
-            selected_guild: demo::GUILDS[0].id,
-            selected_channel: demo::CHANNELS[1].id,
+            selected_guild: guild,
+            selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),
             sent: Vec::new(),
@@ -248,6 +273,7 @@ impl Application for Gumicord {
         };
 
         self.login.start(runtime.handle(), waker.clone());
+        self.live.attach_waker(waker.clone());
         self.waker = Some(waker);
         self.runtime = Some(runtime);
     }
@@ -276,6 +302,9 @@ impl Application for Gumicord {
         {
             tracing::warn!("トークンが無効になった。ログインし直す");
             self.login.forget(rt.handle(), waker.clone());
+            // `SEC-021`: **キャッシュも残さない。** 残すと、次に別の人が
+            // この機械を使ったときに前の人のメッセージが読める
+            self.live.forget_everything();
             changed = true;
         }
 
@@ -350,7 +379,8 @@ impl Application for Gumicord {
             // ⚠️ **ここで一覧に足さない。** 送れたら Gateway が
             // `MESSAGE_CREATE` を返してくるので、そこで 1 回だけ足る。
             // 先に足すと、届いたときに同じものが二重に並ぶ
-            self.live.send_message(self.selected_channel, body);
+            self.live
+                .send_message(ChannelId::from(self.selected_channel), body);
             return true;
         }
 
@@ -399,7 +429,7 @@ impl Gumicord {
     fn build_tree(&self, panes: Panes) -> UiNode {
         // **画面の分かれ目はここだけである。** ログインしていなければ
         // メイン画面は組み立てもしない
-        let screen = if self.login.shows_main() {
+        let screen = if self.shows_main() {
             UiNode::new(NodeId::AppScreenMain)
                 .child_if(panes.guilds(), || self.guild_list())
                 .child_if(panes.channels(), || self.channel_list())
@@ -608,7 +638,7 @@ impl Gumicord {
             return format!("  {hint}");
         }
         if self.uses_live() {
-            if self.live.is_loading(self.selected_channel) {
+            if self.live.is_loading(ChannelId::from(self.selected_channel)) {
                 return "  読み込んでいます…".to_owned();
             }
             return String::new();
@@ -680,9 +710,20 @@ struct MessageRow {
 }
 
 impl Gumicord {
-    /// 本物のデータを出す状態か。**demo との分かれ目はここだけである**
+    /// 本物のデータを出す状態か。**demo との分かれ目はここだけである。**
+    ///
+    /// ⚠️ **ログインを待たない。** キャッシュに中身があるなら、それは
+    /// 前回このアカウントで入れていたということである。ログアウトすると
+    /// キャッシュごと消える (`SEC-021`) ので、残っていること自体が根拠になる。
+    ///
+    /// 待つと、S4 実測で 672〜1120 ms のあいだ空の画面を見せることになる
     fn uses_live(&self) -> bool {
-        self.login.session().logged_in().is_some()
+        self.login.session().logged_in().is_some() || !self.live.is_empty()
+    }
+
+    /// メイン画面を出してよいか。**ログイン画面との分かれ目**
+    fn shows_main(&self) -> bool {
+        self.login.shows_main() || !self.live.is_empty()
     }
 
     /// 選んでいるものが実在するように直し、要るものを取りに行く。
@@ -719,7 +760,8 @@ impl Gumicord {
 
         if self.selected_channel != 0 {
             // 2 回目からは何もしない
-            self.live.open_channel(self.selected_channel);
+            self.live
+                .open_channel(ChannelId::from(self.selected_channel));
         }
         changed
     }
@@ -737,16 +779,14 @@ impl Gumicord {
                 .collect();
         }
 
+        // ⚠️ 落ちているギルドは [`Store`] が既に落としている。
+        // ここには出せるものだけが来る
         self.live
             .guilds()
-            .iter()
-            // ⚠️ **落ちているギルドは出さない。** 名前もチャンネルも無いので、
-            // 中身の無い丸が並ぶだけになる。GUILD_CREATE で届いたら出る
-            .filter(|g| !g.unavailable && !g.name.is_empty())
             .map(|g| GuildRow {
                 id: g.id.get(),
                 name: g.name.clone(),
-                // read-state はまだ無い (C5)。**無いものを在るように見せない**
+                // read-state はまだ無い。**無いものを在るように見せない**
                 unread: false,
                 mentions: 0,
             })
@@ -770,21 +810,11 @@ impl Gumicord {
                 .collect();
         }
 
-        let Some(guild) = self.live.guild(self.selected_guild) else {
-            return Vec::new();
-        };
-
-        let mut rows: Vec<_> = guild
-            .channels
-            .iter()
-            // M1 で開けるのは文字のチャンネルだけである
-            .filter(|c| c.kind.is_text())
-            .collect();
-        // ⚠️ **position が同じことがある。** そのときは ID 順 —
-        // つまり作られた順になる。並びが毎フレーム変わると読めない
-        rows.sort_by_key(|c| (c.position, c.id.get()));
-
-        rows.into_iter()
+        // ⚠️ 文字のチャンネルへの絞り込みと並べ替えは [`Store`] が済ませている。
+        // **画面が毎フレーム並べ替えると、フレームごとに順が揺れうる**
+        self.live
+            .store()
+            .channels_of(GuildId::from(self.selected_guild))
             .map(|c| ChannelRow {
                 id: c.id.get(),
                 name: c.display_name(),
@@ -813,7 +843,8 @@ impl Gumicord {
 
         let me = self.login.session().logged_in().map(|l| l.me.user.id);
         self.live
-            .messages(self.selected_channel)
+            .store()
+            .messages(ChannelId::from(self.selected_channel))
             .iter()
             .map(|m| MessageRow {
                 id: m.id.get(),
