@@ -86,6 +86,12 @@ const THEME_ENV: &str = "GUMICORD_THEME";
 const ICON_PX: u16 = 128;
 const AVATAR_PX: u16 = 128;
 
+/// 閉じたフォルダに敷き詰める枚数。Discord と同じく 2×2 まで。
+///
+/// ⚠️ **ここを増やすならテーマの `grouped` の寸法も変える。**
+/// 枚数と一枚の大きさの積が、フォルダの内側に収まっていなければならない
+const FOLDER_TILES: usize = 4;
+
 /// ポインタが乗ったときに反応するノード。
 ///
 /// ⚠️ **ここに挙げていないノードにホバー状態は立たない。** テーマが
@@ -568,8 +574,7 @@ impl Gumicord {
             // フォルダの見出し。**押すと開閉する**
             if let Some(folder) = g.folder_of_own {
                 list = list.child(
-                    UiNode::text(NodeId::NavGuildListFolder, initial(&g.name))
-                        .with_id_key(folder)
+                    folder_face(folder, &g)
                         .with_state_if(g.collapsed, State::Collapsed)
                         .with_state_if(
                             self.hovered_id(NodeId::NavGuildListFolder, folder),
@@ -769,6 +774,15 @@ struct GuildRow {
     in_folder: bool,
     /// 閉じているフォルダか
     collapsed: bool,
+    /// フォルダの中身。**閉じているときにこれを敷き詰める**
+    members: Vec<FaceRow>,
+}
+
+/// 絵と名前の組。**フォルダの中に敷き詰めるのに要る**
+struct FaceRow {
+    id: u64,
+    name: String,
+    icon: Option<String>,
 }
 
 struct ChannelRow {
@@ -861,6 +875,7 @@ impl Gumicord {
             folder_of_own: None,
             in_folder: false,
             collapsed: false,
+            members: Vec::new(),
         };
 
         if !self.uses_live() {
@@ -881,13 +896,14 @@ impl Gumicord {
                     id,
                     // 名前が無いフォルダもある。**中身の名前で代わりにする**
                     name: row.name.clone().unwrap_or_else(|| self.folder_label(row)),
-                    // フォルダ自体に絵は無い。**中身の絵を並べるのは M2**
+                    // ⚠️ **フォルダ自体に絵は無い。** 代わりに中身を敷き詰める
                     icon: None,
                     unread: false,
                     mentions: 0,
                     folder_of_own: Some(id),
                     in_folder: false,
                     collapsed: self.live.store().is_collapsed(id),
+                    members: self.folder_members(row),
                 },
                 GuildEntry::Guild { row, folder } => GuildRow {
                     id: row.id.get(),
@@ -899,6 +915,7 @@ impl Gumicord {
                     folder_of_own: None,
                     in_folder: folder.is_some(),
                     collapsed: false,
+                    members: Vec::new(),
                 },
             })
             .collect()
@@ -915,6 +932,27 @@ impl Gumicord {
             .map(|g| &*g.name)
             .collect::<Vec<_>>()
             .join("、")
+    }
+
+    /// 閉じたフォルダの中に敷き詰める顔。
+    ///
+    /// ⚠️ **4 つで打ち切る。** 2×2 に入りきらない分は出しても意味がない
+    fn folder_members(&self, folder: &gumicord_store::FolderRow) -> Vec<FaceRow> {
+        folder
+            .guilds
+            .iter()
+            .filter_map(|id| {
+                let g = self.live.store().guild(*id)?;
+                Some(FaceRow {
+                    id: id.get(),
+                    name: g.name.clone(),
+                    // ⚠️ 敷き詰める絵は 16px ほどだが、**頼む大きさは変えない。**
+                    // 大きい方をすでに取ってあるなら使い回せる
+                    icon: self.live.store().guild_icon_url(*id, ICON_PX),
+                })
+            })
+            .take(FOLDER_TILES)
+            .collect()
     }
 
     /// 一覧のうち、**開けるものだけ**。
@@ -1530,6 +1568,110 @@ mod channel_selection_tests {
     }
 }
 
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    use gumicord_model::Guild;
+    use gumicord_store::FolderRow;
+
+    fn guild(id: u64, name: &str, icon: Option<&str>) -> Guild {
+        Guild {
+            id: id.into(),
+            name: name.to_owned(),
+            icon: icon.map(|s| s.to_owned()),
+            unavailable: false,
+            channels: Vec::new(),
+        }
+    }
+
+    /// 3 つ入ったフォルダ 1 つと、その外のギルド 1 つ
+    fn app_with_folder() -> Gumicord {
+        let mut a = Gumicord::demo();
+        a.live.store_mut().replace_guilds(vec![
+            guild(1, "あ", Some("aaa")),
+            guild(2, "い", Some("bbb")),
+            guild(3, "う", None),
+            guild(4, "え", Some("ddd")),
+        ]);
+        a.live.store_mut().set_sidebar(vec![
+            FolderRow {
+                id: Some(100),
+                name: None,
+                guilds: vec![1u64.into(), 2u64.into(), 3u64.into()],
+            },
+            FolderRow {
+                id: None,
+                name: None,
+                guilds: vec![4u64.into()],
+            },
+        ]);
+        a
+    }
+
+    fn tiles(node: &UiNode) -> usize {
+        fn walk(n: &UiNode, found: &mut usize) {
+            if n.id == NodeId::NavGuildListItemIcon {
+                *found += 1;
+            }
+            for c in &n.children {
+                walk(c, found);
+            }
+        }
+        let mut found = 0;
+        walk(node, &mut found);
+        found
+    }
+
+    /// ⚠️ **閉じたフォルダは中身の絵を並べる。**
+    ///
+    /// 頭文字 1 つの箱では、どのフォルダを閉じているのか分からない。
+    /// 実際にそうなっていて、直せと言われた
+    #[test]
+    fn a_closed_folder_shows_what_is_inside() {
+        let mut a = app_with_folder();
+        a.live.store_mut().set_collapsed([100]);
+
+        assert_eq!(tiles(&a.guild_list()), 3);
+    }
+
+    /// ⚠️ **開いているときに敷き詰めない。** 中身は下に並んでいるので、
+    /// 同じ絵が上下に二重に出る
+    #[test]
+    fn an_open_folder_does_not_repeat_its_contents() {
+        let a = app_with_folder();
+
+        assert_eq!(tiles(&a.guild_list()), 0);
+    }
+
+    /// ⚠️ 2×2 に入りきらない分は出しても意味がない
+    #[test]
+    fn only_four_fit() {
+        let mut a = Gumicord::demo();
+        let many: Vec<_> = (1..=7).map(|i| guild(i, "さ", Some("hash"))).collect();
+        a.live.store_mut().replace_guilds(many);
+        a.live.store_mut().set_sidebar(vec![FolderRow {
+            id: Some(100),
+            name: None,
+            guilds: (1..=7u64).map(Into::into).collect(),
+        }]);
+        a.live.store_mut().set_collapsed([100]);
+
+        assert_eq!(tiles(&a.guild_list()), FOLDER_TILES);
+    }
+
+    /// 絵の無いサーバも 1 枚として数える。**穴が空くほうが分かりにくい**
+    #[test]
+    fn a_guild_without_an_icon_still_takes_a_tile() {
+        let mut a = app_with_folder();
+        a.live.store_mut().set_collapsed([100]);
+        let rows = a.guild_rows();
+        let folder = rows.iter().find(|r| r.folder_of_own == Some(100)).unwrap();
+
+        assert_eq!(folder.members.len(), 3);
+        assert!(folder.members[2].icon.is_none());
+    }
+}
+
 /// アイコンかアバターを 1 つ作る。
 ///
 /// # 絵が無いときは頭文字を出す
@@ -1545,4 +1687,55 @@ fn face(id: NodeId, url: Option<&str>, name: &str) -> UiNode {
         Some(url) => UiNode::image(id, url),
         None => UiNode::text(id, initial(name)),
     }
+}
+
+/// フォルダを 1 つ描く。
+///
+/// # 閉じているときは中身を並べて出す
+///
+/// Discord は**中身のサーバのアイコンを 2×2 で敷き詰める**。
+/// 折り畳んだ中身が何かを、開かずに分かるようにするためである。
+/// **頭文字 1 つの箱では、どのフォルダか見分けが付かない。**
+///
+/// ```text
+///   閉じている        開いている
+///   ┌───────┐        ┌───────┐
+///   │ ▢ ▢ │        │  ▱   │   ← 書類挟みの絵
+///   │ ▢ ▢ │        └───────┘
+///   └───────┘          サーバ   ← 中身は下に並ぶ
+///                        サーバ
+/// ```
+///
+/// ⚠️ **開いているときに中身を敷き詰めない。** 同じアイコンが上と下に
+/// 二重に並ぶことになる。
+///
+/// ⚠️ 大きさも形もテーマが決める。ここが渡すのは
+/// **「フォルダである」「閉じている」「中身はこれ」**だけである
+fn folder_face(id: u64, row: &GuildRow) -> UiNode {
+    if !row.collapsed {
+        return UiNode::icon(NodeId::NavGuildListFolder, "folder").with_id_key(id);
+    }
+    let node = UiNode::new(NodeId::NavGuildListFolder).with_id_key(id);
+
+    // ⚠️ 行と列で組む。**格子を並べる仕組みは持っていない**
+    // (`spec/03-uitree.md` 3.6 — row / column / stack / scroll しかない)
+    let mut grid = UiNode::new(NodeId::LayoutColumn);
+    for pair in row.members.chunks(2) {
+        let mut line = UiNode::new(NodeId::LayoutRow);
+        for member in pair {
+            line = line.child(
+                face(
+                    NodeId::NavGuildListItemIcon,
+                    member.icon.as_deref(),
+                    &member.name,
+                )
+                .with_id_key(member.id)
+                // ⚠️ **小ささはテーマが決める。** ここで寸法を焼き付けると
+                // テーマから揃えられなくなる (`chat.message` の grouped と同じ)
+                .with_state(State::Grouped),
+            );
+        }
+        grid = grid.child(line);
+    }
+    node.child(grid)
 }
