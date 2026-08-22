@@ -46,105 +46,141 @@ pub fn from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> Vec<Guil
         return Vec::new();
     };
 
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    walk(&bytes, known, 0, &mut |id| {
-        if seen.insert(id) {
-            found.push(GuildId::from(id));
-        }
-    });
+    // ⚠️ **入れ子ごとに候補を作る。** 識別子は設定の中の何箇所にも現れる
+    // (通知の設定、既読の位置、フォルダ)。全部を出てきた順に混ぜると、
+    // **どこか 1 箇所の順ではなく、混ざった順**になってしまう
+    let mut candidates: Vec<Vec<u64>> = Vec::new();
+    let top = walk(&bytes, known, 0, &mut candidates);
+    candidates.push(top);
 
-    tracing::debug!(
-        found = found.len(),
-        known = known.len(),
-        "並び順を user_settings_proto から取り出した"
-    );
-    found
+    // 全部のギルドを 1 度ずつ持つものが、探している一覧である。
+    // 通知の設定なども全ギルドを持つが、そちらは**入れ子の中に 1 つずつ**
+    // 入っているので、平らな列にはならない
+    let best = candidates
+        .into_iter()
+        .map(dedup)
+        .max_by_key(|list| list.len())
+        .unwrap_or_default();
+
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(
+            found = best.len(),
+            known = known.len(),
+            order = ?best,
+            "並び順を user_settings_proto から取り出した"
+        );
+    }
+    best.into_iter().map(GuildId::from).collect()
 }
 
-/// protobuf の線の形式を歩き、**探している整数**を出てきた順に渡す。
-fn walk(mut buf: &[u8], known: &HashSet<u64>, depth: u32, out: &mut impl FnMut(u64)) {
+/// 重複を落とし、**最初に出た順**を残す
+fn dedup(list: Vec<u64>) -> Vec<u64> {
+    let mut seen = HashSet::new();
+    list.into_iter().filter(|v| seen.insert(*v)).collect()
+}
+
+/// protobuf の線の形式を歩き、**この塊の下で見つかった識別子**を順に返す。
+///
+/// 入れ子に降りるたび、その入れ子ぶんの列を `candidates` に足す。
+/// **どれが探している一覧かは、後で長さで決める。**
+fn walk(
+    mut buf: &[u8],
+    known: &HashSet<u64>,
+    depth: u32,
+    candidates: &mut Vec<Vec<u64>>,
+) -> Vec<u64> {
+    let mut found = Vec::new();
     while !buf.is_empty() {
         let Some((key, rest)) = varint(buf) else {
-            return;
+            return found;
         };
         buf = rest;
 
         match key & 7 {
             // 可変長整数
             0 => {
-                let Some((v, rest)) = varint(buf) else { return };
+                let Some((v, rest)) = varint(buf) else {
+                    return found;
+                };
                 buf = rest;
                 if known.contains(&v) {
-                    out(v);
+                    found.push(v);
                 }
             }
             // 64 ビット固定長。**スノーフレークはこちらで来ることが多い**
             1 => {
                 if buf.len() < 8 {
-                    return;
+                    return found;
                 }
                 let v = u64::from_le_bytes(buf[..8].try_into().expect("8 バイトある"));
                 buf = &buf[8..];
                 if known.contains(&v) {
-                    out(v);
+                    found.push(v);
                 }
             }
             // 長さ付きの塊。入れ子か、ただのバイト列か、詰めた整数の列
             2 => {
                 let Some((len, rest)) = varint(buf) else {
-                    return;
+                    return found;
                 };
                 let len = len as usize;
                 if rest.len() < len {
-                    return;
+                    return found;
                 }
                 let (body, after) = rest.split_at(len);
                 buf = after;
 
                 // ⚠️ **詰めた整数の列を先に試す。** 並び順はここで来る。
                 // 入れ子として読もうとすると意味のない値を拾いうる
-                if !packed(body, known, out) && depth < MAX_DEPTH {
-                    walk(body, known, depth + 1, out);
+                match packed(body, known) {
+                    Some(list) => {
+                        // 詰めた列はそれ自体が 1 つの一覧である
+                        candidates.push(list.clone());
+                        found.extend(list);
+                    }
+                    None if depth < MAX_DEPTH => {
+                        let inner = walk(body, known, depth + 1, candidates);
+                        if !inner.is_empty() {
+                            candidates.push(inner.clone());
+                            found.extend(inner);
+                        }
+                    }
+                    None => {}
                 }
             }
             // 32 ビット固定長。識別子には使われない
             5 => {
                 if buf.len() < 4 {
-                    return;
+                    return found;
                 }
                 buf = &buf[4..];
             }
             // 廃止された群。ここへ来たら読み違えている
-            _ => return,
+            _ => return found,
         }
     }
+    found
 }
 
 /// 詰めた可変長整数の列として読み、**全部が探しているものなら**渡す。
 ///
 /// ⚠️ 「全部が」であることが効いている。一部だけ一致する塊は、
 /// たまたま似た値が並んでいるだけの別のフィールドである
-fn packed(body: &[u8], known: &HashSet<u64>, out: &mut impl FnMut(u64)) -> bool {
+fn packed(body: &[u8], known: &HashSet<u64>) -> Option<Vec<u64>> {
     if body.is_empty() {
-        return false;
+        return None;
     }
     let mut rest = body;
     let mut values = Vec::new();
     while !rest.is_empty() {
-        let Some((v, next)) = varint(rest) else {
-            return false;
-        };
+        let (v, next) = varint(rest)?;
         rest = next;
         if !known.contains(&v) {
-            return false;
+            return None;
         }
         values.push(v);
     }
-    for v in values {
-        out(v);
-    }
-    true
+    Some(values)
 }
 
 /// 可変長整数を 1 つ読む。読めなければ `None`

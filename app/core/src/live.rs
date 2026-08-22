@@ -139,6 +139,8 @@ pub struct Live {
     subs: Option<Subscriptions>,
     /// チャンネルごとの、いま入力中の人。**残さない。消えてよいもの**
     typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
+    /// 自分。**自分の「入力中」を出さないために要る**
+    me: Option<UserId>,
 }
 
 impl Live {
@@ -196,6 +198,7 @@ impl Live {
             last_channel: None,
             subs: None,
             typing: std::collections::HashMap::new(),
+            me: None,
         }
     }
 
@@ -278,8 +281,16 @@ impl Live {
             .into_iter()
             .flatten()
             .filter(|t| now.duration_since(t.at) < TYPING_TTL)
+            // ⚠️ **自分は出さない。** 自分が打っていることは自分が一番
+            // よく知っている。Discord も出さない
+            .filter(|t| Some(t.user) != self.me)
             .map(|t| &*t.name)
             .collect()
+    }
+
+    /// 自分が誰かを教える。**自分の入力中を出さないために要る**
+    pub fn set_me(&mut self, me: UserId) {
+        self.me = Some(me);
     }
 
     /// そのチャンネルを開く。**キャッシュを先に出し、REST で追いかける。**
@@ -384,6 +395,7 @@ impl Live {
             LiveEvent::Ready(ready) => {
                 self.link = Link::Up;
                 // ⚠️ **順を先に取る。** ギルドを差し替えると `ready` が動く
+                self.me = Some(ready.user.user.id);
                 let order = ready.guild_order();
                 self.store.replace_guilds(ready.guilds);
                 if !order.is_empty() {

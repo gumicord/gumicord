@@ -890,3 +890,110 @@ mod tests {
         assert_eq!(a, b);
     }
 }
+
+/// 1 行に収まるように末尾を「…」で詰めた文字列。
+///
+/// # なぜ折り返さずに切るのか
+///
+/// チャンネル名やサーバ名は**一覧の 1 行**である。折り返すと行の高さが
+/// 揃わなくなり、一覧が読めなくなる。Discord も切って「…」を出す。
+///
+/// ⚠️ **切る位置は文字の境界である。** バイトで切ると、日本語も絵文字も
+/// 途中で割れて化ける。整形した結果の字の位置を見て決める。
+impl Shaper {
+    pub fn fit_single_line(&mut self, text: &str, font: &ResolvedFont, max_w: f32) -> String {
+        /// 詰めたことを示す字。**1 文字で済ませる**
+        const ELLIPSIS: &str = "…";
+
+        if text.is_empty() || !max_w.is_finite() || max_w <= 0.0 {
+            return text.to_owned();
+        }
+
+        // ⚠️ 折り返さずに測る。折り返して測ると「収まっている」ことになる
+        if self.measure(text, font, None).w <= max_w {
+            return text.to_owned();
+        }
+
+        let room = max_w - self.measure(ELLIPSIS, font, None).w;
+        if room <= 0.0 {
+            return ELLIPSIS.to_owned();
+        }
+
+        // 収まる最後の字の**手前**で切る
+        let limit = room * self.scale;
+        let mut cut = 0;
+        for g in &self.shape(text, font, None).glyphs {
+            if g.left + g.advance > limit {
+                break;
+            }
+            cut = g.end;
+        }
+        if cut == 0 {
+            return ELLIPSIS.to_owned();
+        }
+
+        // ⚠️ 整形は書記素をまとめるので `end` は境界のはずだが、
+        // **信じずに確かめる**。ここで割れると画面に化けた字が出る
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}{ELLIPSIS}", &text[..cut])
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    fn shaper() -> Shaper {
+        Shaper::new(1.0)
+    }
+
+    /// 収まるものはそのまま
+    #[test]
+    fn text_that_fits_is_untouched() {
+        let mut s = shaper();
+        let font = ResolvedFont::from_style(&Style::default());
+        let wide = s.measure("あい", &font, None).w + 10.0;
+        assert_eq!(s.fit_single_line("あい", &font, wide), "あい");
+    }
+
+    /// はみ出したら「…」が付き、**元より短くなる**
+    #[test]
+    fn overflowing_text_is_cut_with_an_ellipsis() {
+        let mut s = shaper();
+        let font = ResolvedFont::from_style(&Style::default());
+        let long = "とてもながいチャンネルめい";
+        let narrow = s.measure(long, &font, None).w * 0.4;
+
+        let cut = s.fit_single_line(long, &font, narrow);
+        assert!(cut.ends_with('…'), "「…」で終わっていない: {cut}");
+        assert!(cut.chars().count() < long.chars().count());
+        // ⚠️ **収まっている**こと。切ったのに溢れていては意味がない
+        assert!(s.measure(&cut, &font, None).w <= narrow + 0.5);
+    }
+
+    /// ⚠️ **文字の途中で割らない。** バイトで切ると日本語も絵文字も化ける
+    #[test]
+    fn multibyte_text_is_never_split_mid_character() {
+        let mut s = shaper();
+        let font = ResolvedFont::from_style(&Style::default());
+        let text = "🍣🍣🍣🍣🍣🍣🍣🍣";
+
+        // どの幅で切っても、正しい文字列であること
+        for n in 1..40 {
+            let cut = s.fit_single_line(text, &font, n as f32 * 3.0);
+            assert!(cut.chars().all(|c| c == '🍣' || c == '…'), "化けた: {cut}");
+        }
+    }
+
+    /// 幅が無いに等しくても落ちない
+    #[test]
+    fn an_impossible_width_does_not_panic() {
+        let mut s = shaper();
+        let font = ResolvedFont::from_style(&Style::default());
+        assert_eq!(s.fit_single_line("あ", &font, 0.0), "あ");
+        assert_eq!(s.fit_single_line("あいうえお", &font, 1.0), "…");
+        assert_eq!(s.fit_single_line("", &font, 100.0), "");
+    }
+}

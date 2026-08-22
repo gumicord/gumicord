@@ -220,6 +220,18 @@ impl<'a> Cx<'a, '_, '_> {
             Content::Text(_) | Content::Editable(_) => {
                 let s = node.content.as_text().unwrap_or_default();
                 let font = ResolvedFont::from_style(&node.style);
+
+                // ⚠️ **1 行のものは折り返して測らない。** 折り返して測ると
+                // 「2 行に収まっている」ことになり、行の高さが 2 倍になる。
+                // 実際にチャンネル名が 2 行で出た
+                if intrinsic(node.id).single_line {
+                    let mut size = self.text.measure(s, &font, None);
+                    if inner.w.is_finite() {
+                        size.w = size.w.min(inner.w);
+                    }
+                    return size;
+                }
+
                 // 折り返し幅が無限なら折り返さない
                 let max_w = inner.w.is_finite().then_some(inner.w);
                 self.text.measure(s, &font, max_w)

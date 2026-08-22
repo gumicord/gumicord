@@ -290,12 +290,16 @@ impl Application for Gumicord {
         if let (Some(l), Some(rt), Some(waker)) =
             (self.login.session().logged_in(), &self.runtime, &self.waker)
         {
+            // ⚠️ **自分が誰かを先に教える。** READY より前に誰かが打ち始めても、
+            // 自分の「入力中」を出さないため
+            let me = l.me.user.id;
             self.live.start(
                 rt.handle(),
                 l.client.clone(),
                 l.token.clone(),
                 waker.clone(),
             );
+            self.live.set_me(me);
         }
 
         // `FR-004`: Gateway にトークンを弾かれた。**捨ててログイン画面へ戻す**

@@ -609,7 +609,9 @@ fn text_origin(
 ) -> (f32, f32) {
     let font = ResolvedFont::from_style(&placed.node.style);
     let inner = placed.inner;
-    let size = text.shaper().measure(s, &font, Some(inner.w));
+    // ⚠️ 1 行のものは折り返さずに測る。**縦の中心がずれる**
+    let wrap = (!intrinsic(placed.node.id).single_line).then_some(inner.w);
+    let size = text.shaper().measure(s, &font, wrap);
 
     let y = inner.y + ((inner.h - size.h) * 0.5).max(0.0);
     let x = if intrinsic(placed.node.id).axis == Axis::Stack {
@@ -635,8 +637,12 @@ fn draw_glyph_run(
     let font = ResolvedFont::from_style(&placed.node.style);
     let (ox, oy) = text_origin(text, placed, s, scale);
 
+    // ⚠️ **測るときと同じ折り返し幅を渡す。** 食い違うと字が置かれる位置が
+    // 原点の計算とずれる
+    let wrap = (!intrinsic(placed.node.id).single_line).then_some(placed.inner.w);
+
     let mut out: Vec<([f32; 4], [f32; 4], bool)> = Vec::new();
-    text.draw_glyphs(queue, s, &font, Some(placed.inner.w), |e, gx, gy| {
+    text.draw_glyphs(queue, s, &font, wrap, |e, gx, gy| {
         out.push((
             [
                 ox + (gx + e.left) as f32,
@@ -666,6 +672,16 @@ fn draw_text(
     scissor: Option<[u32; 4]>,
 ) {
     let color = linear(placed.node.style.color.unwrap_or(FALLBACK_TEXT), opacity);
+
+    // ⚠️ **1 行のものは、はみ出したぶんを「…」で切る。** 折り返すと行の
+    // 高さが揃わず、一覧として読めなくなる
+    if intrinsic(placed.node.id).single_line {
+        let font = ResolvedFont::from_style(&placed.node.style);
+        let fitted = text.shaper().fit_single_line(s, &font, placed.inner.w);
+        draw_glyph_run(dl, text, queue, placed, &fitted, color, scale, scissor);
+        return;
+    }
+
     draw_glyph_run(dl, text, queue, placed, s, color, scale, scissor);
 }
 

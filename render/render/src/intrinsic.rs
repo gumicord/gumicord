@@ -52,6 +52,11 @@ pub struct Intrinsic {
     pub height: Option<f32>,
     /// はみ出しを切り、スクロールできるか
     pub scroll: bool,
+    /// 1 行に収めて、はみ出したら「…」で切るか。
+    ///
+    /// ⚠️ **一覧の項目は折り返してはいけない。** 行の高さが揃わなくなり、
+    /// 一覧として読めなくなる。Discord も切って「…」を出す
+    pub single_line: bool,
     /// スクロール位置の既定が**末尾**か。
     ///
     /// メッセージ一覧は最新が下にあり、開いたときに見えているべきなのは
@@ -69,6 +74,7 @@ impl Intrinsic {
             width: None,
             height: None,
             scroll: false,
+            single_line: false,
             anchor_end: false,
         }
     }
@@ -104,6 +110,12 @@ impl Intrinsic {
 
     const fn h(mut self, h: f32) -> Self {
         self.height = Some(h);
+        self
+    }
+
+    /// 1 行に収める。はみ出したら「…」で切る
+    const fn one_line(mut self) -> Self {
+        self.single_line = true;
         self
     }
 
@@ -156,7 +168,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // ── chrome.*
         ChromeTitlebar => Intrinsic::row().h(TITLEBAR_H).cross(Cross::Stretch),
         // 題名が余りを取ることで、操作ボタンが右端へ寄る
-        ChromeTitlebarTitle => Intrinsic::row().grow(1.0),
+        ChromeTitlebarTitle => Intrinsic::row().grow(1.0).one_line(),
         ChromeTitlebarControls => Intrinsic::row().cross(Cross::Stretch),
         ChromeTitlebarControl => Intrinsic::stack().w(TITLEBAR_BUTTON_W),
 
@@ -171,20 +183,20 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
             .w(CHANNEL_LIST_W)
             .cross(Cross::Stretch)
             .scrollable(),
-        NavChannelListHeader => Intrinsic::row().h(48.0).cross(Cross::Center),
-        NavChannelListCategory => Intrinsic::row().cross(Cross::Center),
+        NavChannelListHeader => Intrinsic::row().h(48.0).cross(Cross::Center).one_line(),
+        NavChannelListCategory => Intrinsic::row().cross(Cross::Center).one_line(),
         NavChannelListItem | NavDmListItem => Intrinsic::row().cross(Cross::Center),
         NavChannelListItemIcon => Intrinsic::stack().w(20.0).h(20.0),
         // 名前が余りを取ることで、バッジが右端へ寄る
-        NavChannelListItemName => Intrinsic::row().grow(1.0),
+        NavChannelListItemName => Intrinsic::row().grow(1.0).one_line(),
         NavChannelListItemBadge => Intrinsic::row(),
 
         // ── chat.*
         ChatView => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
         ChatHeader => Intrinsic::row().h(48.0).cross(Cross::Center),
-        ChatHeaderTitle => Intrinsic::row(),
+        ChatHeaderTitle => Intrinsic::row().one_line(),
         // 話題が余りを取る。長ければ切り詰められる
-        ChatHeaderTopic => Intrinsic::row().grow(1.0),
+        ChatHeaderTopic => Intrinsic::row().grow(1.0).one_line(),
         // ここが縦の余りを全部取り、はみ出したぶんがスクロールになる
         ChatMessageList => Intrinsic::column()
             .grow(1.0)
@@ -194,14 +206,14 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         ChatMessage => Intrinsic::row().cross(Cross::Start),
         ChatMessageAvatar => Intrinsic::stack().w(40.0).h(40.0),
         ChatMessageHeader => Intrinsic::row().cross(Cross::Center),
-        ChatMessageHeaderAuthor | ChatMessageHeaderTime => Intrinsic::row(),
+        ChatMessageHeaderAuthor | ChatMessageHeaderTime => Intrinsic::row().one_line(),
         ChatMessageHeaderBadges => Intrinsic::row(),
         ChatMessageReplyRef => Intrinsic::row().cross(Cross::Center),
         ChatMessageContent => Intrinsic::column().cross(Cross::Stretch),
         ChatMessageAttachments | ChatMessageEmbeds => Intrinsic::column().cross(Cross::Stretch),
         ChatMessageAttachment | ChatMessageEmbed => Intrinsic::column().cross(Cross::Stretch),
         ChatMessageActions => Intrinsic::row(),
-        ChatTypingIndicator => Intrinsic::row().h(24.0).cross(Cross::Center),
+        ChatTypingIndicator => Intrinsic::row().h(24.0).cross(Cross::Center).one_line(),
         ChatInput => Intrinsic::column().cross(Cross::Stretch),
         ChatInputField => Intrinsic::column().cross(Cross::Stretch),
         ChatInputToolbar => Intrinsic::row().cross(Cross::Center),

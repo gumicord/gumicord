@@ -159,11 +159,8 @@ impl Store {
                     .filter(|c| !c.kind.is_category() && c.parent_id == Some(cat.id))
                     .collect(),
             );
-            // ⚠️ **空のカテゴリは出さない。** 見出しだけが浮くことになる。
-            // 権限で中身が見えないカテゴリは実際にこうなる
-            if children.is_empty() {
-                continue;
-            }
+            // ⚠️ **空のカテゴリも出す。** Discord がそうしている。
+            // 見えているのに一覧に無いと、設定を間違えたのかと思わせる
             out.push(ChannelEntry::Category(cat));
             out.extend(children.into_iter().map(ChannelEntry::Channel));
         }
@@ -444,9 +441,10 @@ mod tests {
         assert_eq!(s.channels_of(GuildId::from(1u64)).count(), 2);
     }
 
-    /// **空のカテゴリは出さない。** 見出しだけが浮くことになる
+    /// ⚠️ **空のカテゴリも出す。** Discord がそうしている。
+    /// 見えているのに一覧に無いと、設定を間違えたのかと思わせる
     #[test]
-    fn an_empty_category_is_not_shown() {
+    fn an_empty_category_is_still_shown() {
         use gumicord_model::ChannelKind;
 
         let mut g = guild(1, "テスト", &[]);
@@ -464,7 +462,12 @@ mod tests {
 
         let mut s = Store::new();
         s.replace_guilds(vec![g]);
-        assert_eq!(s.entries_of(GuildId::from(1u64)).count(), 0);
+
+        let got: Vec<_> = s.entries_of(GuildId::from(1u64)).collect();
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ChannelEntry::Category(_)));
+        // **見出しは開けるものではない**
+        assert_eq!(s.channels_of(GuildId::from(1u64)).count(), 0);
     }
 
     /// **チャンネルは 1 箇所にしかない。** 同じものが 2 つの形で存在すると、
