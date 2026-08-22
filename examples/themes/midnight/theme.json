@@ -201,6 +201,11 @@
     },
     {
       "select": "chat.message",
+      "when": { "state": "grouped" },
+      "style": { "padding": [0, 16, 0, 64] }
+    },
+    {
+      "select": "chat.message",
       "when": { "state": "mentioned" },
       "style": { "background": "#7c6cf01a", "borderColor": "$color.accent", "borderWidth": 2 }
     },
@@ -313,6 +318,20 @@
     {
       "select": "primitive.divider",
       "style": { "background": "$color.border", "height": 1 }
+    },
+
+    {
+      "select": "layout.scrollbar",
+      "style": { "width": 10, "padding": [4, 3, 4, 3] }
+    },
+    {
+      "select": "layout.scrollbar.thumb",
+      "style": { "background": "#ffffff26", "radius": "$radius.full" }
+    },
+    {
+      "select": "layout.scrollbar.thumb",
+      "when": { "state": "hover" },
+      "style": { "background": "#ffffff4d" }
     },
 
     {

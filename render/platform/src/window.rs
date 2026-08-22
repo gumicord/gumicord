@@ -17,6 +17,23 @@
 //! ⚠️ `PLT-022` (スナップレイアウト) はまだ調べていない。Windows で最大化
 //! ボタンにポインタを置いたときに出る配置候補は、標準タイトルバーの機能である。
 //!
+//! ## サーフェスの大きさがずれると、上端と右端が切れる
+//!
+//! **タイトルバーが消えて描画範囲が狭く見えたら、まずこれを疑う。**
+//!
+//! GL バックエンドの原点は左下である。サーフェスをウィンドウより大きく
+//! 構成したまま描くと、UI の上端は見えている領域より**上**へ写り、右端は
+//! はみ出す。`chrome.titlebar` は上端にあるので真っ先に消える。
+//!
+//! リサイズの通知を 1 回でも取りこぼすとこの状態になるので、
+//! [`Host::redraw`] は**描く直前にウィンドウの実寸からサーフェスを合わせる**。
+//! `GUMICORD_LOG=debug` にすると「サーフェスを作り直す from=… to=…」が出るので、
+//! ずれていればそこで分かる。
+//!
+//! ⚠️ 別件として、**Windows は枠なしウィンドウを最大化するとクライアント領域を
+//! 画面の外へ 8px ほどはみ出させる**。正しい直し方は `WM_NCCALCSIZE` を扱う
+//! ことで、Windows 固有の層として P7 に積んである。
+//!
 //! # 再描画は待って行う
 //!
 //! S1 は計測のために `ControlFlow::Poll` で回していたが、常時描画は
@@ -25,7 +42,7 @@
 
 use std::sync::Arc;
 
-use gumicord_render::{Hit, Presented, Renderer, Size};
+use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -90,6 +107,7 @@ pub fn run(app: impl Application + 'static) -> Result<(), PlatformError> {
         cursor: (0.0, 0.0),
         zone: Zone::Client,
         maximized: false,
+        scroll_grab: None,
         first_frame: true,
     };
     event_loop.run_app(&mut host)?;
@@ -113,6 +131,8 @@ struct Host {
     cursor: (f32, f32),
     zone: Zone,
     maximized: bool,
+    /// 掴んでいるスクロールバー。押している間だけ入る
+    scroll_grab: Option<ScrollGrab>,
     first_frame: bool,
 }
 
@@ -228,6 +248,17 @@ impl Host {
             return;
         }
 
+        // ⚠️ **ホバーは配置が変われば変わる。ポインタが動いたときだけでは足りない。**
+        //
+        // スクロールすると行がカーソルの下を通り過ぎるのに、当たり判定は
+        // 前のフレームの配置に対して答える。描き終えたここで見直さないと、
+        // ハイライトが通り過ぎた行に貼り付いたままになる。
+        //
+        // 変わったときだけ再描画を要求するので、次のフレームで落ち着く。
+        if self.app.hover_changed(&self.hits()) {
+            self.request_redraw();
+        }
+
         if self.first_frame && stats.presented == Presented::Yes {
             self.first_frame = false;
             tracing::info!(
@@ -303,6 +334,15 @@ impl ApplicationHandler for Host {
                 let scale = self.renderer.as_ref().map_or(1.0, Renderer::scale) as f64;
                 self.cursor = ((position.x / scale) as f32, (position.y / scale) as f32);
 
+                // スクロールバーを引いている間は、それ以外を見ない。
+                // 摘みから指がはみ出しても掴んだままにする (OS の作法)
+                if let (Some(grab), Some(r)) = (self.scroll_grab, &mut self.renderer) {
+                    if r.drag_scrollbar(&grab, self.cursor.1) {
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
                 let hits = self.hits();
                 let zone = self.zone_at(&hits);
                 if zone != self.zone {
@@ -371,12 +411,32 @@ impl ApplicationHandler for Host {
                         tracing::debug!(slot = other, "知らないタイトルバーのボタン");
                     }
                     Zone::Client => {
+                        // スクロールバーはアプリより先に見る。
+                        // 一覧の中身と重なっているので、どちらかしか反応できない
+                        let grabbed = self
+                            .renderer
+                            .as_mut()
+                            .and_then(|r| r.grab_scrollbar(self.cursor.0, self.cursor.1));
+                        if let Some(g) = grabbed {
+                            self.scroll_grab = Some(g);
+                            self.request_redraw();
+                            return;
+                        }
+
                         let hits = self.hits();
                         if self.app.pressed(&hits) {
                             self.request_redraw();
                         }
                     }
                 }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.scroll_grab = None;
             }
 
             // ⚠️ **ここでフォーカスを見てはならない。** 非アクティブな窓でも、

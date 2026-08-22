@@ -161,6 +161,42 @@ pub const MESSAGES: &[Message] = &[
         body: "そこが M1.1 のクリティカルパス。ADR-0005 のとおり自前で ITextStoreACP を持つ。",
         mentioned: false,
     },
+    // ── ここから下は連投。送信者行が繰り返されないことを見るためにある
+    Message {
+        id: 108,
+        author: "ねんねこ",
+        time: "今日 09:42",
+        body: "ついでにスクロールバーも入れた。摘みの大きさと位置ははみ出し量から決まるので、レンダラが計算している。",
+        mentioned: false,
+    },
+    Message {
+        id: 109,
+        author: "ねんねこ",
+        time: "今日 09:43",
+        body: "テーマが決めるのは幅と余白と色だけ。layout.scrollbar と layout.scrollbar.thumb を足した。",
+        mentioned: false,
+    },
+    Message {
+        id: 110,
+        author: "みどり",
+        time: "今日 09:50",
+        body: "連投したときに送信者行が消えるのは when.state = grouped でやってる？",
+        mentioned: false,
+    },
+    Message {
+        id: 111,
+        author: "ねんねこ",
+        time: "今日 09:51",
+        body: "そう。字下げの量もテーマの padding で決まる。クライアント側に焼き付けると、テーマごとに揃えられなくなる。",
+        mentioned: false,
+    },
+    Message {
+        id: 112,
+        author: "ねんねこ",
+        time: "今日 09:52",
+        body: "次は通信 (C1〜C4) と日本語入力 (P2)。ここまでは全部ダミーデータ。",
+        mentioned: false,
+    },
 ];
 
 /// 名前の 1 文字目。アイコン画像 (R5) ができるまでの代用

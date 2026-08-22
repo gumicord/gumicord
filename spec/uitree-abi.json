@@ -65,6 +65,8 @@
     "layout.column": "none",
     "layout.stack": "none",
     "layout.scroll": "none",
-    "layout.spacer": "none"
+    "layout.spacer": "none",
+    "layout.scrollbar": "none",
+    "layout.scrollbar.thumb": "none"
   }
 }

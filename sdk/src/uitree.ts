@@ -20,7 +20,8 @@ export type NodeState =
   | "disabled"
   | "unread"
   | "mentioned"
-  | "loading";
+  | "loading"
+  | "grouped";
 
 /**
  * プラグインが自分の名前空間に作る ID。

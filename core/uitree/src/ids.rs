@@ -206,6 +206,8 @@ define_node_ids! {
     LayoutStack,              "layout.stack",                    None,    Plugin, "重ね";
     LayoutScroll,             "layout.scroll",                   None,    Plugin, "スクロール領域";
     LayoutSpacer,             "layout.spacer",                   None,    Plugin, "空き";
+    LayoutScrollbar,          "layout.scrollbar",                None,    Plugin, "スクロール位置の表示と操作";
+    LayoutScrollbarThumb,     "layout.scrollbar.thumb",          None,    Plugin, "スクロールバーの摘み";
 }
 
 /// [`NodeId::from_str`] が知らない ID を渡されたときのエラー。

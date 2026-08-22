@@ -29,7 +29,7 @@ use gumicord_uitree::value::Edges;
 use gumicord_uitree::{Content, NodeId, UiNode};
 
 use crate::geom::{EdgesExt, Rect, Size};
-use crate::intrinsic::{Axis, Cross, Intrinsic, intrinsic};
+use crate::intrinsic::{Axis, Cross, Intrinsic, intrinsic, is_overlay};
 use crate::text::{ResolvedFont, Shaper};
 
 /// スクロール位置。安定 ID ごとに、先頭からの距離 (論理 px) を持つ。
@@ -38,6 +38,9 @@ use crate::text::{ResolvedFont, Shaper};
 /// 一覧が画面に 1 つずつしかないので足りる。タブや分割ビューを入れるときに
 /// `key` まで含めた鍵へ広げる。
 pub type ScrollState = HashMap<NodeId, f32>;
+
+/// 摘みがこれより小さくなると掴めない (論理 px)
+const MIN_THUMB: f32 = 24.0;
 
 /// 一番下に貼り付ける。メッセージ一覧の初期値に使う
 pub const SCROLL_TO_END: f32 = f32::MAX;
@@ -54,6 +57,19 @@ pub struct Placed<'a> {
     pub inner: Rect,
 }
 
+/// 置かれたスクロールバー 1 本。**掴んで動かすために要る。**
+///
+/// 当たり判定だけでは足りない。摘みをどこまで動かせるかは
+/// 「溝の高さ − 摘みの高さ」で決まり、それはレイアウトしか知らない。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollBar {
+    /// このスクロールバーが動かすスクロール領域
+    pub owner: NodeId,
+    /// 溝。摘みが動ける範囲 (余白を引いたあと)
+    pub track: Rect,
+    pub thumb: Rect,
+}
+
 /// 1 フレームぶんの配置結果。**描画順 (深さ優先・前順) に並ぶ。**
 #[derive(Debug, Default)]
 pub struct LayoutResult<'a> {
@@ -61,6 +77,7 @@ pub struct LayoutResult<'a> {
     /// スクロール領域ごとの、はみ出した量 (論理 px)。
     /// スクロールの上限を決めるのに使う
     pub overflow: HashMap<NodeId, f32>,
+    pub scrollbars: Vec<ScrollBar>,
 }
 
 impl<'a> LayoutResult<'a> {
@@ -105,11 +122,13 @@ pub fn layout<'a>(
         cache: HashMap::new(),
         out: Vec::new(),
         overflow: HashMap::new(),
+        scrollbars: Vec::new(),
     };
     cx.place(root, Rect::from_size(viewport), None);
     LayoutResult {
         placed: cx.out,
         overflow: cx.overflow,
+        scrollbars: cx.scrollbars,
     }
 }
 
@@ -121,6 +140,7 @@ struct Cx<'a, 't, 's> {
     out: Vec<Placed<'a>>,
     /// スクロール領域ごとの、はみ出した量
     overflow: HashMap<NodeId, f32>,
+    scrollbars: Vec<ScrollBar>,
 }
 
 /// 制約を鍵にするための量子化。`f32` をそのまま鍵にできないため
@@ -257,7 +277,12 @@ impl<'a> Cx<'a, '_, '_> {
             })
             .sum();
 
-        let gaps = gap * (n.saturating_sub(1)) as f32;
+        // 重ねて置く子 (スクロールバー) は主軸を消費しない。
+        // 隙間の数にも数えない
+        let overlay: Vec<bool> = node.children.iter().map(|c| is_overlay(c.id)).collect();
+        let in_flow = overlay.iter().filter(|o| !**o).count();
+
+        let gaps = gap * (in_flow.saturating_sub(1)) as f32;
         let mut remaining = main_avail - gaps - margin_main;
 
         // 主軸の大きさが明示されている子は**余りを取らない**。
@@ -281,7 +306,7 @@ impl<'a> Cx<'a, '_, '_> {
         // [1] 余りを取らない子を先に測る
 
         for (i, c) in node.children.iter().enumerate() {
-            if grows[i] > 0.0 && remaining.is_finite() {
+            if overlay[i] || (grows[i] > 0.0 && remaining.is_finite()) {
                 continue;
             }
             let m = margins[i];
@@ -326,6 +351,9 @@ impl<'a> Cx<'a, '_, '_> {
         let mut main_total = gaps + margin_main;
         let mut cross_max = 0.0f32;
         for (i, s) in sizes.iter().enumerate() {
+            if overlay[i] {
+                continue;
+            }
             let m = margins[i];
             if horizontal {
                 main_total += s.w;
@@ -377,8 +405,9 @@ impl<'a> Cx<'a, '_, '_> {
         let (sizes, content) = self.size_children(node, &it, avail);
 
         let mut offset = 0.0;
+        let mut over = 0.0;
         if it.scroll {
-            let over = match it.axis {
+            over = match it.axis {
                 Axis::Row => content.w - inner.w,
                 _ => content.h - inner.h,
             }
@@ -403,6 +432,12 @@ impl<'a> Cx<'a, '_, '_> {
         let mut cursor = if horizontal { inner.x } else { inner.y } - offset;
 
         for (i, child) in node.children.iter().enumerate() {
+            // 重ねて置く子は流れに入らない。カーソルも進めない
+            if is_overlay(child.id) {
+                self.place_scrollbar(node.id, child, inner, offset, over, clip);
+                continue;
+            }
+
             let m = child.style.margin.unwrap_or_default();
             let ci = intrinsic(child.id);
             let size = sizes[i];
@@ -437,6 +472,70 @@ impl<'a> Cx<'a, '_, '_> {
 
             self.place(child, child_rect, clip);
         }
+    }
+
+    /// スクロールバーを一覧の縁へ重ねて置く。
+    ///
+    /// 摘みの大きさと位置は**はみ出し量から決まる**ので、テーマには書けない。
+    /// テーマが決めるのは幅・余白・色である。
+    ///
+    /// **スクロールできるものが何もなければ、何も置かない。** 動かない
+    /// スクロールバーは嘘をつく。
+    fn place_scrollbar(
+        &mut self,
+        owner: NodeId,
+        node: &'a UiNode,
+        track: Rect,
+        offset: f32,
+        over: f32,
+        clip: Option<Rect>,
+    ) {
+        if over <= 0.0 || track.is_empty() {
+            return;
+        }
+
+        let ci = intrinsic(node.id);
+        let w = explicit(node, &ci, true).unwrap_or(0.0).min(track.w);
+        let bar = Rect::new(track.right() - w, track.y, w, track.h);
+        let inner = bar.deflate(node.style.padding.unwrap_or_default());
+
+        self.out.push(Placed {
+            node,
+            rect: bar,
+            clip,
+            inner,
+        });
+
+        let Some(thumb) = node
+            .children
+            .iter()
+            .find(|c| c.id == NodeId::LayoutScrollbarThumb)
+        else {
+            return;
+        };
+
+        // 見えている割合がそのまま摘みの割合になる。
+        // ただし掴めなくなるほど小さくはしない
+        let visible = track.h;
+        let content = visible + over;
+        let h = (inner.h * (visible / content)).max(MIN_THUMB).min(inner.h);
+        let t = (offset / over).clamp(0.0, 1.0);
+        let rect = Rect::new(inner.x, inner.y + (inner.h - h) * t, inner.w, h);
+
+        self.out.push(Placed {
+            node: thumb,
+            rect,
+            clip,
+            inner: rect.deflate(thumb.style.padding.unwrap_or_default()),
+        });
+
+        // 掴んで動かすのに要る寸法を残す。当たり判定だけでは
+        // 「どこまで動かせるか」が分からない
+        self.scrollbars.push(ScrollBar {
+            owner,
+            track: inner,
+            thumb: rect,
+        });
     }
 
     /// 重ねの子の大きさ。指定があればそれ、なければ親いっぱい。
@@ -755,5 +854,100 @@ mod tests {
         let wide = make(1000.0);
         let narrow = make(200.0);
         assert!(narrow > wide, "狭いほうが高くなるはず ({narrow} <= {wide})");
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use gumicord_uitree::Style;
+
+    use super::*;
+
+    fn shaper() -> Shaper {
+        Shaper::new(1.0)
+    }
+
+    fn styled(id: NodeId, f: impl FnOnce(&mut Style)) -> UiNode {
+        let mut n = UiNode::new(id);
+        f(&mut n.style);
+        n
+    }
+
+    /// 高さ 100 の枠に 50px のメッセージを `n` 件と、スクロールバーを入れる
+    fn list(n: u64, scroll: Option<f32>) -> (UiNode, ScrollState) {
+        let mut list = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0));
+        for i in 0..n {
+            list =
+                list.child(styled(NodeId::ChatMessage, |s| s.height = Some(50.0)).with_id_key(i));
+        }
+        list = list.child(
+            styled(NodeId::LayoutScrollbar, |s| s.width = Some(10.0))
+                .child(UiNode::new(NodeId::LayoutScrollbarThumb)),
+        );
+
+        let mut state = ScrollState::new();
+        if let Some(at) = scroll {
+            state.insert(NodeId::ChatMessageList, at);
+        }
+        (UiNode::new(NodeId::ChatView).child(list), state)
+    }
+
+    fn place<'a>(tree: &'a UiNode, state: &ScrollState) -> LayoutResult<'a> {
+        layout(tree, Size::new(400.0, 100.0), &mut shaper(), state)
+    }
+
+    /// スクロールバーは流れに入らない。**入れても一覧の高さが変わらない**
+    #[test]
+    fn a_scrollbar_does_not_consume_the_main_axis() {
+        let (with_bar, state) = list(10, None);
+        let over_with = *place(&with_bar, &state)
+            .overflow
+            .get(&NodeId::ChatMessageList)
+            .unwrap();
+
+        // 10 件 × 50px = 500px が 100px の枠に入る → 400px はみ出す。
+        // スクロールバーがここに 1 件ぶん足されていたら 400 にならない
+        assert_eq!(over_with, 400.0);
+    }
+
+    /// 縁に置かれ、中身と一緒にスクロールしない
+    #[test]
+    fn the_scrollbar_sits_on_the_trailing_edge() {
+        let (tree, state) = list(10, None);
+        let r = place(&tree, &state);
+        let bar = r.find(NodeId::LayoutScrollbar).expect("置かれていない");
+
+        assert_eq!(bar.rect.w, 10.0);
+        assert_eq!(bar.rect.right(), 400.0, "右端に付く");
+        assert_eq!(bar.rect.y, 0.0, "スクロールしても上端のまま");
+        assert_eq!(bar.rect.h, 100.0, "枠いっぱいの高さ");
+    }
+
+    /// 摘みの大きさは見えている割合になり、位置はスクロール量に従う
+    #[test]
+    fn the_thumb_reflects_how_far_we_are() {
+        // 先頭
+        let (tree, state) = list(10, Some(0.0));
+        let r = place(&tree, &state);
+        let top = r.find(NodeId::LayoutScrollbarThumb).unwrap().rect;
+        // 500px 中 100px が見えている → 摘みは 1/5
+        assert_eq!(top.h, 20.0_f32.max(MIN_THUMB));
+        assert_eq!(top.y, 0.0);
+
+        // 末尾
+        let (tree, state) = list(10, Some(f32::MAX));
+        let r = place(&tree, &state);
+        let bottom = r.find(NodeId::LayoutScrollbarThumb).unwrap().rect;
+        assert_eq!(bottom.bottom(), 100.0, "下端まで来る");
+        assert_eq!(bottom.h, top.h, "大きさは変わらない");
+    }
+
+    /// **スクロールできないなら置かない。** 動かないスクロールバーは嘘をつく
+    #[test]
+    fn no_scrollbar_when_nothing_overflows() {
+        let (tree, state) = list(1, None);
+        let r = place(&tree, &state);
+        assert!(r.find(NodeId::LayoutScrollbar).is_none());
+        assert!(r.find(NodeId::LayoutScrollbarThumb).is_none());
     }
 }

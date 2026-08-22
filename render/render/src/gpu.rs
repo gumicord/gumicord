@@ -286,6 +286,11 @@ impl Gpu {
         if width == 0 || height == 0 || (width, height) == self.size() {
             return;
         }
+        tracing::debug!(
+            from = ?self.size(),
+            to = ?(width, height),
+            "サーフェスを作り直す"
+        );
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);

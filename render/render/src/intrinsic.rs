@@ -126,6 +126,16 @@ const CHANNEL_LIST_W: f32 = 240.0;
 const TITLEBAR_H: f32 = 32.0;
 /// タイトルバーのボタン 1 個の幅。Windows の慣習値
 const TITLEBAR_BUTTON_W: f32 = 46.0;
+/// スクロールバーの幅。細くても掴めるよう、摘みより広めに取る
+const SCROLLBAR_W: f32 = 10.0;
+
+/// そのノードは親の流れに入らず、親の矩形へ重ねて置かれるか。
+///
+/// スクロールバーは一覧の縁に浮いていて、**中身と一緒にスクロールしない**。
+/// 縦に積まれる子の 1 つとして扱うと、一覧の末尾に居座ってしまう。
+pub fn is_overlay(id: NodeId) -> bool {
+    id == NodeId::LayoutScrollbar
+}
 
 /// その安定 ID の既定のレイアウト。
 ///
@@ -218,6 +228,11 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
             .scrollable(),
         // 余りを食べるためだけのノード
         LayoutSpacer => Intrinsic::row().grow(1.0),
+
+        // スクロールバーは**流れに入らない**。スクロール領域の縁へ重ねる。
+        // 幅だけがここで決まり、高さと摘みの位置はレイアウトが計算する
+        LayoutScrollbar => Intrinsic::stack().w(SCROLLBAR_W),
+        LayoutScrollbarThumb => Intrinsic::stack(),
 
         // `#[non_exhaustive]` なので網羅できない。知らない ID は縦に積む
         _ => Intrinsic::column().cross(Cross::Stretch),

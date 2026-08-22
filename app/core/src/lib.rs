@@ -64,6 +64,7 @@ const INTERACTIVE: &[NodeId] = &[
     NodeId::ChatMessage,
     NodeId::ChromeTitlebarControl,
     NodeId::PrimitiveButton,
+    NodeId::LayoutScrollbarThumb,
 ];
 
 /// 画面に出すペインの数 (`PLT-046`)。
@@ -341,7 +342,7 @@ impl Gumicord {
             }
             list = list.child(item);
         }
-        list
+        list.child(scrollbar())
     }
 
     fn chat_view(&self) -> UiNode {
@@ -362,10 +363,15 @@ impl Gumicord {
                 .with_data(channel.id),
             );
 
+        // 直前と同じ送信者なら送信者行を繰り返さない。
+        // **字下げの量はテーマが決める** (`when.state: "grouped"` の padding)
         let mut messages = UiNode::new(NodeId::ChatMessageList);
+        let mut prev: Option<&str> = None;
         for m in demo::MESSAGES {
-            messages = messages.child(self.message(m));
+            messages = messages.child(self.message(m, prev == Some(m.author)));
+            prev = Some(m.author);
         }
+        messages = messages.child(scrollbar());
 
         UiNode::new(NodeId::ChatView)
             .child(header)
@@ -385,34 +391,45 @@ impl Gumicord {
             )
     }
 
-    fn message(&self, m: &demo::Message) -> UiNode {
+    /// メッセージ 1 件。
+    ///
+    /// `grouped` なら送信者アイコンと送信者行を出さない。**字下げはテーマが
+    /// `when.state: "grouped"` の `padding` で決める。** クライアントが
+    /// 空白のノードを挟むと、字下げの量が焼き付いてテーマから揃えられない。
+    fn message(&self, m: &demo::Message, grouped: bool) -> UiNode {
+        let body = UiNode::new(NodeId::LayoutColumn)
+            .child_if(!grouped, || {
+                UiNode::new(NodeId::ChatMessageHeader)
+                    .with_data(m.id)
+                    .child(UiNode::text(NodeId::ChatMessageHeaderAuthor, m.author).with_data(m.id))
+                    .child(
+                        UiNode::text(NodeId::ChatMessageHeaderTime, format!("  {}", m.time))
+                            .with_data(m.id),
+                    )
+            })
+            .child(UiNode::text(NodeId::ChatMessageContent, m.body).with_data(m.id));
+
         UiNode::new(NodeId::ChatMessage)
             .with_id_key(m.id)
             .with_data(m.id)
+            .with_state_if(grouped, State::Grouped)
             .with_state_if(m.mentioned, State::Mentioned)
             .with_state_if(self.hovered_id(NodeId::ChatMessage, m.id), State::Hover)
-            .child(UiNode::text(NodeId::ChatMessageAvatar, demo::initial(m.author)).with_data(m.id))
+            .child_if(!grouped, || {
+                UiNode::text(NodeId::ChatMessageAvatar, demo::initial(m.author)).with_data(m.id)
+            })
             // 送信者行と本文を縦に積む。`layout.column` はこのためにある
-            .child(
-                UiNode::new(NodeId::LayoutColumn)
-                    .child(
-                        UiNode::new(NodeId::ChatMessageHeader)
-                            .with_data(m.id)
-                            .child(
-                                UiNode::text(NodeId::ChatMessageHeaderAuthor, m.author)
-                                    .with_data(m.id),
-                            )
-                            .child(
-                                UiNode::text(
-                                    NodeId::ChatMessageHeaderTime,
-                                    format!("  {}", m.time),
-                                )
-                                .with_data(m.id),
-                            ),
-                    )
-                    .child(UiNode::text(NodeId::ChatMessageContent, m.body).with_data(m.id)),
-            )
+            .child(body)
     }
+}
+
+/// スクロールバー。**摘みの大きさと位置はレンダラが決める。**
+///
+/// はみ出し量はレイアウトしないと分からないので、テーマにもクライアントにも
+/// 書けない。ここが渡すのは「この一覧にはスクロールバーがある」ことだけで、
+/// 幅・余白・色はテーマが決める。
+fn scrollbar() -> UiNode {
+    UiNode::new(NodeId::LayoutScrollbar).child(UiNode::new(NodeId::LayoutScrollbarThumb))
 }
 
 #[cfg(test)]

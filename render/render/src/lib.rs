@@ -28,7 +28,7 @@ pub mod text;
 pub use geom::{Rect, Size};
 pub use gpu::{GpuError, Presented};
 pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
-pub use layout::{SCROLL_TO_END, ScrollState};
+pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState};
 
 use gumicord_uitree::{Key, NodeId, UiNode};
 
@@ -61,6 +61,17 @@ pub struct Hit {
     pub clip: Option<Rect>,
 }
 
+/// 掴んでいるスクロールバー。
+///
+/// 掴んだ瞬間の寸法を持ち続ける。引いている最中に配置が変わっても
+/// 摘みが手から逃げないようにするためである。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollGrab {
+    bar: ScrollBar,
+    /// 摘みの上端から、掴んだ点までの距離
+    grab: f32,
+}
+
 /// UITree を描くもの。
 pub struct Renderer {
     gpu: Gpu,
@@ -72,6 +83,8 @@ pub struct Renderer {
     hits: Vec<Hit>,
     /// スクロール領域ごとの、はみ出した量
     overflow: std::collections::HashMap<NodeId, f32>,
+    /// 直前のフレームに置かれたスクロールバー
+    scrollbars: Vec<ScrollBar>,
 }
 
 impl Renderer {
@@ -92,6 +105,7 @@ impl Renderer {
             scroll: ScrollState::new(),
             hits: Vec::new(),
             overflow: std::collections::HashMap::new(),
+            scrollbars: Vec::new(),
         })
     }
 
@@ -128,13 +142,20 @@ impl Renderer {
         &self.gpu.adapter_name
     }
 
-    /// スクロールを動かす。`delta` は論理 px。
+    /// スクロールを動かす。`delta` は論理 px。**再描画が要るかを返す。**
     ///
     /// 上限は直前のフレームで分かったはみ出し量で抑える。1 フレーム遅れるが、
     /// 動かしてから測り直すと 1 フレームぶん余計にレイアウトすることになる。
+    ///
+    /// ⚠️ **小さすぎる移動でも位置は必ず更新する。**
+    ///
+    /// 精密タッチパッドは 1 回のホイールを細かい差分の連続として送ってくる。
+    /// 「動きが小さいから」と捨てると、その細かい差分がどこにも溜まらず、
+    /// **指を動かしているのに何も起きない**ことになる。捨てるのは再描画の
+    /// 要求だけで、位置は積む。
     pub fn scroll_by(&mut self, id: NodeId, delta: f32) -> bool {
         let max = self.overflow.get(&id).copied().unwrap_or(0.0);
-        if max <= 0.0 {
+        if max <= 0.0 || !delta.is_finite() {
             return false;
         }
         // まだ動かされていない領域の現在位置は、既定の貼り付き先である
@@ -145,17 +166,54 @@ impl Renderer {
             .copied()
             .unwrap_or(default)
             .clamp(0.0, max);
+
         let next = (cur + delta).clamp(0.0, max);
-        if (next - cur).abs() < 0.5 {
-            return false;
-        }
         self.scroll.insert(id, next);
-        true
+
+        // 半ピクセルに満たない動きは、描き直しても見た目が変わらない
+        (next - cur).abs() >= 0.5
     }
 
     /// スクロール位置を直接置く。[`SCROLL_TO_END`] で一番下に貼り付く。
     pub fn set_scroll(&mut self, id: NodeId, at: f32) {
         self.scroll.insert(id, at);
+    }
+
+    /// スクロールバーを掴む。座標は**論理 px**。
+    ///
+    /// 摘みの上を押したらその場を掴む。溝の上を押したら、**その位置へ摘みの
+    /// 中心が来るように飛ばしてから**掴む。押した瞬間から引っ張れるので、
+    /// 押す・飛ぶ・掴み直す、にならない。
+    pub fn grab_scrollbar(&mut self, x: f32, y: f32) -> Option<ScrollGrab> {
+        let bar = *self.scrollbars.iter().find(|b| b.track.contains(x, y))?;
+
+        let grab = if bar.thumb.contains(x, y) {
+            y - bar.thumb.y
+        } else {
+            bar.thumb.h * 0.5
+        };
+        let grab = ScrollGrab { bar, grab };
+
+        self.drag_scrollbar(&grab, y);
+        Some(grab)
+    }
+
+    /// 掴んだまま動かす。**再描画が要るかを返す。**
+    ///
+    /// 摘みが動ける距離は「溝の高さ − 摘みの高さ」であり、それが
+    /// はみ出し量の全体に対応する。
+    pub fn drag_scrollbar(&mut self, grab: &ScrollGrab, y: f32) -> bool {
+        let max = self.overflow.get(&grab.bar.owner).copied().unwrap_or(0.0);
+        let travel = grab.bar.track.h - grab.bar.thumb.h;
+        if max <= 0.0 || travel <= 0.0 {
+            return false;
+        }
+
+        let t = ((y - grab.grab - grab.bar.track.y) / travel).clamp(0.0, 1.0);
+        let next = t * max;
+        let cur = self.scroll.get(&grab.bar.owner).copied().unwrap_or(0.0);
+        self.scroll.insert(grab.bar.owner, next);
+        (next - cur).abs() >= 0.5
     }
 
     /// 1 フレーム描く。木は**スタイル解決済み**でなければならない。
@@ -171,6 +229,7 @@ impl Renderer {
             clip: p.clip,
         }));
         self.overflow.clone_from(&layout.overflow);
+        self.scrollbars.clone_from(&layout.scrollbars);
 
         let dl = draw::build(
             &layout,

@@ -35,6 +35,8 @@ pub enum State {
     Unread,
     Mentioned,
     Loading,
+    /// 直前と同じ送信者が続いている (`EXT-003` により v1.1 で追加)
+    Grouped,
 }
 
 impl State {
@@ -47,6 +49,7 @@ impl State {
         State::Unread,
         State::Mentioned,
         State::Loading,
+        State::Grouped,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -59,26 +62,27 @@ impl State {
             Self::Unread => "unread",
             Self::Mentioned => "mentioned",
             Self::Loading => "loading",
+            Self::Grouped => "grouped",
         }
     }
 }
 
 /// 立っている状態の集合。
 ///
-/// 状態は 8 個しかないのでビットセットで持つ。テーマのセレクタ照合は
+/// 状態はごく少数なのでビットセットで持つ。テーマのセレクタ照合は
 /// ノードごとに走るため、割り当てを避ける。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct StateSet(u8);
+pub struct StateSet(u16);
 
 impl StateSet {
     pub const EMPTY: StateSet = StateSet(0);
 
     pub const fn with(self, s: State) -> Self {
-        StateSet(self.0 | (1 << s as u8))
+        StateSet(self.0 | (1u16 << s as u16))
     }
 
     pub const fn contains(self, s: State) -> bool {
-        self.0 & (1 << s as u8) != 0
+        self.0 & (1u16 << s as u16) != 0
     }
 
     /// すべて含むか。テーマの `when.state` が配列のときに使う (`EXT-013`)。
@@ -143,13 +147,13 @@ mod tests {
         assert!(node.contains_all(StateSet::EMPTY));
     }
 
-    /// State が 8 個を超えたら StateSet の u8 が溢れる。
+    /// State が 16 個を超えたら StateSet の u16 が溢れる。
     /// 状態を足すときはここで気づけるようにしておく。
     #[test]
     fn state_count_fits_in_bitset() {
         assert!(
-            State::ALL.len() <= 8,
-            "State が 8 個を超えた。StateSet の内部表現を u16 以上に広げること"
+            State::ALL.len() <= 16,
+            "State が 16 個を超えた。StateSet の内部表現を u32 へ広げること"
         );
     }
 }

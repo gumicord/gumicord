@@ -70,6 +70,8 @@ export type NodeId =
   | "layout.stack"
   | "layout.scroll"
   | "layout.spacer"
+  | "layout.scrollbar"
+  | "layout.scrollbar.thumb"
   ;
 
 /**
@@ -98,6 +100,8 @@ export type CoreCreatableNodeId =
   | "layout.stack"
   | "layout.scroll"
   | "layout.spacer"
+  | "layout.scrollbar"
+  | "layout.scrollbar.thumb"
   ;
 
 /** ノード種別ごとの `data` の対応 (spec/03-uitree.md 2.4) */

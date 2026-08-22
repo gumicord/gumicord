@@ -141,7 +141,8 @@
         "disabled",
         "unread",
         "mentioned",
-        "loading"
+        "loading",
+        "grouped"
       ]
     },
 
