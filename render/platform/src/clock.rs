@@ -67,3 +67,47 @@ mod tests {
         assert_eq!(m % 15, 0, "15 分で割り切れないずれ: {m} 分");
     }
 }
+
+/// キャレットが点滅する間隔。**OS の設定に従う。**
+///
+/// ⚠️ **自前の値を決め打ちしない。** 点滅の速さは「コントロールパネル →
+/// キーボード」で変えられる設定であり、**点滅させない設定もある**
+/// (てんかんの光過敏や、単に目障りだという理由で切る人がいる)。
+///
+/// `None` は「点滅させない」である。**0 ではない。**
+pub fn caret_blink_interval() -> Option<std::time::Duration> {
+    /// OS の設定が壊れているときに使う値。Windows の既定と同じ
+    const FALLBACK_MS: u64 = 530;
+
+    #[cfg(windows)]
+    {
+        // SAFETY: 引数がなく、戻り値も数値だけである
+        let ms = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+        match ms {
+            // 点滅させない設定
+            u32::MAX => None,
+            // 取れなかった
+            0 => Some(std::time::Duration::from_millis(FALLBACK_MS)),
+            ms => Some(std::time::Duration::from_millis(ms as u64)),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Some(std::time::Duration::from_millis(FALLBACK_MS))
+    }
+}
+
+#[cfg(test)]
+mod blink_tests {
+    use super::*;
+
+    /// 取れた値が現実的な範囲にある。**0 は返さない** —
+    /// 0 だと 1 フレームごとに点滅して、目に見えないほど速くなる
+    #[test]
+    fn the_blink_interval_is_usable_or_absent() {
+        if let Some(d) = caret_blink_interval() {
+            assert!(d.as_millis() >= 100, "速すぎる: {d:?}");
+            assert!(d.as_millis() <= 5_000, "遅すぎる: {d:?}");
+        }
+    }
+}

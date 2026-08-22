@@ -208,6 +208,8 @@ pub fn build(
     queue: &wgpu::Queue,
     scale: f32,
     viewport: (u32, u32),
+    // キャレットをいま描くか。**点滅の刻みはプラットフォーム層が持つ**
+    caret_visible: bool,
 ) -> DrawList {
     let mut dl = DrawList::default();
 
@@ -242,7 +244,17 @@ pub fn build(
                 draw_icon(&mut dl, text, queue, placed, name, opacity, scale, scissor);
             }
             Content::Editable(e) => {
-                draw_editable(&mut dl, text, queue, placed, e, opacity, scale, scissor);
+                draw_editable(
+                    &mut dl,
+                    text,
+                    queue,
+                    placed,
+                    e,
+                    opacity,
+                    scale,
+                    scissor,
+                    caret_visible,
+                );
             }
             Content::Qr(data) => draw_qr(&mut dl, placed, data, opacity, scale, scissor),
             _ => {}
@@ -343,6 +355,7 @@ fn draw_editable(
     opacity: f32,
     scale: f32,
     scissor: Option<[u32; 4]>,
+    caret_visible: bool,
 ) {
     let style = &placed.node.style;
     let font = ResolvedFont::from_style(style);
@@ -433,12 +446,14 @@ fn draw_editable(
         }
     }
 
-    // [4] キャレット
-    mark(
-        shaped.caret(e.caret, (CARET_WIDTH * scale).max(1.0)),
-        linear(fg, opacity),
-        dl,
-    );
+    // [4] キャレット。**消えている拍では描かない**
+    if caret_visible {
+        mark(
+            shaped.caret(e.caret, (CARET_WIDTH * scale).max(1.0)),
+            linear(fg, opacity),
+            dl,
+        );
+    }
 }
 
 /// QR コードを描く ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。

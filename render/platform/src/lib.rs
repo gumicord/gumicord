@@ -27,7 +27,7 @@ pub mod secret;
 pub mod text_input;
 pub mod window;
 
-pub use clock::local_utc_offset_minutes;
+pub use clock::{caret_blink_interval, local_utc_offset_minutes};
 pub use secret::{SecretError, SecretStore};
 pub use text_input::{EditKey, TextDocument, TextInputHost};
 pub use window::{Application, FrameCx, PlatformError, Waker, run};

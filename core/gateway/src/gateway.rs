@@ -498,6 +498,12 @@ impl Connection {
                 let data = payload.d.unwrap_or_default();
                 match kind.as_str() {
                     "READY" => {
+                        // ⚠️ **形が変わったときにここだけを見れば分かるように
+                        // しておく。** Discord は同じ名前のフィールドの
+                        // 入れ子をこちらに断りなく変えてくる
+                        if tracing::enabled!(tracing::Level::DEBUG) {
+                            log_ready_shape(&data);
+                        }
                         let ready: Ready = serde_json::from_value(data)?;
                         // resume 先が来なければ初回の URL へ戻る。
                         // 落ちるよりは「別サーバに当たるかもしれない」ほうがまし
@@ -617,6 +623,31 @@ fn recoverable_session(error: &GatewayError) -> bool {
             4007 | 4009 | CLOSE_INVALID_SESSION
         ),
     }
+}
+
+/// READY の中の guilds が**どういう形で来ているか**を記録に残す。
+///
+/// # なぜ残すのか
+///
+/// 一覧が空になったとき、原因が「入っていない」のか「読めていない」のかは
+/// 外から見分けが付かない。実際に **11 件届いていたのに 1 件も出せなかった**
+/// ことがある (名前が `properties` の中に移っていた)。
+///
+/// ⚠️ **中身は出さない。鍵の名前だけを出す。** ここには利用者のサーバ名も
+/// トークンも通るので、丸ごと記録すると秘密が残る
+fn log_ready_shape(data: &serde_json::Value) {
+    let guilds = data.get("guilds").and_then(|g| g.as_array());
+    let keys: Vec<&str> = guilds
+        .and_then(|g| g.first())
+        .and_then(|g| g.as_object())
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    tracing::debug!(
+        guilds = guilds.map_or(0, |g| g.len()),
+        first_guild = ?keys,
+        "READY の形"
+    );
 }
 
 #[cfg(test)]

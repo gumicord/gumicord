@@ -85,6 +85,11 @@ pub struct Renderer {
     overflow: std::collections::HashMap<NodeId, f32>,
     /// 直前のフレームに置かれたスクロールバー
     scrollbars: Vec<ScrollBar>,
+    /// キャレットをいま描くか。
+    ///
+    /// ⚠️ **点滅の刻みはプラットフォーム層が持つ。** 速さは OS の設定で
+    /// 決まり、**点滅させない設定もある**ので、ここで決め打ちにはできない
+    caret_visible: bool,
 }
 
 impl Renderer {
@@ -106,6 +111,7 @@ impl Renderer {
             hits: Vec::new(),
             overflow: std::collections::HashMap::new(),
             scrollbars: Vec::new(),
+            caret_visible: true,
         })
     }
 
@@ -216,6 +222,14 @@ impl Renderer {
         (next - cur).abs() >= 0.5
     }
 
+    /// キャレットを描くかどうかを切り替える。
+    ///
+    /// 点滅させるのはプラットフォーム層の仕事である。ここは**言われたとおりに
+    /// 描くか描かないか**だけを持つ
+    pub fn set_caret_visible(&mut self, visible: bool) {
+        self.caret_visible = visible;
+    }
+
     /// 1 フレーム描く。木は**スタイル解決済み**でなければならない。
     pub fn render(&mut self, root: &UiNode) -> FrameStats {
         let viewport = self.viewport();
@@ -237,6 +251,7 @@ impl Renderer {
             &self.gpu.queue,
             self.scale,
             self.gpu.size(),
+            self.caret_visible,
         );
 
         FrameStats {

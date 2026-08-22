@@ -186,6 +186,9 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
         first_frame: true,
+        blink: crate::clock::caret_blink_interval(),
+        caret_on: true,
+        next_blink: std::time::Instant::now(),
     };
     event_loop.run_app(&mut host)?;
     Ok(())
@@ -215,12 +218,29 @@ struct Host {
     /// IME を許可しているか。切り替えたときだけ OS へ伝える
     ime_allowed: bool,
     first_frame: bool,
+    /// キャレットの点滅の間隔。`None` は**点滅させない設定**である
+    blink: Option<std::time::Duration>,
+    /// いまキャレットが見えている拍か
+    caret_on: bool,
+    /// 次に切り替える時刻
+    next_blink: std::time::Instant,
 }
 
 impl Host {
     fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// キャレットを**点いた状態から**数え直す。
+    ///
+    /// ⚠️ 打っている最中に消える拍が来ると、**書いている場所を見失う**。
+    /// 入力があったら必ずここを通す。フォーカスが移ったときも同じ
+    fn restart_caret(&mut self) {
+        self.caret_on = true;
+        if let Some(interval) = self.blink {
+            self.next_blink = std::time::Instant::now() + interval;
         }
     }
 
@@ -434,8 +454,10 @@ impl Host {
             r.resize(size.width, size.height);
         }
 
+        let caret_on = self.caret_on;
         let (stats, backend) = {
             let Some(r) = &mut self.renderer else { return };
+            r.set_caret_visible(caret_on);
             let cx = FrameCx {
                 viewport: r.viewport(),
                 scale: r.scale(),
@@ -486,6 +508,36 @@ impl Host {
 }
 
 impl ApplicationHandler for Host {
+    /// 次に何を待つかを決める。**キャレットの点滅はここが刻む。**
+    ///
+    /// # 入力欄にフォーカスが無い間は寝たままでよい
+    ///
+    /// `NFR-005` (非アクティブ時に描画を止める) があるので、**点滅のために
+    /// 常時起きるようなことはしない**。打てる場所が無ければ点滅させるものも
+    /// 無いので、[`ControlFlow::Wait`] に戻す。
+    ///
+    /// 速さは OS の設定に従う。**点滅させない設定もある** ので、
+    /// [`crate::clock::caret_blink_interval`] が `None` を返したら
+    /// 点けっぱなしにする。
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(interval) = self.blink else { return };
+
+        if self.app.focused_document().is_none() {
+            // 次にフォーカスが当たったとき、点いた状態から始まるように戻す
+            self.caret_on = true;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        if now >= self.next_blink {
+            self.caret_on = !self.caret_on;
+            self.next_blink = now + interval;
+            self.request_redraw();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_blink));
+    }
+
     /// [`Waker::wake`] で起こされた。
     ///
     /// **中身は運ばれてこない。** アプリが自前の通り道から取り込む
@@ -646,6 +698,9 @@ impl ApplicationHandler for Host {
 
                         let hits = self.hits();
                         if self.app.pressed(&hits) {
+                            // 入力欄を押した直後にキャレットが消えていると、
+                            // **押せたのかどうか分からない**
+                            self.restart_caret();
                             self.request_redraw();
                         }
                     }
@@ -670,12 +725,15 @@ impl ApplicationHandler for Host {
             // PLT-001: 変換中の文字列。**確定ではない**
             WindowEvent::Ime(ime) => {
                 if self.on_ime(ime) {
+                    // 打っている最中に消える拍が来ると場所を見失う
+                    self.restart_caret();
                     self.request_redraw();
                 }
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 if self.on_key(&event) {
+                    self.restart_caret();
                     self.request_redraw();
                 }
             }

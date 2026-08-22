@@ -71,17 +71,26 @@ impl User {
 }
 
 /// ギルド (サーバー)。
+///
+/// # ⚠️ 名前の在処が 2 つある
+///
+/// **利用者トークンの READY では、名前もアイコンも `properties` の中にある。**
+///
+/// ```text
+///   ボット            {"id": …, "name": "…", "icon": …}
+///   利用者 (READY)    {"id": …, "properties": {"name": "…", "icon": …}, …}
+///   落ちている        {"id": …, "unavailable": true}
+/// ```
+///
+/// 実際にこれで**サーバ一覧が空になった**。READY は届き、11 件のギルドも
+/// 入っていたのに、名前が空だったので 1 つも出せなかった。
+///
+/// 上の 3 つを [`RawGuild`] が吸収し、ここには平らな形だけが残る。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawGuild")]
 pub struct Guild {
     pub id: GuildId,
-    /// ⚠️ **無いことがある。**
-    ///
-    /// READY には「落ちているギルド」が `{"id": …, "unavailable": true}`
-    /// という**識別子だけの殻**で並ぶ。名前を必須にしていたせいで、
-    /// 殻が 1 つ混ざっただけで READY 全体が読めなくなり、Gateway が
-    /// 永久に繋ぎ直し続けた。
-    ///
-    /// **Discord のデータで必須にしてよいのは識別子だけである。**
+    /// ⚠️ **無いことがある。** 落ちているギルドは識別子だけで来る
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -94,6 +103,52 @@ pub struct Guild {
     /// ⚠️ **読めないチャンネルが 1 つあってもギルドごと落とさない**
     #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     pub channels: Vec<Channel>,
+}
+
+/// Discord がよこす**3 つの形**をそのまま受ける入れ物。
+///
+/// ⚠️ ここに直接触らないこと。[`Guild`] に変換された後の平らな形だけを使う
+#[derive(Deserialize)]
+struct RawGuild {
+    id: GuildId,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    unavailable: bool,
+    #[serde(default, deserialize_with = "crate::de::lenient_vec")]
+    channels: Vec<Channel>,
+    /// 利用者トークンの READY はここに入れてくる
+    #[serde(default)]
+    properties: Option<GuildProperties>,
+}
+
+#[derive(Deserialize)]
+struct GuildProperties {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+}
+
+impl From<RawGuild> for Guild {
+    fn from(raw: RawGuild) -> Self {
+        // ⚠️ **上の階層を優先する。** `properties` は「そこにしか無いとき」の
+        // 置き場であって、食い違ったときに勝ってよいものではない
+        let (p_name, p_icon) = match raw.properties {
+            Some(p) => (p.name, p.icon),
+            None => (None, None),
+        };
+
+        Guild {
+            id: raw.id,
+            name: raw.name.or(p_name).unwrap_or_default(),
+            icon: raw.icon.or(p_icon),
+            unavailable: raw.unavailable,
+            channels: raw.channels,
+        }
+    }
 }
 
 impl Guild {
@@ -382,5 +437,72 @@ mod tests {
         }"#;
         let m: Message = serde_json::from_str(json).unwrap();
         assert_eq!(m.referenced_message.unwrap().content, "ですか？");
+    }
+}
+
+#[cfg(test)]
+mod guild_shape_tests {
+    use super::*;
+
+    /// ボットの形。名前は上の階層にある
+    #[test]
+    fn a_bot_style_guild_reads_its_name_from_the_top_level() {
+        let g: Guild = serde_json::from_str(r#"{"id":"1","name":"ふつう","icon":"abc"}"#).unwrap();
+        assert_eq!(g.name, "ふつう");
+        assert_eq!(g.icon.as_deref(), Some("abc"));
+        assert!(!g.unavailable);
+    }
+
+    /// ⚠️ **利用者トークンの READY は properties の中に入れてくる。**
+    /// これで実際にサーバ一覧が空になった
+    #[test]
+    fn a_user_style_guild_reads_its_name_from_properties() {
+        let g: Guild = serde_json::from_str(
+            r#"{
+                "id":"1",
+                "properties":{"name":"本物","icon":"xyz"},
+                "channels":[{"id":"2","type":0,"name":"general"}],
+                "lazy":true,
+                "member_count":3
+            }"#,
+        )
+        .expect("READY の形を読めない");
+
+        assert_eq!(g.name, "本物");
+        assert_eq!(g.icon.as_deref(), Some("xyz"));
+        assert_eq!(g.channels.len(), 1);
+    }
+
+    /// 落ちているギルドは識別子だけ。**それでも読める**
+    #[test]
+    fn an_unavailable_guild_is_just_an_id() {
+        let g: Guild = serde_json::from_str(r#"{"id":"1","unavailable":true}"#).unwrap();
+        assert!(g.unavailable);
+        assert!(g.name.is_empty());
+        assert!(g.channels.is_empty());
+    }
+
+    /// 両方にあれば**上の階層が勝つ**。
+    /// properties は「そこにしか無いとき」の置き場である
+    #[test]
+    fn the_top_level_wins_when_both_are_present() {
+        let g: Guild =
+            serde_json::from_str(r#"{"id":"1","name":"うえ","properties":{"name":"した"}}"#)
+                .unwrap();
+        assert_eq!(g.name, "うえ");
+    }
+
+    /// 知らないフィールドで落ちない。**READY には 18 個ほど入っている**
+    #[test]
+    fn unknown_fields_do_not_break_it() {
+        let g: Guild = serde_json::from_str(
+            r#"{"id":"1","properties":{"name":"x"},
+                "application_command_counts":{},"data_mode":"full","emojis":[],
+                "guild_scheduled_events":[],"joined_at":"…","large":false,
+                "premium_subscription_count":0,"roles":[],"stage_instances":[],
+                "stickers":[],"threads":[],"version":12345}"#,
+        )
+        .unwrap();
+        assert_eq!(g.name, "x");
     }
 }
