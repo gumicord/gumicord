@@ -244,6 +244,7 @@ pub fn build(
             Content::Editable(e) => {
                 draw_editable(&mut dl, text, queue, placed, e, opacity, scale, scissor);
             }
+            Content::Qr(data) => draw_qr(&mut dl, placed, data, opacity, scale, scissor),
             _ => {}
         }
     }
@@ -439,6 +440,103 @@ fn draw_editable(
         dl,
     );
 }
+
+/// QR コードを描く ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
+///
+/// **画像を作らない。** QR は正方形の格子なので、角丸矩形のバッチャで
+/// そのまま描ける。テクスチャも画像デコーダも要らない。
+///
+/// # 1 マスは必ず整数ピクセルにする
+///
+/// 半端な大きさだと、隣り合うマスの境界が丸めでずれて格子が歪む。
+/// **歪んだ QR は読めない。** 詰まるところ、拡大率を切り捨てる。
+///
+/// # 静音領域を空ける
+///
+/// QR の規格は周囲に 4 マス分の余白 (quiet zone) を要求する。これが無いと
+/// 読み取り機が符号の端を見つけられない。
+fn draw_qr(
+    dl: &mut DrawList,
+    placed: &crate::layout::Placed<'_>,
+    data: &str,
+    opacity: f32,
+    scale: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    /// 規格が要求する静音領域 (マス)
+    const QUIET: u32 = 4;
+
+    let Ok(code) = qrcode::QrCode::new(data) else {
+        tracing::warn!(len = data.len(), "QR に符号化できない");
+        return;
+    };
+
+    let modules = code.width() as u32;
+    let total = modules + QUIET * 2;
+    let box_px = snap(placed.inner, scale);
+
+    // 1 マスの大きさ。**切り捨てる**
+    let cell = (box_px[2].min(box_px[3]) / total as f32).floor();
+    if cell < 1.0 {
+        tracing::warn!("QR を描くには狭すぎる");
+        return;
+    }
+
+    // 使う正方形を中央に置く
+    let side = cell * total as f32;
+    let ox = box_px[0] + ((box_px[2] - side) * 0.5).round();
+    let oy = box_px[1] + ((box_px[3] - side) * 0.5).round();
+
+    let style = &placed.node.style;
+    // 背景は必ず敷く。**暗いテーマの上に暗い QR を置いても読めない**
+    let light = style
+        .background
+        .as_ref()
+        .and_then(|b| b.color)
+        .unwrap_or(QR_LIGHT);
+    let dark = style.color.unwrap_or(QR_DARK);
+
+    dl.push_rect(
+        [ox, oy, side, side],
+        linear(light, opacity),
+        0.0,
+        0.0,
+        scissor,
+    );
+
+    let colors = code.to_colors();
+    let fg = linear(dark, opacity);
+    for (i, c) in colors.iter().enumerate() {
+        if *c != qrcode::Color::Dark {
+            continue;
+        }
+        let x = (i as u32 % modules) + QUIET;
+        let y = (i as u32 / modules) + QUIET;
+        dl.push_rect(
+            [ox + x as f32 * cell, oy + y as f32 * cell, cell, cell],
+            fg,
+            0.0,
+            0.0,
+            scissor,
+        );
+    }
+}
+
+/// QR の既定の地の色。**白でないと読み取り機が困る**
+const QR_LIGHT: Color = Color {
+    r: 0xff,
+    g: 0xff,
+    b: 0xff,
+    a: 0xff,
+};
+
+/// QR の既定のマスの色
+const QR_DARK: Color = Color {
+    r: 0x00,
+    g: 0x00,
+    b: 0x00,
+    a: 0xff,
+};
 
 /// テキストの原点 (物理 px)。文字も印もここを基準に置く
 fn text_origin(

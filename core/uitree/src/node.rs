@@ -34,6 +34,11 @@ pub enum Content {
     /// やめてテクスチャにしたときに、UITree 側を変えずに済ませるためである。
     /// **知らない名前は誤りではない**。描かずに進む。
     Icon(String),
+    /// QR コード ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
+    ///
+    /// **中身の文字列だけを持つ。** 符号化も描画もレンダラの仕事である。
+    /// QR は角丸矩形の格子なので、自前レンダラでそのまま描ける。
+    Qr(String),
     /// 編集中のテキスト (`PLT-001`)。
     ///
     /// ただの文字列と分けているのは、**キャレット・選択・変換中の範囲を
@@ -66,6 +71,13 @@ impl Content {
             Content::Text(s) => Some(s),
             Content::Editable(e) if e.text.is_empty() => Some(&e.placeholder),
             Content::Editable(e) => Some(&e.text),
+            _ => None,
+        }
+    }
+
+    pub fn as_qr(&self) -> Option<&str> {
+        match self {
+            Content::Qr(s) => Some(s),
             _ => None,
         }
     }
@@ -147,6 +159,11 @@ impl UiNode {
     /// アイコンを持つノード。
     pub fn icon(id: NodeId, name: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Icon(name.into()))
+    }
+
+    /// QR コードを持つノード。中身は符号化する前の文字列である
+    pub fn qr(id: NodeId, data: impl Into<String>) -> Self {
+        UiNode::new(id).with_content(Content::Qr(data.into()))
     }
 
     /// 編集中のテキストを持つノード (`PLT-001`)。

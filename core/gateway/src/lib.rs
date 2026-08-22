@@ -13,3 +13,7 @@
 //!
 //! 要件: `NFR-010`, `NFR-020`, `NFR-023`
 //! 仕様: [`spec/09-discord-protocol.md`]
+
+pub mod remote_auth;
+
+pub use remote_auth::{RemoteAuth, RemoteAuthError, RemoteAuthEvent, ScannedUser};

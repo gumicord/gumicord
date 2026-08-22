@@ -63,6 +63,14 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 futures-util = "0.3"
 zstd = "0.13"
 
+# QR ログイン (ADR-0007)。RSA-2048 OAEP-SHA256 の復号に要る
+# ⚠️ sha2 と rand_core は rsa の再エクスポートを使う。別に足すと版がずれる
+rsa = { version = "0.9", features = ["sha2"] }
+base64 = "0.22"
+
+# QR ログイン (ADR-0007) の QR を描くため。**符号化だけで、描くのは自前**
+qrcode = { version = "0.14", default-features = false }
+
 # 永続化
 rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 

@@ -230,6 +230,16 @@ impl<'a> Cx<'a, '_, '_> {
                 let s = ResolvedFont::from_style(&node.style).size();
                 Size::new(s, s)
             }
+            // QR は正方形で、**入れ物いっぱいに広がる**。
+            // 内容から大きさは決まらないので、与えられた分を使う
+            Content::Qr(_) => {
+                let s = inner.w.min(inner.h);
+                if s.is_finite() {
+                    Size::new(s, s)
+                } else {
+                    Size::ZERO
+                }
+            }
             Content::None if node.children.is_empty() => Size::ZERO,
             Content::None => self.size_children(node, it, inner).1,
         }
