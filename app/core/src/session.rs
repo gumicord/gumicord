@@ -30,17 +30,28 @@
 //! ⚠️ **起こされる回数は約束されない。** 何度かの `wake` が 1 回にまとまる
 //! ことがあるので、取り込みは必ず空になるまで回す。
 //!
-//! # トークンはまだ保存しない
+//! # トークンは OS の鍵束に預ける (`FR-003`)
 //!
-//! P4 (DPAPI によるセキュアストレージ) ができるまで、トークンは
-//! **プロセスの中にしか置かない**。起動のたびに QR を出し直すことになるが、
-//! 平文で置いて後から直すより良い。ADR-0007 が定めた順序である。
+//! 起動したらまず保存されたトークンを試し、通れば QR を出さない。
+//!
+//! ```text
+//!   起動
+//!    ├─ 鍵束にトークンがある ──▶ GET /users/@me ──┬─ 通った ──▶ そのまま入る
+//!    │                                            └─ 弾かれた ─▶ 捨てて ↓
+//!    └─ 無い ─────────────────────────────────────────────────▶ QR を出す
+//! ```
+//!
+//! ⚠️ **通らなかったトークンはその場で捨てる。** 残しておくと、次の起動でも
+//! 同じ失敗を繰り返したうえで結局 QR を出すことになる。
+//!
+//! ⚠️ **暗号化できない環境では保存しない** ([`gumicord_platform::SecretStore`])。
+//! 起動のたびに聞くほうが、平文をディスクに置くよりましである。
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gumicord_gateway::{RemoteAuth, RemoteAuthEvent, ScannedUser};
-use gumicord_model::CurrentUser;
-use gumicord_platform::Waker;
+use gumicord_model::{CurrentUser, Token};
+use gumicord_platform::{SecretStore, Waker};
 use gumicord_rest::RestClient;
 
 /// ログインを飛ばして画面だけ見るための環境変数。
@@ -48,6 +59,9 @@ use gumicord_rest::RestClient;
 /// レンダラやテーマを触るのに毎回スマホを出すのは馬鹿らしい。
 /// **本物のデータは出ない。** [`crate::demo`] の固定データが出る
 const SKIP_ENV: &str = "GUMICORD_SKIP_LOGIN";
+
+/// 鍵束の中でトークンを指す名前 (`FR-003`)
+const TOKEN_KEY: &str = "token";
 
 /// いまどこまで進んでいるか。**画面はこれだけを見て決まる。**
 #[derive(Debug, Clone)]
@@ -202,9 +216,18 @@ impl Login {
             }
         };
 
+        // 鍵束が開けなくても**ログインはできる**。保存だけを諦める
+        let store = match SecretStore::new() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(%e, "鍵束を開けない。トークンを保存せず、起動のたびに聞く");
+                None
+            }
+        };
+
         let tx = self.tx.clone();
         runtime.spawn(async move {
-            run(tx, waker).await;
+            run(tx, waker, store).await;
         });
         self.runtime = Some(runtime);
     }
@@ -255,14 +278,20 @@ impl Default for Login {
     }
 }
 
-/// QR ログインを最後まで進める。**期限が切れたらやり直す。**
+/// ログインする。**まず保存されたトークンを試し、駄目なら QR を出す。**
 ///
 /// QR には寿命があり (公式クライアントでも 2 分ほどで消える)、置きっぱなしの
 /// 画面の前に戻ってきた利用者は、**死んだ QR を読んで無反応に困る**。
 /// 取り消されたら黙って繋ぎ直す。
-async fn run(tx: Sender<LoginEvent>, waker: Waker) {
+async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
+    if let Some(l) = restore(store.as_ref()).await {
+        let _ = tx.send(LoginEvent::Done(Box::new(l)));
+        waker.wake();
+        return;
+    }
+
     loop {
-        match attempt(&tx, &waker).await {
+        match attempt(&tx, &waker, store.as_ref()).await {
             // 入れた。もう繰り返さない
             Ok(true) => return,
             // 期限切れ。QR を出し直す
@@ -280,8 +309,46 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker) {
     }
 }
 
+/// 保存されたトークンで入り直す (`FR-003`)。
+///
+/// ⚠️ **通らなかったトークンはその場で捨てる。** 残しておくと、次の起動でも
+/// 同じ失敗を繰り返したうえで結局 QR を出すことになる。パスワードを変えた、
+/// 端末を無効にした、期限が切れた — どれも普通に起こる。
+async fn restore(store: Option<&SecretStore>) -> Option<LoggedIn> {
+    let store = store?;
+    let raw = match store.load(TOKEN_KEY) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return None,
+        Err(e) => {
+            // 開けないのは異常ではない。別の利用者としてログオンした等
+            tracing::warn!(%e, "保存されたトークンを開けない。捨てる");
+            let _ = store.clear(TOKEN_KEY);
+            return None;
+        }
+    };
+
+    let token = Token::new(String::from_utf8(raw).ok()?);
+    let rest = RestClient::anonymous().ok()?;
+
+    match rest.authenticate(token).await {
+        Ok((client, me)) => {
+            tracing::info!(user = %me.user.name(), "保存されたトークンで入った");
+            Some(LoggedIn { me, client })
+        }
+        Err(e) => {
+            tracing::warn!(%e, "保存されたトークンが通らない。捨ててログインし直す");
+            let _ = store.clear(TOKEN_KEY);
+            None
+        }
+    }
+}
+
 /// 1 回ぶんのやりとり。入れたら `Ok(true)`、期限切れなら `Ok(false)`
-async fn attempt(tx: &Sender<LoginEvent>, waker: &Waker) -> Result<bool, String> {
+async fn attempt(
+    tx: &Sender<LoginEvent>,
+    waker: &Waker,
+    store: Option<&SecretStore>,
+) -> Result<bool, String> {
     let mut auth = RemoteAuth::connect().await.map_err(|e| e.to_string())?;
     let rest = RestClient::anonymous().map_err(|e| e.to_string())?;
 
@@ -309,8 +376,20 @@ async fn attempt(tx: &Sender<LoginEvent>, waker: &Waker) -> Result<bool, String>
 
                 // 復号できただけでは、使えるトークンである証拠にならない。
                 // `GET /users/@me` が通って初めてログインしたと見なす
-                let (client, me) = rest.authenticate(token).await.map_err(|e| e.to_string())?;
-                tracing::info!(user = %me.user.username, "ログインした");
+                let (client, me) = rest
+                    .authenticate(token.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tracing::info!(user = %me.user.name(), "ログインした");
+
+                // ⚠️ **通ることを確かめてから預ける** (`FR-003`)。
+                // 保存に失敗してもログインは成功である。次の起動で
+                // もう一度聞くだけなので、ここで倒れる理由がない
+                if let Some(store) = store
+                    && let Err(e) = store.store(TOKEN_KEY, token.expose().as_bytes())
+                {
+                    tracing::warn!(%e, "トークンを保存できなかった。次回もログインが要る");
+                }
 
                 let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client })));
                 waker.wake();

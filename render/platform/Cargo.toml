@@ -16,3 +16,6 @@ accesskit_winit.workspace = true
 unicode-segmentation.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
