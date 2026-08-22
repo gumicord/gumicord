@@ -101,6 +101,70 @@ jobs:
         run: cargo test --workspace
 
   # ────────────────────────────────────────────────────────────
+  # 動くものを毎回作って残す。
+  #
+  # 検査が全部通っても「起動して画面が出るか」は分からない。落として
+  # 実行できるものが常にあれば、レビューでも不具合報告でも話が早い。
+  #
+  # ■ Windows だけなのは M1.1 のスコープがそうだから
+  #   macOS / Linux は M2 (spec/07-roadmap.md 7 章)。移植性そのものは
+  #   rust ジョブが ubuntu でビルドして担保している。
+  #
+  # ■ プロファイルを使い分ける
+  #   PR は速さが要るので thin LTO (release)。main への push と手動実行では
+  #   配布物と同じ fat LTO (dist) で作る。ADR-0001 に記録した
+  #   バイナリ 4.66MB / 起動 332ms は dist の値であり、比べるならこちら。
+  # ────────────────────────────────────────────────────────────
+  dist:
+    name: 配布物 (Windows)
+    runs-on: windows-latest
+    env:
+      PROFILE: ${{ github.event_name == 'pull_request' && 'release' || 'dist' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # 検査ジョブとはプロファイルが違うので成果物を共有できない
+          shared-key: dist
+
+      - name: ビルド
+        shell: bash
+        run: cargo build -p gumicord-desktop --profile "$PROFILE"
+
+      # テーマを同梱する。GUMICORD_THEME で差し替えて見比べられるようにする
+      # (README「現在地」参照)。
+      - name: 配布物をまとめる
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/$PROFILE/gumicord.exe" dist/
+          cp -r examples/themes dist/themes
+          cp LICENSE dist/
+          # 落とした人が最初に読むもの。いまは何ができないかを先に書く
+          cat > dist/README.txt <<'TXT'
+          Gumicord (開発版ビルド)
+
+            gumicord.exe    そのまま実行できます
+            themes/         テーマ。差し替えるには:
+                              set GUMICORD_THEME=themes\midnight\theme.json
+                              gumicord.exe
+
+          ⚠️ まだ Discord には接続しません。表示されているギルド・チャンネル・
+             メッセージはすべて固定のダミーデータです。日本語入力もまだです。
+             進捗: https://github.com/gumicord/gumicord/blob/main/spec/07-roadmap.md
+          TXT
+          ls -l dist/gumicord.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-windows-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────
   # Cargo.toml の rust-version = "1.97" が嘘でないことを確認する。
   # 宣言しておいて検査しない値は、いずれ必ずずれる。
   # ────────────────────────────────────────────────────────────
