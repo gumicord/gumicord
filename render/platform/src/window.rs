@@ -242,9 +242,8 @@ impl Host {
 
     /// IME からの通知を文書へ流す。**再描画が要るなら真。**
     ///
-    /// ⚠️ 現状は `winit` の `Ime` イベントを使っている。Windows では preedit は
-    /// 取れるが**変換候補ウィンドウが出ない** (S2 の実測)。候補ウィンドウを
-    /// 出すには TSF テキストストアが要る ([ADR-0005](../../../spec/adr/0005-ime-strategy.md))。
+    /// Windows ではこれで足りる。**TSF テキストストアは要らない**
+    /// ([ADR-0006](../../../spec/adr/0006-windows-ime-via-winit.md))。
     fn on_ime(&mut self, ime: Ime) -> bool {
         let Some(doc) = self.app.focused_document() else {
             return false;

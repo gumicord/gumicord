@@ -173,15 +173,21 @@ GLES で動くことは、**Android の古い端末でも同じ描画コード�
 
 > ✅ **S2 の結論**: `winit` はウィンドウと生の入力イベントの面倒は見るが、**テキスト入力の面倒は見ない。**
 > Windows では `winit` の `Ime` イベントで preedit は取れるものの、**変換候補ウィンドウが一切表示されない**。
-> 主要な日本語 IME (Google 日本語入力 / Microsoft IME / ATOK) はいずれも TSF ベースであり、
-> アプリが TSF テキストストアを持たないと IMM32 互換ブリッジに落ちて UI が機能しないためである。
+> 主要な日本語 IME (Google 日本語入力 / Microsoft IME / ATOK) はいずれも TSF ベースである。
 >
-> したがって**テキスト入力層は 5 プラットフォーム分を自前で実装する** ([ADR-0005](adr/0005-ime-strategy.md))。
+> **Windows は `winit` の IME 経路で足りる** ([ADR-0006](adr/0006-windows-ime-via-winit.md))。
+> `set_ime_cursor_area` に**入力欄全体の矩形**を渡せば、候補ウィンドウは正しい位置に出る。
+> Google 日本語入力と Microsoft IME で確認済み。
+>
+> ⚠️ かつては「TSF テキストストアを自前実装しないと候補ウィンドウが出ない」と結論していたが、
+> **それは誤りだった** ([ADR-0005](adr/0005-ime-strategy.md) — 廃止)。
+>
 > プラットフォーム固有コードは `TextInputHost` という単一の抽象の裏に閉じ込める。
+> **Android の `InputConnection` と iOS の `UITextInput` は依然として自前実装が要る。**
 >
 > **残る最大の未検証リスクは Android / iOS の IME である。** 実装不可能と判明した場合、ADR-0001 ごと再検討する。
 
-### `TextInputHost` の抽象 ([ADR-0005](adr/0005-ime-strategy.md))
+### `TextInputHost` の抽象 ([ADR-0006](adr/0006-windows-ime-via-winit.md))
 
 ```
 gumicord-render

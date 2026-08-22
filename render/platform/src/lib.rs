@@ -3,18 +3,16 @@
 //! 責務: ウィンドウ / 入力 / IME / アクセシビリティ / 通知 / クリップボード /
 //! ファイル選択 / セキュアストレージ。
 //!
-//! ⚠️ **`winit` はウィンドウと生の入力イベントの面倒は見るが、テキスト入力の
-//! 面倒は見ない。** S2 で、Windows では preedit は取れるものの変換候補
-//! ウィンドウが一切表示されないことを確認した。主要な日本語 IME
-//! (Google 日本語入力 / Microsoft IME / ATOK) はいずれも TSF ベースであり、
-//! アプリが TSF テキストストアを持たないと IMM32 互換ブリッジに落ちて
-//! UI が機能しないためである。
+//! テキスト入力層は [`text_input`] にある。文書モデルは全プラットフォームで
+//! 共通で、入力の取り込みだけがプラットフォームごとに分かれる:
+//! - Windows: `winit` の `Ime` イベント ([ADR-0006](../../spec/adr/0006-windows-ime-via-winit.md))
+//! - Android: `InputConnection` (JNI) — M1.2
+//! - iOS: `UITextInput` — M1.2
 //!
-//! したがってテキスト入力層は [`text_input::TextInputHost`] という単一の
-//! 抽象の裏に、プラットフォームごとの実装を持つ:
-//! - Windows: TSF (`ITextStoreACP`)
-//! - Android: `InputConnection` (JNI)
-//! - iOS: `UITextInput`
+//! ⚠️ **`set_ime_cursor_area` には入力欄全体の矩形を渡すこと。** `winit` は
+//! `CANDIDATEFORM` を `CFS_EXCLUDE` で設定するので、渡すのは「避けるべき領域」
+//! である。キャレット幅の矩形を渡すと変換候補ウィンドウが出ない。
+//! **かつてこれを TSF の問題と誤診した** (ADR-0005 — 廃止)。
 //!
 //! ⚠️ GPU バックエンドの探索対象は OS ごとに**明示的に絞る**。
 //! 「対応していないバックエンドは `request_adapter` が `None` を返す」という

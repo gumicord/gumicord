@@ -4,7 +4,7 @@
 |---|---|
 | ステータス | **ドラフト** — S1 / S2 の実測に基づく |
 | 最終更新 | 2026-08-14 |
-| 前提となる決定 | [ADR-0001](adr/0001-native-rust-renderer.md), [ADR-0005](adr/0005-ime-strategy.md) |
+| 前提となる決定 | [ADR-0001](adr/0001-native-rust-renderer.md), [ADR-0006](adr/0006-windows-ime-via-winit.md) |
 | 関連要件 | `NFR-001`〜`NFR-007`, `NFR-015`, `EXT-020`, `EXT-021`〜`EXT-027`, `PLT-001`〜`PLT-009` |
 
 ---
