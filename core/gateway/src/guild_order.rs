@@ -6,27 +6,47 @@
 //! 「自分のサーバ一覧ではない」ものになる。**
 //!
 //! その順は READY の `user_settings_proto` に入っている。中身は
-//! **base64 された protobuf** で、スキーマは公開されていない。
+//! **base64 された protobuf** で、Discord は定義を公開していない。
 //!
-//! # スキーマを推測せずに取り出す
+//! # 2 段で読む
 //!
-//! 素直にやるならフィールド番号を調べて構造体を書くことになるが、
-//! **それは推測であり、Discord が番号を変えたら静かに壊れる。**
+//! | | 何を頼りにするか |
+//! |---|---|
+//! | [1] [`by_documented_path`] | 書き起こされたフィールド番号 |
+//! | [2] [`walk`] | protobuf の線の形式だけ |
 //!
-//! 代わりにこうする:
+//! [1] が当たれば [2] は走らない。**番号が変わったら [2] が拾う。**
+//! 静かに違うものを返すより、落ちてもいいから気付けるほうがよい。
 //!
-//! 1. protobuf の**線の形式だけ**を頼りに全体を歩く
-//!    (可変長整数と長さ付きの塊。これは番号に依らない)
-//! 2. 出てきた整数のうち、**READY が持ってきたギルドの識別子と一致する
-//!    ものだけ**を、出てきた順に拾う
+//! # ⚠️ fixed64 である
 //!
-//! フィールド番号を 1 つも知らずに済む。**探しているものが何であるかは
-//! 既に分かっている**ので、それを見つければよい。
+//! ここで一度間違えた。**`guild_ids` は可変長整数ではなく `fixed64`** で、
+//! しかも protobuf は repeated の数値を既定で詰めるので、線の上では
+//! 「8 の倍数の長さを持つ 1 つの塊」として来る。
 //!
-//! ⚠️ フォルダに入れたギルドも、平らにした順で出てくる。フォルダの表示は
-//! まだ無いので、いまはそれでよい。
+//! 可変長整数の列として読もうとすると 1 つも一致せず、**「並び順が
+//! 入っていない」ように見えた**。11 個中 4 個しか拾えず、しかもその 4 個は
+//! 別の場所から来ていた。
 //!
-//! ⚠️ 見つからなければ**空を返す**。呼び出し側は READY の順に落とす。
+//! 生のバイト列を 3 通りの形で直接探して、初めて切り分けが付いた:
+//!
+//! ```text
+//!   as_varint=0  as_text=0  as_fixed=11
+//! ```
+//!
+//! **「入っていない」のか「読み方が違う」のかは、外から見分けが付かない。**
+//! 見分けが付かないまま読み方をいじるのは推測である。
+//!
+//! # 半分だけ分かった順は、分からないより悪い
+//!
+//! 見つかったぶんを前に出して残りを届いた順で後ろに付けると、**どちらでも
+//! ない並び**ができる。利用者から見れば「ぐちゃぐちゃ」であって、「一部だけ
+//! 正しい」ではない。全部の居場所が分かったときだけ採る。
+//!
+//! ⚠️ フォルダに入れたギルドも、いまは平らにした順で出てくる。
+//! フォルダそのものの表示はまだない。
+//!
+//! 出典: <https://github.com/discord-userdoccers/discord-protos>
 
 use std::collections::HashSet;
 
@@ -46,31 +66,177 @@ pub fn from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> Vec<Guil
         return Vec::new();
     };
 
+    // [1] 文書化された道。**当たればこれが正しい**
+    let mut best = dedup(by_documented_path(&bytes));
+    let by_path = best.len();
+
+    // [2] 番号が変わっていたら、形だけを頼りに探す。
+    //
     // ⚠️ **入れ子ごとに候補を作る。** 識別子は設定の中の何箇所にも現れる
     // (通知の設定、既読の位置、フォルダ)。全部を出てきた順に混ぜると、
     // **どこか 1 箇所の順ではなく、混ざった順**になってしまう
     let mut candidates: Vec<Vec<u64>> = Vec::new();
-    let top = walk(&bytes, known, 0, &mut candidates);
-    candidates.push(top);
+    if best.len() < known.len() {
+        let top = walk(&bytes, known, 0, &mut candidates);
+        candidates.push(top);
 
-    // 全部のギルドを 1 度ずつ持つものが、探している一覧である。
-    // 通知の設定なども全ギルドを持つが、そちらは**入れ子の中に 1 つずつ**
-    // 入っているので、平らな列にはならない
-    let best = candidates
-        .into_iter()
-        .map(dedup)
-        .max_by_key(|list| list.len())
-        .unwrap_or_default();
+        // 全部のギルドを 1 度ずつ持つものが、探している一覧である
+        if let Some(found) = candidates
+            .iter()
+            .cloned()
+            .map(dedup)
+            .max_by_key(|list| list.len())
+            && found.len() > best.len()
+        {
+            best = found;
+        }
+    }
+
+    // 道を辿って出したものに、知らない識別子が混ざっていたら落とす。
+    // **抜けたサーバが並び順にだけ残っていることがある**
+    best.retain(|id| known.contains(id));
 
     if tracing::enabled!(tracing::Level::DEBUG) {
+        // ⚠️ **数が足りないとき、「入っていない」のか「形が違う」のかを
+        // 先に決める。** 見分けが付かないまま読み方をいじるのは推測である
+        let (as_varint, as_text, as_fixed) = count_encodings(&bytes, known);
+        let mut lengths: Vec<usize> = candidates.iter().map(|c| c.len()).collect();
+        lengths.sort_unstable();
+        lengths.dedup();
+        tracing::debug!(
+            bytes = bytes.len(),
+            as_varint,
+            as_text,
+            as_fixed,
+            ?lengths,
+            "識別子がどの形で入っているか"
+        );
         tracing::debug!(
             found = best.len(),
+            by_path,
             known = known.len(),
-            order = ?best,
             "並び順を user_settings_proto から取り出した"
         );
     }
+    // ⚠️ **半分だけ分かった順は、分からないより悪い。**
+    //
+    // 見つかったぶんを前に出し、残りを届いた順で後ろに付けると、
+    // **どちらでもない並び**ができる。利用者から見れば「ぐちゃぐちゃ」で
+    // あって、「一部だけ正しい」ではない。
+    //
+    // 全部の居場所が分かったときだけ採り、そうでなければ何も言わない。
+    if best.len() < known.len() {
+        tracing::debug!(
+            found = best.len(),
+            known = known.len(),
+            "並び順が全部は分からない。**混ぜるより、届いた順のままにする**"
+        );
+        return Vec::new();
+    }
+
     best.into_iter().map(GuildId::from).collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  [1] 文書化された道を辿る
+//
+//  https://github.com/discord-userdoccers/discord-protos が
+//  PreloadedUserSettings を書き起こしている。**推測ではなく記録された値**:
+//
+//    PreloadedUserSettings.guild_folders = 14   (GuildFolders)
+//    GuildFolders.folders                = 1    (repeated GuildFolder)
+//    GuildFolder.guild_ids               = 1    (repeated fixed64)
+//
+//  ⚠️ **fixed64 である。** 可変長整数ではない。しかも protobuf は
+//  repeated の数値を既定で詰めるので、線の上では「8 の倍数の長さを持つ
+//  1 つの塊」として来る。これを可変長整数の列として読もうとすると
+//  何も一致せず、**「入っていない」ように見える**。実際にそうなった。
+//
+//  ⚠️ フォルダに入れていないギルドも、**中身が 1 つのフォルダ**として
+//  並ぶ。だから折り畳みを無視して平らに読めば、それが一覧の順である。
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `PreloadedUserSettings.guild_folders`
+const F_GUILD_FOLDERS: u64 = 14;
+/// `GuildFolders.folders`
+const F_FOLDERS: u64 = 1;
+/// `GuildFolder.guild_ids`
+const F_GUILD_IDS: u64 = 1;
+
+/// 文書化された道を辿って並び順を取り出す。
+///
+/// ⚠️ **番号が変われば空を返す。** そのときは [`walk`] のほうが拾う。
+/// 静かに違うものを返すより、拾えないほうがよい
+fn by_documented_path(bytes: &[u8]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for folders in blocks(bytes, F_GUILD_FOLDERS) {
+        for folder in blocks(folders, F_FOLDERS) {
+            for packed in blocks(folder, F_GUILD_IDS) {
+                out.extend(fixed64s(packed));
+            }
+        }
+    }
+    out
+}
+
+/// その番号を持つ「長さ付きの塊」を順に返す。
+///
+/// 他の形のフィールドは読み飛ばす。**番号を知らないものには触らない**
+fn blocks(mut buf: &[u8], field: u64) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    while !buf.is_empty() {
+        let Some((key, rest)) = varint(buf) else {
+            return out;
+        };
+        buf = rest;
+        let (num, wire) = (key >> 3, key & 7);
+
+        match wire {
+            0 => match varint(buf) {
+                Some((_, rest)) => buf = rest,
+                None => return out,
+            },
+            1 => {
+                if buf.len() < 8 {
+                    return out;
+                }
+                buf = &buf[8..];
+            }
+            2 => {
+                let Some((len, rest)) = varint(buf) else {
+                    return out;
+                };
+                let len = len as usize;
+                if rest.len() < len {
+                    return out;
+                }
+                let (body, after) = rest.split_at(len);
+                buf = after;
+                if num == field {
+                    out.push(body);
+                }
+            }
+            5 => {
+                if buf.len() < 4 {
+                    return out;
+                }
+                buf = &buf[4..];
+            }
+            // 廃止された群。ここへ来たら読み違えている
+            _ => return out,
+        }
+    }
+    out
+}
+
+/// 詰めた `fixed64` の列として読む。**8 の倍数でなければ空**
+fn fixed64s(body: &[u8]) -> Vec<u64> {
+    if body.is_empty() || !body.len().is_multiple_of(8) {
+        return Vec::new();
+    }
+    body.chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().expect("8 バイトある")))
+        .collect()
 }
 
 /// 重複を落とし、**最初に出た順**を残す
@@ -319,5 +485,138 @@ mod tests {
         put_varint(&mut lying, 9999);
         lying.push(0x01);
         assert!(from_settings_proto(&b64(&lying), &known).is_empty());
+    }
+}
+
+/// 識別子が**どういう形で入っているか**を数える。
+///
+/// # なぜ要るのか
+///
+/// 「取り出せた数が足りない」とき、原因は 2 つに 1 つである:
+///
+/// - **入っていない** — 別の場所を探すしかない
+/// - **形が違う** — 読み方を直せばよい
+///
+/// この 2 つは外から見分けが付かない。⚠️ **見分けが付かないまま読み方を
+/// いじるのは推測である。** 生のバイト列を直接探して、どちらかを決める。
+///
+/// 数だけを記録に残す。**識別子そのものは出さない** — 記録に残ると、
+/// 利用者がどのサーバに入っているかが漏れる。
+fn count_encodings(bytes: &[u8], known: &HashSet<u64>) -> (usize, usize, usize) {
+    let mut as_varint = 0;
+    let mut as_text = 0;
+    let mut as_fixed = 0;
+
+    for id in known {
+        let mut buf = Vec::new();
+        let mut v = *id;
+        loop {
+            let mut byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            buf.push(byte);
+            if v == 0 {
+                break;
+            }
+        }
+        if bytes.windows(buf.len()).any(|w| w == buf) {
+            as_varint += 1;
+        }
+
+        let text = id.to_string();
+        if bytes.windows(text.len()).any(|w| w == text.as_bytes()) {
+            as_text += 1;
+        }
+
+        // 64 ビット固定長。**protobuf の fixed64 はこの形で並ぶ**
+        let fixed = id.to_le_bytes();
+        if bytes.windows(8).any(|w| w == fixed) {
+            as_fixed += 1;
+        }
+    }
+    (as_varint, as_text, as_fixed)
+}
+
+#[cfg(test)]
+mod documented_path_tests {
+    use super::*;
+
+    fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let mut byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if v == 0 {
+                return;
+            }
+        }
+    }
+
+    fn block(field: u64, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_varint(&mut out, field << 3 | 2);
+        put_varint(&mut out, body.len() as u64);
+        out.extend(body);
+        out
+    }
+
+    /// `repeated fixed64` を詰めた形で書く
+    fn packed_ids(ids: &[u64]) -> Vec<u8> {
+        ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+    }
+
+    fn settings(folders: &[&[u64]]) -> String {
+        let mut inner = Vec::new();
+        for ids in folders {
+            let guild_ids = block(F_GUILD_IDS, &packed_ids(ids));
+            inner.extend(block(F_FOLDERS, &guild_ids));
+        }
+        let proto = block(F_GUILD_FOLDERS, &inner);
+        base64::engine::general_purpose::STANDARD.encode(proto)
+    }
+
+    /// ⚠️ **`fixed64` を詰めた形で読めること。** ここを可変長整数として
+    /// 読んでいたせいで 11 個中 4 個しか拾えなかった
+    #[test]
+    fn packed_fixed64_guild_ids_are_read_in_order() {
+        let known: HashSet<u64> = [10, 20, 30, 40].into_iter().collect();
+        // フォルダ 1 つと、フォルダに入っていない 2 つ
+        let proto = settings(&[&[30, 10], &[40], &[20]]);
+
+        let got: Vec<u64> = from_settings_proto(&proto, &known)
+            .iter()
+            .map(|g| g.get())
+            .collect();
+        assert_eq!(got, vec![30, 10, 40, 20]);
+    }
+
+    /// **半分だけ分かった順は採らない。** どちらでもない並びになる
+    #[test]
+    fn a_partial_order_is_refused() {
+        let known: HashSet<u64> = [10, 20, 30].into_iter().collect();
+        let proto = settings(&[&[30, 10]]);
+
+        assert!(
+            from_settings_proto(&proto, &known).is_empty(),
+            "足りない順をそのまま採っている"
+        );
+    }
+
+    /// 抜けたサーバが並び順にだけ残っていても落とす
+    #[test]
+    fn guilds_we_are_no_longer_in_are_dropped() {
+        let known: HashSet<u64> = [10, 20].into_iter().collect();
+        let proto = settings(&[&[10, 999, 20]]);
+
+        let got: Vec<u64> = from_settings_proto(&proto, &known)
+            .iter()
+            .map(|g| g.get())
+            .collect();
+        assert_eq!(got, vec![10, 20]);
     }
 }
