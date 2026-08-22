@@ -9,6 +9,7 @@ authors.workspace = true
 
 [dependencies]
 gumicord-render.workspace = true
+gumicord-uitree.workspace = true
 winit.workspace = true
 accesskit.workspace = true
 accesskit_winit.workspace = true

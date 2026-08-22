@@ -1219,6 +1219,7 @@ dependencies = [
  "accesskit",
  "accesskit_winit",
  "gumicord-render",
+ "gumicord-uitree",
  "thiserror 2.0.20",
  "tracing",
  "winit",
