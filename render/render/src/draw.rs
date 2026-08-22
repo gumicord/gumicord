@@ -348,27 +348,30 @@ fn draw_editable(
     let inner = placed.inner;
     let fg = style.color.unwrap_or(FALLBACK_TEXT);
 
-    // 中身が空なら placeholder を薄く出すだけ。印は出さない
-    if e.text.is_empty() {
-        if !e.placeholder.is_empty() {
-            let faded = Color {
-                a: (fg.a as f32 * PLACEHOLDER_ALPHA) as u8,
-                ..fg
-            };
-            draw_glyph_run(
-                dl,
-                text,
-                queue,
-                placed,
-                &e.placeholder,
-                linear(faded, opacity),
-                scale,
-                scissor,
-            );
-        }
-        return;
+    // 中身が空でも placeholder を薄く出す。**編集の対象ではない**
+    if e.text.is_empty() && !e.placeholder.is_empty() {
+        let faded = Color {
+            a: (fg.a as f32 * PLACEHOLDER_ALPHA) as u8,
+            ..fg
+        };
+        draw_glyph_run(
+            dl,
+            text,
+            queue,
+            placed,
+            &e.placeholder,
+            linear(faded, opacity),
+            scale,
+            scissor,
+        );
     }
 
+    // ⚠️ **空でもキャレットは出す。** 何も打っていない状態では、
+    // キャレットだけが「ここへ打てる」ことを示す手掛かりである。
+    //
+    // 位置の基準は placeholder ではなく**編集している文字列**にする。
+    // placeholder は幅が違うので、そちらを基準にすると空の入力欄で
+    // キャレットが中途半端な位置に出る。
     let origin = text_origin(text, placed, &e.text, scale);
     let shaped = text.shaper().shape(&e.text, &font, Some(inner.w)).clone();
 
@@ -400,16 +403,18 @@ fn draw_editable(
     }
 
     // [2] 文字
-    draw_glyph_run(
-        dl,
-        text,
-        queue,
-        placed,
-        &e.text,
-        linear(fg, opacity),
-        scale,
-        scissor,
-    );
+    if !e.text.is_empty() {
+        draw_glyph_run(
+            dl,
+            text,
+            queue,
+            placed,
+            &e.text,
+            linear(fg, opacity),
+            scale,
+            scissor,
+        );
+    }
 
     // [3] 変換中の下線。**確定していないことが見て分かる必要がある**
     if let Some(c) = &e.composing {
