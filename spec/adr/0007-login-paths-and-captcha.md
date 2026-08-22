@@ -82,23 +82,30 @@ wss://remote-auth-gateway.discord.gg/?v=2     Origin: https://discord.com が必
 
 | プラットフォーム | 出し方 |
 |---|---|
-| **デスクトップ (M1.1)** | **ループバックのページを既定のブラウザで開く** |
-| モバイル (M1.2) | OS の webview (`WKWebView` / `android.webkit.WebView`) |
+| **すべて** | **OS の webview をアプリ内のモーダルとして出す** |
+| 逃げ道 | webview が使えない環境では、ループバックのページを既定のブラウザで開く |
 
-#### デスクトップでブラウザを使う理由
-
-**理由は 2 つある。片方は「依存を増やさない」だが、もう片方のほうが重い。**
-
-| | |
+| | webview |
 |---|---|
-| 依存 | webview を埋め込むと、ログイン経路のためだけにブラウザエンジンの糊が入る。ブラウザなら 0 |
-| **通過率** | **hCaptcha は解く側を指紋で測る。** プロファイルも履歴も無い素の webview は、実在の利用者のブラウザより厳しく扱われうる |
+| Windows | WebView2 (Edge)。**OS の部品**であり、同梱するものではない |
+| macOS / iOS | `WKWebView` |
+| Android | `android.webkit.WebView` |
+| Linux | WebKitGTK。**ここだけパッケージ依存になる** |
 
-2 つ目が効く。captcha は「人間かどうか」を判定する仕組みであり、**人間が普段使っている環境で解かせるほうが素直**である。
+#### webview にする理由
 
-#### モバイルで webview を使う理由
+**ログインの途中でアプリの外へ飛ばさない。** 公式クライアントはアプリ内に captcha を出す。そこだけブラウザが開くのは体験として明確に劣る。
 
-デスクトップと逆で、モバイルは OS の webview が**標準の答え**である。[hCaptcha 公式のモバイル SDK](https://docs.hcaptcha.com/mobile_app_sdks/) がまさに webview の実装であり、ドキュメントにも webview 前提の記述がある。
+> **当初はデスクトップだけ「既定のブラウザで開く」と決めていた。**
+> 理由の 1 つに「hCaptcha は解く側を指紋で測るので、プロファイルの無い素の
+> webview は不利かもしれない」を挙げていたが、**これは根拠が弱い**。
+> WebView2 は Edge (Chromium) であり、公式クライアントの Electron と同じ
+> エンジンである。[hCaptcha 公式のモバイル SDK](https://docs.hcaptcha.com/mobile_app_sdks/) 自体が webview の実装でもある。
+> 残る理由は「依存を増やさない」だけで、**それは UX を捨てる理由にならない**。
+
+#### webview を使ってよい理由
+
+[hCaptcha 公式のモバイル SDK](https://docs.hcaptcha.com/mobile_app_sdks/) がまさに webview の実装であり、ドキュメントにも webview 前提の記述がある。
 
 > If using a webview in a native application, you will need to provide a `host` flag to api.js as it can not detect a hostname inside the webview.
 > ... **it is treated as untrusted data; it has no security implications.**
@@ -139,7 +146,7 @@ wss://remote-auth-gateway.discord.gg/?v=2     Origin: https://discord.com が必
 
 | 案 | 評価 |
 |---|---|
-| ブラウザではなく webview にし、`?host=discord.com` を付ける | hCaptcha 的には有効だが、Discord が siteverify のホスト名を見ているなら同じく崩れる |
+| `?host=discord.com` を付ける | hCaptcha 的には有効だが、Discord が siteverify のホスト名を見ているなら同じく崩れる |
 | QR ログインだけにする | `FR-001` を降格することになる。**最後の手段** |
 | 公式のログインページごと webview で開いてトークンを取る | **却下。** 利用者から見て phishing と区別がつかない形は採らない |
 
@@ -153,7 +160,7 @@ wss://remote-auth-gateway.discord.gg/?v=2     Origin: https://discord.com が必
 | captcha 解決サービスに投げる | **論外。** 規約違反であり、利用者の資格情報を第三者へ渡すことになる |
 | QR ログインだけにする | 公式モバイルアプリを持たない利用者を締め出す。`FR-001` を満たさない |
 | パスワードログインだけにする | captcha の穴 ([未検証 1](#未検証-ここは推測で埋めない)) が塞がらなかったとき、誰もログインできない |
-| デスクトップにも webview を埋め込む | 依存が増え、かつ素の webview は captcha の通過率で不利になりうる |
+| デスクトップだけブラウザで開く | ログインの途中でアプリの外へ飛ばすことになる。**体験として明確に劣る**。webview が使えない環境の逃げ道としてだけ残す |
 
 ---
 
@@ -162,8 +169,8 @@ wss://remote-auth-gateway.discord.gg/?v=2     Origin: https://discord.com が必
 | リスク | 対処 |
 |---|---|
 | ホスト名の検証で弾かれる | 実装直後に確かめる。崩れたら上の逃げ道 |
-| ブラウザへ飛ぶ体験が悪い | 既定は QR なので、ここを通る利用者は少ないはずである |
-| Linux で既定のブラウザが開かない環境がある | URL を画面に出して手で開けるようにする |
+| Linux で WebKitGTK のパッケージが要る | デスクトップで唯一の実行時依存になる。無ければブラウザで開く逃げ道へ倒す |
+| webview も既定のブラウザも使えない環境がある | URL を画面に出して手で開けるようにする |
 | リモート認証は非公開 API である | 公式クライアントが使っている経路なので、壊れれば公式も壊れる。追随はできる |
 | QR ログインでも**アカウント停止のリスクは消えない** | サードパーティクライアントであること自体が規約違反である ([00-vision.md](../00-vision.md#リスクと前提)) |
 

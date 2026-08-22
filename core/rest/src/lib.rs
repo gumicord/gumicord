@@ -12,3 +12,11 @@
 //!
 //! 要件: `NFR-021`, `NFR-022`, `NFR-024`
 //! 仕様: [`spec/09-discord-protocol.md`]
+
+pub mod client;
+pub mod ratelimit;
+pub mod route;
+
+pub use client::{CaptchaChallenge, RestClient, RestError};
+pub use ratelimit::{RateLimitHeaders, RateLimiter};
+pub use route::{Method, Route};

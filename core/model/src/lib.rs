@@ -22,10 +22,12 @@
 //! 仕様: [`spec/09-discord-protocol.md`]
 
 pub mod snowflake;
+pub mod token;
 
 pub use snowflake::{
     AttachmentId, ChannelId, EmojiId, GuildId, MessageId, RoleId, Snowflake, UserId,
 };
+pub use token::Token;
 
 use serde::{Deserialize, Serialize};
 
