@@ -835,15 +835,15 @@ impl Gumicord {
             .guild_entries()
             .into_iter()
             .map(|e| match e {
-                GuildEntry::Folder(f) => GuildRow {
-                    id: f.id,
+                GuildEntry::Folder { id, row } => GuildRow {
+                    id,
                     // 名前が無いフォルダもある。**中身の名前で代わりにする**
-                    name: f.name.clone().unwrap_or_else(|| self.folder_label(f)),
+                    name: row.name.clone().unwrap_or_else(|| self.folder_label(row)),
                     unread: false,
                     mentions: 0,
-                    folder_of_own: Some(f.id),
+                    folder_of_own: Some(id),
                     in_folder: false,
-                    collapsed: self.live.store().is_collapsed(f.id),
+                    collapsed: self.live.store().is_collapsed(id),
                 },
                 GuildEntry::Guild { row, folder } => GuildRow {
                     id: row.id.get(),

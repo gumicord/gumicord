@@ -162,7 +162,7 @@ impl Live {
                 if !snapshot.guild_order.is_empty() {
                     live.store.set_preferred_order(snapshot.guild_order);
                 }
-                live.store.set_folders(snapshot.folders);
+                live.store.set_sidebar(snapshot.folders);
                 live.store.set_collapsed(snapshot.collapsed);
                 live.last_channel = snapshot.last_channel;
                 if let Some(ch) = snapshot.last_channel {
@@ -380,27 +380,25 @@ impl Live {
         self.requested.clear();
         self.last_channel = None;
     }
-
-    /// 届いたフォルダを Store へ入れる。
+    /// 届いた並びを Store へ入れる。
     ///
-    /// ⚠️ **中身が 1 つのただのサーバは弾く。** Discord はフォルダに入れて
-    /// いないサーバも「中身が 1 つのフォルダ」として送ってくるので、
-    /// そのまま入れると一覧が入れ物だらけになる
-    fn apply_folders(&mut self, folders: Vec<gumicord_gateway::Folder>) {
+    /// ⚠️ **フォルダだけを抜き出さない。** Discord は並び順の一覧に、
+    /// フォルダも単独のサーバも同じ列として入れてくる。フォルダだけを
+    /// 先に出して残りを末尾へ寄せると、**利用者が並べた位置が失われる**
+    fn apply_sidebar(&mut self, folders: Vec<gumicord_gateway::Folder>) {
         let rows: Vec<gumicord_store::FolderRow> = folders
             .into_iter()
-            .filter(|f| f.is_folder())
             .map(|f| gumicord_store::FolderRow {
-                id: f.id.unwrap_or_default(),
+                id: f.id,
                 name: f.name,
                 guilds: f.guilds,
             })
             .collect();
 
         if let Some(db) = &self.db {
-            db.save_folders(&rows);
+            db.save_sidebar(&rows);
         }
-        self.store.set_folders(rows);
+        self.store.set_sidebar(rows);
     }
 
     /// フォルダの開閉を切り替え、**残す**。
@@ -437,7 +435,7 @@ impl Live {
                 if !order.is_empty() {
                     self.store.set_preferred_order(order);
                 }
-                self.apply_folders(folders);
+                self.apply_sidebar(folders);
                 self.save_guilds();
                 true
             }

@@ -559,7 +559,7 @@ impl Db {
     /// ⚠️ 表を切るほどの量ではない。フォルダは多くても数十で、
     /// 検索も結合もしない。**中身が小さくて、まとめてしか読まないものに
     /// 正規化した表を与えても、面倒が増えるだけである**
-    pub fn save_folders(&self, folders: &[crate::FolderRow]) {
+    pub fn save_sidebar(&self, folders: &[crate::FolderRow]) {
         let json = serde_json::to_string(folders).unwrap_or_else(|_| "[]".to_owned());
         self.send(Job::State("folders", json));
     }
