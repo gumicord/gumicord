@@ -2162,6 +2162,51 @@ mod tests {
         assert_eq!(bar(Composing::Edit(1)), Some(Key::Slot("edit")));
     }
 
+    /// ⚠️ **絵が箱からはみ出していないこと。**
+    ///
+    /// # これは実際に起きた
+    ///
+    /// `primitive.button` には `padding: [6,12,6,12]` を付ける一般の
+    /// ルールが**後ろに**あり、`when.slot` を付けたこちらのルールより
+    /// 後のものが勝つ。20x20 の箱に左右 12px の余白が入って、
+    /// **✕ が箱の外へ 12px ずれ、余白ぶんの暗い箱だけがその左に残った。**
+    ///
+    /// ⚠️ **テーマの数値を見ても分からない。** 置いた結果の矩形で見ること
+    #[test]
+    fn 取り消しの絵は箱からはみ出さない() {
+        let mut a = app();
+        a.composing = Composing::Reply(1);
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        };
+        let tree = a.build(&cx);
+        let placed = gumicord_render::layout_for_test(&tree, cx.viewport);
+
+        let find = |id| {
+            placed
+                .iter()
+                .rev()
+                .find(|(i, _)| *i == id)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("{id:?} が置かれていない"))
+        };
+        let button = find(NodeId::PrimitiveButton);
+        let icon = find(NodeId::PrimitiveIcon);
+
+        assert!(
+            button.w > 0.0 && button.h > 0.0,
+            "箱が潰れている {button:?}"
+        );
+        assert!(
+            icon.x >= button.x
+                && icon.y >= button.y
+                && icon.x + icon.w <= button.x + button.w
+                && icon.y + icon.h <= button.y + button.h,
+            "絵 {icon:?} が箱 {button:?} からはみ出している"
+        );
+    }
+
     /// ⚠️ **やめる道が画面に出ていること。**
     ///
     /// Esc でもやめられるが、それを知らない人には**抜け出せない状態**に

@@ -417,3 +417,16 @@ fn bind_pages(gpu: &Gpu, text: &TextEngine) -> Vec<wgpu::BindGroup> {
         .map(|v| gpu.atlas_bind_group(v))
         .collect()
 }
+
+/// 木を置いた結果を、GPU 無しで見るための入口。**試験と診断だけに使う。**
+///
+/// ⚠️ 本番の描画はここを通らない。整形器を作り直すので**遅い**
+#[doc(hidden)]
+pub fn layout_for_test(
+    tree: &gumicord_uitree::UiNode,
+    viewport: Size,
+) -> Vec<(gumicord_uitree::NodeId, crate::geom::Rect)> {
+    let mut shaper = crate::text::Shaper::new(1.0);
+    let r = crate::layout::layout(tree, viewport, &mut shaper, &ScrollState::default());
+    r.placed.iter().map(|p| (p.node.id, p.rect)).collect()
+}

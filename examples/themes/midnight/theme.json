@@ -682,22 +682,6 @@
       }
     },
     {
-      "select": "primitive.button",
-      "when": { "slot": "cancel_composing" },
-      "style": {
-        "width": 20,
-        "height": 20,
-        "radius": "$radius.sm",
-        "color": "$color.text.muted",
-        "transition": "$motion.fast"
-      }
-    },
-    {
-      "select": "primitive.button",
-      "when": { "slot": "cancel_composing", "state": "hover" },
-      "style": { "background": "$color.bg.hover", "color": "$color.text.primary" }
-    },
-    {
       "select": "primitive.text",
       "when": { "slot": "reply" },
       "style": { "font": "$font.small", "color": "$color.text.secondary" }
@@ -768,6 +752,24 @@
       "select": "primitive.button",
       "when": { "state": "hover" },
       "style": { "background": "$color.bg.hover" }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "cancel_composing" },
+      "style": {
+        "width": 20,
+        "height": 20,
+        "padding": [0, 0, 0, 0],
+        "background": "#00000000",
+        "radius": "$radius.sm",
+        "color": "$color.text.muted",
+        "transition": "$motion.fast"
+      }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "cancel_composing", "state": "hover" },
+      "style": { "background": "$color.bg.hover", "color": "$color.text.primary" }
     },
     {
       "select": "primitive.button",
