@@ -1,29 +1,21 @@
-//! 縦に積まれるものの解析。
+//! Block-level parsing.
 //!
-//! # 順番: コードブロックが最初
+//! Fenced code comes out first, before splitting into lines: a fence can open
+//! mid-line, and leaving it until later would read `# ` and `> ` *inside* code
+//! as headings and quotes. Code contents must not be interpreted at all.
 //!
-//! ```` ``` ```` は**行の途中からでも始まる**。`見て ```js` と打てば、
-//! そこで段落が切れてコードになる。だから行に切る前に、まずコードブロックを
-//! 抜き出して残りを分ける。
-//!
-//! ⚠️ **これは行の解析より先でなければならない。** 後回しにすると、
-//! コードの中の `# ` や `> ` を見出しや引用として読んでしまう。
-//! **コードの中身は何も解釈しない**のが唯一の正しい扱いである。
-//!
-//! ## 引き換えに諦めたこと
-//!
-//! `> ` を付けた引用の中のコードブロックは、引用の外へ出る。
-//! 先にコードを抜くので、`>` が剥がれる前に切れてしまうためである。
-//! 珍しい書き方なので M1 では許す。
+//! The cost is that a fenced block inside a `> ` quote escapes the quote,
+//! since the fence is extracted before the `>` markers are stripped. Rare
+//! enough to accept for now.
 
 use crate::inline;
 use crate::model::{Block, Item, Marker};
 
-/// 字下げ何文字で 1 段とするか
+/// Spaces per indent level.
 const INDENT: usize = 2;
-/// 箇条書きの深さの上限。**壊れた入力で無限に潜らないため**
+/// Bounded so malformed input cannot nest forever.
 const MAX_DEPTH: u8 = 4;
-/// 引用の入れ子の上限。同じ理由である
+/// Bounded for the same reason as MAX_DEPTH.
 const MAX_QUOTE: u32 = 4;
 
 pub fn parse(text: &str) -> Vec<Block> {
@@ -42,7 +34,7 @@ enum Seg {
     Code { lang: Option<String>, text: String },
 }
 
-/// コードブロックとそれ以外に分ける。
+/// Splits fenced code from everything else.
 fn segments(text: &str) -> Vec<Seg> {
     const FENCE: &str = "```";
     let c: Vec<char> = text.chars().collect();
@@ -56,7 +48,7 @@ fn segments(text: &str) -> Vec<Seg> {
             i += 1;
             continue;
         }
-        // 閉じないものはコードではない。**ただの記号として置く**
+        // An unclosed fence is not code; leave it as literal text.
         let Some(close) = find(&c, i + FENCE.len(), FENCE) else {
             plain.push(c[i]);
             i += 1;
@@ -78,11 +70,11 @@ fn segments(text: &str) -> Vec<Seg> {
     out
 }
 
-/// 開きの直後の 1 行が言語名か、それとも中身の 1 行目か。
+/// Decides whether the line after the fence is an info string or content.
 fn split_lang(body: &str) -> (Option<String>, String) {
     let (head, rest) = match body.split_once('\n') {
         Some((h, r)) => (h, r),
-        // 改行が無ければ言語名ではない。```js``` は `js` を出す
+        // With no newline there is no info string: ```js``` renders `js`.
         None => return (None, trim_code(body)),
     };
     let is_lang = !head.is_empty()
@@ -96,20 +88,20 @@ fn split_lang(body: &str) -> (Option<String>, String) {
     }
 }
 
-/// 前後の改行を 1 つだけ削る。**中の空行は中身である**
+/// Strips one leading and trailing newline. Blank lines inside are content.
 fn trim_code(s: &str) -> String {
     let s = s.strip_prefix('\n').unwrap_or(s);
     let s = s.strip_suffix('\n').unwrap_or(s);
     s.to_owned()
 }
 
-/// 行に切って積む。`depth` は引用の入れ子の深さ
+/// Splits into lines and stacks them. `depth` is the quote nesting level.
 fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
     let all: Vec<&str> = text.split('\n').collect();
     let mut para: Vec<&str> = Vec::new();
     let mut i = 0;
 
-    // 溜めていた段落を吐く
+    // Flush the pending paragraph.
     macro_rules! flush {
         () => {
             if !para.is_empty() {
@@ -131,7 +123,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
             continue;
         }
 
-        // `>>> ` はここから先を全部引用にする
+        // `>>> ` quotes everything from here on.
         if depth < MAX_QUOTE
             && let Some(rest) = line.strip_prefix(">>> ")
         {
@@ -144,7 +136,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
             return;
         }
 
-        // `> ` は続く限り 1 つの引用にまとめる
+        // Consecutive `> ` lines merge into one quote.
         if depth < MAX_QUOTE && quoted(line).is_some() {
             flush!();
             let mut body = Vec::new();
@@ -177,7 +169,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
             continue;
         }
 
-        // 箇条書きも続く限り 1 つにまとめる
+        // Consecutive list items merge into one list.
         if bullet(line).is_some() {
             flush!();
             let mut items = Vec::new();
@@ -197,13 +189,13 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
     flush!();
 }
 
-/// `> 中身` の中身。`>` だけの行は空行の引用である
+/// The content of a `> ` line. A bare `>` quotes a blank line.
 fn quoted(line: &str) -> Option<&str> {
     line.strip_prefix("> ")
         .or_else(|| (line == ">" || line == "> ").then_some(""))
 }
 
-/// `# ` `## ` `### `。**空白が要る** — `#tag` は見出しではない
+/// `# `, `## `, `### `. The space is required, so `#tag` is not a heading.
 fn heading(line: &str) -> Option<(u8, &str)> {
     let hashes = line.len() - line.trim_start_matches('#').len();
     if !(1..=3).contains(&hashes) {
@@ -222,7 +214,7 @@ fn bullet(line: &str) -> Option<Item> {
         (Marker::Bullet, b)
     } else {
         let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        // ⚠️ 桁を数えないと、長い数字で `u32` が溢れる
+        // Without a digit cap a long run of digits overflows u32.
         if digits == 0 || digits > 9 {
             return None;
         }
@@ -230,7 +222,7 @@ fn bullet(line: &str) -> Option<Item> {
         (Marker::Number(rest[..digits].parse().ok()?), b)
     };
 
-    // `- ` だけの行は箇条書きにしない。`- ` で始まる文が消える
+    // A bare `- ` is not a list item, or sentences starting with `- ` vanish.
     if body.trim().is_empty() {
         return None;
     }

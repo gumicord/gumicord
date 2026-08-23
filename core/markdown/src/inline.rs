@@ -1,43 +1,30 @@
-//! 行の中の解析。
+//! Inline parsing.
 //!
-//! # ⚠️ 開いた印が必ず閉じるとは限らない
+//! An opening mark is not assumed to close. `2 ** 3` read as the start of
+//! bold would swallow the rest of the body, so a mark is entered only after
+//! its closer has been located; otherwise it stays literal text.
 //!
-//! `**` を見た瞬間に「ここから太字」と決めてはいけない。閉じる `**` が
-//! 無ければ、それは**ただの二文字**である。`2 ** 3` を太字の開始と読むと、
-//! そこから先の本文が丸ごと消える。
+//! Once a closer is chosen, the inner parse must stop exactly there. In
+//! `a ** b ** c`, choosing offset 8 as the closer for `*` while the inner
+//! parse stops at offset 3 would drop `b` entirely. [`Scanner::limit`] hides
+//! everything past the closer, so where to stop is never computed twice.
 //!
-//! なので印を見たら、**先に閉じ先を探してから**入る。見つからなければ
-//! 文字として置く。
+//! Searching for a closer skips code spans, or the marks inside a code span
+//! would close the emphasis around it.
 //!
-//! # ⚠️ 閉じ先を決めたら、そこで止めること
+//! Discord-specific boundary rules, from the `simple-markdown` patterns it
+//! uses:
 //!
-//! 探した閉じ先と、内側の解析が実際に止まる場所は**別物になりうる**。
-//! `a ** b ** c` で `*` の閉じ先を 8 文字目と決めたのに、内側が 3 文字目の
-//! `*` を見て止まると、**間の `b` が誰にも読まれないまま捨てられる**。
-//!
-//! だから内側には[`Scanner::limit`] を渡し、**そこから先を見せない**。
-//! 「どこで止まるか」を二度計算しない、というのがここの決まりである。
-//!
-//! # ⚠️ 閉じ先を探すときに、コードの中を覗いてはいけない
-//!
-//! `` `**` `` の中の `**` は文字である。ここを飛ばさないと、
-//! **コードの中身が外の太字を閉じてしまう**。
-//!
-//! # 空白と語の境目の規則 (Discord 固有)
-//!
-//! - `a * b * c` は斜体にならない。**中身が空白で始まっても終わってもいけない**。
-//!   この一行が無いと、掛け算の式が全部斜体になる。
-//! - `snake_case_word` も斜体にならない。`_` は**前が英数字なら開かない**。
-//!   `*` にこの規則は無い (`a*b*c` は斜体になる)。
-//! - `**` が閉じないとき、**同じ場所で `*` を試さない**。試すと
-//!   `a ** b ** c` が「`*` で開いて `*` で閉じた」に化ける。
-//!
-//! 出典: Discord が使っている `simple-markdown` の規則
-//! (`^\*(?=\S)…[^\s\*\\]\*(?!\*)` と `^\b_…_\b`)
+//! - Content may neither start nor end with whitespace, so `a * b * c` is not
+//!   italic. Without this every multiplication becomes italic.
+//! - `_` does not open after an alphanumeric, so `snake_case_word` is not
+//!   italic. `*` has no such rule: `a*b*c` is.
+//! - When `**` fails to close, `*` is not retried at the same position, or
+//!   `a ** b ** c` collapses into one `*` pair and loses `b`.
 
 use crate::model::{Deco, Inline, InlineKind, Mention};
 
-/// 印と、それが足す飾り。**長いものから試す** — `**` は `*` より先
+/// Marks and the decoration they add. Longest first: `**` before `*`.
 const MARKS: &[(&str, Deco)] = &[
     ("~~", Deco::STRIKE),
     ("||", Deco::SPOILER),
@@ -47,10 +34,8 @@ const MARKS: &[(&str, Deco)] = &[
     ("_", Deco::ITALIC),
 ];
 
-/// 裸の URL の終わりから削る文字。
-///
-/// ⚠️ 文末の `.` まで URL に入れると**リンクが切れる**。
-/// 「詳しくは https://example.com/a。」の `。` も同じ
+/// Trimmed from the end of a bare URL: swallowing sentence-final
+/// punctuation breaks the link.
 const TRAILING: &[char] = &[
     '.', ',', '!', '?', ';', ':', ')', ']', '}', '\'', '"', '。', '、', '」', '）',
 ];
@@ -72,13 +57,14 @@ pub fn parse(text: &str) -> Vec<Inline> {
 struct Scanner<'a> {
     c: &'a [char],
     i: usize,
-    /// ここから先は**無いものとして扱う**。
+    /// Everything at or past this offset is invisible.
     ///
-    /// 印の内側を読むときに閉じ先を入れる。文字列の終わりと同じ扱いになるので、
-    /// 内側の解析が外の閉じを食べたり、外を跨いで別の印を開いたりしなくなる
+    /// Set to the closer when parsing inside a mark, so the inner parse can
+    /// neither consume the outer closer nor open a mark across it.
     limit: usize,
     out: Vec<Inline>,
-    /// まだ [`Inline`] にしていない文字。**同じ飾りの間は繋げて溜める**
+    /// Characters not yet turned into an [`Inline`], accumulated while the
+    /// decoration is unchanged.
     buf: String,
 }
 
@@ -95,8 +81,8 @@ impl Scanner<'_> {
         self.out.push(Inline { deco, kind });
     }
 
-    /// ⚠️ [`Scanner::limit`] から先は `None` である。**終わりと同じ扱い。**
-    /// 先読みもここを通すこと — 通さないと外側の文字を覗いてしまう
+    /// `None` at or past [`Scanner::limit`]. Lookahead must go through here
+    /// too, or it peeks outside the mark.
     fn at(&self, i: usize) -> Option<char> {
         (i < self.limit).then(|| self.c[i])
     }
@@ -118,13 +104,13 @@ impl Scanner<'_> {
         }
     }
 
-    /// 何か特別なものを 1 つ食べたら `true`。
+    /// True when one special construct was consumed.
     fn step(&mut self, deco: Deco) -> bool {
         let i = self.i;
         match self.c[i] {
             '\\' => {
-                // ⚠️ **記号だけ**が逃がせる。`\n` の `n` を文字にすると、
-                // 打った `\` が黙って消える
+                // Only punctuation escapes; escaping the `n` of `\n` would
+                // silently swallow the backslash the author typed.
                 if let Some(n) = self.at(i + 1)
                     && is_punct(n)
                 {
@@ -148,10 +134,10 @@ impl Scanner<'_> {
         }
     }
 
-    /// `` `…` `` と ``` ``…`` ```。**中身は解析しない。**
+    /// Code spans. Contents are not parsed.
     fn code(&mut self, deco: Deco) -> bool {
         let open = self.run_of('`', self.i);
-        // ⚠️ 3 つ以上はコードブロックの印である。ここでは扱わない
+        // Three or more is a fence, handled at block level.
         if open >= 3 {
             return false;
         }
@@ -165,7 +151,7 @@ impl Scanner<'_> {
         }
         let raw: String = self.c[body..close].iter().collect();
         self.i = close + open;
-        // Discord は中身の前後の空白を 1 つだけ削る
+        // Discord strips exactly one space from each side.
         let text = raw
             .strip_prefix(' ')
             .and_then(|t| t.strip_suffix(' '))
@@ -199,7 +185,7 @@ impl Scanner<'_> {
         false
     }
 
-    /// `[名前](url)`
+    /// `[label](url)`
     fn masked_link(&mut self, deco: Deco) -> bool {
         let Some(rb) = self.find_raw(self.i + 1, "]") else {
             return false;
@@ -226,9 +212,9 @@ impl Scanner<'_> {
         true
     }
 
-    /// 裸の `https://…`
+    /// A bare `https://…`
     fn bare_url(&mut self, deco: Deco) -> bool {
-        // ⚠️ 語の途中から始めない。`ahttps://x` はリンクではない
+        // Must not start mid-word: `ahttps://x` is not a link.
         if self.i > 0 && is_word(self.c[self.i - 1]) {
             return false;
         }
@@ -242,7 +228,7 @@ impl Scanner<'_> {
         while end < self.limit && !self.c[end].is_whitespace() && self.c[end] != '<' {
             end += 1;
         }
-        // 文末の記号は URL ではない
+        // Sentence-final punctuation is not part of the URL.
         while end > self.i && TRAILING.contains(&self.c[end - 1]) {
             end -= 1;
         }
@@ -261,13 +247,12 @@ impl Scanner<'_> {
             if !self.starts(self.i, pat) || deco.contains(*add) {
                 continue;
             }
-            // ⚠️ `**` が閉じなかったとき、同じ場所で `*` を試さない。
-            // 試すと `a ** b ** c` が「`*` で開いて次の `*` で閉じた」に化け、
-            // 間の `b` が消える
+            // When `**` fails to close, do not retry `*` here: it would make
+            // `a ** b ** c` one `*` pair and lose `b`.
             if pat.len() == 1 && self.starts(self.i, &pat.repeat(2)) {
                 continue;
             }
-            // `_` は語の後ろでは開かない (`snake_case`)
+            // `_` does not open after a word character (`snake_case`).
             if *pat == "_" && self.i > 0 && self.c[self.i - 1].is_alphanumeric() {
                 continue;
             }
@@ -289,9 +274,9 @@ impl Scanner<'_> {
         false
     }
 
-    /// 印の閉じ先。**中身の空白の規則をここで見る。**
+    /// Finds a mark's closer, applying the whitespace rules.
     fn find_close(&self, from: usize, pat: &str) -> Option<usize> {
-        // 中身が空白で始まってはいけない
+        // Content must not start with whitespace.
         if !self.at(from).is_some_and(|c| !c.is_whitespace()) {
             return None;
         }
@@ -300,11 +285,11 @@ impl Scanner<'_> {
             let last = close.checked_sub(1).and_then(|k| self.at(k));
             let after = self.at(close + pat.chars().count());
             let ok = close > from
-                // 中身が空白で終わってはいけない
+                // Content must not end with whitespace.
                 && last.is_some_and(|c| !c.is_whitespace())
-                // `*a**` の閉じは `**` であって `*` ではない
+                // `*a**` closes with `**`, not `*`.
                 && after != pat.chars().next()
-                // `_a_b` は斜体にしない
+                // `_a_b` is not italic.
                 && (pat != "_" || !after.is_some_and(char::is_alphanumeric));
             if ok {
                 return Some(close);
@@ -314,9 +299,9 @@ impl Scanner<'_> {
         None
     }
 
-    /// `pat` をそのまま探す。**逃がした文字とコードの中は飛ばす。**
+    /// Finds `pat` literally, skipping escapes and code spans.
     ///
-    /// ⚠️ コードを飛ばさないと、`` `**` `` の中の印が外の印を閉じる
+    /// Without skipping code, a mark inside a code span closes the outer one.
     fn find_raw(&self, from: usize, pat: &str) -> Option<usize> {
         let mut i = from;
         while i < self.limit {
@@ -328,7 +313,7 @@ impl Scanner<'_> {
                 '`' if !pat.starts_with('`') => {
                     let n = self.run_of('`', i);
                     let fence = "`".repeat(n);
-                    // 閉じないコードは、ただの記号として素通りさせる
+                    // An unclosed code span is literal; walk past it.
                     match self.find_raw(i + n, &fence) {
                         Some(end) => i = end + n,
                         None => i += n,
@@ -354,14 +339,14 @@ impl Scanner<'_> {
     }
 }
 
-/// ⚠️ **どの枝も、失敗したら次を試せること。** 途中で `?` を使って
-/// 関数ごと抜けると、後ろの枝 (URL) に一生たどり着かない
+/// Every branch must fall through on failure. An early `?` here would exit
+/// the whole function and the later branches would never be reached.
 fn parse_angle(inner: &str) -> Option<InlineKind> {
     if let Some(rest) = inner.strip_prefix("@&") {
         return id(rest).map(|i| InlineKind::Mention(Mention::Role(i)));
     }
     if let Some(rest) = inner.strip_prefix('@') {
-        // `<@!123>` は昔の書き方。いまも来る
+        // `<@!123>` is the old form and still arrives.
         let rest = rest.strip_prefix('!').unwrap_or(rest);
         return id(rest).map(|i| InlineKind::Mention(Mention::User(i)));
     }
@@ -374,7 +359,7 @@ fn parse_angle(inner: &str) -> Option<InlineKind> {
     if let Some(e) = emoji(inner) {
         return Some(e);
     }
-    // `<https://…>` — 埋め込みを抑えるだけで、行き先は同じ
+    // `<https://…>` only suppresses the embed; the target is the same.
     is_url(inner).then(|| InlineKind::Link {
         url: inner.to_owned(),
         label: None,
@@ -384,7 +369,7 @@ fn parse_angle(inner: &str) -> Option<InlineKind> {
 fn timestamp(rest: &str) -> Option<InlineKind> {
     let (at, format) = match rest.split_once(':') {
         Some((a, f)) => (a, f.chars().next().filter(|c| "tTdDfFR".contains(*c))?),
-        // 書式が無ければ既定の書き方である
+        // No format suffix means the default one.
         None => (rest, 'f'),
     };
     Some(InlineKind::Timestamp {
@@ -423,7 +408,7 @@ fn is_url(s: &str) -> bool {
     rest.is_some_and(|r| !r.is_empty() && !r.starts_with('/'))
 }
 
-/// 語を作る文字か。`_` も語の一部である
+/// Whether this is a word character. `_` counts as one.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }

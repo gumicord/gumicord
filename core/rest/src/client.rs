@@ -1,20 +1,15 @@
-//! REST クライアント。
+//! REST client.
 //!
-//! # 責務
+//! Calls routes, respects rate limits, recovers from 429. Holds no state —
+//! keeping what it fetches is the store's job.
 //!
-//! ルートを叩き、レート制限を守り、429 から復帰する。
-//! **状態は持たない。** 取ってきたものをどう保つかは Store (C5) の仕事である。
+//! Deciding how long to wait lives in [`RateLimiter`], which never sleeps;
+//! the sleeping happens only here. That split is what makes the decision
+//! testable without a mock server.
 //!
-//! # 待つのはここ、決めるのは [`RateLimiter`]
-//!
-//! レート制限の判断は眠らない純粋な計算にしてあり、実際に待つのはここだけで
-//! ある。分けてあるおかげで、判断の側はモックサーバーなしで試験できる。
-//!
-//! # トークンを出力しない (`SEC-001`)
-//!
-//! [`Token`] は `Debug` を潰してあるので `{:?}` では漏れない。加えて、
-//! **エラーに応答本文を載せるときは点検する**。本文にトークンが混ざる経路は
-//! 本来ないが、無いことを確かめるほうが安い。
+//! [`Token`] redacts itself when formatted, but response bodies attached to
+//! errors are checked as well: no path should mix a token into one, and
+//! confirming that is cheaper than assuming it.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,21 +23,23 @@ use tokio::sync::Mutex;
 use crate::ratelimit::{RateLimitHeaders, RateLimiter};
 use crate::route::{Method, Route};
 
-/// API の基点。**版を上げるときはここだけ**
+/// The one place the API version appears.
 const API_BASE: &str = "https://discord.com/api/v10";
 
-/// 429 を受けたときに繰り返す上限。
-///
-/// **無限に繰り返さない。** `NFR-024` (自動化された連続リクエストを行わない)
-/// に触れるうえ、こちらが悪い場合に永久に叩き続けることになる。
+/// Retries after a 429. Bounded, so a fault on our side cannot hammer Discord
+/// forever.
 const MAX_RETRIES: u32 = 3;
 
+/// Failure of a REST call.
+///
+/// The messages are Japanese because they reach the login screen, not just
+/// the log.
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     #[error("通信に失敗した: {0}")]
     Network(#[from] reqwest::Error),
 
-    /// **本文は載せるが、トークンが混ざっていないことを確かめてある**
+    /// The body is included, having been checked for a token first.
     #[error("Discord がエラーを返した ({status}): {body}")]
     Api { status: u16, body: String },
 
@@ -52,44 +49,41 @@ pub enum RestError {
     #[error("応答を解釈できない: {0}")]
     Decode(#[source] serde_json::Error),
 
-    /// captcha を解く必要がある ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))
     #[error("captcha が要求された")]
     CaptchaRequired(Box<CaptchaChallenge>),
 }
 
-/// Discord が返してきた captcha の要求 ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
+/// A captcha Discord asked us to solve.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct CaptchaChallenge {
-    /// hCaptcha のサイトキー
+    /// The hCaptcha site key.
     #[serde(default)]
     pub sitekey: Option<String>,
-    /// `"hcaptcha"` など
+    /// `"hcaptcha"`, and so on.
     #[serde(default)]
     pub service: Option<String>,
-    /// enterprise hCaptcha のときに付く。`setData` へ渡す
+    /// Present for enterprise hCaptcha; passed to `setData`.
     #[serde(default)]
     pub rqdata: Option<String>,
-    /// 再送のときに一緒に返す
+    /// Sent back with the retry.
     #[serde(default)]
     pub rqtoken: Option<String>,
 }
 
-/// Discord の REST API を叩くもの。
+/// Calls the Discord REST API.
 ///
-/// 複製して構わない。レート制限の状態は複製の間で共有される。
+/// Cloneable; clones share the rate limit state.
 #[derive(Clone)]
 pub struct RestClient {
     http: reqwest::Client,
     token: Option<Token>,
     limiter: Arc<Mutex<RateLimiter>>,
-    /// こちらが何者だと名乗るか。**Gateway と同じ物である**
-    /// ([`gumicord_model::identity`])
+    /// What we claim to be. Identical to what the Gateway claims.
     identity: Arc<Identity>,
 }
 
 impl core::fmt::Debug for RestClient {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // ⚠️ トークンを出さない (`SEC-001`)
         f.debug_struct("RestClient")
             .field("authenticated", &self.token.is_some())
             .finish()
@@ -97,7 +91,7 @@ impl core::fmt::Debug for RestClient {
 }
 
 impl RestClient {
-    /// トークン無しで作る。ログインの前に使う
+    /// Without a token, for use before login.
     pub fn anonymous() -> Result<Self, RestError> {
         let identity = Arc::new(Identity::detect());
         Ok(RestClient {
@@ -108,7 +102,7 @@ impl RestClient {
         })
     }
 
-    /// トークンを持たせる。**レート制限の状態は引き継ぐ**
+    /// Attaches a token, carrying the rate limit state over.
     pub fn with_token(&self, token: Token) -> Self {
         RestClient {
             http: self.http.clone(),
@@ -118,8 +112,8 @@ impl RestClient {
         }
     }
 
-    /// ⚠️ **トークンを付けない生の HTTP。** CDN から画像を取るときだけ使う。
-    /// 付ける必要がないところへ送らないため
+    /// Raw HTTP with no token attached, for CDN fetches: the token should not
+    /// go anywhere that does not need it.
     pub(crate) fn raw_http(&self) -> &reqwest::Client {
         &self.http
     }
@@ -128,19 +122,17 @@ impl RestClient {
         self.token.is_some()
     }
 
-    /// 本文なしで叩き、JSON を読む。
     pub async fn get<T: DeserializeOwned>(&self, route: Route) -> Result<T, RestError> {
         self.send(route, None::<&()>).await
     }
 
-    /// JSON を送り、JSON を読む。
     pub async fn send<T: DeserializeOwned>(
         &self,
         route: Route,
         body: Option<&impl Serialize>,
     ) -> Result<T, RestError> {
         let text = self.send_raw(route, body).await?;
-        // 本文が空の応答 (204 など) は `null` として読ませる
+        // Empty bodies (204 and friends) read as `null`.
         let text = if text.trim().is_empty() {
             "null"
         } else {
@@ -149,14 +141,14 @@ impl RestClient {
         serde_json::from_str(text).map_err(RestError::Decode)
     }
 
-    /// 叩いて本文を文字列で返す。**レート制限と 429 の面倒はここで見る。**
+    /// Calls a route and returns the body. Rate limits and 429 are handled
+    /// here.
     pub async fn send_raw(
         &self,
         route: Route,
         body: Option<&impl Serialize>,
     ) -> Result<String, RestError> {
         for attempt in 0..=MAX_RETRIES {
-            // [1] 送る前に抑制する (`NFR-021`)
             if let Some(wait) = self
                 .limiter
                 .lock()
@@ -166,9 +158,10 @@ impl RestClient {
                 tracing::debug!(
                     route = %route.bucket_key,
                     wait_ms = wait.as_millis() as u64,
-                    "レート制限を先読みして待つ"
+                    "waiting ahead of a rate limit"
                 );
-                // ⚠️ 錠を持ったまま眠らない。上の行で既に外れている
+                // The lock was released by the end of the line above; never
+                // sleep holding it.
                 tokio::time::sleep(wait).await;
             }
 
@@ -185,7 +178,6 @@ impl RestClient {
                 return self.finish(response, status.as_u16()).await;
             }
 
-            // [2] 429 から復帰する (`NFR-022`)
             let wait = headers
                 .retry_after
                 .map(|s| std::time::Duration::try_from_secs_f64(s.max(0.0)).unwrap_or_default())
@@ -195,7 +187,7 @@ impl RestClient {
                 attempt = attempt + 1,
                 global = headers.global,
                 wait_ms = wait.as_millis() as u64,
-                "429 を受けた"
+                "rate limited"
             );
             tokio::time::sleep(wait).await;
         }
@@ -212,15 +204,14 @@ impl RestClient {
             Method::Delete => self.http.delete(url),
         };
 
-        // ⚠️ **すべての要求に名乗りを載せる。** 公式クライアントは
-        // 例外なく送っており、**無いことが目印になる**
-        // ([`gumicord_model::identity`])
+        // The official client sends these on every request, so their absence
+        // is itself a signal.
         req = req
             .header("X-Super-Properties", self.identity.super_properties())
             .header("X-Discord-Locale", &self.identity.system_locale)
             .header("X-Debug-Options", "bugReporterEnabled");
 
-        // ⚠️ 利用者のトークンには `Bot ` を付けない。付けると弾かれる
+        // User tokens take no `Bot ` prefix; adding one is rejected.
         if let Some(t) = &self.token {
             req = req.header("Authorization", t.expose());
         }
@@ -230,7 +221,6 @@ impl RestClient {
         req
     }
 
-    /// 応答を文字列にし、エラーなら整える。
     async fn finish(&self, response: reqwest::Response, status: u16) -> Result<String, RestError> {
         let body = response.text().await?;
 
@@ -238,16 +228,15 @@ impl RestClient {
             return Ok(body);
         }
 
-        // captcha は「失敗」ではなく「続きがある」ので、専用の形で返す
+        // A captcha is not a failure but a continuation.
         if let Some(c) = parse_captcha(&body) {
             return Err(RestError::CaptchaRequired(Box::new(c)));
         }
 
-        // ⚠️ `SEC-001`: 本文を載せる前に、トークンが混ざっていないか確かめる
         let body = match &self.token {
             Some(t) if !t.is_absent_from(&body) => {
-                tracing::error!("SEC-001: 応答本文にトークンが含まれていた。伏せる");
-                "<秘匿>".to_owned()
+                tracing::error!("a response body contained the token; redacting it");
+                "<redacted>".to_owned()
             }
             _ => body,
         };
@@ -257,13 +246,12 @@ impl RestClient {
 
 fn build_http(identity: &Identity) -> Result<reqwest::Client, RestError> {
     Ok(reqwest::Client::builder()
-        // ⚠️ **名乗りの中の `browser_user_agent` と同じ文字列である。**
-        // 違えば、それ自体が食い違いである ([`gumicord_model::identity`])
+        // Must equal `browser_user_agent` in the claim; a difference is
+        // itself a mismatch.
         .user_agent(identity.user_agent())
         .build()?)
 }
 
-/// 応答のヘッダからレート制限の情報を読む。
 fn read_rate_limit(response: &reqwest::Response, status: u16) -> RateLimitHeaders {
     let h = response.headers();
     let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok());
@@ -273,14 +261,13 @@ fn read_rate_limit(response: &reqwest::Response, status: u16) -> RateLimitHeader
         remaining: get("x-ratelimit-remaining").and_then(|v| v.parse().ok()),
         reset_after: get("x-ratelimit-reset-after").and_then(|v| v.parse().ok()),
         global: get("x-ratelimit-global").is_some_and(|v| v == "true"),
-        // ヘッダの `retry-after` は秒。本文にも入るが、ヘッダのほうが確実
+        // Also present in the body, but the header is more reliable.
         retry_after: (status == 429)
             .then(|| get("retry-after").and_then(|v| v.parse().ok()))
             .flatten(),
     }
 }
 
-/// 本文が captcha の要求かを見る ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
 fn parse_captcha(body: &str) -> Option<CaptchaChallenge> {
     #[derive(serde::Deserialize)]
     struct Raw {
@@ -292,7 +279,7 @@ fn parse_captcha(body: &str) -> Option<CaptchaChallenge> {
     }
 
     let raw: Raw = serde_json::from_str(body).ok()?;
-    // `captcha_key` が無ければ captcha の話ではない
+    // Without `captcha_key` this is some other error.
     raw.captcha_key?;
 
     Some(CaptchaChallenge {
@@ -307,19 +294,17 @@ fn parse_captcha(body: &str) -> Option<CaptchaChallenge> {
 mod tests {
     use super::*;
 
-    /// **SEC-001**: クライアントを `{:?}` で書いてもトークンが漏れない
     #[test]
     fn the_client_never_prints_its_token() {
         let c = RestClient::anonymous()
             .unwrap()
-            .with_token(Token::new("MTIzNDU2Nzg5.秘密.abcdefg"));
+            .with_token(Token::new("MTIzNDU2Nzg5.secret.abcdefg"));
 
         let printed = format!("{c:?}");
-        assert!(!printed.contains("秘密"), "漏れている: {printed}");
+        assert!(!printed.contains("secret"), "token leaked: {printed}");
         assert!(printed.contains("authenticated"));
     }
 
-    /// captcha の要求を「失敗」ではなく「続きがある」として読む
     #[test]
     fn a_captcha_response_is_recognised() {
         let body = r#"{
@@ -329,25 +314,24 @@ mod tests {
             "captcha_rqtoken": "abc"
         }"#;
 
-        let c = parse_captcha(body).expect("captcha として読めるはず");
+        let c = parse_captcha(body).expect("should read as a captcha");
         assert_eq!(c.service.as_deref(), Some("hcaptcha"));
         assert!(c.sitekey.is_some());
         assert_eq!(c.rqtoken.as_deref(), Some("abc"));
-        assert_eq!(c.rqdata, None, "enterprise でなければ付かない");
+        assert_eq!(c.rqdata, None, "only enterprise carries rqdata");
     }
 
-    /// 普通のエラーを captcha と取り違えない
     #[test]
     fn an_ordinary_error_is_not_a_captcha() {
         assert!(parse_captcha(r#"{"message":"401: Unauthorized","code":0}"#).is_none());
-        assert!(parse_captcha("これは JSON ですらない").is_none());
+        assert!(parse_captcha("not even JSON").is_none());
         assert!(
             parse_captcha(r#"{"captcha_sitekey":"x"}"#).is_none(),
-            "captcha_key が要る"
+            "captcha_key is required"
         );
     }
 
-    /// 版を上げ忘れないよう、基点を固定しておく
+    /// Pins the version so a bump is deliberate.
     #[test]
     fn the_api_base_is_pinned() {
         assert_eq!(API_BASE, "https://discord.com/api/v10");

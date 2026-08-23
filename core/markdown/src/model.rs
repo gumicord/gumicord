@@ -1,14 +1,12 @@
-//! 解析の結果。**描き方は知らない。**
-//!
-//! ここに色も大きさも出てこない。それはテーマが決めることである
-//! ([`spec/04-theme.md`])。ここが持つのは「太字である」「引用である」
-//! までで、太字が何ポイントかは知らない。
+//! Parse results. Nothing here knows how anything is drawn — "this is bold"
+//! is a parse fact, "bold is weight 700" is the theme's.
 
-/// 文字にかかっている飾り。**重ねられる。**
+/// Decoration applied to text. Stackable.
 ///
-/// ⚠️ **スポイラーもここに入る。** `||` は行をまたぐ他の飾りと同じように
-/// 任意の中身を包むので、別の要素にすると**包んだ中身が折り返せなくなる**。
-/// 隠す・現すの状態は描く側が持つ
+/// Spoilers live here rather than as their own element: `||` wraps arbitrary
+/// content the way the other decorations do, and a separate element would
+/// stop that content from wrapping with the rest of the line. Whether a
+/// spoiler is revealed is the renderer's state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Deco(u8);
 
@@ -44,29 +42,27 @@ impl core::ops::BitOr for Deco {
     }
 }
 
-/// 誰・どこを指しているか。
+/// Who or what is being referred to.
 ///
-/// ⚠️ **名前は入っていない。** `<@123>` に入っているのは番号だけで、
-/// 名前は手元の一覧を引かないと分からない。引けなかったときにどう出すかは
-/// 描く側の判断である ([`crate::Inline`] の注意も見よ)
+/// Carries the id only: `<@123>` contains no name, and resolving it needs a
+/// local directory. What to show when the lookup fails is the renderer's
+/// decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mention {
-    /// `<@123>` / `<@!123>`
+    /// `<@123>` or `<@!123>`
     User(u64),
     /// `<#123>`
     Channel(u64),
     /// `<@&123>`
     Role(u64),
-    /// `@everyone`
     Everyone,
-    /// `@here`
     Here,
 }
 
-/// 行の中に並ぶもの 1 つ。
+/// One item within a line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Inline {
-    /// かかっている飾り。**入れ子は畳んである** — `**~~a~~**` は 1 つになる
+    /// Nesting is already flattened: `**~~a~~**` becomes one item.
     pub deco: Deco,
     pub kind: InlineKind,
 }
@@ -83,65 +79,62 @@ impl Inline {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InlineKind {
     Text(String),
-    /// `` `…` ``。**中身は解析しない**
+    /// `` `…` ``. Contents are not parsed.
     Code(String),
-    /// `[名前](url)` と、裸の URL。
-    ///
-    /// `label` が `None` なら URL をそのまま見せる
+    /// `[label](url)` and bare URLs. A `None` label shows the URL itself.
     Link {
         url: String,
         label: Option<String>,
     },
     Mention(Mention),
-    /// `<:name:123>` / `<a:name:123>`
+    /// `<:name:123>` or `<a:name:123>`
     Emoji {
         name: String,
         id: u64,
         animated: bool,
     },
-    /// `<t:1700000000:R>`。`format` は書かれていなければ `'f'`
+    /// `<t:1700000000:R>`. `format` defaults to `'f'`.
     Timestamp {
         at: i64,
         format: char,
     },
-    /// 段落の中の改行。**段落を切らない**
+    /// A newline inside a paragraph; does not end it.
     Break,
 }
 
-/// 行の頭に付く印。
+/// The marker at the head of a list item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Marker {
-    /// `-` `*` `+`
+    /// `-`, `*`, or `+`
     Bullet,
-    /// `1.` — 書かれていた数を持つ
+    /// `1.`, carrying the number as written.
     Number(u32),
 }
 
-/// 箇条書きの 1 項目。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
-    /// 字下げの深さ。**空白 2 つで 1 段**とする
+    /// Indent depth, two spaces per level.
     pub depth: u8,
     pub marker: Marker,
     pub content: Vec<Inline>,
 }
 
-/// 縦に積まれるもの 1 つ。
+/// One vertically stacked element.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Paragraph(Vec<Inline>),
-    /// `#` `##` `###`。`level` は 1〜3
+    /// `#`, `##`, `###`. `level` is 1 to 3.
     Heading {
         level: u8,
         content: Vec<Inline>,
     },
-    /// `-# `。Discord の小さい注釈
+    /// `-# `, Discord's subtext.
     Subtext(Vec<Inline>),
-    /// `> ` と `>>> `。**入れ子になる**
+    /// `> ` and `>>> `. Nests.
     Quote(Vec<Block>),
-    /// 続いた項目をまとめて 1 つにする
+    /// Consecutive items collapsed into one list.
     List(Vec<Item>),
-    /// ```` ``` ````。`lang` は書かれていた文字列そのまま
+    /// A fenced block. `lang` is the fence's info string verbatim.
     Code {
         lang: Option<String>,
         text: String,

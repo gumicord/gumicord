@@ -1,27 +1,18 @@
-//! ルート。**パスと、レート制限の鍵は別物である。**
+//! Routes. The path and the rate limit key are different things.
 //!
-//! # なぜ分けるのか
+//! `POST /channels/1/messages` and `POST /channels/2/messages` are separate
+//! buckets, but `DELETE /channels/1/messages/111` and `.../222` share one.
+//! Discord calls the distinction "major parameters", and only guild, channel
+//! and webhook ids are major. Putting every id in the key would mean learning
+//! a fresh bucket on every delete and never sharing a limit.
 //!
-//! `POST /channels/1/messages` と `POST /channels/2/messages` は**別の
-//! バケット**である。チャンネルごとに制限がかかるためである。
-//!
-//! 一方 `DELETE /channels/1/messages/111` と `.../222` は**同じバケット**で
-//! ある。メッセージ ID は制限の単位ではない。
-//!
-//! Discord はこれを「主要パラメータ」と呼ぶ。主要なのは
-//! **ギルド ID / チャンネル ID / webhook ID** の 3 つだけで、それ以外の ID は
-//! バケットの鍵に含めない。
-//!
-//! **鍵にすべてを含めると、メッセージを消すたびに新しいバケットを覚え、
-//! 制限を一切共有できなくなる。**
-//!
-//! 仕様: [`spec/09-discord-protocol.md`] 7 章
+//! See `spec/09-discord-protocol.md`.
 
 use core::fmt;
 
 use gumicord_model::{ChannelId, GuildId, MessageId};
 
-/// HTTP のメソッド。**`reqwest` の型を外へ出さないために自前で持つ。**
+/// HTTP method. Defined here so reqwest's types stay inside this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
@@ -49,18 +40,18 @@ impl fmt::Display for Method {
     }
 }
 
-/// 1 本のリクエストの宛先。
+/// Where one request goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub method: Method,
-    /// 実際に叩くパス。`/api/v10` は含めない
+    /// The path actually requested, without the `/api/v10` prefix.
     pub path: String,
-    /// レート制限の鍵。**主要パラメータだけを含む**
+    /// The rate limit key. Major parameters only.
     pub bucket_key: String,
 }
 
 impl Route {
-    /// 主要パラメータを持たないルート。パスがそのまま鍵になる
+    /// A route with no major parameters; the path is the key.
     fn plain(method: Method, path: impl Into<String>) -> Self {
         let path = path.into();
         Route {
@@ -70,7 +61,7 @@ impl Route {
         }
     }
 
-    /// 主要パラメータを持つルート。**鍵にはそれだけを残す**
+    /// A route with major parameters; only those go in the key.
     fn scoped(method: Method, path: String, key: String) -> Self {
         Route {
             method,
@@ -79,24 +70,18 @@ impl Route {
         }
     }
 
-    // ───────────────────────────────────────────── 自分
-
-    /// `GET /users/@me` — S4 実測: 上限 1000 / 回復 0.00 秒
     pub fn current_user() -> Self {
         Self::plain(Method::Get, "/users/@me")
     }
 
-    /// `GET /users/@me/guilds`
     pub fn current_user_guilds() -> Self {
         Self::plain(Method::Get, "/users/@me/guilds")
     }
 
-    /// `GET /users/@me/channels` — DM の一覧 (`FR-013`)
+    /// The DM list.
     pub fn current_user_channels() -> Self {
         Self::plain(Method::Get, "/users/@me/channels")
     }
-
-    // ───────────────────────────────────────────── ギルド
 
     pub fn guild_channels(guild: GuildId) -> Self {
         Self::scoped(
@@ -106,12 +91,8 @@ impl Route {
         )
     }
 
-    // ───────────────────────────────────────────── メッセージ
-
-    /// `GET /channels/:id/messages` (`FR-020`)。
-    ///
-    /// ⚠️ **件数は経路に載るが、バケットの鍵には入れない。** 入れると
-    /// 件数を変えるたびに別のバケットを覚えることになり、制限を共有できない
+    /// `limit` rides on the path but stays out of the key: otherwise changing
+    /// the page size would learn a separate bucket.
     pub fn messages(channel: ChannelId, limit: u8) -> Self {
         Self::scoped(
             Method::Get,
@@ -120,10 +101,8 @@ impl Route {
         )
     }
 
-    /// `GET /channels/:id/messages?before=` — その 1 件より**古いほう**。
-    ///
-    /// ⚠️ **`before` もバケットの鍵には入れない。** どこまで遡ったかで
-    /// 制限が分かれてしまう。[`Route::messages`] と同じ入れ物である
+    /// Older than one message. `before` stays out of the key for the same
+    /// reason as `limit`, so this shares a bucket with [`Route::messages`].
     pub fn messages_before(channel: ChannelId, limit: u8, before: MessageId) -> Self {
         Self::scoped(
             Method::Get,
@@ -132,10 +111,8 @@ impl Route {
         )
     }
 
-    /// `POST /channels/:id/messages/:message/ack` — ここまで読んだと伝える。
-    ///
-    /// ⚠️ **バケットの鍵に発言の識別子を入れない。** 入れると 1 回ごとに
-    /// 別の入れ物を覚えることになり、制限を共有できない
+    /// Marks a channel read up to a message. The message id stays out of the
+    /// key, or every ack would learn its own bucket.
     pub fn ack_message(channel: ChannelId, message: MessageId) -> Self {
         Self::scoped(
             Method::Post,
@@ -144,7 +121,6 @@ impl Route {
         )
     }
 
-    /// `POST /channels/:id/messages` — S4 実測: 上限 5 / 回復 1.00 秒
     pub fn create_message(channel: ChannelId) -> Self {
         Self::scoped(
             Method::Post,
@@ -153,9 +129,6 @@ impl Route {
         )
     }
 
-    /// `PATCH /channels/:id/messages/:mid` (`FR-024`)
-    ///
-    /// **メッセージ ID は鍵に含めない。** [`Route::delete_message`] と同じ理由
     pub fn edit_message(channel: ChannelId, message: MessageId) -> Self {
         Self::scoped(
             Method::Patch,
@@ -164,10 +137,6 @@ impl Route {
         )
     }
 
-    /// `DELETE /channels/:id/messages/:mid`
-    ///
-    /// **メッセージ ID は鍵に含めない。** 含めると消すたびに別のバケットを
-    /// 覚えることになり、制限を共有できなくなる
     pub fn delete_message(channel: ChannelId, message: MessageId) -> Self {
         Self::scoped(
             Method::Delete,
@@ -176,19 +145,15 @@ impl Route {
         )
     }
 
-    // ───────────────────────────────────────────── 認証
-
-    /// `POST /auth/login` (`FR-001`)
     pub fn login() -> Self {
         Self::plain(Method::Post, "/auth/login")
     }
 
-    /// `POST /auth/mfa/totp` (`FR-002`)
     pub fn mfa_totp() -> Self {
         Self::plain(Method::Post, "/auth/mfa/totp")
     }
 
-    /// `POST /users/@me/remote-auth/login` — QR ログインの最後 ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))
+    /// The final step of QR login.
     pub fn remote_auth_login() -> Self {
         Self::plain(Method::Post, "/users/@me/remote-auth/login")
     }
@@ -198,7 +163,6 @@ impl Route {
 mod tests {
     use super::*;
 
-    /// **チャンネルごとに別のバケットである**
     #[test]
     fn different_channels_get_different_buckets() {
         let a = Route::create_message(1u64.into());
@@ -206,20 +170,17 @@ mod tests {
         assert_ne!(a.bucket_key, b.bucket_key);
     }
 
-    /// **メッセージ ID は鍵に含めない。**
-    /// 含めると消すたびに新しいバケットを覚え、制限を共有できなくなる
     #[test]
     fn the_message_id_is_not_part_of_the_bucket() {
         let ch = ChannelId::from(1u64);
         let a = Route::delete_message(ch, 111u64.into());
         let b = Route::delete_message(ch, 222u64.into());
 
-        assert_eq!(a.bucket_key, b.bucket_key, "同じバケットのはず");
-        assert_ne!(a.path, b.path, "叩くパスは違う");
+        assert_eq!(a.bucket_key, b.bucket_key);
+        assert_ne!(a.path, b.path);
         assert!(a.path.ends_with("/111"));
     }
 
-    /// メソッドが違えば別のバケットである
     #[test]
     fn the_method_is_part_of_the_bucket() {
         let ch = ChannelId::from(1u64);

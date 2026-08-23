@@ -1,29 +1,27 @@
-//! チャンネルとメッセージの REST 呼び出し (`FR-020`, `FR-024`)。
+//! Channel and message REST calls.
 
 use gumicord_model::{Channel, ChannelId, Message, MessageId};
 
 use crate::{RestClient, RestError, Route};
 
 impl RestClient {
-    /// 過去のメッセージを取ってくる。
+    /// Fetches recent messages.
     ///
-    /// ⚠️ **Discord は新しい順で返す。** 画面は古い順に積むので、
-    /// 並べ替えるのは呼び出し側の仕事である。ここで勝手に反転させると、
-    /// 「前のページを継ぎ足す」ときに向きが分からなくなる。
+    /// Discord returns newest first and this does not reverse them: the
+    /// caller stacks them oldest first, and flipping here would lose the
+    /// direction needed to prepend a page.
     ///
-    /// `limit` の上限は 100。超えて頼むと Discord が弾く
+    /// `limit` is capped at 100, which Discord rejects beyond.
     pub async fn messages(&self, channel: ChannelId, limit: u8) -> Result<Vec<Message>, RestError> {
         self.get(Route::messages(channel, limit.clamp(1, 100)))
             .await
     }
 
-    /// その 1 件より**古いほう**を取ってくる (`FR-020`)。
+    /// Fetches messages older than one message.
     ///
-    /// ⚠️ **境目の 1 件は含まれない。** `before` に渡した本人は返ってこない
-    /// ので、そのまま前へ継ぎ足してよい。ここを取り違えると 1 件だけ
-    /// 重なって出る。
-    ///
-    /// 空で返ってきたら**そこが一番古い**。呼び出し側は、もう頼まない
+    /// The boundary message is not included, so the result can be prepended
+    /// as-is; assuming otherwise duplicates exactly one row. An empty result
+    /// means the top of the channel.
     pub async fn messages_before(
         &self,
         channel: ChannelId,
@@ -34,23 +32,18 @@ impl RestClient {
             .await
     }
 
-    /// 送る (`FR-024`)。
+    /// Posts a message, as a reply when `reply_to` is set.
     ///
-    /// ⚠️ 返ってくるのは**作られたメッセージそのもの**である。ただし
-    /// Gateway も同じものを `MESSAGE_CREATE` で運んでくるので、
-    /// **両方を画面に足すと二重に出る**。
-    /// 発言する (`FR-024`)。`reply_to` があれば返信になる (`FR-028`)。
+    /// The created message is returned, but the Gateway delivers the same one
+    /// as `MESSAGE_CREATE`; adding both to the view shows it twice.
     ///
-    /// # ⚠️ 返信は相手に通知が飛ぶ
+    /// Without `allowed_mentions`, a reply notifies its target. That is
+    /// Discord's default and what the official client does, so silently
+    /// changing it would mean replies the recipient never notices. A
+    /// no-notify reply needs somewhere in the UI to choose it first.
     ///
-    /// `allowed_mentions` を書かないと、返信先の相手に通知が飛ぶ。
-    /// これは Discord の既定であり、**公式クライアントもそう動く**。
-    /// 通知を飛ばさない返信を出せるようにするのは、それを選ぶ場所を
-    /// 画面に用意してからである。黙って既定を変えると、
-    /// **返したのに相手が気づかない**。
-    ///
-    /// ⚠️ `fail_if_not_exists` は偽にする。真だと、返信を書いている
-    /// 間に元の発言が消されたときに**書いたものごと弾かれる**
+    /// `fail_if_not_exists` is false: otherwise deleting the original while a
+    /// reply is being typed rejects the reply along with it.
     pub async fn create_message(
         &self,
         channel: ChannelId,
@@ -80,10 +73,8 @@ impl RestClient {
         self.send(Route::create_message(channel), Some(&body)).await
     }
 
-    /// 発言を書き換える (`FR-024`)。
-    ///
-    /// ⚠️ **他人の発言は書き換えられない。** サーバが 403 を返す。
-    /// 押せる場所に出さないのが先で、ここはその後ろの守りである
+    /// Edits a message. Editing someone else's returns 403; not offering the
+    /// action comes first, and this is the layer behind that.
     pub async fn edit_message(
         &self,
         channel: ChannelId,
@@ -102,9 +93,7 @@ impl RestClient {
         .await
     }
 
-    /// 発言を消す (`FR-024`)。
-    ///
-    /// ⚠️ **取り消せない。** 押す前に確かめる場所を用意すること
+    /// Deletes a message. Not reversible; callers confirm first.
     pub async fn delete_message(
         &self,
         channel: ChannelId,
@@ -118,14 +107,14 @@ impl RestClient {
         Ok(())
     }
 
-    /// ここまで読んだと伝える (`FR-042`)。
+    /// Marks a channel read up to a message.
     ///
-    /// ⚠️ **応答は捨ててよい。** 返ってくるのは次に使う token だけで、
-    /// 未読の表示に要るものは何も無い。**画面はもう既読になっている**
-    /// ので、失敗しても記録するだけでよい。
+    /// The response carries only a token for the next call, nothing the
+    /// unread display needs, and the view is already marked read — so a
+    /// failure just gets logged.
     ///
-    /// ⚠️ **他の端末にも効く。** これは手元の見た目ではなく、
-    /// アカウントの状態を変える呼び出しである
+    /// This changes account state, not local appearance: other devices see it
+    /// too.
     pub async fn ack_message(
         &self,
         channel: ChannelId,
@@ -133,7 +122,8 @@ impl RestClient {
     ) -> Result<(), RestError> {
         #[derive(serde::Serialize)]
         struct Body {
-            /// 手動で既読にしたのではない。**通知の数え方が変わる**
+            /// False means "read by scrolling", which Discord counts
+            /// differently from an explicit mark-as-read.
             manual: bool,
         }
 
@@ -145,22 +135,22 @@ impl RestClient {
         Ok(())
     }
 
-    /// 自分が入っているチャンネル (DM とグループ DM)。
+    /// DMs and group DMs.
     pub async fn dm_channels(&self) -> Result<Vec<Channel>, RestError> {
         self.get(Route::current_user_channels()).await
     }
 }
 
 impl RestClient {
-    /// CDN から取ってくる (アバター・サーバアイコン)。
+    /// Fetches from the CDN (avatars, guild icons).
     ///
-    /// ⚠️ **API ではない。** 認証も要らず、レート制限のバケットも別である。
-    /// トークンを付けないのは、**付ける必要がないところへ送らない**ため。
+    /// Not the API: no auth, separate limits. No token is attached, because
+    /// it should not go anywhere that does not need it.
     ///
-    /// ⚠️ 大きすぎるものは途中で諦める。CDN が何を返すかはこちらの都合とは
-    /// 無関係で、**画像 1 枚でメモリを食い潰されてはいけない**
+    /// Oversized responses are dropped. What the CDN returns is not under our
+    /// control, and one image must not exhaust memory.
     pub async fn fetch_cdn(&self, url: &str) -> Result<Vec<u8>, RestError> {
-        /// 1 枚の上限 (バイト)。アバターは大きくても数十 KB である
+        /// Avatars are tens of kilobytes at most.
         const MAX: usize = 4 * 1024 * 1024;
 
         let response = self.raw_http().get(url).send().await?;
@@ -174,7 +164,7 @@ impl RestClient {
 
         let bytes = response.bytes().await?;
         if bytes.len() > MAX {
-            tracing::warn!(url, len = bytes.len(), "画像が大きすぎる。捨てる");
+            tracing::warn!(url, len = bytes.len(), "image too large; dropping it");
             return Err(RestError::Api {
                 status: 0,
                 body: "画像が大きすぎる".to_owned(),
@@ -188,8 +178,6 @@ impl RestClient {
 mod tests {
     use super::*;
 
-    /// 件数は経路に載るが、**バケットの鍵には入らない**。
-    /// 入れると件数を変えるたびに別のバケットを覚えることになる
     #[test]
     fn the_limit_does_not_split_the_bucket() {
         let a = Route::messages(ChannelId::from(1u64), 50);
@@ -199,7 +187,6 @@ mod tests {
         assert_eq!(a.bucket_key, b.bucket_key);
     }
 
-    /// ⚠️ **どこまで遡ったかで制限を分けない。** 継ぎ足しは同じ入れ物である
     #[test]
     fn paging_back_shares_the_bucket() {
         let ch = ChannelId::from(1u64);

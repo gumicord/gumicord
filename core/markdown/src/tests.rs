@@ -1,8 +1,6 @@
 use super::*;
 
-/// 飾りの付いた文だけを、読める形にして並べる。
-///
-/// `**a**` → `[B]a`。飾りの無い文字は素で出る
+/// Renders a parse into a readable one-line form: `**a**` becomes `[B]a[/]`.
 fn flat(text: &str) -> String {
     let mut s = String::new();
     for b in parse(text) {
@@ -19,21 +17,21 @@ fn write_block(b: &Block, s: &mut String) {
             write_inlines(content, s);
         }
         Block::Subtext(c) => {
-            s.push_str("[小]");
+            s.push_str("[sub]");
             write_inlines(c, s);
         }
         Block::Quote(inner) => {
-            s.push_str("[引用{");
+            s.push_str("[quote{");
             for b in inner {
                 write_block(b, s);
             }
             s.push_str("}]");
         }
         Block::List(items) => {
-            s.push_str("[箇条{");
+            s.push_str("[list{");
             for it in items {
                 let m = match it.marker {
-                    Marker::Bullet => "・".to_owned(),
+                    Marker::Bullet => "*".to_owned(),
                     Marker::Number(n) => format!("{n}."),
                 };
                 s.push_str(&format!("{}{m}", "  ".repeat(it.depth as usize)));
@@ -44,7 +42,7 @@ fn write_block(b: &Block, s: &mut String) {
         }
         Block::Code { lang, text } => {
             s.push_str(&format!(
-                "[コード{}{{{text}}}]",
+                "[code{}{{{text}}}]",
                 lang.as_deref().unwrap_or("")
             ));
         }
@@ -79,15 +77,15 @@ fn write_inlines(c: &[Inline], s: &mut String) {
             InlineKind::Mention(m) => s.push_str(&format!("[{m:?}]")),
             InlineKind::Emoji { name, id, animated } => {
                 s.push_str(&format!(
-                    "[絵{name}:{id}{}]",
+                    "[emoji{name}:{id}{}]",
                     if *animated { "*" } else { "" }
                 ));
             }
-            InlineKind::Timestamp { at, format } => s.push_str(&format!("[時{at}:{format}]")),
+            InlineKind::Timestamp { at, format } => s.push_str(&format!("[time{at}:{format}]")),
             InlineKind::Break => s.push('⏎'),
         }
-        // ⚠️ **閉じも書く。** 書かないと「どこで太字が終わったか」が
-        // 出力に現れず、飾りの範囲が間違っていてもテストが通ってしまう
+        // The closer is written too: without it the extent of a decoration
+        // never shows up, and a wrong range still passes.
         if !tag.is_empty() {
             s.push_str("[/]");
         }
@@ -95,10 +93,10 @@ fn write_inlines(c: &[Inline], s: &mut String) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  飾り
+//  Decoration
 
 #[test]
-fn 太字と斜体と下線と打ち消しとスポイラー() {
+fn bold_italic_underline_strike_and_spoiler() {
     assert_eq!(flat("**a**"), "[B]a[/]\n");
     assert_eq!(flat("*a*"), "[I]a[/]\n");
     assert_eq!(flat("_a_"), "[I]a[/]\n");
@@ -108,7 +106,7 @@ fn 太字と斜体と下線と打ち消しとスポイラー() {
 }
 
 #[test]
-fn 飾りは重なる() {
+fn decorations_stack() {
     assert_eq!(flat("***a***"), "[BI]a[/]\n");
     assert_eq!(flat("**~~a~~**"), "[BS]a[/]\n");
     assert_eq!(flat("||**a**||"), "[BX]a[/]\n");
@@ -116,238 +114,238 @@ fn 飾りは重なる() {
 }
 
 #[test]
-fn 飾りの外と中が繋がる() {
+fn a_decoration_joins_the_text_around_it() {
     assert_eq!(flat("前**中**後"), "前[B]中[/]後\n");
 }
 
-/// ⚠️ **閉じない印は文字である。** ここが崩れると本文が丸ごと消える
+/// Getting this wrong makes the rest of the body disappear.
 #[test]
-fn 閉じない印はただの文字() {
+fn an_unclosed_mark_is_literal_text() {
     assert_eq!(flat("**a"), "**a\n");
     assert_eq!(flat("a ** b"), "a ** b\n");
     assert_eq!(flat("||隠し"), "||隠し\n");
     assert_eq!(flat("~~"), "~~\n");
 }
 
-/// `a * b * c` は掛け算であって斜体ではない
+/// `a * b * c` is multiplication, not italic.
 #[test]
-fn 中身が空白で始まる印は開かない() {
+fn a_mark_does_not_open_on_whitespace() {
     assert_eq!(flat("2 * 3 * 4"), "2 * 3 * 4\n");
     assert_eq!(flat("a ** b ** c"), "a ** b ** c\n");
 }
 
 #[test]
-fn 中身が空白で終わる印も開かない() {
+fn a_mark_does_not_close_after_whitespace() {
     assert_eq!(flat("*a *b"), "*a *b\n");
 }
 
-/// ⚠️ ここが無いと `snake_case_word` が斜体になる
+/// Without this rule `snake_case_word` becomes italic.
 #[test]
-fn 下線付きの語は斜体にならない() {
+fn snake_case_words_are_not_italic() {
     assert_eq!(flat("snake_case_word"), "snake_case_word\n");
     assert_eq!(flat("a_b_c"), "a_b_c\n");
-    // 語の外なら開く
+    // Outside a word it does open.
     assert_eq!(flat("_a_ b"), "[I]a[/] b\n");
     assert_eq!(flat("(_a_)"), "([I]a[/])\n");
 }
 
 #[test]
-fn 星は語の途中でも開く() {
+fn an_asterisk_opens_mid_word() {
     assert_eq!(flat("a*b*c"), "a[I]b[/]c\n");
 }
 
 #[test]
-fn 同じ飾りは入れ子にしない() {
-    // 内側の `**` は閉じに使われる
+fn the_same_decoration_does_not_nest() {
+    // The inner `**` closes.
     assert_eq!(flat("**a**b**"), "[B]a[/]b**\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  逃がし
+//  Escapes
 
 #[test]
-fn 記号は逃がせる() {
+fn punctuation_can_be_escaped() {
     assert_eq!(flat(r"\*\*a\*\*"), "**a**\n");
     assert_eq!(flat(r"\|\|a\|\|"), "||a||\n");
 }
 
-/// ⚠️ `\n` の `n` を文字にすると、打った `\` が黙って消える
+/// Escaping the `n` of `\n` would silently swallow the backslash.
 #[test]
-fn 記号でない字は逃がさない() {
+fn non_punctuation_is_not_escaped() {
     assert_eq!(flat(r"\n"), "\\n\n");
     assert_eq!(flat(r"C:\Users"), "C:\\Users\n");
 }
 
 #[test]
-fn 逃がした印は閉じに使われない() {
+fn an_escaped_mark_cannot_close() {
     assert_eq!(flat(r"**a\*b**"), "[B]a*b[/]\n");
-    // `\*` で 1 つ、余った `*` で 1 つ。**どちらも閉じには使わない**
+    // One from `\*`, one from the leftover `*`; neither can close.
     assert_eq!(flat(r"**a\**b**"), "[B]a**b[/]\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  コード
+//  Code
 
 #[test]
-fn 行の中のコード() {
+fn inline_code() {
     assert_eq!(flat("`a`"), "`a`\n");
     assert_eq!(flat("``a`b``"), "`a`b`\n");
     assert_eq!(flat("前 `a` 後"), "前 `a` 後\n");
 }
 
-/// ⚠️ コードの中の印は文字である
+/// Marks inside code are literal.
 #[test]
-fn コードの中は解析しない() {
+fn code_contents_are_not_parsed() {
     assert_eq!(flat("`**a**`"), "`**a**`\n");
     assert_eq!(flat("`<@1>`"), "`<@1>`\n");
 }
 
-/// ⚠️ ここが無いと、コードの中の印が外の印を閉じる
+/// Without this, a mark inside code closes the outer one.
 #[test]
-fn コードの中の印は外を閉じない() {
+fn a_mark_inside_code_does_not_close_the_outer_one() {
     assert_eq!(flat("**a `**` b**"), "[B]a [/][B]`**`[/][B] b[/]\n");
 }
 
 #[test]
-fn 閉じないコードはただの記号() {
+fn an_unclosed_code_span_is_literal() {
     assert_eq!(flat("`a"), "`a\n");
 }
 
 #[test]
-fn コードブロック() {
-    assert_eq!(flat("```\na\n```"), "[コード{a}]\n");
-    assert_eq!(flat("```js\na\n```"), "[コードjs{a}]\n");
-    // 改行が無ければ言語名ではない
-    assert_eq!(flat("```js```"), "[コード{js}]\n");
+fn fenced_code() {
+    assert_eq!(flat("```\na\n```"), "[code{a}]\n");
+    assert_eq!(flat("```js\na\n```"), "[codejs{a}]\n");
+    // Without a newline there is no info string.
+    assert_eq!(flat("```js```"), "[code{js}]\n");
 }
 
-/// ⚠️ **行の途中から始まる。** ここで段落が切れる
+/// A fence opens mid-line and ends the paragraph there.
 #[test]
-fn コードブロックは行の途中からでも始まる() {
-    assert_eq!(flat("見て ```js\na\n``` ね"), "見て \n[コードjs{a}]\n ね\n");
+fn a_fence_can_open_mid_line() {
+    assert_eq!(flat("見て ```js\na\n``` ね"), "見て \n[codejs{a}]\n ね\n");
 }
 
-/// ⚠️ コードブロックの中の `# ` を見出しにしてはいけない
+/// A `# ` inside a fence is not a heading.
 #[test]
-fn コードブロックの中は何も解釈しない() {
+fn nothing_inside_a_fence_is_interpreted() {
     assert_eq!(
         flat("```\n# a\n> b\n**c**\n```"),
-        "[コード{# a\n> b\n**c**}]\n"
+        "[code{# a\n> b\n**c**}]\n"
     );
 }
 
 #[test]
-fn 閉じないコードブロックはただの記号() {
+fn an_unclosed_fence_is_literal() {
     assert_eq!(flat("```js\na"), "```js⏎a\n");
 }
 
 #[test]
-fn コードブロックの中の空行は残る() {
-    assert_eq!(flat("```\na\n\nb\n```"), "[コード{a\n\nb}]\n");
+fn blank_lines_inside_a_fence_survive() {
+    assert_eq!(flat("```\na\n\nb\n```"), "[code{a\n\nb}]\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  行の頭の印
+//  Line-leading markers
 
 #[test]
-fn 見出し() {
+fn headings() {
     assert_eq!(flat("# a"), "[H1]a\n");
     assert_eq!(flat("## a"), "[H2]a\n");
     assert_eq!(flat("### a"), "[H3]a\n");
 }
 
-/// ⚠️ `#tag` は見出しではない。空白が要る
+/// `#tag` is not a heading; the space is required.
 #[test]
-fn 空白の無い井桁は見出しにしない() {
+fn a_hash_without_a_space_is_not_a_heading() {
     assert_eq!(flat("#tag"), "#tag\n");
     assert_eq!(flat("#### a"), "#### a\n");
     assert_eq!(flat("# "), "# \n");
 }
 
 #[test]
-fn 小さい注釈() {
-    assert_eq!(flat("-# a"), "[小]a\n");
+fn subtext() {
+    assert_eq!(flat("-# a"), "[sub]a\n");
 }
 
 #[test]
-fn 引用() {
-    assert_eq!(flat("> a"), "[引用{a\n}]\n");
-    // 続く行はまとまる
-    assert_eq!(flat("> a\n> b"), "[引用{a⏎b\n}]\n");
-    // 続かない行は外へ出る
-    assert_eq!(flat("> a\nb"), "[引用{a\n}]\nb\n");
+fn quotes() {
+    assert_eq!(flat("> a"), "[quote{a\n}]\n");
+    // Consecutive lines merge.
+    assert_eq!(flat("> a\n> b"), "[quote{a⏎b\n}]\n");
+    // A non-consecutive line falls outside.
+    assert_eq!(flat("> a\nb"), "[quote{a\n}]\nb\n");
 }
 
 #[test]
-fn 大なりだけの行は引用の空行() {
-    assert_eq!(flat("> a\n>\n> b"), "[引用{a\nb\n}]\n");
+fn a_bare_angle_quotes_a_blank_line() {
+    assert_eq!(flat("> a\n>\n> b"), "[quote{a\nb\n}]\n");
 }
 
 #[test]
-fn 三連の大なりは以降ぜんぶ() {
-    assert_eq!(flat(">>> a\nb"), "[引用{a⏎b\n}]\n");
+fn a_triple_angle_quotes_the_rest() {
+    assert_eq!(flat(">>> a\nb"), "[quote{a⏎b\n}]\n");
 }
 
 #[test]
-fn 引用は入れ子になる() {
-    assert_eq!(flat("> > a"), "[引用{[引用{a\n}]\n}]\n");
+fn quotes_nest() {
+    assert_eq!(flat("> > a"), "[quote{[quote{a\n}]\n}]\n");
 }
 
-/// ⚠️ 深さに上限が無いと、`>` を千個並べた本文で潜り切る
+/// Without a depth cap, a thousand `>` characters recurse to the bottom.
 #[test]
-fn 引用の深さには上限がある() {
+fn quote_nesting_is_bounded() {
     let deep = "> ".repeat(500) + "a";
     let _ = flat(&deep);
 }
 
 #[test]
-fn 箇条書き() {
-    assert_eq!(flat("- a\n- b"), "[箇条{・a;・b;}]\n");
-    assert_eq!(flat("* a"), "[箇条{・a;}]\n");
-    assert_eq!(flat("1. a\n2. b"), "[箇条{1.a;2.b;}]\n");
+fn lists() {
+    assert_eq!(flat("- a\n- b"), "[list{*a;*b;}]\n");
+    assert_eq!(flat("* a"), "[list{*a;}]\n");
+    assert_eq!(flat("1. a\n2. b"), "[list{1.a;2.b;}]\n");
 }
 
 #[test]
-fn 箇条書きは字下げで潜る() {
-    assert_eq!(flat("- a\n  - b"), "[箇条{・a;  ・b;}]\n");
+fn indentation_nests_a_list() {
+    assert_eq!(flat("- a\n  - b"), "[list{*a;  *b;}]\n");
 }
 
-/// ⚠️ 桁を数えないと `u32` が溢れる
+/// Without a digit cap this overflows u32.
 #[test]
-fn 長すぎる番号は箇条書きにしない() {
+fn an_overlong_number_is_not_a_list_item() {
     assert_eq!(flat("99999999999. a"), "99999999999. a\n");
 }
 
 #[test]
-fn 中身の無い印は箇条書きにしない() {
+fn a_marker_with_no_content_is_not_a_list_item() {
     assert_eq!(flat("- "), "- \n");
     assert_eq!(flat("-"), "-\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  段落
+//  Paragraphs
 
 #[test]
-fn 段落の中の改行は残る() {
+fn a_newline_inside_a_paragraph_survives() {
     assert_eq!(flat("a\nb"), "a⏎b\n");
 }
 
 #[test]
-fn 空行は段落を切る() {
+fn a_blank_line_ends_a_paragraph() {
     assert_eq!(flat("a\n\nb"), "a\nb\n");
 }
 
 #[test]
-fn 空の本文からは何も出ない() {
+fn empty_input_yields_nothing() {
     assert_eq!(parse(""), vec![]);
     assert_eq!(parse("\n\n"), vec![]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  メンションと絵文字と時刻
+//  Mentions, emoji, timestamps
 
 #[test]
-fn メンション() {
+fn mentions() {
     assert_eq!(flat("<@1>"), "[User(1)]\n");
     assert_eq!(flat("<@!1>"), "[User(1)]\n");
     assert_eq!(flat("<@&1>"), "[Role(1)]\n");
@@ -357,32 +355,32 @@ fn メンション() {
 }
 
 #[test]
-fn 番号でないメンションは文字() {
+fn a_non_numeric_mention_is_literal() {
     assert_eq!(flat("<@abc>"), "<@abc>\n");
     assert_eq!(flat("<@>"), "<@>\n");
     assert_eq!(flat("a < b > c"), "a < b > c\n");
 }
 
 #[test]
-fn 絵文字() {
-    assert_eq!(flat("<:neko:1>"), "[絵neko:1]\n");
-    assert_eq!(flat("<a:neko:1>"), "[絵neko:1*]\n");
+fn emoji() {
+    assert_eq!(flat("<:neko:1>"), "[emojineko:1]\n");
+    assert_eq!(flat("<a:neko:1>"), "[emojineko:1*]\n");
 }
 
 #[test]
-fn 時刻() {
-    assert_eq!(flat("<t:1700000000:R>"), "[時1700000000:R]\n");
-    // 書式が無ければ既定
-    assert_eq!(flat("<t:1700000000>"), "[時1700000000:f]\n");
-    // 知らない書式は文字のまま
+fn timestamps() {
+    assert_eq!(flat("<t:1700000000:R>"), "[time1700000000:R]\n");
+    // No format suffix means the default.
+    assert_eq!(flat("<t:1700000000>"), "[time1700000000:f]\n");
+    // An unknown format stays literal.
     assert_eq!(flat("<t:1:z>"), "<t:1:z>\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  リンク
+//  Links
 
 #[test]
-fn 裸のリンク() {
+fn bare_links() {
     assert_eq!(flat("https://example.com"), "[→https://example.com]\n");
     assert_eq!(
         flat("見て http://a.b/c だよ"),
@@ -390,43 +388,43 @@ fn 裸のリンク() {
     );
 }
 
-/// ⚠️ 文末の記号まで URL に入れるとリンクが切れる
+/// Swallowing sentence-final punctuation breaks the link.
 #[test]
-fn 文末の記号はリンクに入れない() {
+fn sentence_final_punctuation_stays_out_of_a_link() {
     assert_eq!(flat("https://a.b/c。"), "[→https://a.b/c]。\n");
     assert_eq!(flat("(https://a.b/c)"), "([→https://a.b/c])\n");
     assert_eq!(flat("https://a.b/c!"), "[→https://a.b/c]!\n");
 }
 
 #[test]
-fn 語の途中はリンクにしない() {
+fn a_link_does_not_start_mid_word() {
     assert_eq!(flat("ahttps://a.b"), "ahttps://a.b\n");
 }
 
 #[test]
-fn 名前付きリンク() {
+fn masked_links() {
     assert_eq!(flat("[ここ](https://a.b)"), "[ここ→https://a.b]\n");
 }
 
 #[test]
-fn 行き先が_url_でなければ名前付きリンクにしない() {
+fn a_masked_link_needs_a_url_target() {
     assert_eq!(flat("[a](b)"), "[a](b)\n");
     assert_eq!(flat("[a]"), "[a]\n");
 }
 
 #[test]
-fn 山括弧で囲んだリンク() {
+fn angle_wrapped_links() {
     assert_eq!(flat("<https://a.b>"), "[→https://a.b]\n");
-    // 中で切らない
+    // Not split in the middle.
     assert_eq!(flat("<https://a.b/x_y>"), "[→https://a.b/x_y]\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  壊れた入力で落ちない
+//  Malformed input
 
-/// ⚠️ 本文は他人が打った文字列である。**落ちないことが要件である**
+/// Bodies are strings other people typed; not panicking is the requirement.
 #[test]
-fn 壊れた入力でも落ちない() {
+fn malformed_input_does_not_panic() {
     let ugly = [
         "***",
         "****",
@@ -450,19 +448,19 @@ fn 壊れた入力でも落ちない() {
     }
 }
 
-/// 多バイト文字の途中で切らない
+/// Never split inside a multi-byte character.
 #[test]
-fn 日本語と絵文字で境目を割らない() {
+fn multibyte_text_is_never_split_mid_character() {
     assert_eq!(flat("**あい**うえ"), "[B]あい[/]うえ\n");
     assert_eq!(flat("🎉**あ**🎉"), "🎉[B]あ[/]🎉\n");
     assert_eq!(flat("あ_い_う"), "あ_い_う\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  組み合わせ
+//  Combinations
 
 #[test]
-fn 実際に来そうな本文() {
+fn a_realistic_message_body() {
     let src = "# お知らせ\n\
                <@123> さん、**明日** の会議は <#456> です。\n\
                -# 変更は <t:1700000000:R>\n\
@@ -479,9 +477,9 @@ fn 実際に来そうな本文() {
         flat(src),
         "[H1]お知らせ\n\
          [User(123)] さん、[B]明日[/] の会議は [Channel(456)] です。\n\
-         [小]変更は [時1700000000:R]\n\
-         [箇条{・`cargo test` を通す;・[S]急ぐ[/] 落ち着いてやる;}]\n\
-         [引用{詳しくは [→https://example.com/doc]\n}]\n\
-         [コードrust{fn main() {}}]\n"
+         [sub]変更は [time1700000000:R]\n\
+         [list{*`cargo test` を通す;*[S]急ぐ[/] 落ち着いてやる;}]\n\
+         [quote{詳しくは [→https://example.com/doc]\n}]\n\
+         [coderust{fn main() {}}]\n"
     );
 }

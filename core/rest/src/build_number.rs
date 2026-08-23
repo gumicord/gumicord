@@ -1,113 +1,94 @@
-//! 名乗るビルド番号を**起動時に実測する** (`NFR-020`)。
+//! Measures the build number to claim, at startup.
 //!
-//! # なぜ埋め込みでは駄目なのか
+//! A number baked into the source goes stale in weeks, and a client claiming
+//! a months-old build is itself distinctive — almost no real installation is
+//! that far behind.
 //!
-//! ソースに書いた番号は数週間で古くなる。古い番号を名乗るクライアントは
-//! **「何か月も更新していない Discord」**に見える。実際にはそんな端末は
-//! ほとんど無いので、埋め込みの値はそれ自体が目印になる。
-//!
-//! # どこに本物があるか
-//!
-//! `https://discord.com/login` が返す HTML の中に、こういう塊がある。
+//! `https://discord.com/login` carries it in the HTML:
 //!
 //! ```text
-//! window.GLOBAL_ENV = {"NODE_ENV":"production","BUILT_AT":"...",
-//!   "BUILD_NUMBER":"595897","RELEASE_CHANNEL":"stable", ... }
+//! window.GLOBAL_ENV = {"NODE_ENV":"production", … ,"BUILD_NUMBER":"595897", … }
 //! ```
 //!
-//! **JS の束を落としてくる必要はない。** HTML の 60 KB を読むだけで足りる。
+//! Reading 60 KB of HTML is enough; the JS bundles need not be fetched.
 //!
-//! # ⚠️ 取れなくても起動を止めない
+//! Failure falls back to the baked-in value rather than blocking startup: no
+//! network, a changed page shape, or a proxy in the way are all ordinary.
 //!
-//! 網が落ちている、Discord が形を変えた、串の向こうにいる — どれも普通に
-//! 起こる。取れなければ [`gumicord_model::identity`] の埋め込みに落ちる。
-//! **ここで止めると、番号が古いだけの理由でアプリが起動しなくなる。**
-//!
-//! # ⚠️ トークンを載せない
-//!
-//! ここはログイン前に呼ばれる。**専用の [`reqwest::Client`] を作り**、
-//! [`crate::RestClient`] は通さない。認証ヘッダも `X-Super-Properties` も
-//! 送らない — ただの匿名の GET である。
+//! This runs before login, so it builds its own [`reqwest::Client`] and sends
+//! neither a token nor `X-Super-Properties`.
 
 use std::time::Duration;
 
 use gumicord_model::identity;
 
-/// 番号の載っているページ。**JS の束ではなく HTML である**
+/// The page that carries the number — HTML, not a JS bundle.
 const LOGIN_PAGE: &str = "https://discord.com/login";
 
-/// `GLOBAL_ENV` の中の目印
 const MARKER: &str = "\"BUILD_NUMBER\"";
 
-/// ここまでに返らなければ諦める。
-///
-/// ⚠️ **長くしない。** ログインの手前に挟まる待ち時間である。届かない網の
-/// 前で 30 秒固まるより、埋め込みで進むほうがましである
+/// Kept short: this sits in front of login, and freezing for thirty seconds
+/// on a dead network is worse than using the fallback.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// あり得るビルド番号の範囲。
-///
-/// 桁が違うものを掴んだら、それは番号ではなく形が変わった合図である。
-/// **黙って変な値を名乗るより、落ちる先に落ちるほうがよい**
+/// Plausible range. A number outside it means the page shape changed, and
+/// falling back beats claiming something odd.
 const PLAUSIBLE: std::ops::RangeInclusive<u64> = 100_000..=99_999_999;
 
-/// 取りに行って据える。**取れたら `Some`、駄目なら `None`。**
+/// Fetches the build number and records it.
 ///
-/// ⚠️ **[`crate::RestClient`] を作るより前に呼ぶこと。** 後から呼ぶと、
-/// 先に作ったものだけが古い番号を名乗り、Gateway と REST で食い違う。
+/// Call before constructing a [`crate::RestClient`] or connecting the
+/// Gateway; recording it afterwards leaves one of them claiming the stale
+/// number.
 pub async fn measure() -> Option<u64> {
     let build = fetch().await?;
     identity::set_measured_build_number(build);
-    tracing::info!(build, "ビルド番号を実測した");
+    tracing::info!(build, "measured the client build number");
     Some(build)
 }
 
-/// 取りに行くだけ。据えない。
 async fn fetch() -> Option<u64> {
-    // ⚠️ ログイン前なので、トークンを持つ経路を通さない
     let http = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(identity::Identity::detect().user_agent())
         .build()
-        .inspect_err(|e| tracing::warn!(%e, "実測用の HTTP を組めない。埋め込みで進む"))
+        .inspect_err(|e| tracing::warn!(%e, "cannot build the probe client; using the fallback"))
         .ok()?;
 
     let html = async {
         let res = http.get(LOGIN_PAGE).send().await?;
         let status = res.status();
         if !status.is_success() {
-            tracing::warn!(%status, "ログイン画面が {status} を返した。埋め込みで進む");
+            tracing::warn!(%status, "login page returned an error; using the fallback");
             return Ok(None);
         }
         res.text().await.map(Some)
     }
     .await
     .inspect_err(|e: &reqwest::Error| {
-        // ⚠️ ここは異常ではない。網が無いだけかもしれない
-        tracing::warn!(%e, "ビルド番号を取りに行けない。埋め込みで進む");
+        // Not exceptional; there may simply be no network.
+        tracing::warn!(%e, "cannot reach the login page; using the fallback");
     })
     .ok()
     .flatten()?;
 
     let found = extract(&html);
     if found.is_none() {
-        // 形が変わった可能性がある。**中身は出さない** (`SEC-001`)
+        // The page shape may have changed. Never log the body itself.
         tracing::warn!(
             bytes = html.len(),
-            "ログイン画面に {MARKER} が見当たらない。埋め込みで進む"
+            "no {MARKER} on the login page; using the fallback"
         );
     }
     found
 }
 
-/// HTML からビルド番号を取り出す。**網に触らない純粋な関数である。**
+/// Extracts the build number from the page. Pure; touches no network.
 ///
-/// `"BUILD_NUMBER":"595897"` も `"BUILD_NUMBER": 595897` も読める。
-/// Discord がどちらで書いてくるかは向こうの都合であって、こちらが
-/// 決められることではない。
+/// Accepts both `"BUILD_NUMBER":"595897"` and `"BUILD_NUMBER": 595897`, since
+/// which one arrives is Discord's choice.
 pub fn extract(html: &str) -> Option<u64> {
     let after = &html[html.find(MARKER)? + MARKER.len()..];
-    // `:` と、その後ろの空白や引用符を読み飛ばす
     let after = after.strip_prefix(':')?;
     let digits: String = after
         .chars()
@@ -117,7 +98,7 @@ pub fn extract(html: &str) -> Option<u64> {
 
     let build: u64 = digits.parse().ok()?;
     if !PLAUSIBLE.contains(&build) {
-        tracing::warn!(build, "ビルド番号にしては桁が合わない。埋め込みで進む");
+        tracing::warn!(build, "implausible build number; using the fallback");
         return None;
     }
     Some(build)
@@ -127,57 +108,51 @@ pub fn extract(html: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// 2026-08-24 に実際に返ってきた形。**これが読めなければ意味がない**
-    const 実物: &str = r#"<script>window.GLOBAL_ENV = {"NODE_ENV":"production","BUILT_AT":"1787095329146","HTML_TIMESTAMP":Date.now(),"BUILD_NUMBER":"595897","PROJECT_ENV":"production","RELEASE_CHANNEL":"stable"};</script>"#;
+    /// The shape actually returned on 2026-08-24.
+    const REAL: &str = r#"<script>window.GLOBAL_ENV = {"NODE_ENV":"production","BUILT_AT":"1787095329146","HTML_TIMESTAMP":Date.now(),"BUILD_NUMBER":"595897","PROJECT_ENV":"production","RELEASE_CHANNEL":"stable"};</script>"#;
 
     #[test]
-    fn 実物から取り出せる() {
-        assert_eq!(extract(実物), Some(595_897));
+    fn it_reads_the_real_shape() {
+        assert_eq!(extract(REAL), Some(595_897));
     }
 
-    /// 引用符が無い形で来ても読める。**向こうの都合で変わりうる**
     #[test]
-    fn 引用符が無くても読める() {
+    fn it_reads_an_unquoted_number_too() {
         assert_eq!(extract(r#"{"BUILD_NUMBER":595897}"#), Some(595_897));
         assert_eq!(extract(r#"{"BUILD_NUMBER": "595897"}"#), Some(595_897));
     }
 
-    /// 目印が無い。**形が変わったということなので、埋め込みに落ちる**
     #[test]
-    fn 見当たらなければ何も返さない() {
-        assert_eq!(extract("<html><body>ログイン</body></html>"), None);
+    fn a_missing_marker_yields_nothing() {
+        assert_eq!(extract("<html><body>login</body></html>"), None);
         assert_eq!(extract(""), None);
     }
 
-    /// ⚠️ **桁が違うものを掴んだら番号ではない。**
-    ///
-    /// 変な値を黙って名乗るより、落ちる先に落ちるほうがよい
     #[test]
-    fn 桁が合わなければ捨てる() {
+    fn an_implausible_number_is_rejected() {
         assert_eq!(extract(r#""BUILD_NUMBER":"0""#), None);
         assert_eq!(extract(r#""BUILD_NUMBER":"12""#), None);
         assert_eq!(extract(r#""BUILD_NUMBER":"123456789012345""#), None);
     }
 
-    /// 数字で始まらない。**推測で拾わない**
     #[test]
-    fn 数字でなければ捨てる() {
+    fn a_non_numeric_value_is_rejected() {
         assert_eq!(extract(r#""BUILD_NUMBER":null"#), None);
         assert_eq!(extract(r#""BUILD_NUMBER":"stable""#), None);
         assert_eq!(extract(r#""BUILD_NUMBER" = "595897""#), None);
     }
 
-    /// 途中で切れた HTML でも panic しない。**中途半端な応答は普通に来る**
+    /// Truncated responses are ordinary.
     #[test]
-    fn 途中で切れていても落ちない() {
-        for n in 0..実物.len() {
-            let _ = extract(&実物[..n]);
+    fn a_truncated_page_does_not_panic() {
+        for n in 0..REAL.len() {
+            let _ = extract(&REAL[..n]);
         }
     }
 
-    /// ⚠️ **UTF-8 の境目で切らない。** `find` の戻りは文字境界である
+    /// `find` returns a char boundary, so slicing stays valid.
     #[test]
-    fn 日本語が混ざっていても落ちない() {
+    fn multibyte_text_does_not_panic() {
         assert_eq!(extract(r#"あ"BUILD_NUMBER":"595897"い"#), Some(595_897));
     }
 }
