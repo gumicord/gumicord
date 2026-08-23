@@ -127,7 +127,38 @@ Close: code=4014 reason="Disallowed intent(s)."
 | 出所は 1 つ | [`gumicord_model::identity`]。Gateway の `properties` も REST の `X-Super-Properties` も同じ物から作る |
 | **食い違わせない** | 「Gateway では Windows のデスクトップ、REST では別の何か」は片方が嘘である。**食い違いそのものが目印になる** |
 | `User-Agent` も同じ | `browser_user_agent` に書いた文字列と HTTP の `User-Agent` が違えば、それもまた食い違いである |
-| 版は差し替えられる | `GUMICORD_CLIENT_BUILD` / `GUMICORD_CLIENT_VERSION`。**埋め込みの値は数週間で古くなる** |
+| **ビルド番号は起動時に実測する** | 下の節を見よ。埋め込みは落ちる先でしかない |
+| 版は差し替えられる | `GUMICORD_CLIENT_BUILD` / `GUMICORD_CLIENT_VERSION`。**実測より環境変数が強い** |
+
+#### ビルド番号は起動時に実測する (2026-08-24)
+
+**ソースに書いた番号は数週間で古くなる。** 古い番号を名乗るクライアントは
+「何か月も更新していない Discord」に見える。実際にはそんな端末はほとんど無いので、
+**埋め込みの値はそれ自体が目印になる。**
+
+本物は `https://discord.com/login` が返す HTML の中にある。
+
+```text
+window.GLOBAL_ENV = {"NODE_ENV":"production", ... ,"BUILD_NUMBER":"595897", ... }
+```
+
+**JS の束を落としてくる必要はない。** HTML の 60 KB を読むだけで足りる
+(`discord.py-self` は JS まで追っているが、それは要らなかった)。
+
+| | |
+|---|---|
+| 取りに行く場所 | [`gumicord_rest::build_number`] |
+| 呼ぶ場所 | ログインの背景の仕事の**一番先**。[`RestClient`] も Gateway の identify もこれより後で名乗りを組む |
+| 待つ上限 | 5 秒 |
+| **取れなかったら** | **埋め込みに落ちる。起動は止めない** |
+| 形が変わったら | `--ignored` の生き試験 (`core/rest/tests/build_number_live.rs`) でしか分からない |
+
+⚠️ **後から据えてはいけない。** 先に作った [`Identity`] だけが古い番号を名乗り、
+Gateway と REST で食い違う。**食い違いそのものが目印になる**ので、遅れて据えるくらいなら
+据えないほうがましである。
+
+⚠️ **`client_version` のほうは実測できていない。** 配信物のどこにも無く、
+デスクトップの実行ファイル自身が持っている値だからである。ここは埋め込みのままである。
 
 #### REST に載せるヘッダ
 

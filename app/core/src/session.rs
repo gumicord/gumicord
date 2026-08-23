@@ -279,6 +279,14 @@ const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// 網が落ちているだけかもしれないので、待ち時間を伸ばしながら繋ぎ続ける。
 /// 理由は画面に出るので、黙って隠しているわけではない。
 async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
+    // ⚠️ **一番先に測る。** [`RestClient`] も Gateway の identify も、
+    // ここより後で名乗りを組み立てる。後から測ると片方だけ古い番号を名乗り、
+    // **経路の間で食い違う** ([`gumicord_model::identity`])。
+    //
+    // 画面は既にキャッシュから出ているので (C6)、ここで数百 ms 待っても
+    // 利用者は待たされない。取れなくても埋め込みで進む
+    gumicord_rest::build_number::measure().await;
+
     if let Some(l) = restore(store.as_ref()).await {
         let _ = tx.send(LoginEvent::Done(Box::new(l)));
         waker.wake();

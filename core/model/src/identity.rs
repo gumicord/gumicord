@@ -18,11 +18,20 @@
 //!
 //! # ⚠️ ここの値は古くなる
 //!
-//! [`BUILD_NUMBER`] と [`CLIENT_VERSION`] は**書いた時点の推測**である。
 //! 本物は Discord の配信物の中にあり、数週間で変わる。古いまま名乗ると
 //! 「更新していないクライアント」に見える。
 //!
-//! 環境変数で差し替えられるようにしてある:
+//! ビルド番号は**起動時に実測する**。`https://discord.com/login` が返す
+//! HTML の `GLOBAL_ENV` に `"BUILD_NUMBER":"595897"` の形で入っており、
+//! 取ってきた値を [`set_measured_build_number`] へ渡すと以降の名乗りに載る。
+//! 取りに行くのは `gumicord_rest::build_number` の仕事である。
+//!
+//! ⚠️ **取れなかったら [`BUILD_NUMBER`] に落ちる。** 起動は止めない。
+//!
+//! [`CLIENT_VERSION`] のほうは実測できていない。**配信物のどこにも無く、
+//! デスクトップの実行ファイル自身が持っている値**だからである。
+//!
+//! 環境変数で差し替えられるようにしてある。**実測より環境変数が強い**:
 //!
 //! ```text
 //! GUMICORD_CLIENT_BUILD=451000
@@ -38,20 +47,65 @@
 //! この判断は利用者が引き受けるものであり、ここはその判断を実装している
 //! だけである。
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use base64::Engine as _;
 
 /// 名乗るデスクトップクライアントの版。**古くなる。** モジュールの説明を見よ
 const CLIENT_VERSION: &str = "1.0.9250";
-/// 名乗るビルド番号。**古くなる。**
+/// 実測できなかったときに名乗るビルド番号。**古くなる。**
 ///
-/// ⚠️ **これは書いた時点の推測であり、確かめた値ではない。**
-/// 本物は `https://discord.com/app` が読み込む JS の中の `build_number`
-/// にある。環境変数 `GUMICORD_CLIENT_BUILD` で差し替えられる
-const BUILD_NUMBER: u64 = 451_672;
+/// ⚠️ **これは落ちる先であって、当てにする値ではない。** 普段は起動時に
+/// [`set_measured_build_number`] で本物が入る。ここが使われるのは
+/// **discord.com に届かなかったとき**だけである。
+///
+/// 2026-08-24 に `https://discord.com/login` から実測した値を置いてある。
+/// 数週間で古くなるが、実測が効いていれば誰も見ない
+const BUILD_NUMBER: u64 = 595_897;
 /// 中で動いている Chromium の版
 const CHROME_VERSION: &str = "134.0.6998.205";
 /// 中で動いている Electron の版
 const ELECTRON_VERSION: &str = "35.7.5";
+
+/// 起動時に実測したビルド番号。`0` は「まだ測っていない」を意味する
+static MEASURED_BUILD_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+/// 実測したビルド番号を据える。以降の [`Identity::detect`] がこれを名乗る。
+///
+/// ⚠️ **[`Identity`] を作るより前に呼ぶこと。** 後から呼ぶと、先に作った
+/// [`Identity`] だけが古い番号を名乗り、**経路の間で食い違う**。食い違い
+/// そのものが目印になるので、遅れて据えるくらいなら据えないほうがましである。
+///
+/// ⚠️ **`GUMICORD_CLIENT_BUILD` のほうが強い。** 手で指定した値を実測が
+/// 黙って上書きしたら、環境変数の意味がない
+pub fn set_measured_build_number(build: u64) {
+    MEASURED_BUILD_NUMBER.store(build, Ordering::Relaxed);
+}
+
+/// 実測できているならその値。まだなら `None`
+pub fn measured_build_number() -> Option<u64> {
+    match MEASURED_BUILD_NUMBER.load(Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
+}
+
+/// 実測が無いときに落ちる先。**記録と試験のためだけに公開している**
+pub const fn fallback_build_number() -> u64 {
+    BUILD_NUMBER
+}
+
+/// どのビルド番号を名乗るかを決める。**強い順に 環境変数 → 実測 → 埋め込み。**
+///
+/// ⚠️ **プロセス全体の状態を読まない純粋な関数にしてある。** 環境変数も
+/// [`static`] も引数で受けるので、優先順位そのものを直接試験できる
+const fn resolve_build_number(from_env: Option<u64>, measured: Option<u64>) -> u64 {
+    match (from_env, measured) {
+        (Some(n), _) => n,
+        (None, Some(n)) => n,
+        (None, None) => BUILD_NUMBER,
+    }
+}
 
 /// こちらが何者か。**Gateway と REST で同じものを使う。**
 #[derive(Debug, Clone)]
@@ -79,8 +133,10 @@ impl Identity {
     pub fn detect() -> Identity {
         let client_version =
             env_or("GUMICORD_CLIENT_VERSION", Some).unwrap_or_else(|| CLIENT_VERSION.into());
-        let client_build_number =
-            env_or("GUMICORD_CLIENT_BUILD", |s| s.parse().ok()).unwrap_or(BUILD_NUMBER);
+        let client_build_number = resolve_build_number(
+            env_or("GUMICORD_CLIENT_BUILD", |s| s.parse().ok()),
+            measured_build_number(),
+        );
 
         Identity {
             // ⚠️ **頭を大文字にする。** `std::env::consts::OS` は
@@ -254,5 +310,42 @@ mod tests {
             os.chars().next().is_some_and(char::is_uppercase),
             "頭が小文字である: {os}"
         );
+    }
+
+    /// 何も無ければ埋め込みに落ちる。**起動を止めない**
+    #[test]
+    fn 実測も指定も無ければ埋め込みに落ちる() {
+        assert_eq!(resolve_build_number(None, None), fallback_build_number());
+    }
+
+    /// 実測できたらそれを名乗る。埋め込みは見ない
+    #[test]
+    fn 実測できたら実測を名乗る() {
+        // ⚠️ 埋め込みと違う値を使う。同じ値では効いているか分からない
+        let 実測 = fallback_build_number() + 1;
+        assert_eq!(resolve_build_number(None, Some(実測)), 実測);
+        assert_ne!(
+            resolve_build_number(None, Some(実測)),
+            fallback_build_number()
+        );
+    }
+
+    /// ⚠️ **手で指定した値を実測が黙って上書きしない。**
+    ///
+    /// 上書きすると `GUMICORD_CLIENT_BUILD` に意味がなくなり、古い番号を
+    /// 名乗って試すことができなくなる
+    #[test]
+    fn 環境変数は実測より強い() {
+        assert_eq!(resolve_build_number(Some(451_672), Some(595_897)), 451_672);
+    }
+
+    /// 据えれば読める。`0` は「まだ測っていない」であって値ではない
+    #[test]
+    fn 実測を据えると読み出せる() {
+        set_measured_build_number(123_456);
+        assert_eq!(measured_build_number(), Some(123_456));
+        // ⚠️ プロセス全体の状態なので、他の試験のために戻しておく
+        set_measured_build_number(0);
+        assert_eq!(measured_build_number(), None);
     }
 }

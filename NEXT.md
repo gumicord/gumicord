@@ -17,18 +17,19 @@
 > 見分けが付きにくくなるだけで、アカウントを失う可能性は消えない。
 > 2026-08-23 に実際にパスワードの再設定を求められている。
 
-### 1.1 ビルド番号を実測する (優先)
+### 1.1 ~~ビルド番号を実測する~~ ✅ 済んだ
 
-[`core/model/src/identity.rs`](core/model/src/identity.rs) の
-`BUILD_NUMBER` と `CLIENT_VERSION` は**書いた時点の推測**であって、
-確かめた値ではない。数週間で古くなる。
+起動時に `https://discord.com/login` の HTML から取るようにした。
+JS の束を追う必要は無く、`GLOBAL_ENV` の `"BUILD_NUMBER"` を読むだけで
+足りた。取れなければ埋め込みに落ちる。実測 595897 (書いてあった推測は
+451672 で、**14 万ぶん古かった**)。
 
-- いまは `GUMICORD_CLIENT_BUILD` / `GUMICORD_CLIENT_VERSION` で
-  差し替えられる
-- 本物は `https://discord.com/app` が読み込む JS の中の `build_number`
-  にある。起動時に取りに行けば古くならない
-  (`discord.py-self` が同じことをしている)
-- ⚠️ **取れなかったら埋め込みの値に落ちること。** 起動を止めない
+⚠️ **`CLIENT_VERSION` のほうは実測できていない。** 配信物のどこにも無く、
+デスクトップの実行ファイル自身が持っている値である。埋め込みのままである。
+
+⚠️ **形が変わったことは単体試験では分からない。** たまに
+`cargo test -p gumicord-rest --test build_number_live -- --ignored` を
+走らせること。
 
 ### 1.2 `/science` をどうするか — 決めていない
 
