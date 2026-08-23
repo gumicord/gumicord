@@ -324,6 +324,11 @@ impl Shaped {
 /// アトラスに載ったグリフ。
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphEntry {
+    /// 何ページ目に載っているか。
+    ///
+    /// ⚠️ **ページごとにテクスチャが違う。** 描くときに束ね直す必要が
+    /// あるので、これを持たないと 1 枚目のページから読んでしまう
+    pub page: u32,
     /// アトラス内の UV (0..1)
     pub uv: [f32; 4],
     /// ペン位置からのずれ (物理 px)
@@ -509,8 +514,14 @@ impl TextEngine {
         &mut self.shaper
     }
 
-    pub fn atlas_view(&self) -> &wgpu::TextureView {
-        &self.atlas.view
+    /// ページごとのテクスチャ。**束ね直すのに要る**
+    pub fn atlas_views(&self) -> Vec<&wgpu::TextureView> {
+        self.atlas.pages.iter().map(|p| &p.view).collect()
+    }
+
+    /// ページが増えたか。**1 回だけ真を返す**
+    pub fn took_atlas_growth(&mut self) -> bool {
+        self.atlas.took_growth()
     }
 
     /// DPI が変わったら、整形結果もグリフも作り直す。
@@ -529,6 +540,7 @@ impl TextEngine {
     /// `self` をフィールドごとに分解して両立させている。
     pub fn draw_glyphs(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         text: &str,
         font: &ResolvedFont,
@@ -548,7 +560,7 @@ impl TextEngine {
 
         let s = &shaped[&key];
         for g in &s.glyphs {
-            if let Some(e) = atlas.glyph(queue, font_system, swash, g.cache_key)
+            if let Some(e) = atlas.glyph(device, queue, font_system, swash, g.cache_key)
                 && e.w != 0
             {
                 f(&e, g.x, g.y);
@@ -560,9 +572,15 @@ impl TextEngine {
     /// アイコンをアトラスへ載せて位置を返す。`size_px` は物理ピクセル。
     ///
     /// 知らない名前には `None` を返す。**誤りではない** ([`crate::icon`])。
-    pub fn icon(&mut self, queue: &wgpu::Queue, name: &str, size_px: u32) -> Option<GlyphEntry> {
+    pub fn icon(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        name: &str,
+        size_px: u32,
+    ) -> Option<GlyphEntry> {
         let (name, def) = icon::lookup(name)?;
-        self.atlas.icon(queue, name, def, size_px)
+        self.atlas.icon(device, queue, name, def, size_px)
     }
 
     /// アトラスに載っているものの数。性能の目安に使う
@@ -648,22 +666,17 @@ struct Shelves {
     images_full: bool,
 }
 
-struct Atlas {
+/// アトラス 1 ページ。**1 枚のテクスチャと、その詰め具合**
+struct Page {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-    entries: HashMap<AtlasKey, Option<GlyphEntry>>,
     shelves: Shelves,
-    uploaded: usize,
-    /// 前回作り直してから何枚入れたか。**空回りを見分けるために要る**
-    images_since_recycle: usize,
-    /// 絵を作り直した。**呼び出し側が取りに来る** ([`Atlas::took_recycle`])
-    recycled: bool,
 }
 
-impl Atlas {
-    fn new(device: &wgpu::Device) -> Self {
+impl Page {
+    fn new(device: &wgpu::Device, n: usize) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("gumicord-glyph-atlas"),
+            label: Some(&format!("gumicord-atlas-{n}")),
             size: wgpu::Extent3d {
                 width: ATLAS_SIZE,
                 height: ATLAS_SIZE,
@@ -677,15 +690,76 @@ impl Atlas {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Atlas {
+        Page {
             texture,
             view,
-            entries: HashMap::new(),
             shelves: Shelves::new(),
+        }
+    }
+}
+
+/// ページを何枚まで増やすか。
+///
+/// ⚠️ **1 枚 16MB である** (2048² × RGBA)。増やすほど常駐メモリが増える
+/// ので、際限なくは持てない。4 枚で 64MB — 公式 Electron 版より小さい
+/// という主張を保てる上限として置いてある。
+///
+/// **足りるかどうかは実測で決める。** ここに達するのは、日本語と絵文字と
+/// 顔を大量に見た後である
+const MAX_PAGES: usize = 4;
+
+struct Atlas {
+    /// ⚠️ **最後のページが「いま詰めているページ」である。**
+    /// 前のページに戻って隙間を探したりはしない — 探す価値のある隙間は
+    /// 棚詰めの性質上ほとんど残らない
+    pages: Vec<Page>,
+    entries: HashMap<AtlasKey, Option<GlyphEntry>>,
+    uploaded: usize,
+    /// 前回作り直してから何枚入れたか。**空回りを見分けるために要る**
+    images_since_recycle: usize,
+    /// 絵を作り直した。**呼び出し側が取りに来る** ([`Atlas::took_recycle`])
+    recycled: bool,
+    /// ページが増えた。**束ね直しが要る** ([`Atlas::took_growth`])
+    grew: bool,
+}
+
+impl Atlas {
+    fn new(device: &wgpu::Device) -> Self {
+        Atlas {
+            pages: vec![Page::new(device, 0)],
+            entries: HashMap::new(),
             uploaded: 0,
             images_since_recycle: 0,
             recycled: false,
+            grew: true,
         }
+    }
+
+    /// ページが増えたか。**1 回だけ真を返す**
+    fn took_growth(&mut self) -> bool {
+        std::mem::take(&mut self.grew)
+    }
+
+    /// いま詰めているページで場所を取る。入らなければ**ページを足す**。
+    ///
+    /// ⚠️ **足せなくなったら諦める。** そのときだけ虫食いになる
+    fn alloc(&mut self, device: &wgpu::Device, w: u32, h: u32, side: Side) -> Option<(u32, u32)> {
+        let last = self.pages.len() - 1;
+        if let Some(at) = self.pages[last].shelves.alloc(w, h, side) {
+            return Some(at);
+        }
+        if self.pages.len() >= MAX_PAGES {
+            tracing::warn!(
+                pages = MAX_PAGES,
+                "アトラスが上限まで埋まった。ここから先は描けない"
+            );
+            return None;
+        }
+        tracing::info!(pages = self.pages.len() + 1, "アトラスのページを足す");
+        self.pages.push(Page::new(device, self.pages.len()));
+        self.grew = true;
+        let last = self.pages.len() - 1;
+        self.pages[last].shelves.alloc(w, h, side)
     }
 
     /// 絵の側を丸ごと空けて、詰め直せるようにする。
@@ -713,7 +787,9 @@ impl Atlas {
         }
         tracing::info!(images = self.images_since_recycle, "アトラスの絵を詰め直す");
         self.entries.retain(|k, _| !matches!(k, AtlasKey::Image(_)));
-        self.shelves.reset_images();
+        for p in &mut self.pages {
+            p.shelves.reset_images();
+        }
         self.images_since_recycle = 0;
         self.recycled = true;
         true
@@ -765,9 +841,9 @@ impl Shelves {
                 }
                 // 絵の側へ食い込まない
                 if self.cursor_y + h + PAD > self.image_top {
-                    tracing::warn!(
+                    tracing::debug!(
                         y = self.cursor_y,
-                        "アトラスの文字側が溢れた。R3 (複数ページ化) が要る"
+                        "このページの文字側が埋まった。次のページへ"
                     );
                     self.glyphs_full = true;
                     return None;
@@ -791,9 +867,9 @@ impl Shelves {
                     let top = self.image_top - need;
                     // 文字の側へ食い込まない
                     if top < self.cursor_y + self.shelf_h + PAD {
-                        tracing::warn!(
+                        tracing::debug!(
                             top = self.image_top,
-                            "アトラスの絵の側が溢れた。R3 (複数ページ化) が要る"
+                            "このページの絵の側が埋まった。次のページへ"
                         );
                         self.images_full = true;
                         return None;
@@ -813,6 +889,7 @@ impl Shelves {
 impl Atlas {
     fn glyph(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         font_system: &mut FontSystem,
         swash: &mut SwashCache,
@@ -822,7 +899,7 @@ impl Atlas {
         if let Some(e) = self.entries.get(&k) {
             return *e;
         }
-        let entry = self.rasterize_glyph(queue, font_system, swash, key);
+        let entry = self.rasterize_glyph(device, queue, font_system, swash, key);
         self.entries.insert(k, entry);
         entry
     }
@@ -830,6 +907,7 @@ impl Atlas {
     /// アイコンを載せる。`size` は物理ピクセルでの一辺。
     fn icon(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         name: &'static str,
         def: &icon::IconDef,
@@ -841,6 +919,7 @@ impl Atlas {
         }
         // アイコンは正方形で、ペン位置からのずれを持たない
         let entry = self.insert(
+            device,
             queue,
             size,
             size,
@@ -854,6 +933,7 @@ impl Atlas {
 
     fn rasterize_glyph(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         font_system: &mut FontSystem,
         swash: &mut SwashCache,
@@ -864,6 +944,7 @@ impl Atlas {
         if p.width == 0 || p.height == 0 {
             // 空白など。描くものはないが、位置は返す必要がある
             return Some(GlyphEntry {
+                page: 0,
                 uv: [0.0; 4],
                 left: p.left,
                 top: p.top,
@@ -872,10 +953,6 @@ impl Atlas {
                 is_color: false,
             });
         }
-        if self.shelves.glyphs_full {
-            return None;
-        }
-
         let (w, h) = (p.width, p.height);
         let is_color = matches!(image.content, SwashContent::Color);
 
@@ -901,6 +978,7 @@ impl Atlas {
         }
 
         self.insert(
+            device,
             queue,
             w,
             h,
@@ -914,11 +992,13 @@ impl Atlas {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// RGBA8 を 1 枚アトラスへ詰める。**グリフも絵もここを通る。**
     ///
     /// `side` は詰める向きを決める ([`Side`])
     fn insert(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         w: u32,
         h: u32,
@@ -934,10 +1014,11 @@ impl Atlas {
         if w == 0 || h == 0 {
             return None;
         }
-        let (x, y) = self.shelves.alloc(w, h, side)?;
+        let (x, y) = self.alloc(device, w, h, side)?;
+        let page = self.pages.len() - 1;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
+                texture: &self.pages[page].texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -959,6 +1040,7 @@ impl Atlas {
 
         let s = ATLAS_SIZE as f32;
         Some(GlyphEntry {
+            page: page as u32,
             uv: [
                 x as f32 / s,
                 y as f32 / s,
@@ -1294,7 +1376,12 @@ impl TextEngine {
     ///
     /// 入らなければ (アトラスが溢れていれば) `false`。呼び出し側は
     /// **諦めてよい** — 絵が出ないだけで、他は何も壊れない
-    pub fn put_image(&mut self, queue: &wgpu::Queue, image: &ImageData) -> bool {
+    pub fn put_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageData,
+    ) -> bool {
         let key = AtlasKey::Image(image_key(&image.url));
         if self.atlas.entries.contains_key(&key) {
             return true;
@@ -1306,6 +1393,7 @@ impl TextEngine {
 
         let place = |atlas: &mut Atlas| {
             atlas.insert(
+                device,
                 queue,
                 image.width,
                 image.height,

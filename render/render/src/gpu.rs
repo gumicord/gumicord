@@ -357,10 +357,12 @@ impl Gpu {
     /// `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が来るまで
     /// 窓が空白のままになる。
     #[must_use]
+    /// ⚠️ `atlas_binds` はページごとに 1 つ。**束ねは 1 枚のテクスチャしか
+    /// 指せない**ので、ページが違えば描く束も分かれる
     pub fn submit(
         &mut self,
         dl: &DrawList,
-        atlas_bind: &wgpu::BindGroup,
+        atlas_binds: &[wgpu::BindGroup],
         clear: [f32; 4],
     ) -> Presented {
         let frame = match self.acquire() {
@@ -421,7 +423,7 @@ impl Gpu {
             });
 
             let (w, h) = (self.config.width, self.config.height);
-            let mut current: Option<RunKind> = None;
+            let mut current: Option<(RunKind, u32)> = None;
             let mut current_scissor: Option<Option<[u32; 4]>> = None;
 
             for run in &dl.runs {
@@ -435,7 +437,7 @@ impl Gpu {
                     continue;
                 }
 
-                if current != Some(run.kind) {
+                if current != Some((run.kind, run.page)) {
                     match run.kind {
                         RunKind::Rect => {
                             pass.set_pipeline(&self.rect_pipeline);
@@ -445,11 +447,16 @@ impl Gpu {
                         RunKind::Glyph => {
                             pass.set_pipeline(&self.text_pipeline);
                             pass.set_bind_group(0, &self.globals_bind, &[]);
-                            pass.set_bind_group(1, atlas_bind, &[]);
+                            // ⚠️ ページが無ければ描かない。**1 枚目で
+                            // 代用すると、別の字が出る**
+                            let Some(bind) = atlas_binds.get(run.page as usize) else {
+                                continue;
+                            };
+                            pass.set_bind_group(1, bind, &[]);
                             pass.set_vertex_buffer(0, self.glyph_buf.slice(..));
                         }
                     }
-                    current = Some(run.kind);
+                    current = Some((run.kind, run.page));
                 }
 
                 if current_scissor != Some(run.scissor) {

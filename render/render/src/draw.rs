@@ -62,6 +62,8 @@ pub enum RunKind {
 #[derive(Debug, Clone, Copy)]
 pub struct Run {
     pub kind: RunKind,
+    /// アトラスの何ページ目から読むか。**矩形では使わない**
+    pub page: u32,
     /// インスタンスの範囲
     pub first: u32,
     pub count: u32,
@@ -103,7 +105,7 @@ impl DrawList {
             r[0], r[1], r[2], r[3], color[0], color[1], color[2], color[3], radius, border, 0.0,
             0.0,
         ]);
-        self.extend_run(RunKind::Rect, first, scissor);
+        self.extend_run(RunKind::Rect, first, scissor, 0);
     }
 
     /// テクスチャ付きクアッドを 1 個積む。
@@ -119,6 +121,7 @@ impl DrawList {
         is_color: bool,
         radius: f32,
         scissor: Option<[u32; 4]>,
+        page: u32,
     ) {
         let first = self.glyph_count();
         self.glyphs.extend_from_slice(&[
@@ -139,14 +142,17 @@ impl DrawList {
             0.0,
             0.0,
         ]);
-        self.extend_run(RunKind::Glyph, first, scissor);
+        self.extend_run(RunKind::Glyph, first, scissor, page);
     }
 
     /// 直前の run と同じ種類・同じ切り取りなら伸ばし、違えば新しく作る。
-    fn extend_run(&mut self, kind: RunKind, first: u32, scissor: Option<[u32; 4]>) {
+    /// ⚠️ **ページが違えば束ね直す。** 同じ束で描くとテクスチャが 1 枚
+    /// しか選べず、別のページに載った字が 1 枚目から読まれる
+    fn extend_run(&mut self, kind: RunKind, first: u32, scissor: Option<[u32; 4]>, page: u32) {
         if let Some(last) = self.runs.last_mut()
             && last.kind == kind
             && last.scissor == scissor
+            && last.page == page
         {
             last.count += 1;
             return;
@@ -156,6 +162,7 @@ impl DrawList {
             first,
             count: 1,
             scissor,
+            page,
         });
     }
 }
@@ -211,6 +218,7 @@ fn scissor_of(clip: Option<Rect>, scale: f32, viewport: (u32, u32)) -> Option<[u
 pub fn build(
     layout: &LayoutResult<'_>,
     text: &mut TextEngine,
+    device: &wgpu::Device,
     queue: &wgpu::Queue,
     scale: f32,
     viewport: (u32, u32),
@@ -244,15 +252,20 @@ pub fn build(
 
         match &node.content {
             Content::Text(s) if !s.is_empty() => {
-                draw_text(&mut dl, text, queue, placed, s, opacity, scale, scissor);
+                draw_text(
+                    &mut dl, text, device, queue, placed, s, opacity, scale, scissor,
+                );
             }
             Content::Icon(name) => {
-                draw_icon(&mut dl, text, queue, placed, name, opacity, scale, scissor);
+                draw_icon(
+                    &mut dl, text, device, queue, placed, name, opacity, scale, scissor,
+                );
             }
             Content::Editable(e) => {
                 draw_editable(
                     &mut dl,
                     text,
+                    device,
                     queue,
                     placed,
                     e,
@@ -281,6 +294,7 @@ pub fn build(
 fn draw_icon(
     dl: &mut DrawList,
     text: &mut TextEngine,
+    device: &wgpu::Device,
     queue: &wgpu::Queue,
     placed: &crate::layout::Placed<'_>,
     name: &str,
@@ -298,7 +312,7 @@ fn draw_icon(
         .min(inner.h);
     let size = (logical * scale).round().max(1.0);
 
-    let Some(e) = text.icon(queue, name, size as u32) else {
+    let Some(e) = text.icon(device, queue, name, size as u32) else {
         // 知らない名前。描かずに進む
         return;
     };
@@ -308,7 +322,15 @@ fn draw_icon(
     let y = box_px[1] + ((box_px[3] - size) * 0.5).round();
 
     let color = linear(style.color.unwrap_or(FALLBACK_TEXT), opacity);
-    dl.push_glyph([x, y, size, size], e.uv, color, e.is_color, 0.0, scissor);
+    dl.push_glyph(
+        [x, y, size, size],
+        e.uv,
+        color,
+        e.is_color,
+        0.0,
+        scissor,
+        e.page,
+    );
 }
 
 fn draw_background(
@@ -358,6 +380,7 @@ fn draw_background(
 fn draw_editable(
     dl: &mut DrawList,
     text: &mut TextEngine,
+    device: &wgpu::Device,
     queue: &wgpu::Queue,
     placed: &crate::layout::Placed<'_>,
     e: &gumicord_uitree::Editable,
@@ -380,6 +403,7 @@ fn draw_editable(
         draw_glyph_run(
             dl,
             text,
+            device,
             queue,
             placed,
             &e.placeholder,
@@ -430,6 +454,7 @@ fn draw_editable(
         draw_glyph_run(
             dl,
             text,
+            device,
             queue,
             placed,
             &e.text,
@@ -636,6 +661,7 @@ fn text_origin(
 fn draw_glyph_run(
     dl: &mut DrawList,
     text: &mut TextEngine,
+    device: &wgpu::Device,
     queue: &wgpu::Queue,
     placed: &crate::layout::Placed<'_>,
     s: &str,
@@ -650,8 +676,8 @@ fn draw_glyph_run(
     // 原点の計算とずれる
     let wrap = (!intrinsic(placed.node.id).single_line).then_some(placed.inner.w);
 
-    let mut out: Vec<([f32; 4], [f32; 4], bool)> = Vec::new();
-    text.draw_glyphs(queue, s, &font, wrap, |e, gx, gy| {
+    let mut out: Vec<([f32; 4], [f32; 4], bool, u32)> = Vec::new();
+    text.draw_glyphs(device, queue, s, &font, wrap, |e, gx, gy| {
         out.push((
             [
                 ox + (gx + e.left) as f32,
@@ -661,11 +687,12 @@ fn draw_glyph_run(
             ],
             e.uv,
             e.is_color,
+            e.page,
         ));
     });
 
-    for (r, uv, is_color) in out {
-        dl.push_glyph(r, uv, color, is_color, 0.0, scissor);
+    for (r, uv, is_color, page) in out {
+        dl.push_glyph(r, uv, color, is_color, 0.0, scissor, page);
     }
 }
 
@@ -673,6 +700,7 @@ fn draw_glyph_run(
 fn draw_text(
     dl: &mut DrawList,
     text: &mut TextEngine,
+    device: &wgpu::Device,
     queue: &wgpu::Queue,
     placed: &crate::layout::Placed<'_>,
     s: &str,
@@ -687,11 +715,13 @@ fn draw_text(
     if intrinsic(placed.node.id).single_line {
         let font = ResolvedFont::from_style(&placed.node.style);
         let fitted = text.shaper().fit_single_line(s, &font, placed.inner.w);
-        draw_glyph_run(dl, text, queue, placed, &fitted, color, scale, scissor);
+        draw_glyph_run(
+            dl, text, device, queue, placed, &fitted, color, scale, scissor,
+        );
         return;
     }
 
-    draw_glyph_run(dl, text, queue, placed, s, color, scale, scissor);
+    draw_glyph_run(dl, text, device, queue, placed, s, color, scale, scissor);
 }
 
 /// 取ってきた画像を 1 枚描く。
@@ -754,6 +784,7 @@ fn draw_image(
         true,
         radius_px,
         scissor,
+        e.page,
     );
 }
 
@@ -833,6 +864,30 @@ mod tests {
     fn srgb_endpoints_are_exact() {
         assert_eq!(srgb_to_linear(0), 0.0);
         assert!((srgb_to_linear(255) - 1.0).abs() < 1e-6);
+    }
+
+    /// ⚠️ **ページが違えば束ね直す。**
+    ///
+    /// 同じ束で描くとテクスチャが 1 枚しか選べず、別のページに載った字が
+    /// 1 枚目から読まれる — 見たこともない字が出る
+    #[test]
+    fn a_different_page_starts_a_new_run() {
+        let mut dl = DrawList::default();
+        let uv = [0.0, 0.0, 1.0, 1.0];
+        let c = [1.0; 4];
+
+        dl.push_glyph([0.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 0);
+        dl.push_glyph([1.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 0);
+        assert_eq!(dl.runs.len(), 1, "同じページなら 1 つ");
+
+        dl.push_glyph([2.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 1);
+        assert_eq!(dl.runs.len(), 2, "ページが変われば分かれる");
+        assert_eq!(dl.runs[0].page, 0);
+        assert_eq!(dl.runs[1].page, 1);
+
+        // 戻ってもまた分かれる
+        dl.push_glyph([3.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 0);
+        assert_eq!(dl.runs.len(), 3);
     }
 
     #[test]

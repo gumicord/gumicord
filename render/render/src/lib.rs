@@ -86,7 +86,8 @@ impl ScrollGrab {
 pub struct Renderer {
     gpu: Gpu,
     text: TextEngine,
-    atlas_bind: wgpu::BindGroup,
+    /// ページごとの束ね。**増えたら作り直す**
+    atlas_binds: Vec<wgpu::BindGroup>,
     scale: f32,
     scroll: ScrollState,
     /// 直前のフレームの配置。入力の当たり判定に使う
@@ -113,11 +114,11 @@ impl Renderer {
     ) -> Result<Self, GpuError> {
         let gpu = Gpu::new(target, width, height)?;
         let text = TextEngine::new(&gpu.device, scale);
-        let atlas_bind = gpu.atlas_bind_group(text.atlas_view());
+        let atlas_binds = bind_pages(&gpu, &text);
         Ok(Renderer {
             gpu,
             text,
-            atlas_bind,
+            atlas_binds,
             scale,
             scroll: ScrollState::new(),
             hits: Vec::new(),
@@ -140,7 +141,7 @@ impl Renderer {
         }
         self.scale = scale;
         self.text.set_scale(&self.gpu.device, scale);
-        self.atlas_bind = self.gpu.atlas_bind_group(self.text.atlas_view());
+        self.atlas_binds = bind_pages(&self.gpu, &self.text);
     }
 
     pub fn scale(&self) -> f32 {
@@ -318,6 +319,7 @@ impl Renderer {
         let dl = draw::build(
             &layout,
             &mut self.text,
+            &self.gpu.device,
             &self.gpu.queue,
             self.scale,
             self.gpu.size(),
@@ -329,7 +331,7 @@ impl Renderer {
             rects: dl.rect_count(),
             glyphs: dl.glyph_count(),
             draw_calls: dl.runs.len(),
-            presented: self.gpu.submit(&dl, &self.atlas_bind, CLEAR),
+            presented: self.gpu.submit(&dl, &self.atlas_binds, CLEAR),
         }
     }
 
@@ -365,7 +367,13 @@ impl Renderer {
     ///
     /// 入らなければ黙って諦める。**絵が出ないだけで、他は何も壊れない**
     pub fn put_image(&mut self, image: &crate::text::ImageData) {
-        self.text.put_image(&self.gpu.queue, image);
+        self.text
+            .put_image(&self.gpu.device, &self.gpu.queue, image);
+        // ⚠️ **ページが増えたら束ね直す。** 束ね直さないと、新しい
+        // ページのテクスチャを選べず、そこに載ったものが描かれない
+        if self.text.took_atlas_growth() {
+            self.atlas_binds = bind_pages(&self.gpu, &self.text);
+        }
     }
 
     /// 絵を忘れたか。**1 回だけ真を返す。**
@@ -381,4 +389,15 @@ impl Renderer {
     pub fn has_image(&self, url: &str) -> bool {
         self.text.has_image(url)
     }
+}
+
+/// アトラスのページごとに束ねる。
+///
+/// ⚠️ **ページが増えるたびに作り直す。** 束ねは 1 枚のテクスチャしか
+/// 指せないので、ページの数だけ要る
+fn bind_pages(gpu: &Gpu, text: &TextEngine) -> Vec<wgpu::BindGroup> {
+    text.atlas_views()
+        .into_iter()
+        .map(|v| gpu.atlas_bind_group(v))
+        .collect()
 }
