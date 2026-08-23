@@ -52,6 +52,13 @@ pub struct Intrinsic {
     pub height: Option<f32>,
     /// はみ出しを切り、スクロールできるか
     pub scroll: bool,
+    /// 交差軸の大きさを**決めない**。親が決めた分をもらうだけか。
+    ///
+    /// ⚠️ **自分の欄は左側の幅を決めない。** 幅を決めるのはサーバ一覧と
+    /// チャンネル一覧のほうであって、その下に敷かれる帯ではない。ここを
+    /// 外すと、帯が入れ物いっぱいに広がろうとした分だけ左側が広がり、
+    /// **チャットの幅が 0 になって何も出なくなる**。
+    pub follows_cross: bool,
     /// 1 行に収めて、はみ出したら「…」で切るか。
     ///
     /// ⚠️ **一覧の項目は折り返してはいけない。** 行の高さが揃わなくなり、
@@ -74,6 +81,7 @@ impl Intrinsic {
             width: None,
             height: None,
             scroll: false,
+            follows_cross: false,
             single_line: false,
             anchor_end: false,
         }
@@ -116,6 +124,12 @@ impl Intrinsic {
     /// 1 行に収める。はみ出したら「…」で切る
     const fn one_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// 交差軸では親に従い、親の大きさを決めない
+    const fn follows_cross(mut self) -> Self {
+        self.follows_cross = true;
         self
     }
 
@@ -209,8 +223,12 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // ── nav.user_panel — 一覧の一番下に居座る
         //
         // ⚠️ **一覧と一緒にスクロールしない。** 自分が誰かは、
-        // どこまで巻いていても見えていなければならない
-        NavUserPanel => Intrinsic::row().h(52.0).cross(Cross::Center),
+        // どこまで巻いていても見えていなければならない。
+        // 幅は一覧が決める (`follows_cross`)
+        NavUserPanel => Intrinsic::row()
+            .h(52.0)
+            .cross(Cross::Center)
+            .follows_cross(),
         NavUserPanelAvatar => Intrinsic::stack().w(32.0).h(32.0),
         // 名前と言葉を縦に積む。**余りを取って、右に何か置けるようにする**
         NavUserPanelName => Intrinsic::row().grow(1.0).one_line(),

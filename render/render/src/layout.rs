@@ -279,6 +279,9 @@ impl<'a> Cx<'a, '_, '_> {
                     ),
                 );
                 sizes[i] = s;
+                if intrinsic(c.id).follows_cross {
+                    continue;
+                }
                 content.w = content.w.max(s.w + m.horizontal());
                 content.h = content.h.max(s.h + m.vertical());
             }
@@ -385,9 +388,17 @@ impl<'a> Cx<'a, '_, '_> {
             let m = margins[i];
             if horizontal {
                 main_total += s.w;
-                cross_max = cross_max.max(s.h + m.vertical());
             } else {
                 main_total += s.h;
+            }
+            // 交差軸を決めない子は数に入れない。**主軸には要る** ―
+            // 積まれている以上、場所は取っている
+            if intrinsic(node.children[i].id).follows_cross {
+                continue;
+            }
+            if horizontal {
+                cross_max = cross_max.max(s.h + m.vertical());
+            } else {
                 cross_max = cross_max.max(s.w + m.horizontal());
             }
         }
@@ -702,6 +713,45 @@ mod tests {
             rect_of(&r, NodeId::ChatView).h,
             600.0,
             "指定がなければ広がる"
+        );
+    }
+
+    /// 自分の欄は左側の幅を**決めない**。一覧が決めた幅をもらうだけである。
+    ///
+    /// これを外すと、帯が入れ物いっぱいに広がろうとした分だけ左側が広がり、
+    /// `chat.view` に配る余りが無くなって**チャットが消える**。実際に消えた
+    #[test]
+    fn the_user_panel_takes_the_width_it_is_given() {
+        let lists = UiNode::new(NodeId::NavSidebarLists)
+            .child(styled(NodeId::NavGuildList, |s| s.width = Some(64.0)))
+            .child(styled(NodeId::NavChannelList, |s| s.width = Some(240.0)));
+        let panel = UiNode::new(NodeId::NavUserPanel).child(
+            UiNode::new(NodeId::LayoutColumn).child(UiNode::text(
+                NodeId::NavUserPanelName,
+                "ずいぶん長い名前のひと".to_owned(),
+            )),
+        );
+        let tree = UiNode::new(NodeId::AppScreenMain)
+            .child(UiNode::new(NodeId::NavSidebar).child(lists).child(panel))
+            .child(UiNode::new(NodeId::ChatView));
+
+        let r = layout(
+            &tree,
+            Size::new(1000.0, 600.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+
+        assert_eq!(rect_of(&r, NodeId::NavSidebar).w, 304.0, "一覧が幅を決める");
+        assert_eq!(
+            rect_of(&r, NodeId::NavUserPanel).w,
+            304.0,
+            "帯は両方にまたがる"
+        );
+        assert_eq!(
+            rect_of(&r, NodeId::ChatView).w,
+            696.0,
+            "チャットに余りが残る"
         );
     }
 

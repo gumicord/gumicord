@@ -117,10 +117,7 @@ pub fn from_settings_proto(proto_base64: &str) -> Option<Status> {
         .ok()?;
 
     // [1] 文書化された道。**当たればこれが正しい**
-    if let Some(found) = wrapped_string(&bytes, F_STATUS)
-        .as_deref()
-        .and_then(Status::from_wire)
-    {
+    if let Some(found) = documented(&bytes) {
         tracing::debug!(status = found.as_wire(), "ステータスを道筋から読んだ");
         return Some(found);
     }
@@ -129,9 +126,36 @@ pub fn from_settings_proto(proto_base64: &str) -> Option<Status> {
     //
     // ⚠️ **知っている名前に一致したときしか採らない。** 設定の中には
     // 文字列がいくらでもあり、拾った端から信じると別のものを出す
-    let found = by_shape(&bytes, 0)?;
+    let Some(found) = by_shape(&bytes, 0) else {
+        // ⚠️ **設定の中身をばら撒かない。** 出すのは大きさと、
+        // 番号どおりの場所にあった**ステータスの名前**だけである。
+        // 知らない名前が来たのか、そもそも入っていないのかを
+        // 分けられないと、次に何を直すか決められない
+        tracing::debug!(
+            bytes = bytes.len(),
+            raw = documented_raw(&bytes).as_deref().unwrap_or("(無し)"),
+            "設定の中にステータスが無い"
+        );
+        return None;
+    };
     tracing::debug!(status = found.as_wire(), "ステータスを形から読んだ");
     Some(found)
+}
+
+/// 番号どおりに辿る。
+///
+/// ⚠️ **包みは 2 枚ある。** `PreloadedUserSettings.status` は
+/// `StatusSettings` であって包みではない。包みなのはその中の 1 番である。
+/// ここを 1 枚と数えると、**文字列の代わりに包みの中身を生で読む**ことに
+/// なり、道筋は必ず外れて [`by_shape`] 頼りになる
+fn documented(bytes: &[u8]) -> Option<Status> {
+    Status::from_wire(&documented_raw(bytes)?)
+}
+
+/// 番号どおりの場所にある**線の上の名前**。知らない名前もそのまま返す
+fn documented_raw(bytes: &[u8]) -> Option<String> {
+    let settings = blocks(bytes, F_STATUS).into_iter().next()?;
+    wrapped_string(settings, F_STATUS_VALUE)
 }
 
 /// 入れ子を潜って、ステータスに読める文字列を探す。
@@ -206,6 +230,17 @@ mod tests {
         ] {
             assert_eq!(from_settings_proto(&settings(wire)), Some(want));
         }
+    }
+
+    /// ⚠️ **形頼りに落ちていないことを確かめる。** [`by_shape`] は同じ
+    /// 答えを出すので、[`from_settings_proto`] を見ているだけでは
+    /// 道筋が外れていても気付けない。実際に外れていた
+    #[test]
+    fn the_documented_path_answers_on_its_own() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(settings("dnd"))
+            .expect("自分で組んだもの");
+        assert_eq!(documented(&bytes), Some(Status::Dnd));
     }
 
     /// ⚠️ **番号が変わっても拾う。** 知っている名前に一致したときだけ
