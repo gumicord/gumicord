@@ -99,39 +99,75 @@
 
     {
       "select": "nav.guild_list",
-      "style": { "background": "$color.bg.sunken", "padding": 12, "gap": "$space.2" }
+      "style": { "background": "$color.bg.sunken", "padding": [12, 12, 12, 4], "gap": "$space.2" }
     },
     {
       "select": "nav.guild_list.item",
-      "style": { "width": 40, "height": 40, "radius": "$radius.lg", "background": "$color.bg.raised" }
+      "style": { "width": 56, "height": 48 }
     },
     {
       "select": "nav.guild_list.item",
-      "when": { "state": "hover" },
-      "style": { "radius": "$radius.md" }
-    },
-    {
-      "select": "nav.guild_list.item",
-      "when": { "state": "selected" },
-      "style": { "radius": "$radius.md", "borderColor": "$color.accent", "borderWidth": 2 }
+      "when": { "state": "grouped" },
+      "style": { "width": 40, "height": 40 }
     },
     {
       "select": "nav.guild_list.item",
       "when": { "platform": "mobile" },
-      "style": { "width": 36, "height": 36 }
+      "style": { "width": 52, "height": 44 }
     },
     {
-      "select": "nav.guild_list.item",
+      "select": "nav.guild_list.item.pill",
+      "style": {
+        "width": 4,
+        "height": 8,
+        "margin": [0, 52, 0, 0],
+        "radius": "$radius.full",
+        "background": "$color.text.primary"
+      }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
+      "when": { "state": "hover" },
+      "style": { "height": 20 }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
+      "when": { "state": "selected" },
+      "style": { "height": 40 }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
       "when": { "state": "grouped" },
-      "style": { "width": 32, "height": 32 }
+      "style": { "margin": [0, 36, 0, 0] }
     },
     {
       "select": "nav.guild_list.item.icon",
-      "style": { "width": 40, "height": 40, "radius": "$radius.lg", "background": "$color.bg.raised" }
+      "style": {
+        "width": 48,
+        "height": 48,
+        "margin": [0, 0, 0, 8],
+        "radius": "$radius.lg",
+        "background": "$color.bg.raised"
+      }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "hover" },
+      "style": { "radius": "$radius.md" }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "selected" },
+      "style": { "radius": "$radius.md" }
     },
     {
       "select": "nav.guild_list.item.icon",
       "when": { "state": "grouped" },
+      "style": { "width": 32, "height": 32, "margin": [0, 0, 0, 0] }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "collapsed" },
       "style": {
         "width": 14,
         "height": 14,
@@ -143,7 +179,8 @@
     {
       "select": "nav.guild_list.folder",
       "style": {
-        "width": 40,
+        "width": 48,
+        "margin": [0, 0, 0, 8],
         "radius": "$radius.lg",
         "background": "$color.bg.hover",
         "padding": [0, 0, 4, 0],
@@ -154,12 +191,12 @@
       "select": "nav.guild_list.folder",
       "when": { "state": "collapsed" },
       "style": {
-        "height": 40,
+        "height": 48,
         "radius": "$radius.md",
         "background": "$color.bg.raised",
         "borderColor": "$color.border",
         "borderWidth": 1,
-        "padding": [4, 4, 4, 4]
+        "padding": [6, 6, 6, 6]
       }
     },
     {
@@ -169,7 +206,7 @@
     },
     {
       "select": "nav.guild_list.folder.icon",
-      "style": { "color": "$color.text.secondary", "font": { "size": 22, "lineHeight": 22 } }
+      "style": { "color": "$color.text.secondary", "font": { "size": 26, "lineHeight": 26 } }
     },
     {
       "select": "nav.guild_list.folder.icon",
@@ -201,7 +238,7 @@
     },
     {
       "select": "nav.guild_list.home",
-      "style": { "width": 40, "height": 40, "radius": "$radius.full", "background": "$color.brand", "color": "#ffffff" }
+      "style": { "width": 48, "height": 48, "margin": [0, 0, 0, 8], "radius": "$radius.full", "background": "$color.brand", "color": "#ffffff" }
     },
     {
       "select": "nav.channel_list.item",
@@ -403,6 +440,10 @@
     {
       "select": "chat.message.header.author",
       "style": { "font": "$font.title", "color": "$color.text.primary" }
+    },
+    {
+      "select": "chat.message.header.author",
+      "style": { "color": "$data.tint" }
     },
     {
       "select": "chat.message.header.timestamp",

@@ -154,6 +154,7 @@ define_node_ids! {
     NavGuildListHome,         "nav.guild_list.home",             None,    Core,   "DM への入口 (FR-013)";
     NavGuildListItem,         "nav.guild_list.item",             Guild,   Core,   "ギルド 1 個 (FR-010)";
     NavGuildListItemIcon,     "nav.guild_list.item.icon",        Guild,   Core,   "ギルドアイコン";
+    NavGuildListItemPill,     "nav.guild_list.item.pill",        Guild,   Core,   "左端の白い印。選択中・未読・ホバーで大きさが変わる";
     NavGuildListItemBadge,    "nav.guild_list.item.badge",       Guild,   Core,   "未読・メンション数 (FR-042)";
     NavGuildListFolder,       "nav.guild_list.folder",           None,    Core,   "サーバフォルダ。押すと開閉する";
     NavGuildListFolderIcon,   "nav.guild_list.folder.icon",      None,    Core,   "開いているフォルダの目印";

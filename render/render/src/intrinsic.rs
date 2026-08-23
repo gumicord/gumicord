@@ -190,13 +190,21 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
 
         // ── nav.* — ギルド一覧は内容 (48px の丸) が幅を決める
         NavGuildList => Intrinsic::column().cross(Cross::Start).scrollable(),
-        NavGuildListHome | NavGuildListItem | NavGuildListItemIcon | NavGuildListFolderIcon => {
-            Intrinsic::stack().w(48.0).h(48.0)
-        }
+        NavGuildListHome | NavGuildListFolderIcon => Intrinsic::stack().w(48.0).h(48.0),
+        // ⚠️ **絵より広い。** 左端に印 (`pill`) の通り道がある。
+        // 絵をそのまま項目にすると、印を置く場所が無い
+        NavGuildListItem => Intrinsic::stack().w(56.0).h(48.0),
+        // ⚠️ **大きさを持たない。** 入れ物いっぱいに広がる。
+        // 閉じたフォルダに敷き詰めるときだけ、テーマが小さくする
+        NavGuildListItemIcon => Intrinsic::stack(),
         // ⚠️ **フォルダは中身を抱える入れ物である。** 開いているときは
         // 目印と中のサーバが縦に並び、**その背景が 1 枚で後ろを通る**。
         // 高さは中身が決めるので、ここでは決めない
         NavGuildListFolder => Intrinsic::column().cross(Cross::Center).w(48.0),
+        // ⚠️ **絵の隣ではなく、絵と同じ場所に重なる。** 流れの中に置くと
+        // 出た瞬間にサーバの絵が右へずれる。左端へ寄せるのは
+        // テーマの `margin` の仕事である
+        NavGuildListItemPill => Intrinsic::stack().w(4.0),
         NavGuildListItemBadge => Intrinsic::row(),
 
         // ⚠️ **これ自体は巻かない。** 中の `layout.scroll` だけが巻く。

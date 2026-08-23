@@ -667,20 +667,62 @@ impl Gumicord {
 
     /// サーバ 1 個。**フォルダの中でも外でも同じものである**
     fn guild_item(&self, g: &GuildRow) -> UiNode {
-        face(NodeId::NavGuildListItem, g.icon.as_deref(), &g.name)
+        let selected = g.id == self.selected_guild;
+        let hovered = self.hovered_id(NodeId::NavGuildListItem, g.id);
+
+        // ⚠️ **入れ物と絵を分ける。** 入れ物のほうが広く、左端に印の
+        // 通り道がある。絵をそのまま項目にすると、印を置く場所が無い
+        let icon = face(NodeId::NavGuildListItemIcon, g.icon.as_deref(), &g.name)
+            .with_data(g.id)
+            .with_state_if(selected, State::Selected)
+            .with_state_if(hovered, State::Hover)
+            .with_state_if(g.in_folder, State::Grouped);
+
+        UiNode::new(NodeId::NavGuildListItem)
             .with_id_key(g.id)
             .with_data(g.id)
-            .with_state_if(g.id == self.selected_guild, State::Selected)
+            .with_state_if(selected, State::Selected)
             .with_state_if(g.unread, State::Unread)
             .with_state_if(g.mentions > 0, State::Mentioned)
             // ⚠️ **フォルダの中にいることは状態で伝える。**
             // 空白のノードを挟むと、字下げの量が焼き付いてテーマから
             // 揃えられなくなる (`chat.message` の grouped と同じ考え)
             .with_state_if(g.in_folder, State::Grouped)
-            .with_state_if(
-                self.hovered_id(NodeId::NavGuildListItem, g.id),
-                State::Hover,
-            )
+            .with_state_if(hovered, State::Hover)
+            .children(self.guild_pill(g, selected, hovered))
+            .child(icon)
+    }
+
+    /// サーバの左端に出る白い印 (Discord の「ピル」)。
+    ///
+    /// ```text
+    ///   ▍◯   選択中     — 背が高い
+    ///   ▪◯   未読       — 点だけ
+    ///   ▎◯   ホバー     — その中間
+    ///    ◯   それ以外   — 出ない
+    /// ```
+    ///
+    /// # ⚠️ 意味が無いときは出さない
+    ///
+    /// 高さ 0 のノードを置いて隠すのではなく、置かない。**出ている印は
+    /// 必ず何かを言っている**ようにする。
+    ///
+    /// ⚠️ **大きさはテーマが決める。** ここが渡すのは「どういう理由で
+    /// 出ているか」だけである。
+    ///
+    /// ⚠️ **未読はまだ来ない。** READY の `read_state` を読んでいないので、
+    /// いま出るのは選択中とホバーだけである
+    fn guild_pill(&self, g: &GuildRow, selected: bool, hovered: bool) -> Option<UiNode> {
+        if !selected && !hovered && !g.unread {
+            return None;
+        }
+        Some(
+            UiNode::new(NodeId::NavGuildListItemPill)
+                .with_data(g.id)
+                .with_state_if(selected, State::Selected)
+                .with_state_if(g.unread, State::Unread)
+                .with_state_if(hovered, State::Hover),
+        )
     }
 
     /// フォルダを 1 つ組む。
@@ -733,9 +775,17 @@ impl Gumicord {
                 line = line.child(
                     face(NodeId::NavGuildListItemIcon, m.icon.as_deref(), &m.name)
                         .with_id_key(m.id)
-                        // ⚠️ **小ささはテーマが決める。** ここで寸法を焼き付けると
+                        // ⚠️ **`grouped` ではなく `collapsed` である。**
+                        //
+                        // `grouped` は「フォルダの中にいるサーバ」であり、
+                        // それは開いているときの普通の大きさで出る。ここは
+                        // **閉じたフォルダの面に敷き詰めた 1 枚**で、意味も
+                        // 大きさも別物である。同じ状態に相乗りさせると、
+                        // 片方を直したときにもう片方が壊れる。
+                        //
+                        // ⚠️ 小ささはテーマが決める。ここで寸法を焼き付けると
                         // テーマから揃えられなくなる (`chat.message` と同じ)
-                        .with_state(State::Grouped),
+                        .with_state(State::Collapsed),
                 );
             }
             grid = grid.child(line);
@@ -1078,7 +1128,11 @@ impl Gumicord {
             .child_if(!grouped, || {
                 UiNode::new(NodeId::ChatMessageHeader)
                     .with_data(m.id)
-                    .child(UiNode::text(NodeId::ChatMessageHeaderAuthor, &m.author).with_data(m.id))
+                    .child(
+                        UiNode::text(NodeId::ChatMessageHeaderAuthor, &m.author)
+                            .with_data(m.id)
+                            .with_tint_opt(m.tint.map(Color::from_rgb)),
+                    )
                     .child(
                         UiNode::text(NodeId::ChatMessageHeaderTime, format!("  {}", m.time))
                             .with_data(m.id),
@@ -1145,6 +1199,8 @@ struct MessageRow {
     author: String,
     /// アバターの URL。**無ければ頭文字を出す**
     avatar: Option<String>,
+    /// 役職の色。**塗る場所はテーマが決める**
+    tint: Option<u32>,
     time: String,
     body: String,
     mentioned: bool,
@@ -1385,6 +1441,7 @@ impl Gumicord {
                     id: m.id,
                     author: m.author.to_string(),
                     avatar: None,
+                    tint: None,
                     time: m.time.to_string(),
                     body: m.body.to_string(),
                     mentioned: m.mentioned,
@@ -1418,6 +1475,12 @@ impl Gumicord {
                     .with_size(AVATAR_PX)
                     .url(),
                 ),
+                // ⚠️ **一番上の「色を付けている」役職が勝つ。**
+                // 色を載せるだけで、塗る場所はテーマが決める
+                tint: m
+                    .member
+                    .as_ref()
+                    .and_then(|x| self.live.store().member_tint(guild, &x.roles)),
                 time: local_time(&m.timestamp),
                 body: m.content.clone(),
                 // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
@@ -2407,9 +2470,13 @@ mod folder_tests {
         a
     }
 
+    /// 閉じたフォルダの面に敷き詰められた絵の枚数。
+    ///
+    /// ⚠️ **`collapsed` で数える。** 普通のサーバも同じ安定 ID の絵を
+    /// 持っているので、ID だけで数えると一覧じゅうの絵が混ざる
     fn tiles(node: &UiNode) -> usize {
         fn walk(n: &UiNode, found: &mut usize) {
-            if n.id == NodeId::NavGuildListItemIcon {
+            if n.id == NodeId::NavGuildListItemIcon && n.states.contains(State::Collapsed) {
                 *found += 1;
             }
             for c in &n.children {
@@ -2419,6 +2486,63 @@ mod folder_tests {
         let mut found = 0;
         walk(node, &mut found);
         found
+    }
+
+    /// 左端の印は**選択中・未読・ホバーのときだけ**出る。
+    ///
+    /// ⚠️ 高さ 0 で隠すのではなく置かない。**出ている印は必ず何かを言う**
+    #[test]
+    fn the_pill_only_appears_when_it_means_something() {
+        fn pills(n: &UiNode, out: &mut Vec<gumicord_uitree::StateSet>) {
+            if n.id == NodeId::NavGuildListItemPill {
+                out.push(n.states);
+            }
+            for c in &n.children {
+                pills(c, out);
+            }
+        }
+
+        let mut a = app_with_folder();
+        a.selected_guild = 4;
+
+        let mut found = Vec::new();
+        pills(&a.guild_list(), &mut found);
+
+        // 選んでいるサーバ 1 つにしか出ない
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains(State::Selected));
+
+        // どれも選んでいなければ 1 つも出ない
+        a.selected_guild = 0;
+        let mut none = Vec::new();
+        pills(&a.guild_list(), &mut none);
+        assert!(none.is_empty());
+    }
+
+    /// ⚠️ **絵は入れ物の子である。** 入れ物のほうが広く、左端に印の
+    /// 通り道がある。絵をそのまま項目にすると印を置く場所が無い
+    #[test]
+    fn the_item_holds_the_picture_rather_than_being_it() {
+        let a = app_with_folder();
+        let list = a.guild_list();
+
+        let item = list
+            .children
+            .iter()
+            .find(|n| n.id == NodeId::NavGuildListItem)
+            .expect("サーバがある");
+        assert!(item.content.as_image().is_none(), "入れ物は絵を持たない");
+        assert!(
+            item.children
+                .iter()
+                .any(|c| c.id == NodeId::NavGuildListItemIcon),
+            "絵は子である"
+        );
+        assert!(
+            gumicord_render::intrinsic(NodeId::NavGuildListItem).width
+                > gumicord_render::intrinsic(NodeId::NavGuildListHome).width,
+            "印の通り道のぶん広い"
+        );
     }
 
     /// ⚠️ **閉じたフォルダは中身の絵を並べる。**

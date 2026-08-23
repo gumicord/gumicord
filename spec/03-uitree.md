@@ -221,6 +221,7 @@ M1 で公開するフィールド。
 | `nav.guild_list.home` | — | DM への入口 (FR-013) |
 | `nav.guild_list.item` | `GuildData` | ギルド 1 個 (FR-010) |
 | `nav.guild_list.item.icon` | `GuildData` | ギルドアイコン |
+| `nav.guild_list.item.pill` | `GuildData` | 左端の白い印。選択中・未読・ホバーで大きさが変わる |
 | `nav.guild_list.item.badge` | `GuildData` | 未読・メンション数 (FR-042) |
 | `nav.guild_list.folder` | — | サーバフォルダ。押すと開閉する |
 | `nav.guild_list.folder.icon` | — | 開いているフォルダの目印 |
@@ -306,7 +307,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 85 個** (中核 64 / プラグインも生成可 21)。
+**合計 86 個** (中核 65 / プラグインも生成可 21)。
 
 <!-- END GENERATED: node-ids -->
 

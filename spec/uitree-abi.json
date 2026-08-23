@@ -17,6 +17,7 @@
     "nav.guild_list.home": "none",
     "nav.guild_list.item": "GuildData",
     "nav.guild_list.item.icon": "GuildData",
+    "nav.guild_list.item.pill": "GuildData",
     "nav.guild_list.item.badge": "GuildData",
     "nav.guild_list.folder": "none",
     "nav.guild_list.folder.icon": "none",

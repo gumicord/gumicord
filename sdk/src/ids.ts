@@ -21,6 +21,7 @@ export type NodeId =
   | "nav.guild_list.home"
   | "nav.guild_list.item"
   | "nav.guild_list.item.icon"
+  | "nav.guild_list.item.pill"
   | "nav.guild_list.item.badge"
   | "nav.guild_list.folder"
   | "nav.guild_list.folder.icon"
@@ -127,6 +128,7 @@ export type CoreCreatableNodeId =
 export interface DataByNode {
   "nav.guild_list.item": GuildData;
   "nav.guild_list.item.icon": GuildData;
+  "nav.guild_list.item.pill": GuildData;
   "nav.guild_list.item.badge": GuildData;
   "nav.channel_list.category": CategoryData;
   "nav.channel_list.item": ChannelData;
