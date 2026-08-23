@@ -121,6 +121,25 @@ pub trait Application {
     /// 何の一覧なのかを知らない。
     fn scrolled(&mut self, _id: NodeId, _at: f32, _max: f32) {}
 
+    /// 入力が無くても、**この時間が経ったら描き直してほしい**。
+    ///
+    /// # なぜ要るのか
+    ///
+    /// `<t:…:R>` の「3 分前」は、誰も何もしなくても文字が変わる。出した
+    /// きり寝てしまうと、開きっぱなしの画面で「たった今」が何時間も残る。
+    ///
+    /// かといって毎秒起きるのは `NFR-005` (非アクティブ時に描画を停止する)
+    /// に反する。**次に文字が変わるまでの時間**が分かれば、そこまでは寝て
+    /// いられる。
+    ///
+    /// ⚠️ **`None` は「寝たままでよい」である。** 0 秒ではない。
+    /// 相対表示が画面に 1 つも無ければ、起きる理由が無い。
+    ///
+    /// 描いた直後に 1 回だけ聞かれる。
+    fn next_frame_in(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// 上へ足したので、**見ている場所を動かさないでほしい**一覧。
     ///
     /// 描く直前に呼ばれ、**1 回だけ効く**。伸びたのが上か下かを知って
@@ -246,6 +265,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         blink: crate::clock::caret_blink_interval(),
         caret_on: true,
         next_blink: std::time::Instant::now(),
+        next_frame: None,
         motion: gumicord_render::Motion::new(),
     };
     event_loop.run_app(&mut host)?;
@@ -283,6 +303,9 @@ struct Host {
     caret_on: bool,
     /// 次に切り替える時刻
     next_blink: std::time::Instant,
+    /// 入力が無くても描き直す時刻。`None` は**寝たままでよい**
+    /// ([`Application::next_frame_in`])
+    next_frame: Option<std::time::Instant>,
     /// 動いている最中のスタイル。**止まったら寝る** (`NFR-005`)
     motion: gumicord_render::Motion,
 }
@@ -580,6 +603,14 @@ impl Host {
             self.request_redraw();
         }
 
+        // 時間で変わる表示 (`<t:…:R>`) があれば、変わる頃に起き直す。
+        // ⚠️ **毎フレーム聞き直す。** 「3 分前」の次は 1 分後だが、
+        // 「59 秒前」の次は 1 秒後である
+        self.next_frame = self
+            .app
+            .next_frame_in()
+            .map(|d| std::time::Instant::now() + d);
+
         // ⚠️ **表示できなかったら、もう一度描き直しを要求する。**
         // `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が
         // 来るまで窓が空白のままになる。リサイズ直後は実際にそうなった。
@@ -636,22 +667,49 @@ impl ApplicationHandler for Host {
     /// [`crate::clock::caret_blink_interval`] が `None` を返したら
     /// 点けっぱなしにする。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(interval) = self.blink else { return };
-
-        if self.app.focused_document().is_none() {
-            // 次にフォーカスが当たったとき、点いた状態から始まるように戻す
-            self.caret_on = true;
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        }
-
         let now = std::time::Instant::now();
-        if now >= self.next_blink {
-            self.caret_on = !self.caret_on;
-            self.next_blink = now + interval;
-            self.request_redraw();
+
+        // ⚠️ **一番早いものまで寝る。** 待つ理由は 2 つあり、どちらか
+        // 片方だけを見ると、もう片方がその間ずっと止まる
+        let mut until: Option<std::time::Instant> = None;
+        let mut soonest = |at: std::time::Instant| {
+            until = Some(until.map_or(at, |cur: std::time::Instant| cur.min(at)));
+        };
+
+        // ── キャレットの点滅
+        //
+        // 打てる場所が無ければ点滅させるものも無い。**そのときは
+        // 点滅のために起きない** (`NFR-005`)
+        match self.blink.filter(|_| self.app.focused_document().is_some()) {
+            Some(interval) => {
+                if now >= self.next_blink {
+                    self.caret_on = !self.caret_on;
+                    self.next_blink = now + interval;
+                    self.request_redraw();
+                }
+                soonest(self.next_blink);
+            }
+            // 次にフォーカスが当たったとき、点いた状態から始まるように戻す
+            None => self.caret_on = true,
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_blink));
+
+        // ── 時間で変わる表示 (`<t:…:R>`)
+        if let Some(at) = self.next_frame {
+            if now >= at {
+                // 描き直せば、次にいつ起きるかも一緒に決まる
+                self.next_frame = None;
+                self.request_redraw();
+            } else {
+                soonest(at);
+            }
+        }
+
+        // ⚠️ **理由が無ければ寝る。** `WaitUntil` を置きっぱなしにすると、
+        // 何も変わらないのに起き続ける
+        event_loop.set_control_flow(match until {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     /// [`Waker::wake`] で起こされた。

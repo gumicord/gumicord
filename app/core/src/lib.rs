@@ -274,6 +274,16 @@ pub struct Gumicord {
     sent: Vec<demo::Message>,
     /// 絵を取ってくるもの (R5)
     images: images::Images,
+    /// フレームの頭で読んだ時刻 (UTC 秒)。
+    ///
+    /// ⚠️ **組んでいる最中に読み直さない。** 隣り合う `<t:…:R>` が
+    /// 同じ時刻を指しうる
+    now: i64,
+    /// 組んだ結果が、あと何秒そのままでよいか。
+    ///
+    /// `None` は「時間で変わるものが無い」= 寝たままでよい (`NFR-005`)。
+    /// 木を組むのは `&self` なので [`Cell`](std::cell::Cell) で溜める
+    holds: std::cell::Cell<Option<i64>>,
 }
 
 impl Gumicord {
@@ -328,6 +338,8 @@ impl Gumicord {
             input: TextDocument::new(),
             sent: Vec::new(),
             images: images::Images::new(),
+            now: gumicord_platform::now_unix(),
+            holds: std::cell::Cell::new(None),
         }
     }
 
@@ -475,6 +487,16 @@ impl Application for Gumicord {
         }
         let channel = ChannelId::from(self.selected_channel);
         self.live.load_older(channel);
+    }
+
+    /// 時間で変わる表示 (`<t:…:R>`) が、あと何秒持つか。
+    ///
+    /// ⚠️ **`None` は「寝たままでよい」である。** 相対表示が画面に 1 つも
+    /// 無ければ起きる理由が無い (`NFR-005`)
+    fn next_frame_in(&self) -> Option<std::time::Duration> {
+        self.holds
+            .get()
+            .map(|s| std::time::Duration::from_secs(s.max(1) as u64))
     }
 
     /// 上へ足したので、**見ている場所を動かさないでほしい**
@@ -722,6 +744,12 @@ impl Application for Gumicord {
     fn build(&mut self, cx: &FrameCx) -> UiNode {
         // ⚠️ **頼む絵の大きさが DPI で変わる。** 木を組む前に控える
         self.scale = cx.scale;
+
+        // ⚠️ **時計はフレームの頭で 1 回だけ読む。** 組んでいる最中に
+        // 読み直すと、同じ画面に並んだ「3 分前」と「4 分前」が同じ時刻を
+        // 指しうる
+        self.now = gumicord_platform::now_unix();
+        self.holds.set(None);
 
         // ⚠️ **木を組む前に控える。** 本文の飾りは走りであってノードでは
         // ないので、[5] の走査では拾えない。組みながら引くしかない
@@ -1701,14 +1729,32 @@ impl Gumicord {
             self.theme.as_ref(),
             self.match_ctx,
             self.revealed.contains(&m.id),
+            self.now,
         );
         let names = StoreNames {
             store: self.live.store(),
             guild: GuildId::from(self.selected_guild),
         };
-        UiNode::new(NodeId::ChatMessageContent)
+        let node = UiNode::new(NodeId::ChatMessageContent)
             .with_data(m.id)
-            .children(ink.blocks(&m.blocks, &names))
+            .children(ink.blocks(&m.blocks, &names));
+
+        // 時間で変わる表示があれば、一番早く変わるものを覚えておく
+        if let Some(secs) = ink.holds_for() {
+            self.hold(secs);
+        }
+        node
+    }
+
+    /// 「あと何秒そのままでよいか」を溜める。**一番短いものが残る。**
+    ///
+    /// ⚠️ `&self` のまま組むので [`Cell`](std::cell::Cell) で持つ
+    fn hold(&self, secs: i64) {
+        let next = match self.holds.get() {
+            Some(cur) => cur.min(secs),
+            None => secs,
+        };
+        self.holds.set(Some(next));
     }
 }
 
@@ -2510,6 +2556,53 @@ mod tests {
 
         assert!(a.cancel_input(), "2 回目でフォーカスが外れていない");
         assert!(!a.input_focused);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  時間で変わる表示 (`<t:…:R>`, `NFR-005`)
+
+    fn built(a: &mut Gumicord) {
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        };
+        a.build(&cx);
+    }
+
+    /// ⚠️ **相対表示が 1 つも無ければ寝たままでよい。**
+    ///
+    /// 起きる理由が無いのに `WaitUntil` を置くと、何も変わらないのに
+    /// 回り続ける (`NFR-005`)
+    #[test]
+    fn 相対表示が無ければ起きない() {
+        let mut a = app();
+        built(&mut a);
+        assert_eq!(a.next_frame_in(), None);
+    }
+
+    /// ⚠️ **時間で変わるものがあれば、変わる頃に起き直す。**
+    ///
+    /// 出したきり寝ると、開きっぱなしの画面で「たった今」が何時間も残る
+    #[test]
+    fn 相対表示があると起き直しを頼む() {
+        let mut a = app();
+        // ⚠️ **時計を読んだ結果に合わせる。** 決め打ちの時刻を書くと、
+        // 走らせるたびに「何年前」の側へ落ちる
+        let at = gumicord_platform::now_unix() - 90;
+        a.sent.push(demo::Message {
+            id: 9_999,
+            author: Cow::Borrowed("ねんねこ"),
+            time: Cow::Borrowed("たった今"),
+            body: Cow::Owned(format!("<t:{at}:R>")),
+            mentioned: false,
+        });
+        built(&mut a);
+
+        let d = a.next_frame_in().expect("起き直しを頼んでいない");
+        assert!(
+            d.as_secs() >= 1 && d.as_secs() <= 60,
+            "分の切れ目のはずが {d:?}"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════
