@@ -34,7 +34,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
-use gumicord_model::{Channel, ChannelId, Guild, GuildId, Message, User};
+use gumicord_model::{Channel, ChannelId, Guild, GuildId, Member, Message, User};
 
 /// 1 チャンネルにつきディスクに残す件数。
 ///
@@ -213,11 +213,13 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-    id         TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    author_id  TEXT NOT NULL,
-    content    TEXT NOT NULL,
-    ts         TEXT NOT NULL
+    id            TEXT PRIMARY KEY,
+    channel_id    TEXT NOT NULL,
+    author_id     TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    ts            TEXT NOT NULL,
+    nick          TEXT,
+    member_avatar TEXT
 );
 
 CREATE INDEX IF NOT EXISTS messages_by_channel ON messages(channel_id, id);
@@ -238,7 +240,7 @@ CREATE TABLE IF NOT EXISTS state (
 ///
 /// ⚠️ **記録を置く場所ができたら、この判断はそこには使えない。**
 /// 消えて困るものをここへ入れないこと
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 fn init(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let found: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -263,7 +265,7 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
             Ok(Guild {
                 id: parse_id(row.get::<_, String>(0)?),
                 name: row.get(1)?,
-                icon: row.get(2)?,
+                icon_hash: row.get(2)?,
                 unavailable: false,
                 channels: Vec::new(),
             })
@@ -361,7 +363,8 @@ fn read_messages(
     // 辞書順で**並べる。桁が同じなら辞書順が時刻順に一致する
     conn.prepare(
         "SELECT m.id, m.author_id, m.content, m.ts,
-                u.username, u.global_name, u.discriminator, u.avatar
+                u.username, u.global_name, u.discriminator, u.avatar,
+                m.nick, m.member_avatar
            FROM messages m
            LEFT JOIN users u ON u.id = m.author_id
           WHERE m.channel_id = ?1
@@ -378,7 +381,7 @@ fn read_messages(
                 username: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 global_name: row.get(5)?,
                 discriminator: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                avatar: row.get(7)?,
+                avatar_hash: row.get(7)?,
                 bot: false,
             },
             content: row.get(2)?,
@@ -386,10 +389,31 @@ fn read_messages(
             edited_timestamp: None,
             pinned: false,
             attachments: Vec::new(),
+            member: member(row.get(8)?, row.get(9)?),
             referenced_message: None,
         })
     })?
     .collect()
+}
+
+/// 残しておいた「そのギルドでの姿」を戻す。
+///
+/// ⚠️ **どちらも無ければ [`Member`] を作らない。** 何も上書きしていない
+/// `Member` と「そもそも一員ではない (DM)」は別のことである。
+///
+/// ⚠️ **役職と参加日は残していない。** 画面に出していないものを残すと、
+/// 出すようになった日に**古い値が出る**
+fn member(nick: Option<String>, avatar_hash: Option<String>) -> Option<Member> {
+    if nick.is_none() && avatar_hash.is_none() {
+        return None;
+    }
+    Some(Member {
+        nick,
+        avatar_hash,
+        roles: Vec::new(),
+        joined_at: None,
+        user: None,
+    })
 }
 
 /// 文字列の識別子を戻す。**読めなければ 0。**
@@ -464,7 +488,7 @@ fn write_guilds(conn: &rusqlite::Connection, guilds: &[Guild]) -> rusqlite::Resu
         }
         tx.execute(
             "INSERT OR REPLACE INTO guilds(id, name, icon) VALUES(?1, ?2, ?3)",
-            rusqlite::params![g.id.get().to_string(), g.name, g.icon],
+            rusqlite::params![g.id.get().to_string(), g.name, g.icon_hash],
         )?;
 
         for c in &g.channels {
@@ -501,20 +525,24 @@ fn write_messages(
                 m.author.id.get().to_string(),
                 m.author.username,
                 m.author.global_name,
-                // â ï¸ **æ¨ã¦ãªãã** æ¢å®ã®ã¢ãã¿ã¼ã®é¸ã³æ¹ãããã§å¤ãã
+                // ⚠️ **捨てない。** 既定のアバターの選び方がこれで変わる
                 m.author.discriminator,
-                m.author.avatar,
+                m.author.avatar_hash,
             ],
         )?;
         tx.execute(
-            "INSERT OR REPLACE INTO messages(id, channel_id, author_id, content, ts)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO messages(id, channel_id, author_id, content, ts, nick, member_avatar)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 m.id.get().to_string(),
                 ch,
                 m.author.id.get().to_string(),
                 m.content,
                 m.timestamp,
+                // ⚠️ **そのギルドでの呼び名と顔も残す。** 捨てると、
+                // キャッシュから出した発言だけ別人の名前で並ぶ
+                m.member.as_ref().and_then(|x| x.nick.as_deref()),
+                m.member.as_ref().and_then(|x| x.avatar_hash.as_deref()),
             ],
         )?;
     }
@@ -630,7 +658,7 @@ mod tests {
         Guild {
             id: id.into(),
             name: name.to_owned(),
-            icon: None,
+            icon_hash: None,
             unavailable: false,
             channels: vec![Channel {
                 id: channel.into(),
@@ -656,7 +684,7 @@ mod tests {
                 username: "ねんねこ".to_owned(),
                 global_name: Some("ｽﾋﾟｷ".to_owned()),
                 discriminator: "0".to_owned(),
-                avatar: None,
+                avatar_hash: None,
                 bot: false,
             },
             content: body.to_owned(),
@@ -664,6 +692,7 @@ mod tests {
             edited_timestamp: None,
             pinned: false,
             attachments: Vec::new(),
+            member: None,
             referenced_message: None,
         }
     }

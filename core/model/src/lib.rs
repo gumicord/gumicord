@@ -21,11 +21,13 @@
 //!
 //! 仕様: [`spec/09-discord-protocol.md`]
 
+pub mod asset;
 pub mod snowflake;
 pub mod token;
 
 pub mod de;
 
+pub use asset::{Asset, Format};
 pub use snowflake::{
     AttachmentId, ChannelId, EmojiId, GuildId, MessageId, RoleId, Snowflake, UserId,
 };
@@ -49,8 +51,9 @@ pub struct User {
     /// **捨てるとボットの顔が変わる**。だから残して保存もする
     #[serde(default)]
     pub discriminator: String,
-    #[serde(default)]
-    pub avatar: Option<String>,
+    /// アバターの印。**URL ではない** ([`User::avatar`])
+    #[serde(default, rename = "avatar")]
+    pub avatar_hash: Option<String>,
     #[serde(default)]
     pub bot: bool,
 }
@@ -70,19 +73,10 @@ impl User {
         (!d.is_empty() && !d.chars().all(|c| c == '0')).then_some(d)
     }
 
-    /// アバター画像の URL。設定していなければ `None`。
-    ///
-    /// `size` は 2 の冪 (16〜4096)。Discord がその大きさで返す。
-    ///
-    /// ⚠️ **動くアバターも静止画として頼む。** `a_` で始まる印は GIF だが、
-    /// `.png` を頼めば 1 コマ目が PNG で返る。動かす仕組みは別の話であり、
-    /// **読めない形を頼んで何も出せないほうが悪い**
-    pub fn avatar_url(&self, size: u16) -> Option<String> {
-        let hash = self.avatar.as_ref()?;
-        Some(format!(
-            "https://cdn.discordapp.com/avatars/{}/{hash}.png?size={size}",
-            self.id
-        ))
+    /// 本人が設定したアバター。設定していなければ `None`
+    pub fn avatar(&self) -> Option<Asset> {
+        let hash = self.avatar_hash.as_ref()?;
+        Some(Asset::user_avatar(self.id, hash))
     }
 
     /// 既定のアバターの通し番号。
@@ -104,26 +98,93 @@ impl User {
         }
     }
 
-    /// 既定のアバターの URL。**必ずある**。
+    /// 誰にでも配られる既定のアバター。**必ずある**。
     ///
-    /// ⚠️ **`size` を取らない。** 誰が使っても同じ絵なので、大きさを
+    /// ⚠️ **大きさを選べない。** 同じ番号の全員が同じ絵なので、
     /// 揃えておけば**利用者をまたいで 1 枚を使い回せる**
-    pub fn default_avatar_url(&self) -> String {
-        format!(
-            "https://cdn.discordapp.com/embed/avatars/{}.png",
-            self.default_avatar_index()
-        )
+    pub fn default_avatar(&self) -> Asset {
+        Asset::default_avatar(self.default_avatar_index())
     }
 
-    /// 出すべきアバターの URL。**必ずある**。
+    /// 出すべきアバター。**必ずある**。
     ///
     /// 設定していれば本人のもの、していなければ既定のものである。
     ///
-    /// ⚠️ **ギルドごとのアバターはまだ見ていない。** Member を持ったら
-    /// ここが最初に見る場所になる (`FR-011`)
-    pub fn display_avatar_url(&self, size: u16) -> String {
-        self.avatar_url(size)
-            .unwrap_or_else(|| self.default_avatar_url())
+    /// ⚠️ **ギルドごとのアバターはここでは見えない。** それを知っているのは
+    /// [`Member`] だけなので、ギルドの中では [`Member::display_avatar`] を使う
+    pub fn display_avatar(&self) -> Asset {
+        self.avatar().unwrap_or_else(|| self.default_avatar())
+    }
+}
+
+/// ギルドの一員。
+///
+/// # ⚠️ 同じ人でも、ギルドごとに名前も顔も違う
+///
+/// ```text
+///   User    ねんねこ           全体の名前と顔
+///   Member  ねこ (このサーバでは)  そのギルドだけの名前と顔
+/// ```
+///
+/// 上書きされているところだけが入っていて、**入っていなければ [`User`] の
+/// ものを使う**。[`Member::display_name`] と [`Member::display_avatar`] が
+/// その順序を持っている。
+///
+/// # ⚠️ どのギルドの一員かを、自分では知らない
+///
+/// `MESSAGE_CREATE` に添えて来る `member` には `guild_id` が入っていない。
+/// 入っているのは**メッセージのほう**である。ここに嘘の `guild_id` を
+/// 持たせるより、**知っている側から渡してもらう**ほうが正しい。
+///
+/// だから [`Member::guild_avatar`] はギルドを引数に取る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    /// このギルドだけの呼び名
+    #[serde(default)]
+    pub nick: Option<String>,
+    /// このギルドだけのアバターの印。**URL ではない**
+    #[serde(default, rename = "avatar")]
+    pub avatar_hash: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<RoleId>,
+    /// ISO 8601。**表示のための整形は上の層の仕事**
+    #[serde(default)]
+    pub joined_at: Option<String>,
+    /// ⚠️ **無いことがある。** `MESSAGE_CREATE` の `member` には
+    /// 送信者が誰かが書かれていない。それはメッセージ側の `author` である
+    #[serde(default)]
+    pub user: Option<User>,
+}
+
+impl Member {
+    /// このギルドで画面に出す名前。
+    ///
+    /// ```text
+    ///   nick → global_name → username
+    /// ```
+    ///
+    /// `user` を持たない `member` もあるので、そのときは
+    /// **[`User::display_name`] を呼ぶ側で重ねる**
+    pub fn display_name<'a>(&'a self, user: &'a User) -> &'a str {
+        self.nick
+            .as_deref()
+            .unwrap_or_else(|| self.user.as_ref().unwrap_or(user).display_name())
+    }
+
+    /// このギルドだけのアバター。設定していなければ `None`
+    pub fn guild_avatar(&self, guild: GuildId, user: UserId) -> Option<Asset> {
+        let hash = self.avatar_hash.as_ref()?;
+        Some(Asset::member_avatar(guild, user, hash))
+    }
+
+    /// このギルドで出すべきアバター。**必ずある**。
+    ///
+    /// ```text
+    ///   ギルドのアバター → 本人のアバター → 既定のアバター
+    /// ```
+    pub fn display_avatar(&self, guild: GuildId, user: &User) -> Asset {
+        self.guild_avatar(guild, user.id)
+            .unwrap_or_else(|| user.display_avatar())
     }
 }
 
@@ -150,8 +211,9 @@ pub struct Guild {
     /// ⚠️ **無いことがある。** 落ちているギルドは識別子だけで来る
     #[serde(default)]
     pub name: String,
-    #[serde(default)]
-    pub icon: Option<String>,
+    /// アイコンの印。**URL ではない** ([`Guild::icon`])
+    #[serde(default, rename = "icon")]
+    pub icon_hash: Option<String>,
     /// いま落ちている。**名前もチャンネルも入っていない**
     #[serde(default)]
     pub unavailable: bool,
@@ -201,7 +263,7 @@ impl From<RawGuild> for Guild {
         Guild {
             id: raw.id,
             name: raw.name.or(p_name).unwrap_or_default(),
-            icon: raw.icon.or(p_icon),
+            icon_hash: raw.icon.or(p_icon),
             unavailable: raw.unavailable,
             channels: raw.channels,
         }
@@ -209,13 +271,13 @@ impl From<RawGuild> for Guild {
 }
 
 impl Guild {
-    pub fn icon_url(&self, size: u16) -> Option<String> {
-        let hash = self.icon.as_ref()?;
-        // ⚠️ **動くアイコンも静止画として頼む** (User::avatar_url と同じ)
-        Some(format!(
-            "https://cdn.discordapp.com/icons/{}/{hash}.png?size={size}",
-            self.id
-        ))
+    /// サーバアイコン。設定していなければ `None`。
+    ///
+    /// ⚠️ **サーバには既定のアイコンが無い。** 人と違って Discord は絵を
+    /// 配っていないので、無いときは頭文字を出すしかない
+    pub fn icon(&self) -> Option<Asset> {
+        let hash = self.icon_hash.as_ref()?;
+        Some(Asset::guild_icon(self.id, hash))
     }
 }
 
@@ -392,6 +454,12 @@ pub struct Message {
     pub pinned: bool,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// 送信者の、このギルドでの姿。
+    ///
+    /// ⚠️ **ここに `user` は入っていない。** 送信者は `author` である。
+    /// DM には最初から無い
+    #[serde(default)]
+    pub member: Option<Member>,
     /// 返信元 (`FR-028`)
     #[serde(default)]
     pub referenced_message: Option<Box<Message>>,
@@ -481,13 +549,20 @@ mod tests {
     #[test]
     fn even_animated_avatars_are_requested_as_png() {
         let mut u: User = serde_json::from_str(r#"{"id":"7","username":"x"}"#).unwrap();
-        assert_eq!(u.avatar_url(64), None, "設定していなければ URL は無い");
+        assert!(u.avatar().is_none(), "設定していなければ絵は無い");
 
-        u.avatar = Some("a_abc".into());
-        assert!(u.avatar_url(64).unwrap().ends_with("a_abc.png?size=64"));
+        u.avatar_hash = Some("a_abc".into());
+        let a = u.avatar().unwrap();
+        assert!(a.is_animated(), "動かせる素材であることは分かる");
+        assert!(
+            a.with_size(64).url().ends_with("a_abc.png?size=64"),
+            "それでも頼むのは静止画"
+        );
 
-        u.avatar = Some("abc".into());
-        assert!(u.avatar_url(64).unwrap().ends_with("abc.png?size=64"));
+        u.avatar_hash = Some("abc".into());
+        let a = u.avatar().unwrap();
+        assert!(!a.is_animated());
+        assert!(a.with_size(64).url().ends_with("abc.png?size=64"));
     }
 
     /// ⚠️ **4 桁を持っているかで既定のアバターの選び方が変わる。**
@@ -521,10 +596,62 @@ mod tests {
     #[test]
     fn everyone_has_a_face() {
         let mut u: User = serde_json::from_str(r#"{"id":"7","username":"x"}"#).unwrap();
-        assert!(u.display_avatar_url(64).contains("/embed/avatars/"));
+        assert!(u.display_avatar().url().contains("/embed/avatars/"));
 
-        u.avatar = Some("abc".into());
-        assert!(u.display_avatar_url(64).ends_with("abc.png?size=64"));
+        u.avatar_hash = Some("abc".into());
+        assert!(
+            u.display_avatar()
+                .with_size(64)
+                .url()
+                .ends_with("abc.png?size=64")
+        );
+    }
+
+    /// ⚠️ **ギルドの中では、名前も顔もそのギルドのものが勝つ。**
+    ///
+    /// 同じ人でもサーバごとに呼び名を変えている。全体の名前で出すと、
+    /// **そのサーバでは誰なのか分からない**
+    #[test]
+    fn a_guild_overrides_both_the_name_and_the_face() {
+        let user: User =
+            serde_json::from_str(r#"{"id":"7","username":"nenneko","global_name":"ねんねこ"}"#)
+                .unwrap();
+        let guild = GuildId::from(1u64);
+
+        // 何も上書きしていない一員
+        let m: Member = serde_json::from_str("{}").unwrap();
+        assert_eq!(m.display_name(&user), "ねんねこ");
+        assert!(m.guild_avatar(guild, user.id).is_none());
+        assert!(
+            m.display_avatar(guild, &user)
+                .url()
+                .contains("/embed/avatars/"),
+            "本人も設定していないなら既定の絵"
+        );
+
+        // このサーバだけの呼び名と顔
+        let m: Member = serde_json::from_str(r#"{"nick":"ねこ","avatar":"xyz"}"#).unwrap();
+        assert_eq!(m.display_name(&user), "ねこ");
+        assert_eq!(
+            m.display_avatar(guild, &user).url(),
+            "https://cdn.discordapp.com/guilds/1/users/7/avatars/xyz.png"
+        );
+    }
+
+    /// `MESSAGE_CREATE` は送信者のギルドでの姿を添えて来る
+    #[test]
+    fn a_message_carries_the_senders_guild_face() {
+        let json = r#"{
+            "id":"2","channel_id":"9","guild_id":"1","content":"はい",
+            "author":{"id":"7","username":"nenneko"},
+            "member":{"nick":"ねこ","roles":["3"],"joined_at":"2020-01-01T00:00:00+00:00"}
+        }"#;
+        let m: Message = serde_json::from_str(json).unwrap();
+        let member = m.member.as_ref().expect("member が落ちている");
+
+        assert_eq!(member.display_name(&m.author), "ねこ");
+        assert_eq!(member.roles, vec![RoleId::from(3u64)]);
+        assert!(member.user.is_none(), "送信者は author のほうである");
     }
 
     /// 返信元が入れ子で入る (`FR-028`)
@@ -552,7 +679,7 @@ mod guild_shape_tests {
     fn a_bot_style_guild_reads_its_name_from_the_top_level() {
         let g: Guild = serde_json::from_str(r#"{"id":"1","name":"ふつう","icon":"abc"}"#).unwrap();
         assert_eq!(g.name, "ふつう");
-        assert_eq!(g.icon.as_deref(), Some("abc"));
+        assert_eq!(g.icon_hash.as_deref(), Some("abc"));
         assert!(!g.unavailable);
     }
 
@@ -572,7 +699,7 @@ mod guild_shape_tests {
         .expect("READY の形を読めない");
 
         assert_eq!(g.name, "本物");
-        assert_eq!(g.icon.as_deref(), Some("xyz"));
+        assert_eq!(g.icon_hash.as_deref(), Some("xyz"));
         assert_eq!(g.channels.len(), 1);
     }
 

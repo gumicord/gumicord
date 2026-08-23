@@ -523,7 +523,7 @@ impl Live {
             .map(|g| Guild {
                 id: g.id,
                 name: g.name.clone(),
-                icon: g.icon.clone(),
+                icon_hash: g.icon_hash.clone(),
                 unavailable: false,
                 channels: self.store.channels_of(g.id).cloned().collect(),
             })
@@ -646,7 +646,7 @@ mod tests {
                 username: "ねんねこ".to_owned(),
                 global_name: None,
                 discriminator: "0".to_owned(),
-                avatar: None,
+                avatar_hash: None,
                 bot: false,
             },
             content: body.to_owned(),
@@ -654,6 +654,7 @@ mod tests {
             edited_timestamp: None,
             pinned: false,
             attachments: Vec::new(),
+            member: None,
             referenced_message: None,
         }
     }

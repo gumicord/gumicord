@@ -24,7 +24,7 @@ pub use db::{Db, DbError, Snapshot, default_path};
 
 use std::collections::HashMap;
 
-use gumicord_model::{Channel, ChannelId, Guild, GuildId, Message};
+use gumicord_model::{Asset, Channel, ChannelId, Guild, GuildId, Message};
 
 /// 正規化された状態。
 ///
@@ -105,7 +105,8 @@ pub enum ChannelEntry<'a> {
 pub struct GuildRow {
     pub id: GuildId,
     pub name: String,
-    pub icon: Option<String>,
+    /// アイコンの印。**URL ではない** (`Store::guild_icon`)
+    pub icon_hash: Option<String>,
 }
 
 impl Store {
@@ -218,15 +219,13 @@ impl Store {
         false
     }
 
-    /// そのサーバのアイコンの URL。**設定していなければ `None`**
+    /// そのサーバのアイコン。**設定していなければ `None`**
     ///
-    /// ⚠️ **動くアイコンも静止画として頼む** (`User::avatar_url` と同じ)。
-    /// 読めない形を頼んで何も出せないほうが悪い
-    pub fn guild_icon_url(&self, id: GuildId, size: u16) -> Option<String> {
-        let hash = self.guilds.get(&id)?.icon.as_ref()?;
-        Some(format!(
-            "https://cdn.discordapp.com/icons/{id}/{hash}.png?size={size}"
-        ))
+    /// ⚠️ **サーバには既定のアイコンが無い。** 人と違って Discord は絵を
+    /// 配っていないので、無いときは頭文字を出すしかない
+    pub fn guild_icon(&self, id: GuildId) -> Option<Asset> {
+        let hash = self.guilds.get(&id)?.icon_hash.as_ref()?;
+        Some(Asset::guild_icon(id, hash))
     }
 
     pub fn guild(&self, id: GuildId) -> Option<&GuildRow> {
@@ -368,7 +367,7 @@ impl Store {
             GuildRow {
                 id,
                 name: guild.name,
-                icon: guild.icon,
+                icon_hash: guild.icon_hash,
             },
         );
         self.resort();
@@ -443,7 +442,7 @@ mod tests {
         Guild {
             id: id.into(),
             name: name.to_owned(),
-            icon: None,
+            icon_hash: None,
             unavailable: false,
             channels: channels
                 .iter()
@@ -472,7 +471,7 @@ mod tests {
                 username: "ねんねこ".to_owned(),
                 global_name: None,
                 discriminator: "0".to_owned(),
-                avatar: None,
+                avatar_hash: None,
                 bot: false,
             },
             content: format!("その {id}"),
@@ -480,6 +479,7 @@ mod tests {
             edited_timestamp: None,
             pinned: false,
             attachments: Vec::new(),
+            member: None,
             referenced_message: None,
         }
     }
@@ -642,7 +642,7 @@ mod tests {
         s.upsert_guild(Guild {
             id: 1u64.into(),
             name: String::new(),
-            icon: None,
+            icon_hash: None,
             unavailable: true,
             channels: Vec::new(),
         });
@@ -692,21 +692,21 @@ mod folder_tests {
             Guild {
                 id: 1u64.into(),
                 name: "いち".to_owned(),
-                icon: None,
+                icon_hash: None,
                 unavailable: false,
                 channels: Vec::new(),
             },
             Guild {
                 id: 2u64.into(),
                 name: "に".to_owned(),
-                icon: None,
+                icon_hash: None,
                 unavailable: false,
                 channels: Vec::new(),
             },
             Guild {
                 id: 3u64.into(),
                 name: "さん".to_owned(),
-                icon: None,
+                icon_hash: None,
                 unavailable: false,
                 channels: Vec::new(),
             },

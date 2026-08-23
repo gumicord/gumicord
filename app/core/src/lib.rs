@@ -961,7 +961,11 @@ impl Gumicord {
                 GuildEntry::Guild { row, folder } => GuildRow {
                     id: row.id.get(),
                     name: row.name.clone(),
-                    icon: self.live.store().guild_icon_url(row.id, ICON_PX),
+                    icon: self
+                        .live
+                        .store()
+                        .guild_icon(row.id)
+                        .map(|a| a.with_size(ICON_PX).url()),
                     // read-state はまだ無い。**無いものを在るように見せない**
                     unread: false,
                     mentions: 0,
@@ -1002,7 +1006,11 @@ impl Gumicord {
                     name: g.name.clone(),
                     // ⚠️ 敷き詰める絵は 16px ほどだが、**頼む大きさは変えない。**
                     // 大きい方をすでに取ってあるなら使い回せる
-                    icon: self.live.store().guild_icon_url(*id, ICON_PX),
+                    icon: self
+                        .live
+                        .store()
+                        .guild_icon(*id)
+                        .map(|a| a.with_size(ICON_PX).url()),
                     unread: false,
                     mentions: 0,
                     folder_of_own: None,
@@ -1090,16 +1098,31 @@ impl Gumicord {
         }
 
         let me = self.login.session().logged_in().map(|l| l.me.user.id);
+        // ⚠️ **どのギルドを見ているかは、発言ではなくこちらが知っている。**
+        // REST で取ったメッセージに `guild_id` は入っていない
+        let guild = GuildId::from(self.selected_guild);
         self.live
             .store()
             .messages(ChannelId::from(self.selected_channel))
             .iter()
             .map(|m| MessageRow {
                 id: m.id.get(),
-                author: m.author.display_name().to_owned(),
+                // ⚠️ **そのサーバでの呼び名が勝つ。** 全体の名前で出すと、
+                // 「このサーバでは誰なのか」が分からなくなる
+                author: match &m.member {
+                    Some(x) => x.display_name(&m.author).to_owned(),
+                    None => m.author.display_name().to_owned(),
+                },
                 // ⚠️ **人には必ず顔がある。** 設定していない人には Discord が
                 // 既定の絵を配っていて、頭文字を出すのはこちらの勝手である
-                avatar: Some(m.author.display_avatar_url(AVATAR_PX)),
+                avatar: Some(
+                    match &m.member {
+                        Some(x) => x.display_avatar(guild, &m.author),
+                        None => m.author.display_avatar(),
+                    }
+                    .with_size(AVATAR_PX)
+                    .url(),
+                ),
                 time: local_time(&m.timestamp),
                 body: m.content.clone(),
                 // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
@@ -1556,6 +1579,100 @@ mod typing_tests {
 }
 
 #[cfg(test)]
+mod member_tests {
+    use super::*;
+    use gumicord_model::{Member, Message, MessageId, User, UserId};
+
+    fn message(nick: Option<&str>, member_avatar: Option<&str>) -> Message {
+        Message {
+            id: MessageId::from(100u64),
+            channel_id: ChannelId::from(10u64),
+            guild_id: None,
+            author: User {
+                id: UserId::from(7u64),
+                username: "nenneko".to_owned(),
+                global_name: Some("ねんねこ".to_owned()),
+                discriminator: "0".to_owned(),
+                avatar_hash: None,
+                bot: false,
+            },
+            content: "こんにちは".to_owned(),
+            timestamp: "2026-08-22T12:34:56+00:00".to_owned(),
+            edited_timestamp: None,
+            pinned: false,
+            attachments: Vec::new(),
+            member: Some(Member {
+                nick: nick.map(|s| s.to_owned()),
+                avatar_hash: member_avatar.map(|s| s.to_owned()),
+                roles: Vec::new(),
+                joined_at: None,
+                user: None,
+            }),
+            referenced_message: None,
+        }
+    }
+
+    fn app(m: Message) -> Gumicord {
+        let mut a = Gumicord::demo();
+        // ⚠️ **ギルドを 1 つ置かないと demo のままである。**
+        // 本物かどうかの分かれ目は `uses_live()` の 1 箇所しかない
+        a.live
+            .store_mut()
+            .replace_guilds(vec![gumicord_model::Guild {
+                id: 1u64.into(),
+                name: "テスト".to_owned(),
+                icon_hash: None,
+                unavailable: false,
+                channels: vec![gumicord_model::Channel {
+                    id: 10u64.into(),
+                    kind: gumicord_model::ChannelKind::GuildText,
+                    name: Some("いっぱん".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: None,
+                    position: 0,
+                    topic: None,
+                    nsfw: false,
+                    recipients: Vec::new(),
+                }],
+            }]);
+        a.live
+            .store_mut()
+            .set_backlog(ChannelId::from(10u64), vec![m]);
+        a.selected_guild = 1;
+        a.selected_channel = 10;
+        a
+    }
+
+    /// ⚠️ **そのサーバでの呼び名が勝つ。**
+    ///
+    /// 全体の名前で出すと、「このサーバでは誰なのか」が分からない
+    #[test]
+    fn a_nickname_wins_over_the_global_name() {
+        let a = app(message(Some("ねこ"), None));
+        assert_eq!(a.message_rows()[0].author, "ねこ");
+
+        let a = app(message(None, None));
+        assert_eq!(a.message_rows()[0].author, "ねんねこ");
+    }
+
+    /// ⚠️ **顔もサーバごとに違う。** 見ているギルドが URL に入る
+    #[test]
+    fn a_guild_avatar_wins_over_the_global_one() {
+        let a = app(message(None, Some("xyz")));
+        let url = a.message_rows()[0].avatar.clone().unwrap();
+        assert!(
+            url.starts_with("https://cdn.discordapp.com/guilds/1/users/7/avatars/xyz.png"),
+            "{url}"
+        );
+
+        // 何も上書きしていなければ、本人も設定していないので既定の絵
+        let a = app(message(None, None));
+        let url = a.message_rows()[0].avatar.clone().unwrap();
+        assert!(url.contains("/embed/avatars/"), "{url}");
+    }
+}
+
+#[cfg(test)]
 mod channel_selection_tests {
     use super::*;
     use gumicord_model::{Channel, ChannelKind, Guild};
@@ -1564,7 +1681,7 @@ mod channel_selection_tests {
         Guild {
             id: 1u64.into(),
             name: "テスト".to_owned(),
-            icon: None,
+            icon_hash: None,
             unavailable: false,
             channels: vec![
                 // ⚠️ **カテゴリが先に来る。** 位置が 0 なので、
@@ -1639,7 +1756,7 @@ mod folder_tests {
         Guild {
             id: id.into(),
             name: name.to_owned(),
-            icon: icon.map(|s| s.to_owned()),
+            icon_hash: icon.map(|s| s.to_owned()),
             unavailable: false,
             channels: Vec::new(),
         }
