@@ -284,7 +284,7 @@
 
     {
       "select": "nav.member_list",
-      "style": { "background": "$color.bg.sunken", "padding": [8, 0, 8, 0] }
+      "style": { "background": "$color.bg.sunken", "padding": [8, 0, 8, 0], "gap": 2 }
     },
     {
       "select": "nav.member_list.group",
@@ -296,7 +296,7 @@
     },
     {
       "select": "nav.member_list.item",
-      "style": { "padding": [1, 8, 1, 8], "margin": [0, 8, 0, 8], "gap": "$space.2", "radius": "$radius.md" }
+      "style": { "padding": [5, 8, 5, 8], "margin": [0, 8, 0, 8], "gap": "$space.2", "radius": "$radius.md" }
     },
     {
       "select": "nav.member_list.item",

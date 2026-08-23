@@ -218,11 +218,38 @@ impl Subscriptions {
     }
 }
 
+/// 繋ぎ先の URL。`resume` するなら**リージョン別のホスト**へ。
+///
+/// ⚠️ **経路の `/` を落とさない。**
+///
+/// `resume_gateway_url` は `wss://gateway-us-east1-b.discord.gg` の形で来る。
+/// ここへ問い合わせをそのまま繋ぐと `wss://host?v=10…` になり、経路が
+/// **空**の URL になる。`http` はこれを `?v=10…` として持つので、
+/// 送られる要求行が
+///
+/// ```text
+///   GET ?v=10&encoding=json&compress=zstd-stream HTTP/1.1
+/// ```
+///
+/// になる。要求先として不正なので Discord は **400 Bad Request** を返し、
+/// 繋がらない。しかも `session` を持ったままなので**同じ URL へ延々と
+/// 繋ぎ直し続け、二度と復帰しなかった**。
+fn connect_url(resume_host: Option<&str>) -> String {
+    match resume_host {
+        Some(host) => format!("{}/{QUERY}", host.trim_end_matches('/')),
+        None => GATEWAY.to_owned(),
+    }
+}
+
 /// `op 14` — 見ているものを伝える。
 ///
 /// `channels` の `[[0, 99]]` は「メンバー一覧の 0〜99 番目が要る」という
-/// 意味である。**メンバー一覧はまだ出さないが、この形でないと
-/// 購読が成立しない。**
+/// 意味である。**この形でないと購読そのものが成立しない**ので、一覧を
+/// 出さない画面でも送る。
+///
+/// ⚠️ **頼んだ範囲しか来ない。** これが [`crate::member_list`] が
+/// 100 人目で止まる理由である。巻いた先を見せるには、範囲を広げて
+/// 送り直す必要がある
 fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
     json!({
         "op": OP_GUILD_SUBSCRIBE,
@@ -302,6 +329,15 @@ impl Gateway {
                         if let Some(fatal) = fatal_of(&e) {
                             return Event::Fatal(fatal);
                         }
+                        // ⚠️ **開けなかった resume 先に固執しない。**
+                        //
+                        // resume は「繋がった上で取りこぼしを埋める」もので
+                        // あって、繋がらない相手に何度掛けても意味がない。
+                        // 持ち越すと**同じ失敗を延々と繰り返し、二度と
+                        // 復帰しない**。次は identify からやり直す
+                        if self.session.take().is_some() {
+                            tracing::warn!("resume 先へ繋げない。identify からやり直す");
+                        }
                         let wait = self.grow_backoff();
                         tracing::warn!(error = %e, wait_ms = wait.as_millis() as u64, "繋げない");
                         // 待つ前に知らせる。**待ってから知らせると、
@@ -367,12 +403,7 @@ impl Gateway {
 
     /// 繋いで Hello を受け、identify か resume を送る。
     async fn open(&mut self) -> Result<(), GatewayError> {
-        // resume できるならリージョン別のホストへ。**ここを間違えると
-        // 別のサーバへ割り当てられて resume が落ちる**
-        let url = match &self.session {
-            Some(s) => format!("{}{QUERY}", s.url.trim_end_matches('/')),
-            None => GATEWAY.to_owned(),
-        };
+        let url = connect_url(self.session.as_ref().map(|s| &*s.url));
 
         crate::install_crypto_provider();
         let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
@@ -801,6 +832,41 @@ mod tests {
 
     fn closed(code: u16) -> GatewayError {
         GatewayError::Closed(code)
+    }
+
+    /// ⚠️ **要求行に載る経路が `/` で始まること。**
+    ///
+    /// `resume_gateway_url` には経路が付いていない。問い合わせをそのまま
+    /// 繋ぐと `GET ?v=10… HTTP/1.1` になり、Discord は 400 を返す。
+    /// 繋がらないまま `session` を持ち続けて**二度と復帰しなかった**
+    #[test]
+    fn the_resume_url_keeps_its_path() {
+        use tokio_tungstenite::tungstenite::http::Uri;
+
+        let target = |url: &str| {
+            url.parse::<Uri>()
+                .expect("URL として読める")
+                .path_and_query()
+                .expect("経路がある")
+                .as_str()
+                .to_owned()
+        };
+
+        for host in [
+            "wss://gateway-us-east1-b.discord.gg",
+            // 末尾に `/` が付いてきても二重にしない
+            "wss://gateway-us-east1-b.discord.gg/",
+        ] {
+            let url = connect_url(Some(host));
+            assert!(
+                url.starts_with(&format!("{}/?", host.trim_end_matches('/'))),
+                "{url}"
+            );
+            assert!(target(&url).starts_with("/?v=10"), "{url}");
+        }
+
+        // 初回も同じ形である
+        assert!(target(&connect_url(None)).starts_with("/?v=10"));
     }
 
     /// トークンが弾かれたら諦める。**捨ててログイン画面へ戻すため**

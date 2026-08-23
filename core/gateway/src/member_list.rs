@@ -194,11 +194,18 @@ impl MemberList {
 pub fn parse(data: &Value) -> Option<MemberListUpdate> {
     let guild = data.get("guild_id")?.as_str()?.parse::<u64>().ok()?;
 
+    // ⚠️ **人数は上の `groups` が持っていることがある。**
+    //
+    // 差分の中の見出しは `{"id": …}` だけで来ることがあり、そのまま
+    // 読むと**どの見出しも「0 人」になる**。実機でそうなった。
+    // 同じ知らせの中にある一覧のほうを先に見る
+    let counts = group_counts(data);
+
     let ops = data
         .get("ops")?
         .as_array()?
         .iter()
-        .filter_map(op)
+        .filter_map(|raw| op(raw, &counts))
         .collect::<Vec<_>>();
 
     Some(MemberListUpdate {
@@ -209,6 +216,17 @@ pub fn parse(data: &Value) -> Option<MemberListUpdate> {
     })
 }
 
+/// 上の `groups` から「見出しの識別子 → 人数」。**無ければ空**
+fn group_counts(data: &Value) -> std::collections::HashMap<&str, u32> {
+    let Some(groups) = data.get("groups").and_then(Value::as_array) else {
+        return std::collections::HashMap::new();
+    };
+    groups
+        .iter()
+        .filter_map(|g| Some((g.get("id")?.as_str()?, count(g, "count"))))
+        .collect()
+}
+
 fn count(data: &Value, key: &str) -> u32 {
     data.get(key)
         .and_then(Value::as_u64)
@@ -216,9 +234,9 @@ fn count(data: &Value, key: &str) -> u32 {
         .min(u64::from(u32::MAX)) as u32
 }
 
-fn op(raw: &Value) -> Option<ListOp> {
+fn op(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<ListOp> {
     let index = || raw.get("index").and_then(Value::as_u64).map(|i| i as usize);
-    let one = || row(raw.get("item")?);
+    let one = || row(raw.get("item")?, counts);
 
     match raw.get("op")?.as_str()? {
         "SYNC" => {
@@ -234,7 +252,7 @@ fn op(raw: &Value) -> Option<ListOp> {
                 .get("items")?
                 .as_array()?
                 .iter()
-                .filter_map(row)
+                .filter_map(|r| row(r, counts))
                 .collect();
             Some(ListOp::Sync { start, rows })
         }
@@ -257,11 +275,17 @@ fn op(raw: &Value) -> Option<ListOp> {
     }
 }
 
-fn row(raw: &Value) -> Option<MemberRow> {
+fn row(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<MemberRow> {
     if let Some(group) = raw.get("group") {
+        let id = group.get("id")?.as_str()?;
+        // 上の一覧が知っていればそちら。**同じ知らせの中の値である**
+        let count = counts
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| count(group, "count"));
         return Some(MemberRow::Group {
-            id: group.get("id")?.as_str()?.to_owned(),
-            count: count(group, "count"),
+            id: id.to_owned(),
+            count,
         });
     }
 
@@ -409,6 +433,47 @@ mod tests {
             list.apply(parse(&raw).expect("読める"));
             assert_eq!(names(&list), vec!["いち"]);
         }
+    }
+
+    /// ⚠️ **見出しの人数は上の `groups` から拾う。**
+    ///
+    /// 差分の中の見出しが `{"id": …}` だけで来ると、そのまま読んだ人数は
+    /// 全部 0 になる。実機で**どの見出しも「0 人」と出た**
+    #[test]
+    fn a_heading_without_a_count_borrows_it_from_the_summary() {
+        let raw = json!({
+            "guild_id": "7",
+            "member_count": 30,
+            "online_count": 5,
+            "groups": [{ "id": "55", "count": 2 }, { "id": "online", "count": 5 }],
+            "ops": [{ "op": "SYNC", "range": [0, 99], "items": [
+                { "group": { "id": "55" } },
+                member("ねんねこ", Some("online")),
+                { "group": { "id": "online" } },
+            ]}],
+        });
+
+        let mut list = MemberList::default();
+        list.apply(parse(&raw).expect("読める"));
+        assert_eq!(names(&list), vec!["[55 2]", "ねんねこ", "[online 5]"]);
+    }
+
+    /// 上の一覧に無い見出しは、**行が持っている人数をそのまま使う**
+    #[test]
+    fn a_heading_missing_from_the_summary_keeps_its_own_count() {
+        let raw = json!({
+            "guild_id": "7",
+            "member_count": 30,
+            "online_count": 5,
+            "groups": [{ "id": "online", "count": 5 }],
+            "ops": [{ "op": "SYNC", "range": [0, 99], "items": [
+                { "group": { "id": "55", "count": 3 } },
+            ]}],
+        });
+
+        let mut list = MemberList::default();
+        list.apply(parse(&raw).expect("読める"));
+        assert_eq!(names(&list), vec!["[55 3]"]);
     }
 
     /// `INVALIDATE` が来たら**空にする**。古いものを出し続けない
