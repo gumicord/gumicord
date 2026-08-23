@@ -472,7 +472,7 @@ mod tests {
     /// ⚠️ **テーマが何も書かなければ、何も変わらない。**
     /// クライアントが太字の見た目を持っていないことの確認である
     #[test]
-    fn テーマが無ければ飾りは何も付かない() {
+    fn without_a_theme_nothing_is_decorated() {
         let spans = spans_of(None, "**太い**", &NoNames);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "太い");
@@ -483,7 +483,7 @@ mod tests {
 
     /// 太さを決めるのはテーマである
     #[test]
-    fn 太字の太さはテーマが決める() {
+    fn the_theme_decides_how_heavy_bold_is() {
         let t = ink_with(
             r#"{ "manifest": { "id": "t.t", "name": "T", "version": "1.0.0", "abi": 1 }, "rules": [
                 { "select": "primitive.text", "when": { "slot": "bold" },
@@ -497,7 +497,7 @@ mod tests {
     /// ⚠️ 線を引くかどうかもテーマの判断である。
     /// `__a__` を色で表すテーマがあってよい
     #[test]
-    fn 下線を引くかはテーマが決める() {
+    fn the_theme_decides_whether_to_underline() {
         let none = ink_with(
             r#"{ "manifest": { "id": "t.t", "name": "T", "version": "1.0.0", "abi": 1 }, "rules": [] }"#,
         );
@@ -514,7 +514,7 @@ mod tests {
 
     /// 重なった飾りは、両方のルールが乗ること
     #[test]
-    fn 重なった飾りは両方乗る() {
+    fn stacked_decorations_both_apply() {
         let t = ink_with(
             r#"{ "manifest": { "id": "t.t", "name": "T", "version": "1.0.0", "abi": 1 }, "rules": [
                 { "select": "primitive.text", "when": { "slot": "bold" },
@@ -531,7 +531,7 @@ mod tests {
     /// ⚠️ **引けなかったときに番号を出さない。**
     /// `<@1>` は打った人が書いた文字ではないし、`@1` は嘘である
     #[test]
-    fn 名前が引けなければ番号ではなく不明と出す() {
+    fn an_unresolved_mention_shows_unknown_not_a_number() {
         let spans = spans_of(None, "<@1> <#2> <@&3>", &NoNames);
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(text, "@不明なユーザー #不明なチャンネル @不明な役職");
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn 名前が引ければ名前で出す() {
+    fn a_resolved_mention_shows_the_name() {
         let spans = spans_of(None, "<@1> <#2> <@&3>", &Known);
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(text, "@みどり #雑談 @管理");
@@ -548,7 +548,7 @@ mod tests {
     /// スポイラーは**場所を空けたまま**隠す。詰めて描くと、開いた瞬間に
     /// 行の折り返しが変わって本文が飛び跳ねる
     #[test]
-    fn スポイラーは開けるまで隠す() {
+    fn a_spoiler_stays_hidden_until_revealed() {
         let hidden = Ink::new(None, MatchContext::new(1000.0), false, NOW);
         let shown = Ink::new(None, MatchContext::new(1000.0), true, NOW);
         let blocks = gumicord_markdown::parse("||秘密||");
@@ -565,7 +565,7 @@ mod tests {
 
     /// コードブロックの中身は飾らない
     #[test]
-    fn コードブロックは中身をそのまま持つ() {
+    fn a_fenced_block_keeps_its_contents_verbatim() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
         let nodes = ink.blocks(&gumicord_markdown::parse("```rust\n**a**\n```"), &NoNames);
         assert_eq!(nodes.len(), 1);
@@ -575,7 +575,7 @@ mod tests {
 
     /// 知らない言語でも落ちず、`code` に落ちること
     #[test]
-    fn 知らない言語は既定の枠に落ちる() {
+    fn an_unknown_language_falls_back_to_the_default_slot() {
         assert_eq!(lang_slot(Some("rust")), "rust");
         assert_eq!(lang_slot(Some("RUST")), "rust");
         assert_eq!(lang_slot(Some("brainfuck")), "code");
@@ -584,7 +584,7 @@ mod tests {
 
     /// ⚠️ 1970 年より前と閏日で崩れないこと
     #[test]
-    fn 日付の変換は閏年と負の日数で崩れない() {
+    fn the_date_conversion_survives_leap_years_and_negative_days() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
         // 2000 年は閏年 (400 で割り切れる)
@@ -599,7 +599,7 @@ mod tests {
 
     /// ⚠️ **1970-01-01 は木曜である。** ここを間違えると全部の曜日がずれる
     #[test]
-    fn 曜日は木曜から数える() {
+    fn the_weekday_counts_from_a_thursday() {
         assert_eq!(WEEKDAYS[weekday(0)], "木");
         assert_eq!(WEEKDAYS[weekday(1)], "金");
         // 1969-12-31 は水曜。**負の日数でも崩れないこと**
@@ -613,7 +613,7 @@ mod tests {
     /// ⚠️ **時差で結果が変わるので、中身の時刻までは見ない。**
     /// この機械の時間帯に依らず言えることだけを見る
     #[test]
-    fn 書式ごとに出す形が変わる() {
+    fn each_format_renders_differently() {
         let at = |f| stamp(NOW, NOW, f).0;
 
         // 時刻だけ。日付は出さない
@@ -631,21 +631,21 @@ mod tests {
         assert!(at('F').contains('年') && at('F').contains(':'));
 
         // ⚠️ **曜日が付くのは `F` だけ**
-        let 曜日あり = |s: &str| WEEKDAYS.iter().any(|w| s.contains(&format!("({w})")));
-        assert!(曜日あり(&at('F')), "{}", at('F'));
-        assert!(!曜日あり(&at('f')), "{}", at('f'));
+        let has_weekday = |s: &str| WEEKDAYS.iter().any(|w| s.contains(&format!("({w})")));
+        assert!(has_weekday(&at('F')), "{}", at('F'));
+        assert!(!has_weekday(&at('f')), "{}", at('f'));
     }
 
     /// ⚠️ **知らない書式でも時刻を消さない。** 解析側が通した以上、
     /// ここで空にすると本文から時刻だけが消える
     #[test]
-    fn 知らない書式は既定として出す() {
+    fn an_unknown_format_renders_as_the_default() {
         assert_eq!(stamp(NOW, NOW, 'z').0, stamp(NOW, NOW, 'f').0);
     }
 
     /// 絶対表示は時間で変わらない。**寝たままでよい** (`NFR-005`)
     #[test]
-    fn 絶対表示は描き直しを要求しない() {
+    fn an_absolute_timestamp_asks_for_no_redraw() {
         for f in ['t', 'T', 'd', 'D', 'f', 'F', 'z'] {
             assert_eq!(stamp(NOW, NOW, f).1, None, "{f} が描き直しを求めている");
         }
@@ -653,25 +653,25 @@ mod tests {
 
     /// 相対表示は単位を切り替えながら出る
     #[test]
-    fn 相対表示は単位が上がっていく() {
-        let 前 = |secs: i64| relative(NOW, NOW - secs).0;
+    fn a_relative_timestamp_steps_up_through_units() {
+        let ago = |secs: i64| relative(NOW, NOW - secs).0;
 
-        assert_eq!(前(0), "0 秒前");
-        assert_eq!(前(59), "59 秒前");
-        assert_eq!(前(60), "1 分前");
-        assert_eq!(前(3_599), "59 分前");
-        assert_eq!(前(3_600), "1 時間前");
-        assert_eq!(前(86_399), "23 時間前");
-        assert_eq!(前(86_400), "1 日前");
-        assert_eq!(前(2_591_999), "29 日前");
-        assert_eq!(前(2_592_000), "1 か月前");
-        assert_eq!(前(31_535_999), "12 か月前");
-        assert_eq!(前(31_536_000), "1 年前");
+        assert_eq!(ago(0), "0 秒前");
+        assert_eq!(ago(59), "59 秒前");
+        assert_eq!(ago(60), "1 分前");
+        assert_eq!(ago(3_599), "59 分前");
+        assert_eq!(ago(3_600), "1 時間前");
+        assert_eq!(ago(86_399), "23 時間前");
+        assert_eq!(ago(86_400), "1 日前");
+        assert_eq!(ago(2_591_999), "29 日前");
+        assert_eq!(ago(2_592_000), "1 か月前");
+        assert_eq!(ago(31_535_999), "12 か月前");
+        assert_eq!(ago(31_536_000), "1 年前");
     }
 
     /// 未来の時刻は「後」で出る。**Discord は未来も打てる**
     #[test]
-    fn 未来は後ろ向きに出る() {
+    fn a_future_timestamp_reads_as_from_now() {
         assert_eq!(relative(NOW, NOW + 90).0, "1 分後");
         assert_eq!(relative(NOW, NOW + 86_400 * 3).0, "3 日後");
     }
@@ -679,24 +679,24 @@ mod tests {
     /// ⚠️ **次に文字が変わる頃に起きる。** 早すぎると `NFR-005` に反し、
     /// 遅すぎると「たった今」が何時間も残る
     #[test]
-    fn 次に変わる頃まで寝る() {
-        let 持つ = |secs: i64| relative(NOW, NOW - secs).1;
+    fn it_sleeps_until_the_text_would_change() {
+        let holds = |secs: i64| relative(NOW, NOW - secs).1;
 
         // 秒の桁は毎秒変わる
-        assert_eq!(持つ(0), 1);
-        assert_eq!(持つ(59), 1);
+        assert_eq!(holds(0), 1);
+        assert_eq!(holds(59), 1);
         // 「1 分前」は次の分まで持つ
-        assert_eq!(持つ(60), 60);
-        assert_eq!(持つ(90), 30);
+        assert_eq!(holds(60), 60);
+        assert_eq!(holds(90), 30);
         // 「1 時間前」は次の時まで持つ
-        assert_eq!(持つ(3_600), 3_600);
-        assert_eq!(持つ(3_610), 3_590);
+        assert_eq!(holds(3_600), 3_600);
+        assert_eq!(holds(3_610), 3_590);
     }
 
     /// ⚠️ **必ず 1 秒以上を返す。** 0 を返すと、描いては起き描いては起きで
     /// 回り続ける
     #[test]
-    fn 持つ秒数は必ず一以上() {
+    fn it_never_reports_less_than_one_second() {
         for d in [-100_000i64, -3_600, -60, -1, 0, 1, 59, 60, 3_600, 86_400] {
             let (_, holds) = relative(NOW, NOW - d);
             assert!(holds >= 1, "差 {d} 秒で {holds} 秒を返した");
@@ -706,14 +706,14 @@ mod tests {
     /// ⚠️ **遠い過去のために長い約束をしない。** 「3 年前」の次の変化は
     /// 1 年後だが、そこまで待つ意味は無い。窓が閉じるほうが先である
     #[test]
-    fn 遠い過去でも一時間で見直す() {
+    fn even_the_distant_past_is_revisited_within_an_hour() {
         let (_, holds) = relative(NOW, NOW - 86_400 * 400);
         assert_eq!(holds, 3_600);
     }
 
     /// 相対表示が 1 つでもあれば、木は「あと何秒持つか」を知っている
     #[test]
-    fn 相対表示があると描き直しを求める() {
+    fn a_relative_timestamp_asks_for_a_redraw() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
         assert_eq!(ink.holds_for(), None, "組む前から要求している");
 
@@ -727,7 +727,7 @@ mod tests {
     /// ⚠️ **一番早く変わるものに合わせる。** 遅いほうに合わせると、
     /// 速いほうが止まって見える
     #[test]
-    fn 一番早く変わるものに合わせる() {
+    fn it_follows_whichever_changes_soonest() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
         ink.blocks(
             &gumicord_markdown::parse(&format!(
@@ -742,7 +742,7 @@ mod tests {
 
     /// ⚠️ **絶対表示だけなら寝たままでよい** (`NFR-005`)
     #[test]
-    fn 絶対表示だけなら起きない() {
+    fn absolute_timestamps_alone_never_wake_it() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
         ink.blocks(
             &gumicord_markdown::parse(&format!("<t:{NOW}:f> と <t:{NOW}> と ふつうの文")),

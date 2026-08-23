@@ -1196,7 +1196,7 @@ mod scrollbar_tests {
 
     /// 余裕があれば、押した点から右下へ伸びる
     #[test]
-    fn 浮かぶ箱は基準の点から右下へ伸びる() {
+    fn a_floating_box_grows_down_and_right_from_its_anchor() {
         let r = floated(50.0, 60.0, 100.0, 80.0);
         assert_eq!((r.x, r.y), (50.0, 60.0));
         assert_eq!((r.w, r.h), (100.0, 80.0));
@@ -1207,7 +1207,7 @@ mod scrollbar_tests {
     /// 返さないと、画面の外に押せる項目が並ぶ。「出ているのに押せない」
     /// という壊れ方をする
     #[test]
-    fn 右下で押したら反対側へ返る() {
+    fn it_flips_when_pressed_near_the_bottom_right() {
         // 右端から 20px の位置に幅 100 の箱は入らない
         let r = floated(380.0, 290.0, 100.0, 80.0);
         assert_eq!(r.right(), 380.0, "右へ伸びたまま画面の外に出ている");
@@ -1216,7 +1216,7 @@ mod scrollbar_tests {
 
     /// 片側だけ入らないときは、その軸だけ返す
     #[test]
-    fn 返すのは入らない軸だけ() {
+    fn only_the_axis_that_overflows_flips() {
         let r = floated(380.0, 10.0, 100.0, 80.0);
         assert_eq!(r.right(), 380.0, "横は返る");
         assert_eq!(r.y, 10.0, "縦は返らない");
@@ -1226,7 +1226,7 @@ mod scrollbar_tests {
     ///
     /// 返すだけだと、入れ物より大きい箱はどちらへ返してもはみ出す
     #[test]
-    fn 返しても入らなければ枠へ押し込む() {
+    fn it_is_pushed_inside_when_flipping_is_not_enough() {
         let r = floated(200.0, 150.0, 500.0, 400.0);
         assert_eq!((r.x, r.y), (0.0, 0.0), "左上に寄せて入れる");
     }
@@ -1235,7 +1235,7 @@ mod scrollbar_tests {
     ///
     /// 進めると、後ろに並ぶものが浮かんだ箱のぶんだけ押し出される
     #[test]
-    fn 浮かぶものは並びを押し出さない() {
+    fn a_floating_child_does_not_advance_the_flow() {
         let row = |float: bool| {
             let mut n = styled(NodeId::LayoutColumn, |st| st.height = Some(300.0))
                 .child(styled(NodeId::ChatMessage, |st| st.height = Some(50.0)));

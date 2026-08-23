@@ -2253,7 +2253,7 @@ mod tests {
     /// 編集しているつもりで新規発言を送る、返信のつもりで独り言を言う、
     /// はどちらも取り消せない
     #[test]
-    fn 返信と編集は画面に出る() {
+    fn replying_and_editing_are_visible_on_screen() {
         let bar = |c: Composing| {
             let mut a = app();
             a.composing = c;
@@ -2281,7 +2281,7 @@ mod tests {
     ///
     /// ⚠️ **テーマの数値を見ても分からない。** 置いた結果の矩形で見ること
     #[test]
-    fn 取り消しの絵は箱からはみ出さない() {
+    fn the_cancel_icon_stays_inside_its_box() {
         let mut a = app();
         a.composing = Composing::Reply(1);
         let cx = gumicord_platform::FrameCx {
@@ -2320,7 +2320,7 @@ mod tests {
     /// Esc でもやめられるが、それを知らない人には**抜け出せない状態**に
     /// 見える
     #[test]
-    fn 返信中は取り消しのボタンが出る() {
+    fn a_cancel_button_appears_while_replying() {
         let cancel = |c: Composing| {
             let mut a = app();
             a.composing = c;
@@ -2342,7 +2342,7 @@ mod tests {
     /// 書いたものごと消える。編集の入力欄にあるのは元の発言の中身であって、
     /// 利用者が書いたものではない
     #[test]
-    fn 返信をやめても書いた文は残り編集をやめたら消える() {
+    fn cancelling_a_reply_keeps_the_draft_but_cancelling_an_edit_clears_it() {
         let press = |c: Composing| {
             let mut a = app();
             a.composing = c;
@@ -2365,7 +2365,7 @@ mod tests {
     /// 読まれると、あらゆる `primitive.button` がここへ落ちる。
     /// 見た目は同じに動くので、押すまで気づけない
     #[test]
-    fn 別のボタンでは取り消されない() {
+    fn another_button_does_not_cancel() {
         let mut a = app();
         a.composing = Composing::Reply(1);
         let hits = [hit_of(NodeId::PrimitiveButton, Some(Key::Slot("その他")))];
@@ -2395,7 +2395,7 @@ mod tests {
     /// うっかり全部消して Enter を押したときに発言が消えるのは、
     /// 取り返しがつかない
     #[test]
-    fn 空のまま送っても何も起きない() {
+    fn submitting_an_empty_field_does_nothing() {
         let mut a = app();
         a.composing = Composing::Edit(1);
         assert!(!a.submit());
@@ -2404,7 +2404,7 @@ mod tests {
 
     /// 送ったら新規に戻ること。**戻らないと次の発言まで返信になる**
     #[test]
-    fn 送ったら新規に戻る() {
+    fn submitting_returns_to_composing_a_new_message() {
         let mut a = app();
         a.composing = Composing::Reply(1);
         a.input.insert("やあ");
@@ -2417,7 +2417,7 @@ mod tests {
     /// サーバが 403 を返すだけである。押せる場所に出さないのが先で、
     /// サーバの拒否はその後ろの守りである
     #[test]
-    fn 他人の発言には編集と削除を出さない() {
+    fn someone_elses_message_offers_neither_edit_nor_delete() {
         use crate::menu::Action;
         // demo ではログインしていないので、誰の発言も自分のものではない
         let a = app();
@@ -2435,7 +2435,7 @@ mod tests {
     /// ⚠️ **入力欄を先に見る。** 発言の一覧の上に重なっているので、
     /// 後ろに置くと入力欄の上で押しても発言のメニューが出る
     #[test]
-    fn 入力欄の上では入力欄のメニューが出る() {
+    fn the_input_field_gets_the_input_menu() {
         use crate::menu::Action;
         let mut a = app();
         let hits = [
@@ -2454,7 +2454,7 @@ mod tests {
     /// ⚠️ **できないものを並べない。** 何も選んでいないのに「コピー」を
     /// 出しても、押して何も起きないだけである
     #[test]
-    fn 選んでいなければ切り取りとコピーを出さない() {
+    fn cut_and_copy_are_absent_without_a_selection() {
         use crate::menu::Action;
         let mut a = app();
         let has = |a: &Gumicord, want: Action| a.field_menu().iter().any(|i| i.action == want);
@@ -2495,7 +2495,7 @@ mod tests {
     }
 
     #[test]
-    fn 発言を副ボタンで押すとメニューが開く() {
+    fn right_clicking_a_message_opens_the_menu() {
         let a = with_menu();
         assert!(a.floating.is_some());
         assert_eq!(
@@ -2513,7 +2513,7 @@ mod tests {
     /// 押した場所は当たり判定としては両方に掛かっているので、こちらが
     /// 「上が開いているなら上だけ」と決めなければ素通りする
     #[test]
-    fn 開いている間は下を押しても届かない() {
+    fn nothing_underneath_is_reachable_while_the_menu_is_open() {
         let mut a = with_menu();
         let before = a.selected_channel;
         // 下にあるチャンネルへの当たりを一緒に渡す
@@ -2529,7 +2529,7 @@ mod tests {
     /// ⚠️ **試験でクリップボードへ書かない。** 走らせた人の手元の
     /// コピー内容が消える。ここで見たいのは「押したら閉じる」だけである
     #[test]
-    fn 項目を押すと閉じる() {
+    fn choosing_an_item_closes_the_menu() {
         let mut a = with_menu();
         a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
             at: (0.0, 0.0),
@@ -2574,7 +2574,7 @@ mod tests {
     /// 起きる理由が無いのに `WaitUntil` を置くと、何も変わらないのに
     /// 回り続ける (`NFR-005`)
     #[test]
-    fn 相対表示が無ければ起きない() {
+    fn nothing_relative_means_no_wake_up() {
         let mut a = app();
         built(&mut a);
         assert_eq!(a.next_frame_in(), None);
@@ -2584,7 +2584,7 @@ mod tests {
     ///
     /// 出したきり寝ると、開きっぱなしの画面で「たった今」が何時間も残る
     #[test]
-    fn 相対表示があると起き直しを頼む() {
+    fn a_relative_timestamp_asks_for_a_later_frame() {
         let mut a = app();
         // ⚠️ **時計を読んだ結果に合わせる。** 決め打ちの時刻を書くと、
         // 走らせるたびに「何年前」の側へ落ちる
@@ -2644,7 +2644,7 @@ mod tests {
     /// メニューの中に埋もれた 1 行で、押した瞬間に消えるのは危うい。
     /// 隣の項目と 1 行しか離れておらず、消した発言は戻せない
     #[test]
-    fn 削除は一度押しただけでは消えない() {
+    fn one_press_of_delete_does_not_delete() {
         let mut a = with_delete_menu();
         assert!(press_menu(&mut a, 0));
         assert!(is_confirm(&a), "確認の窓が出ていない");
@@ -2653,7 +2653,7 @@ mod tests {
 
     /// やめたら何も起きない。**窓も閉じる**
     #[test]
-    fn やめるを押したら何も起きない() {
+    fn cancelling_the_dialog_does_nothing() {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
 
@@ -2664,7 +2664,7 @@ mod tests {
 
     /// 確かめたら進む。**ここで初めて消える**
     #[test]
-    fn 削除するを押したら消える() {
+    fn confirming_the_dialog_deletes() {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
 
@@ -2680,7 +2680,7 @@ mod tests {
     /// ことを示している。外を押して消えると、決めたのか消えたのかが
     /// 分からない
     #[test]
-    fn 窓は外を押しても閉じない() {
+    fn clicking_outside_does_not_close_the_dialog() {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
 
@@ -2693,7 +2693,7 @@ mod tests {
 
     /// Esc なら閉じる。**閉じ方が 1 つも無いのは行き止まりである**
     #[test]
-    fn 窓は_esc_で閉じる() {
+    fn escape_closes_the_dialog() {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
 
@@ -2705,7 +2705,7 @@ mod tests {
     /// ⚠️ **窓から来たものにもう一度窓を挟まない。** 挟むと窓が出続けて
     /// 永久に進めない
     #[test]
-    fn 窓は二度出ない() {
+    fn the_dialog_does_not_reappear() {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
         press_button(&mut a, crate::menu::button::CONFIRM);
@@ -2714,7 +2714,7 @@ mod tests {
 
     /// 窓が出ているあいだは、下のチャンネルへ届かない
     #[test]
-    fn 窓が出ている間は下を押しても届かない() {
+    fn nothing_underneath_is_reachable_while_the_dialog_is_open() {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
         let before = a.selected_channel;
@@ -2726,7 +2726,7 @@ mod tests {
     /// ⚠️ **戻せない操作以外に窓を挟まない。** 何を押しても窓が出ると、
     /// 窓そのものが読まれなくなる
     #[test]
-    fn 戻せる操作には窓を挟まない() {
+    fn a_reversible_action_gets_no_dialog() {
         let mut a = app();
         a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
             at: (0.0, 0.0),
@@ -2792,7 +2792,7 @@ mod tests {
     ///
     /// はみ出したボタンは「出ているのに押せない」という壊れ方をする
     #[test]
-    fn 窓の中身は窓からはみ出さない() {
+    fn the_dialog_contents_stay_inside_it() {
         let placed = placed_confirm(1280.0, 800.0);
         let modal = one_of(&placed, NodeId::OverlayModal);
         assert!(modal.w > 0.0 && modal.h > 0.0, "窓が潰れている {modal:?}");
@@ -2830,7 +2830,7 @@ mod tests {
     /// ⚠️ **2 つのボタンが重ならないこと。** 重なると、上のボタンしか
     /// 押せないのに下のボタンも見えている状態になる
     #[test]
-    fn 二つのボタンは重ならない() {
+    fn the_two_buttons_do_not_overlap() {
         let placed = placed_confirm(1280.0, 800.0);
         let b = all_of(&placed, NodeId::OverlayModalAction);
         assert_eq!(b.len(), 2);
@@ -2843,7 +2843,7 @@ mod tests {
 
     /// 窓は押した場所ではなく**画面の真ん中**に出る
     #[test]
-    fn 窓は画面の真ん中に出る() {
+    fn the_dialog_is_centred_on_screen() {
         let (w, h) = (1280.0, 800.0);
         let modal = one_of(&placed_confirm(w, h), NodeId::OverlayModal);
         let cx = modal.x + modal.w / 2.0;
@@ -2855,7 +2855,7 @@ mod tests {
     /// ⚠️ **狭い窓でも入りきること。** 携帯の幅で画面からはみ出すと、
     /// 「やめる」に手が届かなくなる
     #[test]
-    fn 狭い窓でも収まる() {
+    fn it_fits_in_a_narrow_window() {
         let (w, h) = (400.0, 700.0);
         let placed = placed_confirm(w, h);
         let modal = one_of(&placed, NodeId::OverlayModal);
@@ -2876,7 +2876,7 @@ mod tests {
     ///
     /// 常に載せると、窓いっぱいの層が当たりを受け止め続けて何も押せなくなる
     #[test]
-    fn 閉じている間は層を組まない() {
+    fn no_overlay_layer_is_built_while_nothing_is_open() {
         let has_layer = |a: &Gumicord| {
             let mut found = false;
             a.build_tree(Panes::Four).walk(&mut |n, _| {
@@ -2890,7 +2890,7 @@ mod tests {
 
     /// 何も無いところで押したら、開いていたものを閉じるだけ
     #[test]
-    fn 何も無いところで副ボタンを押すと閉じる() {
+    fn right_clicking_empty_space_closes_the_menu() {
         let mut a = with_menu();
         assert!(a.context_menu(&[], (0.0, 0.0)));
         assert!(a.floating.is_none());
@@ -2899,7 +2899,7 @@ mod tests {
     /// ⚠️ **端末の種類ではなく幅で決める。** 窓を狭くした机の上でも、
     /// 指の下にメニューが出るより下から出たほうが読める
     #[test]
-    fn 狭い窓では下から出す() {
+    fn a_narrow_window_presents_the_menu_as_a_sheet() {
         use crate::menu::Present;
         assert_eq!(Panes::One.present(), Present::Sheet);
         assert_eq!(Panes::Two.present(), Present::Popover);
@@ -2911,7 +2911,7 @@ mod tests {
     /// 素の文字列を `contains` で調べる実装だと、`` `<@1>` `` と書いた
     /// だけで相手に通知が飛ぶ。ここは解析した結果を見ている (`FR-022`)
     #[test]
-    fn コードの中のメンションは呼びかけではない() {
+    fn a_mention_inside_code_is_not_a_mention() {
         let me = Some(UserId::from(1));
         let call = |src: &str| calls_me(&gumicord_markdown::parse(src), me, None);
 
@@ -2929,7 +2929,7 @@ mod tests {
     /// ⚠️ **役職も見る。** `@everyone` だけを見ていると、自分の役職が
     /// 呼ばれたときに気づけない
     #[test]
-    fn 自分の役職への呼びかけも気づく() {
+    fn a_mention_of_our_own_role_counts() {
         let me = Some(UserId::from(1));
         let roles = [RoleId::from(9)];
         let call =
@@ -2946,7 +2946,7 @@ mod tests {
 
     /// 引用と箇条書きの中の呼びかけも拾うこと
     #[test]
-    fn 入れ子の中の呼びかけも拾う() {
+    fn a_nested_mention_is_found() {
         let me = Some(UserId::from(1));
         let call = |src: &str| calls_me(&gumicord_markdown::parse(src), me, None);
         assert!(call("> やあ <@1>"));

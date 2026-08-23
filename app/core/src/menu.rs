@@ -361,7 +361,7 @@ mod tests {
     /// ⚠️ **暗幕はメニューより先に置く。** 後ろに置くと、描く順が木の順
     /// なのでメニューの上に暗幕が掛かる
     #[test]
-    fn 暗幕はメニューより先に来る() {
+    fn the_scrim_comes_before_the_menu() {
         let order = ids(&menu().node(Present::Popover, None));
         let scrim = order.iter().position(|i| *i == NodeId::OverlayScrim);
         let m = order.iter().position(|i| *i == NodeId::OverlayMenu);
@@ -370,7 +370,7 @@ mod tests {
 
     /// 机の上では点に浮かべ、携帯では下から出す
     #[test]
-    fn 包み方だけが端末で変わる() {
+    fn only_the_presentation_changes_per_device() {
         let pop = ids(&menu().node(Present::Popover, None));
         assert!(pop.contains(&NodeId::OverlayPopover));
         assert!(!pop.contains(&NodeId::OverlaySheet));
@@ -383,7 +383,7 @@ mod tests {
     /// ⚠️ **中身は端末で変わらない。** 同じ操作が出たり出なかったりすると
     /// 覚えられない
     #[test]
-    fn 項目は端末で変わらない() {
+    fn the_items_are_the_same_on_every_device() {
         let labels = |how| {
             let mut out = Vec::new();
             menu().node(how, None).walk(&mut |c, _| {
@@ -401,7 +401,7 @@ mod tests {
 
     /// 基準の点はそのまま運ばれること。**置き場所を先に決めない**
     #[test]
-    fn 基準の点はそのまま運ばれる() {
+    fn the_anchor_point_is_carried_through_untouched() {
         let n = menu().node(Present::Popover, None);
         let mut found = None;
         n.walk(&mut |c, _| {
@@ -415,7 +415,7 @@ mod tests {
     /// ⚠️ **番号で指す。** 名前で指すと、同じ名前の項目が 2 つ並んだ
     /// ときに片方しか押せない
     #[test]
-    fn 項目は番号で指す() {
+    fn items_are_addressed_by_index() {
         let mut keys = Vec::new();
         menu().node(Present::Popover, None).walk(&mut |c, _| {
             if c.id == NodeId::OverlayMenuItem {
@@ -443,7 +443,7 @@ mod tests {
     /// ⚠️ **窓は必ず暗くする。** 後ろが読めたままだと、窓が出ていることに
     /// 気付かずに下を押そうとする
     #[test]
-    fn 窓は後ろを暗くする() {
+    fn the_dialog_dims_what_is_behind_it() {
         let n = confirm().node(Present::Popover, None);
         let mut slot = None;
         n.walk(&mut |c, _| {
@@ -457,7 +457,7 @@ mod tests {
     /// ⚠️ **端末で包み方を変えない。** 窓は押した場所と関係のないところに
     /// 出るので、机の上でも携帯でも同じである
     #[test]
-    fn 窓は端末で変わらない() {
+    fn the_dialog_is_the_same_on_every_device() {
         let pop = ids(&confirm().node(Present::Popover, None));
         let sheet = ids(&confirm().node(Present::Sheet, None));
         assert_eq!(pop, sheet);
@@ -470,7 +470,7 @@ mod tests {
     /// ⚠️ **やめるほうを先に置く。** 押し間違えたときに起きることが
     /// 軽いほうを、指と目が先に当たる場所に置く
     #[test]
-    fn やめるほうが先に来る() {
+    fn the_cancel_button_comes_first() {
         let labels = texts(
             &confirm().node(Present::Popover, None),
             NodeId::OverlayModalActionLabel,
@@ -481,7 +481,7 @@ mod tests {
     /// ⚠️ **「はい」にしない。** 見出しを読み飛ばした人には、何に対する
     /// 「はい」か分からない
     #[test]
-    fn 進むほうの文字は動詞である() {
+    fn the_confirming_button_is_labelled_with_a_verb() {
         let labels = texts(
             &confirm().node(Present::Popover, None),
             NodeId::OverlayModalActionLabel,
@@ -492,7 +492,7 @@ mod tests {
     /// ⚠️ **番号で指す。** 文字で指すと、言語を変えた瞬間にどちらが
     /// 押されたか分からなくなる
     #[test]
-    fn ボタンは番号で指す() {
+    fn buttons_are_addressed_by_index() {
         let mut keys = Vec::new();
         confirm().node(Present::Popover, None).walk(&mut |c, _| {
             if c.id == NodeId::OverlayModalAction {
@@ -511,14 +511,14 @@ mod tests {
     /// 消えるものそのものを出す。**「本当に？」だけでは何が消えるか
     /// 分からない**
     #[test]
-    fn 何が消えるのかを一緒に出す() {
+    fn it_shows_what_is_about_to_be_deleted() {
         let n = confirm().node(Present::Popover, None);
         assert_eq!(texts(&n, NodeId::OverlayModalPreview), vec!["おはよう"]);
     }
 
     /// 中身が無ければ枠ごと出さない。**空の枠は何も伝えない**
     #[test]
-    fn 出すものが無ければ枠を出さない() {
+    fn no_preview_box_appears_when_there_is_nothing_to_show() {
         let Floating::Confirm(mut c) = confirm() else {
             unreachable!()
         };
@@ -529,7 +529,7 @@ mod tests {
 
     /// 指が乗っているボタンだけが光る
     #[test]
-    fn 指の乗ったボタンだけが光る() {
+    fn only_the_hovered_button_highlights() {
         let n = confirm().node(Present::Popover, Some(button::CONFIRM));
         let mut hovered = Vec::new();
         n.walk(&mut |c, _| {
@@ -544,14 +544,14 @@ mod tests {
 
     /// 短い本文はそのまま出る
     #[test]
-    fn 短い本文はそのまま出る() {
+    fn a_short_body_is_shown_as_is() {
         assert_eq!(preview_line("おはよう"), Some("おはよう".to_owned()));
     }
 
     /// ⚠️ **改行を潰す。** 1 行の場所なので、そのまま入れると 2 行目
     /// 以降が見えないところへ消える
     #[test]
-    fn 改行は空白に潰れる() {
+    fn newlines_collapse_into_spaces() {
         assert_eq!(
             preview_line("いち\nに\r\nさん"),
             Some("いち に さん".to_owned())
@@ -560,7 +560,7 @@ mod tests {
 
     /// ⚠️ **バイトで切らない。** 日本語の途中で切ると壊れる
     #[test]
-    fn 長い本文は文字数で切れる() {
+    fn a_long_body_is_cut_by_character_count() {
         let out = preview_line(&"あ".repeat(200)).expect("出るはず");
         assert_eq!(out.chars().count(), 61, "60 文字 + …");
         assert!(out.ends_with('…'));
@@ -568,7 +568,7 @@ mod tests {
 
     /// 添付だけの発言は本文が空である。**空の枠を出しても何も伝わらない**
     #[test]
-    fn 中身が無ければ出さない() {
+    fn an_empty_body_yields_no_preview() {
         assert_eq!(preview_line(""), None);
         assert_eq!(preview_line("   \n\t "), None);
     }

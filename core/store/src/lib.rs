@@ -771,7 +771,7 @@ mod tests {
     /// `MESSAGE_UPDATE` は開いていないチャンネルのぶんも、巻き戻して
     /// 読んでいない古い発言のぶんも来る。足すと一覧の途中に飛び地ができる
     #[test]
-    fn 知らない発言は書き換えで足さない() {
+    fn an_edit_never_adds_an_unknown_message() {
         let mut s = Store::new();
         s.set_backlog(ChannelId::from(9u64), vec![message(1, 9)]);
 
@@ -787,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn 書き換えは中身を差し替える() {
+    fn an_edit_replaces_the_body() {
         let mut s = Store::new();
         s.set_backlog(ChannelId::from(9u64), vec![message(1, 9), message(2, 9)]);
 
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn 消すと一覧から抜ける() {
+    fn a_delete_removes_it_from_the_list() {
         let mut s = Store::new();
         let ch = ChannelId::from(9u64);
         s.set_backlog(ch, vec![message(1, 9), message(2, 9)]);

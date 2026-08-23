@@ -1,45 +1,35 @@
-//! 安定 ID の**唯一の定義元**。
+//! The single definition site for stable IDs — the extension ABI itself.
 //!
-//! ⚠️ **このファイルが Gumicord の拡張 ABI そのものである。**
+//! `spec/03-uitree.md` and `sdk/src/ids.ts` are generated from here by
+//! `cargo xtask gen`; never hand-synchronised.
 //!
-//! [`spec/03-uitree.md`] の一覧と `sdk/src/ids.ts` は、ここから
-//! `cargo xtask gen` で生成する。**手書きで同期しない。**
+//! Within a major version, IDs may be added but never removed or renamed, and
+//! their parent relationships may not change (that would alter `ui.wrap`).
+//! `cargo xtask abi` enforces this against `spec/uitree-abi.json`.
 //!
-//! # 変更するときの規則 (`EXT-003`, `EXT-004`)
+//! Since nothing can be removed, add only what an extension cannot be written
+//! without — never what merely might be handy.
 //!
-//! | | |
-//! |---|---|
-//! | 追加 | ✅ 自由。破壊的変更ではない |
-//! | 削除 | ❌ メジャーバージョン内では不可 |
-//! | 改名 | ❌ 同上 |
-//! | 親子関係の変更 | ❌ `ui.wrap` の結果が変わるため破壊的変更 |
-//!
-//! `cargo xtask abi` が `spec/uitree-abi.json` と比較してこれを強制する。
-//! 意図的に受け入れる場合のみ `cargo xtask abi --accept` でスナップショットを
-//! 更新し、その差分をレビューで確認する。
-//!
-//! # 追加するときの心構え
-//!
-//! **削除できないので、「あったほうが便利かもしれない」で足さない。**
-//! 「これがないと拡張が書けない」だけを足す。
+//! The description strings below are spec content and stay in Japanese: they
+//! are what `cargo xtask gen` writes into the spec table.
 
 use core::fmt;
 use core::str::FromStr;
 
-/// そのノードがプラグインへ渡す `data` の種別。
+/// The kind of `data` a node hands to plugins.
 ///
-/// ⚠️ `data` のフィールドもまた拡張 ABI である。追加は自由だが削除と改名は
-/// 破壊的変更になる ([`spec/03-uitree.md`] 2.4)。
+/// Its fields are part of the ABI too: additions are free, removals and
+/// renames are breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DataKind {
-    /// `data` を持たない
+    /// Carries no `data`.
     None,
     Message,
     Guild,
     Channel,
     Category,
     Dm,
-    /// メンバー一覧に出る 1 人 (`FR-043`)
+    /// One person in the member list.
     Member,
     Attachment,
     Embed,
@@ -61,24 +51,22 @@ impl DataKind {
     }
 }
 
-/// プラグインがそのノードを**生成してよいか**。
+/// Whether a plugin may create this node.
 ///
-/// 中核ノードは実在するドメインオブジェクトと結びついている。プラグインが
-/// 偽物を作れると、アクセシビリティツリーが嘘をつき、他プラグインのセレクタが
-/// 実体のないノードにマッチする ([`spec/03-uitree.md`] 8.2)。
+/// Core nodes are bound to real domain objects. A forged one would make the
+/// accessibility tree lie and let other plugins' selectors match something
+/// that does not exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Origin {
-    /// クライアントのみが生成する
+    /// Created only by the client.
     Core,
-    /// プラグインも生成してよい
+    /// Plugins may create it too.
     Plugin,
 }
 
 macro_rules! define_node_ids {
     ($($variant:ident, $id:literal, $data:ident, $origin:ident, $doc:literal;)*) => {
-        /// UITree の安定 ID。
-        ///
-        /// 一覧は [`NodeId::ALL`]。仕様は [`spec/03-uitree.md`]。
+        /// A stable UITree ID. See [`NodeId::ALL`].
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[non_exhaustive]
         pub enum NodeId {
@@ -89,25 +77,25 @@ macro_rules! define_node_ids {
         }
 
         impl NodeId {
-            /// 定義されているすべての安定 ID。**定義順**に並ぶ。
+            /// Every stable ID, in definition order.
             pub const ALL: &'static [NodeId] = &[$(NodeId::$variant,)*];
 
-            /// 文字列としての安定 ID
+            /// The ID as a string.
             pub const fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => $id,)* }
             }
 
-            /// このノードが持つ `data` の種別
+            /// The kind of `data` this node carries.
             pub const fn data_kind(self) -> DataKind {
                 match self { $(Self::$variant => DataKind::$data,)* }
             }
 
-            /// プラグインが生成してよいか
+            /// Whether plugins may create it.
             pub const fn origin(self) -> Origin {
                 match self { $(Self::$variant => Origin::$origin,)* }
             }
 
-            /// 人間向けの説明。仕様書の生成に使う
+            /// Human-readable description, used to generate the spec.
             pub const fn doc(self) -> &'static str {
                 match self { $(Self::$variant => $doc,)* }
             }
@@ -126,11 +114,11 @@ macro_rules! define_node_ids {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  安定 ID の定義
+//  Stable ID definitions
 //
-//  変種名, 文字列 ID, data の種別, 生成元, 説明
+//  variant, string id, data kind, origin, description
 //
-//  ⚠️ 行を削除・改名しないこと。追加のみ。
+//  Add lines only; never delete or rename one.
 // ═══════════════════════════════════════════════════════════════════════
 define_node_ids! {
     // ─────────────────────────── app.* — アプリのルートと画面
@@ -279,7 +267,7 @@ impl fmt::Display for NodeId {
 }
 
 impl NodeId {
-    /// 名前空間 (最初のドットまで)
+    /// The namespace, up to the first dot.
     pub fn namespace(self) -> &'static str {
         let s = self.as_str();
         match s.find('.') {
@@ -288,18 +276,17 @@ impl NodeId {
         }
     }
 
-    /// 親の安定 ID。ID の階層構造から導く。
+    /// The parent ID, derived from the dotted name.
     ///
-    /// ⚠️ これは **ID の文字列上の親**であり、UITree 上で必ず親子になることを
-    /// 意味しない。命名規則 N4 (親の ID は子の ID の接頭辞) により、
-    /// 通常は一致する。
+    /// This is the parent in the *name*, which need not be the parent in the
+    /// tree, though the naming rules make them agree in practice.
     pub fn parent(self) -> Option<NodeId> {
         let s = self.as_str();
         let i = s.rfind('.')?;
         NodeId::from_str(&s[..i]).ok()
     }
 
-    /// プラグインが生成してよいか ([`spec/03-uitree.md`] 8.1)
+    /// Whether plugins may create this node.
     pub const fn is_plugin_creatable(self) -> bool {
         matches!(self.origin(), Origin::Plugin)
     }
@@ -310,17 +297,20 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// 文字列 ID が重複していないこと。
-    /// 重複すると `from_str` がどちらか一方しか返せなくなる。
+    /// A duplicate would make `from_str` unable to return both.
     #[test]
     fn ids_are_unique() {
         let mut seen = HashSet::new();
         for id in NodeId::ALL {
-            assert!(seen.insert(id.as_str()), "重複した安定 ID: {}", id.as_str());
+            assert!(
+                seen.insert(id.as_str()),
+                "duplicate stable ID: {}",
+                id.as_str()
+            );
         }
     }
 
-    /// 命名規則 N1: 使える文字は [a-z0-9_.] のみ
+    /// Only `[a-z0-9_.]`, at most four levels deep.
     #[test]
     fn ids_follow_naming_rules() {
         for id in NodeId::ALL {
@@ -328,46 +318,49 @@ mod tests {
             assert!(
                 s.chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.'),
-                "N1 違反 (使えない文字): {s}"
+                "illegal character in ID: {s}"
             );
-            // N2: 階層は最大 4 段
+            // At most four levels.
             let depth = s.matches('.').count() + 1;
-            assert!(depth <= 4, "N2 違反 (5 段以上): {s}");
-            assert!(!s.starts_with('.') && !s.ends_with('.'), "不正な形: {s}");
-            assert!(!s.contains(".."), "不正な形: {s}");
+            assert!(depth <= 4, "ID is more than four levels deep: {s}");
+            assert!(
+                !s.starts_with('.') && !s.ends_with('.'),
+                "malformed ID: {s}"
+            );
+            assert!(!s.contains(".."), "malformed ID: {s}");
         }
     }
 
-    /// 往復変換が成立すること
+    /// Parsing and formatting round-trip.
     #[test]
     fn round_trip() {
         for id in NodeId::ALL {
             assert_eq!(NodeId::from_str(id.as_str()), Ok(*id));
         }
-        assert_eq!(NodeId::from_str("存在しない"), Err(UnknownNodeId));
+        assert_eq!(NodeId::from_str("does.not.exist"), Err(UnknownNodeId));
     }
 
-    /// N4: 親の ID は子の ID の接頭辞である。
-    /// 子として定義した以上、親も定義されていなければならない。
+    /// A parent ID is a prefix of its children, so defining a child requires
+    /// the parent to exist.
     #[test]
     fn parents_are_defined() {
         for id in NodeId::ALL {
             let s = id.as_str();
             if let Some(i) = s.rfind('.') {
                 let parent = &s[..i];
-                // 名前空間そのもの (app, chat など) は ID ではない
+                // A bare namespace (app, chat, …) is not itself an ID.
                 if !parent.contains('.') && parent == id.namespace() {
                     continue;
                 }
                 assert!(
                     NodeId::from_str(parent).is_ok(),
-                    "N4 違反: {s} の親 {parent} が定義されていない"
+                    "{s} has an undefined parent {parent}"
                 );
             }
         }
     }
 
-    /// 中核 ID をプラグインが生成できてはならない (spec/03-uitree.md 8.2)
+    /// Core IDs must not be plugin-creatable.
     #[test]
     fn core_namespaces_are_not_plugin_creatable() {
         for id in NodeId::ALL {
@@ -375,15 +368,14 @@ mod tests {
             assert_eq!(
                 core_ns,
                 !id.is_plugin_creatable(),
-                "{} の生成可否が名前空間と矛盾している",
+                "{} disagrees with its namespace about creatability",
                 id.as_str()
             );
         }
     }
 
-    /// data を持つのは中核ノードだけであるべき。
-    /// primitive.* / layout.* はプラグインが自由に作れるため、
-    /// 特定のドメインオブジェクトと結びつけられない。
+    /// Only core nodes carry `data`: plugin-creatable nodes can be made
+    /// freely and so cannot be bound to a domain object.
     #[test]
     fn plugin_creatable_nodes_have_no_data() {
         for id in NodeId::ALL {
@@ -391,7 +383,7 @@ mod tests {
                 assert_eq!(
                     id.data_kind(),
                     DataKind::None,
-                    "{} はプラグインが生成できるのに data を持っている",
+                    "{} is plugin-creatable yet carries data",
                     id.as_str()
                 );
             }

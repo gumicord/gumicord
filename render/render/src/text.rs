@@ -1308,7 +1308,7 @@ mod tests {
     /// **一続きの文として折り返していること**を見ている。走りごとに
     /// 整形していたら、どちらの走りも 1 行に収まって 1 行のままになる
     #[test]
-    fn 混じった飾りは一続きの文として折り返す() {
+    fn mixed_decoration_wraps_as_one_run_of_text() {
         let mut sh = Shaper::new(1.0);
         let runs = [
             ("aaaa ".to_owned(), plain(16.0)),
@@ -1331,7 +1331,7 @@ mod tests {
 
     /// 走りの番号が字まで届いていること。**届かないと色が塗り分けられない**
     #[test]
-    fn 字はどの走りから来たかを覚えている() {
+    fn each_glyph_remembers_its_span() {
         let mut sh = Shaper::new(1.0);
         let runs = [
             ("ab".to_owned(), plain(16.0)),
@@ -1345,7 +1345,7 @@ mod tests {
 
     /// ⚠️ 折り返した走りを 1 つの矩形で塗ると、行間まで塗って読めなくなる
     #[test]
-    fn 走りの矩形は行ごとに切れる() {
+    fn a_span_rect_is_split_per_line() {
         let mut sh = Shaper::new(1.0);
         let runs = [("aaaa bbbb".to_owned(), plain(16.0))];
         let wide = sh.measure_rich(&runs, None).w;
@@ -1363,7 +1363,7 @@ mod tests {
     /// 走りが 1 つのときは、飾りの無い文字列と同じ結果になること。
     /// **同じ道を通っている**ことの確認である
     #[test]
-    fn 走りが一つなら素の文字列と同じ() {
+    fn a_single_span_matches_plain_text() {
         let mut sh = Shaper::new(1.0);
         let f = plain(16.0);
         let a = sh.measure("こんにちは world", &f, None);
@@ -1378,7 +1378,7 @@ mod tests {
     /// 走りごとに独立して置いているということで、飾りを付けた途端に
     /// 行末がずれる
     #[test]
-    fn 走りの切れ目は行に影響しない() {
+    fn span_boundaries_do_not_affect_line_breaking() {
         let mut sh = Shaper::new(1.0);
         let f = plain(16.0);
         let whole = "the quick brown fox jumps over the lazy dog";
