@@ -37,17 +37,46 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use gumicord_uitree::value::{Background, Color};
-use gumicord_uitree::{Key, NodeId, Style, UiNode};
+use gumicord_uitree::{Style, UiNode};
 
 /// これ以下の差は「同じ」とみなす (論理 px / 0〜1 の比)
 const EPSILON: f32 = 0.01;
 
-/// ノードを跨いで覚えておくための鍵。
+/// ノードを跨いで覚えておくための鍵。**木の中の位置**である。
 ///
-/// ⚠️ **木は毎フレーム組み直される。** 同じノードだと言えるのは
-/// 安定 ID と `key` の組だけである ([`spec/03-uitree.md`] 2.2)。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Ident(NodeId, Option<Key>);
+/// # ⚠️ 安定 ID と `key` だけでは足りない
+///
+/// `key` が区別するのは「**同じ親の下の**同じ安定 ID」であって
+/// ([`spec/03-uitree.md`] 2.2)、木全体で一意ではない。
+///
+/// サーバの絵 `nav.guild_list.item.icon` は鍵を持たない — 親のサーバが
+/// 鍵を持っているので、そこでは要らないからである。だが記録の鍵に
+/// 使うと**サーバの数だけあるものが 1 つの記録を取り合う**。1 フレームの
+/// 中で行き先が何度も書き換わり、**動きが消える**。実際に消えた。
+///
+/// そこで根からの道を畳んで持つ。鍵があればそれを、無ければ兄弟の中の
+/// 位置を混ぜる。
+///
+/// ⚠️ **数えるのは同じ安定 ID の中での順番である。** 兄弟の通し番号だと、
+/// 隣に別の種類のノードが 1 つ増えただけで番号がずれる。サーバに印が
+/// 出た瞬間に絵の番号が動き、**絵が「初めて見たノード」になって飛ぶ**。
+///
+/// ⚠️ **鍵の無い同じ安定 ID の兄弟が並び替わると、動きは引き直しになる。**
+/// 位置しか手がかりが無いので、それが「別のもの」と区別できない。
+/// 並び替わっても同じものだと言いたいなら、`key` を付けるのが答えである。
+type Ident = u64;
+
+fn ident(parent: Ident, node: &UiNode, index: usize) -> Ident {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parent.hash(&mut h);
+    node.id.hash(&mut h);
+    match &node.key {
+        Some(k) => k.hash(&mut h),
+        None => index.hash(&mut h),
+    }
+    h.finish()
+}
 
 /// 1 ノードぶんの、動いている最中の記録。
 #[derive(Debug, Clone)]
@@ -82,7 +111,7 @@ impl Motion {
     /// 요求をやめる — それが `NFR-005` である。
     pub fn apply(&mut self, root: &mut UiNode, now: Instant) -> bool {
         self.frame = self.frame.wrapping_add(1);
-        let moving = self.walk(root, now);
+        let moving = self.walk(root, ident(0, root, 0), now);
         // ⚠️ **消えたノードの記録を捨てる。** 残すと、一覧をめくるたびに
         // 増え続ける
         let frame = self.frame;
@@ -90,19 +119,28 @@ impl Motion {
         moving
     }
 
-    fn walk(&mut self, node: &mut UiNode, now: Instant) -> bool {
-        let mut moving = self.node(node, now);
+    fn walk(&mut self, node: &mut UiNode, at: Ident, now: Instant) -> bool {
+        let mut moving = self.node(node, at, now);
+
+        // ⚠️ **兄弟の通し番号ではなく、同じ安定 ID の中での順番で数える。**
+        //
+        // 通し番号だと、隣に別の種類のノードが 1 つ増えただけで番号が
+        // ずれる。サーバに印が出た瞬間に絵の番号が 0 から 1 へ動き、
+        // **絵が「初めて見たノード」になって角が飛ぶ**。
+        let mut nth: HashMap<gumicord_uitree::NodeId, usize> = HashMap::new();
         for child in &mut node.children {
-            moving |= self.walk(child, now);
+            let n = nth.entry(child.id).or_default();
+            let child_at = ident(at, child, *n);
+            *n += 1;
+            moving |= self.walk(child, child_at, now);
         }
         moving
     }
 
-    fn node(&mut self, node: &mut UiNode, now: Instant) -> bool {
+    fn node(&mut self, node: &mut UiNode, ident: Ident, now: Instant) -> bool {
         let Some(duration) = node.style.transition.filter(|d| *d > 0.0) else {
             return false;
         };
-        let ident = Ident(node.id, node.key.clone());
         let frame = self.frame;
 
         let Some(track) = self.tracks.get_mut(&ident) else {
@@ -230,6 +268,7 @@ fn lerp_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gumicord_uitree::NodeId;
     use std::time::Duration;
 
     fn node(radius: f32, transition: Option<f32>) -> UiNode {
@@ -319,6 +358,99 @@ mod tests {
             lerp_color(None, Color::parse("#ffffff"), 0.5),
             Color::parse("#ffffff")
         );
+    }
+
+    /// ⚠️ **同じ安定 ID が並んでいても、それぞれ別に動く。**
+    ///
+    /// サーバの絵は鍵を持たない (親のサーバが持っているので要らない)。
+    /// 安定 ID と鍵だけを記録の鍵にすると**サーバの数だけあるものが 1 つの
+    /// 記録を取り合い**、1 フレームの中で行き先が何度も書き換わって
+    /// **動きが消える**。実際に消えた
+    #[test]
+    fn siblings_with_the_same_id_move_on_their_own() {
+        fn rail(hovered_radius: f32) -> UiNode {
+            let mut list = UiNode::new(NodeId::NavGuildList);
+            for i in 0..3u64 {
+                // 親のサーバだけが鍵を持ち、絵は持たない
+                let mut icon = UiNode::new(NodeId::NavGuildListItemIcon);
+                icon.style.radius = Some(if i == 1 { hovered_radius } else { 12.0 });
+                icon.style.transition = Some(100.0);
+                list = list.child(
+                    UiNode::new(NodeId::NavGuildListItem)
+                        .with_id_key(i)
+                        .child(icon),
+                );
+            }
+            list
+        }
+
+        fn radii(n: &UiNode, out: &mut Vec<f32>) {
+            if n.id == NodeId::NavGuildListItemIcon {
+                out.push(n.style.radius.expect("値がある"));
+            }
+            for c in &n.children {
+                radii(c, out);
+            }
+        }
+
+        let mut m = Motion::new();
+        let start = Instant::now();
+        m.apply(&mut rail(12.0), start);
+
+        // 真ん中だけにポインタが乗った。**気付いた瞬間はまだ動き出さない**
+        m.apply(&mut rail(8.0), start);
+
+        let mut tree = rail(8.0);
+        assert!(m.apply(&mut tree, start + Duration::from_millis(50)));
+
+        let mut got = Vec::new();
+        radii(&tree, &mut got);
+        assert_eq!(got[0], 12.0, "乗っていないものは動かない");
+        assert_eq!(got[2], 12.0, "乗っていないものは動かない");
+        assert!(
+            got[1] > 8.0 && got[1] < 12.0,
+            "乗ったものだけが途中: {}",
+            got[1]
+        );
+    }
+
+    /// ⚠️ **隣に別の種類のノードが増えても、動きは続く。**
+    ///
+    /// サーバにポインタを乗せると、絵の角が変わると**同時に**左端の印が
+    /// 現れる。兄弟の通し番号で数えると、そこで絵の番号が 0 から 1 へ
+    /// ずれて「初めて見たノード」になり、角が飛ぶ
+    #[test]
+    fn a_new_kind_of_sibling_does_not_restart_the_animation() {
+        fn item(radius: f32, with_pill: bool) -> UiNode {
+            let mut icon = UiNode::new(NodeId::NavGuildListItemIcon);
+            icon.style.radius = Some(radius);
+            icon.style.transition = Some(100.0);
+
+            let mut item = UiNode::new(NodeId::NavGuildListItem).with_id_key(1);
+            if with_pill {
+                // 印は絵より**前**に来る
+                item = item.child(UiNode::new(NodeId::NavGuildListItemPill));
+            }
+            item.child(icon)
+        }
+
+        let mut m = Motion::new();
+        let start = Instant::now();
+        m.apply(&mut item(12.0, false), start);
+
+        // ポインタが乗った。印が生えて、同時に角が変わる
+        m.apply(&mut item(8.0, true), start);
+
+        let mut tree = item(8.0, true);
+        assert!(m.apply(&mut tree, start + Duration::from_millis(50)));
+
+        let icon = tree
+            .children
+            .iter()
+            .find(|c| c.id == NodeId::NavGuildListItemIcon)
+            .expect("絵がある");
+        let r = icon.style.radius.expect("値がある");
+        assert!(r > 8.0 && r < 12.0, "飛ばずに動いている: {r}");
     }
 
     /// ⚠️ **消えたノードの記録は捨てる。** 一覧をめくるたびに増え続ける
