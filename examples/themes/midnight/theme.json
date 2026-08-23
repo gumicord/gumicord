@@ -220,14 +220,14 @@
     {
       "select": "nav.guild_list.item.badge",
       "style": {
-        "margin": [28, 0, 0, 32],
+        "margin": [34, 0, 0, 41],
         "borderColor": "$color.bg.sunken",
         "borderWidth": 2,
         "background": "$color.danger",
         "color": "#ffffff",
-        "font": "$font.small",
+        "font": { "size": 11, "lineHeight": 14, "weight": 600 },
         "radius": "$radius.full",
-        "padding": [2, 6, 2, 6]
+        "padding": [0, 4, 0, 4]
       }
     },
 
