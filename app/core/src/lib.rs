@@ -565,7 +565,7 @@ impl Gumicord {
             UiNode::new(NodeId::AppScreenMain)
                 .children(self.sidebar(panes))
                 .child(self.chat_view())
-                .children(panes.members().then(|| self.member_list()).flatten())
+                .child_if(panes.members(), || self.member_list())
         } else {
             self.login_screen()
         };
@@ -870,10 +870,15 @@ impl Gumicord {
     ///   └──────────────────┘
     /// ```
     ///
-    /// # ⚠️ 届いていなければ**出さない**
+    /// # ⚠️ 届く前から**列は立てておく**
     ///
-    /// 空の列を出すと「このサーバには誰も居ない」と読める。まだ来て
-    /// いないだけなので、来るまでは列ごと畳む。
+    /// 届いてから列を生やすと、そのとき**チャットの幅が変わって本文が
+    /// 組み直される**。読んでいる最中に画面が動くのは、空の列が一瞬
+    /// 見えるより悪い。
+    ///
+    /// 中身が無い間は [`State::Loading`] を立てる。**「まだ来ていない」と
+    /// 「誰も居ない」は別のこと**であり、テーマがそこを描き分けられる
+    /// ようにしておく。
     ///
     /// # ⚠️ 見出しは名前にする。識別子を出さない
     ///
@@ -885,11 +890,13 @@ impl Gumicord {
     ///
     /// `op 14` で頼んでいるのが 0〜99 番目だからである。巻いた先を
     /// 頼み直す仕組みはまだない ([`gumicord_gateway::member_list`])。
-    fn member_list(&self) -> Option<UiNode> {
+    fn member_list(&self) -> UiNode {
         use gumicord_gateway::MemberRow;
 
         let guild = GuildId::from(self.selected_guild);
-        let list = self.live.members(guild)?;
+        let Some(list) = self.live.members(guild) else {
+            return UiNode::new(NodeId::NavMemberList).with_state(State::Loading);
+        };
 
         let mut out = UiNode::new(NodeId::NavMemberList);
         for row in list.rows() {
@@ -948,11 +955,11 @@ impl Gumicord {
             }
         }
 
-        // 見出ししか出せなかったときも、出すものが無いのと同じである
+        // 名前の分かる見出しも人も無かった。**まだ出せるものが無い**
         if out.children.is_empty() {
-            return None;
+            return out.with_state(State::Loading);
         }
-        Some(out.children(self.scrollbar(NodeId::NavMemberList)))
+        out.children(self.scrollbar(NodeId::NavMemberList))
     }
 
     /// メンバー一覧の見出しの名前。**分からなければ `None`**
@@ -2132,17 +2139,32 @@ mod member_list_tests {
         out
     }
 
-    /// ⚠️ **届いていなければ列ごと出さない。**
-    /// 空の列は「誰も居ない」と読める
+    /// ⚠️ **届く前から列は立てておく。**
+    ///
+    /// 届いてから生やすと、そのときチャットの幅が変わって本文が組み直される。
+    /// 読んでいる最中に画面が動くのは、空の列が一瞬見えるより悪い
     #[test]
-    fn nothing_arrived_means_no_column() {
+    fn the_column_stands_before_anything_arrives() {
         let a = app();
-        assert!(a.member_list().is_none());
+
+        let empty = a.member_list();
+        assert_eq!(empty.id, NodeId::NavMemberList);
+        assert!(empty.children.is_empty(), "中身はまだ無い");
+        // 「まだ来ていない」と「誰も居ない」は別のことである
+        assert!(empty.states.contains(State::Loading));
 
         let tree = a.build_tree(Panes::Four);
         let mut found = false;
         tree.walk(&mut |n, _| found |= n.id == NodeId::NavMemberList);
-        assert!(!found);
+        assert!(found, "幅があるうちは列が立っている");
+    }
+
+    /// 届いたら [`State::Loading`] は下りる
+    #[test]
+    fn the_loading_state_goes_away_once_people_arrive() {
+        let mut a = app();
+        sync(&mut a, vec![person("7", "ねんねこ")]);
+        assert!(!a.member_list().states.contains(State::Loading));
     }
 
     /// 見出しは**名前**で出る。役職の識別子は出さない
@@ -2159,7 +2181,7 @@ mod member_list_tests {
             ],
         );
 
-        let list = a.member_list().expect("出る");
+        let list = a.member_list();
         assert_eq!(
             texts(&list),
             vec!["管理者 — 1", "ねんねこ", "オンライン — 1", "すぴき"]
@@ -2179,7 +2201,7 @@ mod member_list_tests {
             ],
         );
 
-        assert_eq!(texts(&a.member_list().expect("出る")), vec!["ねんねこ"]);
+        assert_eq!(texts(&a.member_list()), vec!["ねんねこ"]);
     }
 
     /// ⚠️ **狭いときはメンバー一覧から畳む。** チャットより後で構わない
