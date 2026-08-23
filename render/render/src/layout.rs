@@ -514,7 +514,8 @@ impl<'a> Cx<'a, '_, '_> {
         for (i, child) in node.children.iter().enumerate() {
             // 重ねて置く子は流れに入らない。カーソルも進めない
             if is_overlay(child.id) {
-                self.place_scrollbar(node.id, child, inner, offset, over, clip);
+                // ⚠️ `inner` ではなく `rect`。**余白の内側へ入れない**
+                self.place_scrollbar(node.id, child, rect, offset, over, clip);
                 continue;
             }
 
@@ -558,6 +559,14 @@ impl<'a> Cx<'a, '_, '_> {
     ///
     /// 摘みの大きさと位置は**はみ出し量から決まる**ので、テーマには書けない。
     /// テーマが決めるのは幅・余白・色である。
+    ///
+    /// # ⚠️ 余白の内側ではなく、外縁に置く
+    ///
+    /// `track` に渡すのは余白を引く**前**の矩形である。引いた後に置くと、
+    /// 余白の分だけ内側へ入り込み、**中身の上に乗る**。サーバ一覧では
+    /// 48px の丸の上に線が重なった。
+    ///
+    /// スクロールバーは中身ではなく入れ物の縁に属している。
     ///
     /// **スクロールできるものが何もなければ、何も置かない。** 動かない
     /// スクロールバーは嘘をつく。
@@ -1153,6 +1162,33 @@ mod scrollbar_tests {
         assert_eq!(bar.rect.right(), 400.0, "右端に付く");
         assert_eq!(bar.rect.y, 0.0, "スクロールしても上端のまま");
         assert_eq!(bar.rect.h, 100.0, "枠いっぱいの高さ");
+    }
+
+    /// ⚠️ **余白の内側へ入らない。**
+    ///
+    /// 余白を引いた後に置くと、その分だけ内側へ入り込んで**中身の上に
+    /// 乗る**。サーバ一覧で 48px の丸の上に線が重なった
+    #[test]
+    fn the_scrollbar_ignores_the_padding() {
+        let mut list = styled(NodeId::ChatMessageList, |s| {
+            s.height = Some(100.0);
+            s.padding = Some(Edges::all(12.0));
+        });
+        for i in 0..10 {
+            list =
+                list.child(styled(NodeId::ChatMessage, |s| s.height = Some(50.0)).with_id_key(i));
+        }
+        list = list.child(
+            styled(NodeId::LayoutScrollbar, |s| s.width = Some(10.0))
+                .child(UiNode::new(NodeId::LayoutScrollbarThumb)),
+        );
+        let tree = UiNode::new(NodeId::ChatView).child(list);
+
+        let r = place(&tree, &ScrollState::new());
+        let bar = r.find(NodeId::LayoutScrollbar).expect("置かれていない");
+
+        assert_eq!(bar.rect.right(), 400.0, "余白があっても外縁に付く");
+        assert_eq!(bar.rect.h, 100.0, "高さも余白を引かない");
     }
 
     /// 摘みの大きさは見えている割合になり、位置はスクロール量に従う
