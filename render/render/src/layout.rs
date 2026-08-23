@@ -483,6 +483,24 @@ impl<'a> Cx<'a, '_, '_> {
                 .clamp(0.0, over);
         }
 
+        // ⚠️ **足りないぶんは下へ寄せる。**
+        //
+        // 末尾に貼り付く一覧は「一番新しいものが下にある」ものである。
+        // 中身が枠に満たないときにそれを上へ置くと、**発言が 1 件しか
+        // 無いチャンネルだけ天井に貼り付いて見える**。実際にそうなった。
+        //
+        // はみ出していないので巻く話ではない。位置を負へずらすことで、
+        // 置き始めを下げている
+        if it.anchor_end {
+            let short = match it.axis {
+                Axis::Row => inner.w - content.w,
+                _ => inner.h - content.h,
+            };
+            if short > 0.0 {
+                offset -= short;
+            }
+        }
+
         let clip = if it.scroll {
             Some(clip.map_or(inner, |c| c.intersect(inner)))
         } else {
@@ -881,6 +899,57 @@ mod tests {
                 .expect("メッセージがある");
             assert_eq!(last.rect.bottom(), 100.0, "{n} 件でも一番下に居る");
         }
+    }
+
+    /// ⚠️ **中身が枠に満たなくても下に寄る。**
+    ///
+    /// 一番新しいものが下にある一覧で、1 件しか無いときだけ天井に
+    /// 貼り付いて見えた
+    #[test]
+    fn a_short_list_still_sits_at_the_bottom() {
+        let tree = messages(1);
+        let r = layout(
+            &tree,
+            Size::new(400.0, 100.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+
+        let only = r
+            .placed
+            .iter()
+            .find(|p| p.node.id == NodeId::ChatMessage)
+            .expect("1 件ある");
+        assert_eq!(only.rect.bottom(), 100.0, "下端に着いている");
+        assert_eq!(only.rect.y, 50.0, "50px の行が 100px の枠の下半分にいる");
+
+        // はみ出してはいないので、巻けるものは何も無い
+        assert_eq!(r.overflow.get(&NodeId::ChatMessageList), Some(&0.0));
+    }
+
+    /// ⚠️ **末尾に貼り付かない一覧は上のままである。**
+    /// サーバ一覧が 1 つだけのときに下へ落ちてはいけない
+    #[test]
+    fn a_list_that_does_not_anchor_stays_at_the_top() {
+        let mut list = styled(NodeId::NavGuildList, |s| s.height = Some(100.0));
+        list = list.child(styled(NodeId::NavGuildListItem, |s| {
+            s.width = Some(48.0);
+            s.height = Some(48.0);
+        }));
+        let tree = UiNode::new(NodeId::AppScreenMain).child(list);
+
+        let r = layout(
+            &tree,
+            Size::new(400.0, 100.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+        let only = r
+            .placed
+            .iter()
+            .find(|p| p.node.id == NodeId::NavGuildListItem)
+            .expect("1 つある");
+        assert_eq!(only.rect.y, 0.0);
     }
 
     /// 途中で止めていたら、そこに残る。**勝手に追いかけない**
