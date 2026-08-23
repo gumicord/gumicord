@@ -5,7 +5,7 @@
 //!     │
 //! swash でラスタライズ
 //!     │
-//! RGBA8 アトラス (2048², 棚詰め)
+//! RGBA8 アトラス (2048²、棚詰め。**文字は上から、絵は下から**)
 //!     │
 //! テクスチャ付きクアッド
 //! ```
@@ -612,14 +612,47 @@ impl Placement {
     };
 }
 
+/// アトラスの詰め方。**大きさの桁が違うものを混ぜない。**
+///
+/// # ⚠️ 棚は一番背の高いものに合わせて厚くなる
+///
+/// 20px のグリフが並ぶ棚に 128px のアバターが 1 枚落ちると、**その棚は
+/// 128px 厚になる**。残りの 108px × 2048 は誰も使わない。それが数回
+/// 起きただけで 2048×2048 が埋まり、以降の**グリフが 1 つも入らなく
+/// なる**。実際に、日本語の本文が虫食いで出た。
+///
+/// そこで、グリフは上から下へ、絵は下から上へ詰める。互いの棚に
+/// 混ざらないので、厚みの無駄が出ない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// 文字。小さくて数が多い
+    Glyph,
+    /// 絵。大きくて数が少ない
+    Image,
+}
+
+/// 棚の状態だけ。**GPU に触らない**ので、そのまま試験できる
+#[derive(Debug, Default)]
+struct Shelves {
+    /// 上から下へ伸びる、文字の棚
+    cursor_x: u32,
+    cursor_y: u32,
+    shelf_h: u32,
+    /// 下から上へ伸びる、絵の棚。`image_top` は**いまの棚の上端**
+    image_x: u32,
+    image_top: u32,
+    image_shelf_h: u32,
+    /// ⚠️ **側ごとに持つ。** 絵で埋まったからといって文字まで
+    /// 諦めると、本文が虫食いになる
+    glyphs_full: bool,
+    images_full: bool,
+}
+
 struct Atlas {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     entries: HashMap<AtlasKey, Option<GlyphEntry>>,
-    cursor_x: u32,
-    cursor_y: u32,
-    shelf_h: u32,
-    full: bool,
+    shelves: Shelves,
     uploaded: usize,
 }
 
@@ -644,14 +677,90 @@ impl Atlas {
             texture,
             view,
             entries: HashMap::new(),
-            cursor_x: 0,
-            cursor_y: 0,
-            shelf_h: 0,
-            full: false,
+            shelves: Shelves::new(),
             uploaded: 0,
         }
     }
+}
 
+impl Shelves {
+    fn new() -> Self {
+        Shelves {
+            cursor_x: 0,
+            cursor_y: 0,
+            shelf_h: 0,
+            // 幅いっぱいから始めることで、最初の 1 枚が棚を作る
+            image_x: ATLAS_SIZE,
+            image_top: ATLAS_SIZE,
+            image_shelf_h: 0,
+            glyphs_full: false,
+            images_full: false,
+        }
+    }
+
+    /// 空き場所を 1 つ取る。**取れなければ `None`**
+    fn alloc(&mut self, w: u32, h: u32, side: Side) -> Option<(u32, u32)> {
+        /// 棚詰め。1px 空けて隣のにじみを防ぐ
+        const PAD: u32 = 1;
+
+        match side {
+            Side::Glyph => {
+                if self.glyphs_full {
+                    return None;
+                }
+                if self.cursor_x + w + PAD > ATLAS_SIZE {
+                    self.cursor_x = 0;
+                    self.cursor_y += self.shelf_h + PAD;
+                    self.shelf_h = 0;
+                }
+                // 絵の側へ食い込まない
+                if self.cursor_y + h + PAD > self.image_top {
+                    tracing::warn!(
+                        y = self.cursor_y,
+                        "アトラスの文字側が溢れた。R3 (複数ページ化) が要る"
+                    );
+                    self.glyphs_full = true;
+                    return None;
+                }
+                let at = (self.cursor_x, self.cursor_y);
+                self.cursor_x += w + PAD;
+                self.shelf_h = self.shelf_h.max(h);
+                Some(at)
+            }
+            Side::Image => {
+                if self.images_full {
+                    return None;
+                }
+                // 横が足りない、または棚より背が高いなら棚を作り直す
+                if self.image_x + w + PAD > ATLAS_SIZE || h > self.image_shelf_h {
+                    let need = h + PAD;
+                    if self.image_top < need {
+                        self.images_full = true;
+                        return None;
+                    }
+                    let top = self.image_top - need;
+                    // 文字の側へ食い込まない
+                    if top < self.cursor_y + self.shelf_h + PAD {
+                        tracing::warn!(
+                            top = self.image_top,
+                            "アトラスの絵の側が溢れた。R3 (複数ページ化) が要る"
+                        );
+                        self.images_full = true;
+                        return None;
+                    }
+                    self.image_top = top;
+                    self.image_x = 0;
+                    self.image_shelf_h = h;
+                }
+                let at = (self.image_x, self.image_top);
+                self.image_x += w + PAD;
+                Some(at)
+            }
+        }
+    }
+}
+
+impl Atlas {
     fn glyph(
         &mut self,
         queue: &wgpu::Queue,
@@ -681,7 +790,14 @@ impl Atlas {
             return *e;
         }
         // アイコンは正方形で、ペン位置からのずれを持たない
-        let entry = self.insert(queue, size, size, &def.rasterize(size), Placement::ICON);
+        let entry = self.insert(
+            queue,
+            size,
+            size,
+            &def.rasterize(size),
+            Placement::ICON,
+            Side::Glyph,
+        );
         self.entries.insert(k, entry);
         entry
     }
@@ -706,7 +822,7 @@ impl Atlas {
                 is_color: false,
             });
         }
-        if self.full {
+        if self.shelves.glyphs_full {
             return None;
         }
 
@@ -744,10 +860,13 @@ impl Atlas {
                 top: p.top,
                 is_color,
             },
+            Side::Glyph,
         )
     }
 
-    /// RGBA8 の絵をアトラスへ詰める。**グリフもアイコンもここを通る。**
+    /// RGBA8 を 1 枚アトラスへ詰める。**グリフも絵もここを通る。**
+    ///
+    /// `side` は詰める向きを決める ([`Side`])
     fn insert(
         &mut self,
         queue: &wgpu::Queue,
@@ -755,30 +874,17 @@ impl Atlas {
         h: u32,
         rgba: &[u8],
         p: Placement,
+        side: Side,
     ) -> Option<GlyphEntry> {
         let Placement {
             left,
             top,
             is_color,
         } = p;
-        if w == 0 || h == 0 || self.full {
+        if w == 0 || h == 0 {
             return None;
         }
-
-        // 棚詰め。1px 空けて隣のグリフのにじみを防ぐ
-        const PAD: u32 = 1;
-        if self.cursor_x + w + PAD > ATLAS_SIZE {
-            self.cursor_x = 0;
-            self.cursor_y += self.shelf_h + PAD;
-            self.shelf_h = 0;
-        }
-        if self.cursor_y + h + PAD > ATLAS_SIZE {
-            tracing::warn!("グリフアトラスが溢れた。R3 (複数ページ化) が要る");
-            self.full = true;
-            return None;
-        }
-
-        let (x, y) = (self.cursor_x, self.cursor_y);
+        let (x, y) = self.shelves.alloc(w, h, side)?;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -799,8 +905,6 @@ impl Atlas {
             },
         );
 
-        self.cursor_x += w + PAD;
-        self.shelf_h = self.shelf_h.max(h);
         self.uploaded += 1;
 
         let s = ATLAS_SIZE as f32;
@@ -817,6 +921,88 @@ impl Atlas {
             h,
             is_color,
         })
+    }
+}
+
+#[cfg(test)]
+mod shelf_tests {
+    use super::*;
+
+    /// ⚠️ **絵は文字の棚を厚くしない。**
+    ///
+    /// 20px の字が並ぶ棚に 128px のアバターが 1 枚落ちると、その棚は
+    /// 128px 厚になり、残りの 108px × 2048 は誰も使わない。それが何度か
+    /// 起きただけでアトラスが埋まり、**以降の字が 1 つも入らなくなる**。
+    /// 実際に、日本語の本文が虫食いで出た
+    #[test]
+    fn a_picture_does_not_thicken_the_glyph_shelf() {
+        let mut s = Shelves::new();
+
+        // 字を 1 つ置いてから、大きな絵を置く
+        s.alloc(20, 20, Side::Glyph).expect("入る");
+        let before = s.shelf_h;
+        s.alloc(128, 128, Side::Image).expect("入る");
+
+        assert_eq!(s.shelf_h, before, "字の棚は厚くならない");
+    }
+
+    /// 字は上から、絵は下から。**互いの領分へ食い込まない**
+    #[test]
+    fn glyphs_grow_down_and_pictures_grow_up() {
+        let mut s = Shelves::new();
+
+        let (_, gy) = s.alloc(20, 20, Side::Glyph).expect("入る");
+        let (_, iy) = s.alloc(128, 128, Side::Image).expect("入る");
+
+        assert_eq!(gy, 0, "字は上端から");
+        assert!(iy > gy, "絵は下のほう");
+        assert!(iy + 128 <= ATLAS_SIZE);
+    }
+
+    /// 同じ棚に並び、幅が尽きたら次の棚へ移る
+    #[test]
+    fn pictures_share_a_shelf_until_the_width_runs_out() {
+        let mut s = Shelves::new();
+
+        let (_, first) = s.alloc(128, 128, Side::Image).expect("入る");
+        let (x, same) = s.alloc(128, 128, Side::Image).expect("入る");
+        assert_eq!(same, first, "同じ棚");
+        assert!(x > 0, "横に並ぶ");
+
+        // 幅を使い切らせる
+        for _ in 0..20 {
+            s.alloc(128, 128, Side::Image);
+        }
+        let (_, next) = s.alloc(128, 128, Side::Image).expect("入る");
+        assert!(next < first, "次の棚は上へ");
+    }
+
+    /// ⚠️ **絵で埋まっても字は入り続ける。**
+    /// 諦めると本文が虫食いになる
+    #[test]
+    fn a_full_picture_side_does_not_stop_the_glyphs() {
+        let mut s = Shelves::new();
+
+        // 絵で埋め尽くす
+        while s.alloc(256, 256, Side::Image).is_some() {}
+        assert!(s.images_full);
+
+        assert!(s.alloc(20, 20, Side::Glyph).is_some(), "字はまだ入る");
+        assert!(!s.glyphs_full);
+    }
+
+    /// ⚠️ **重ならない。** 両側から詰めても、同じ場所を 2 度渡さない
+    #[test]
+    fn the_two_sides_never_overlap() {
+        let mut s = Shelves::new();
+
+        let mut lowest_glyph = 0;
+        while let Some((_, y)) = s.alloc(64, 64, Side::Glyph) {
+            lowest_glyph = lowest_glyph.max(y + 64);
+        }
+        // 字で埋めた後は、絵はもう入らない
+        assert!(s.alloc(128, 128, Side::Image).is_none());
+        assert!(lowest_glyph <= ATLAS_SIZE);
     }
 }
 
@@ -1051,6 +1237,7 @@ impl TextEngine {
                 // 画像は色そのものを使う。文字のように色を掛けない
                 is_color: true,
             },
+            Side::Image,
         );
         self.atlas.entries.insert(key, entry);
         entry.is_some()

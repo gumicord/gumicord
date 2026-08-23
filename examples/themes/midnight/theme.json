@@ -108,7 +108,7 @@
     {
       "select": "nav.guild_list.item",
       "when": { "state": "grouped" },
-      "style": { "width": 40, "height": 40 }
+      "style": { "width": 48, "height": 48 }
     },
     {
       "select": "nav.guild_list.item",
@@ -138,7 +138,7 @@
     {
       "select": "nav.guild_list.item.pill",
       "when": { "state": "grouped" },
-      "style": { "margin": [0, 36, 0, 0] }
+      "style": { "margin": [0, 44, 0, 0] }
     },
     {
       "select": "nav.guild_list.item.icon",
@@ -163,7 +163,7 @@
     {
       "select": "nav.guild_list.item.icon",
       "when": { "state": "grouped" },
-      "style": { "width": 32, "height": 32, "margin": [0, 0, 0, 0] }
+      "style": { "width": 48, "height": 48, "margin": [0, 0, 0, 0] }
     },
     {
       "select": "nav.guild_list.item.icon",
