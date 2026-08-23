@@ -101,7 +101,8 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 | 識別子 (試験関数名 159 個ほか) | ✅ **全部終わった。** 日本語の識別子はもう 1 つも無い |
 | `core/model` `core/rest` `core/markdown` `core/uitree` `core/plugin` | ✅ コメントも済んだ |
 | `app/core/menu.rs` `app/core/markdown.rs` | ✅ 済んだ |
-| **残り** | 下の表。**約 3,400 行** |
+| `render/platform/{clock,clipboard,lib}.rs` | ✅ 済んだ |
+| **残り** | 下の表。**約 3,300 行** |
 
 ```text
   762  app/core/src/lib.rs          ← 一番大きい
@@ -117,14 +118,17 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
   116  core/store/src/db.rs
   112  app/core/src/session.rs
   ...  core/theme/*, render/render/{lib,motion,icon,gpu}.rs,
-       render/platform/{secret,clipboard,clock,text_input}.rs, xtask/*
+       render/platform/{secret,text_input}.rs, xtask/*
 ```
 
 数え直す:
 
 ```text
-  grep -rc '[ぁ-んァ-ヶ一-龠]' --include=*.rs core app render xtask
+  grep -rn '^\s*//' --include=*.rs core app render xtask | grep -c '[ぁ-んァ-ヶ一-龠]'
 ```
+
+⚠️ **`grep` の文字クラスは `—` (em dash) も拾う。** 英語に直した後の
+ファイルにも数行残るので、数えるときは目で見ること。
 
 ⚠️ **残すもの**:
 
