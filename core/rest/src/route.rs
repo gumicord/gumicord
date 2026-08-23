@@ -153,6 +153,17 @@ impl Route {
         )
     }
 
+    /// `PATCH /channels/:id/messages/:mid` (`FR-024`)
+    ///
+    /// **メッセージ ID は鍵に含めない。** [`Route::delete_message`] と同じ理由
+    pub fn edit_message(channel: ChannelId, message: MessageId) -> Self {
+        Self::scoped(
+            Method::Patch,
+            format!("/channels/{channel}/messages/{message}"),
+            format!("/channels/{channel}/messages/:id"),
+        )
+    }
+
     /// `DELETE /channels/:id/messages/:mid`
     ///
     /// **メッセージ ID は鍵に含めない。** 含めると消すたびに別のバケットを

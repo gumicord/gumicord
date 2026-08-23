@@ -673,6 +673,25 @@
       "style": { "padding": [0, 16, 16, 16] }
     },
     {
+      "select": "chat.input.toolbar",
+      "style": {
+        "background": "$color.bg.sunken",
+        "radius": "$radius.md",
+        "padding": [6, 12, 6, 12],
+        "margin": [0, 0, 2, 0]
+      }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "reply" },
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "edit" },
+      "style": { "font": "$font.small", "color": "$color.accent" }
+    },
+    {
       "select": "chat.input.field",
       "style": {
         "background": "$color.bg.raised",

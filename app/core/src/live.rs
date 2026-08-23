@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gumicord_gateway::{Event, Fatal, Gateway, Ready, Subscriptions, status::Status};
-use gumicord_model::{ChannelId, Guild, GuildId, Message, Token, UserId};
+use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, Token, UserId};
 use gumicord_platform::Waker;
 use gumicord_rest::RestClient;
 use gumicord_store::{Db, GuildRow, Store};
@@ -93,6 +93,13 @@ pub enum LiveEvent {
     Ready(Box<Ready>),
     /// Gateway から届いた新着
     Posted(Box<Message>),
+    /// 書き換わった 1 件 (`FR-024`)
+    Edited(Box<Message>),
+    /// 消えた 1 件 (`FR-024`)
+    Removed {
+        channel: ChannelId,
+        id: MessageId,
+    },
     /// ギルドの中身が届いた・変わった。**殻だった分がここで埋まる**
     GuildChanged(Box<Guild>),
     /// キャッシュから読めた分。**REST より先に出る**
@@ -555,18 +562,54 @@ impl Live {
         true
     }
 
-    /// 送る (`FR-024`)。
+    /// 送る (`FR-024`)。`reply_to` があれば返信になる (`FR-028`)。
     ///
     /// ⚠️ **画面には足さない。** 送れたら Gateway が `MESSAGE_CREATE` を
     /// 返してくるので、そこで 1 回だけ足る。ここでも足すと二重に出る
-    pub fn send_message(&self, channel: ChannelId, content: String) {
+    pub fn send_message(&self, channel: ChannelId, content: String, reply_to: Option<MessageId>) {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
         let (rest, waker) = (rest.clone(), waker.clone());
         rt.spawn(async move {
-            if let Err(e) = rest.create_message(channel, &content).await {
+            if let Err(e) = rest.create_message(channel, &content, reply_to).await {
                 tracing::warn!(%e, channel = %channel, "送れなかった");
+            }
+            waker.wake();
+        });
+    }
+
+    /// 書き換える (`FR-024`)。
+    ///
+    /// ⚠️ **画面には反映しない。** 通ったら Gateway が `MESSAGE_UPDATE` を
+    /// 返してくる。ここで先に直すと、**失敗したときに直ったまま残る** —
+    /// 送信と違い、これは「もう直っている」と誤解させる
+    pub fn edit_message(&self, channel: ChannelId, message: MessageId, content: String) {
+        let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
+            return;
+        };
+        let (rest, waker) = (rest.clone(), waker.clone());
+        rt.spawn(async move {
+            if let Err(e) = rest.edit_message(channel, message, &content).await {
+                tracing::warn!(%e, channel = %channel, "書き換えられなかった");
+            }
+            waker.wake();
+        });
+    }
+
+    /// 消す (`FR-024`)。
+    ///
+    /// ⚠️ **画面からも先に消さない。** 消せなかったときに戻すと、
+    /// 一度消えたものが再び現れることになる。どちらもぎょっとするが、
+    /// 「消えない」ほうがまだ分かりやすい
+    pub fn delete_message(&self, channel: ChannelId, message: MessageId) {
+        let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
+            return;
+        };
+        let (rest, waker) = (rest.clone(), waker.clone());
+        rt.spawn(async move {
+            if let Err(e) = rest.delete_message(channel, message).await {
+                tracing::warn!(%e, channel = %channel, "消せなかった");
             }
             waker.wake();
         });
@@ -712,6 +755,28 @@ impl Live {
                 }
                 true
             }
+            LiveEvent::Edited(m) => {
+                let channel = m.channel_id;
+                // ⚠️ **姿を覚え直す。** 書き換えの知らせには `member` が
+                // 付いてくる。REST の発言には付いていないので、ここも
+                // 役職の色の出所である
+                self.store.remember_from_message(&m);
+                // ⚠️ **円盤へ書くのは書き換わった 1 件である。** 一覧の
+                // 最後を書くと、古い発言を直したときに別のものを書く
+                let saved = (*m).clone();
+                if !self.store.update_message(*m) {
+                    // 手元に無い発言だった。**足さない** —
+                    // 一覧の途中に飛び地ができる
+                    return false;
+                }
+                // ⚠️ **円盤も直す。** 直さないと、閉じて開いたときに
+                // 書き換える前の本文が戻ってくる
+                if let Some(db) = &self.db {
+                    db.save_messages(channel, vec![saved]);
+                }
+                true
+            }
+            LiveEvent::Removed { channel, id } => self.store.remove_message(channel, id),
             // ⚠️ **REST が先に返っていたら採らない。**
             // 古いもので新しいものを潰すことになる
             LiveEvent::Cached { channel, list } => {
@@ -855,6 +920,17 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                     Ok(m) => send(LiveEvent::Posted(Box::new(m))),
                     Err(e) => tracing::warn!(%e, "MESSAGE_CREATE を読めなかった"),
                 },
+                // ⚠️ **本文が変わったときだけ来るのではない。** 埋め込みが
+                // 後から解決されたときにも来る。どちらも一覧を差し替える
+                "MESSAGE_UPDATE" => match serde_json::from_value::<Message>(data) {
+                    Ok(m) => send(LiveEvent::Edited(Box::new(m))),
+                    Err(e) => tracing::warn!(%e, "MESSAGE_UPDATE を読めなかった"),
+                },
+                // ⚠️ **来るのは番号だけである。** 本文は付いてこない
+                "MESSAGE_DELETE" => match deleted(&data) {
+                    Some(e) => send(e),
+                    None => tracing::warn!("MESSAGE_DELETE を読めなかった"),
+                },
                 // READY で殻だけだったギルドが、遅れてここで埋まる。
                 // **これが来ないと落ちていたギルドは永久に出てこない**
                 "GUILD_CREATE" | "GUILD_UPDATE" => match serde_json::from_value::<Guild>(data) {
@@ -928,6 +1004,16 @@ fn members_chunk(data: &serde_json::Value) -> Option<LiveEvent> {
     Some(LiveEvent::MemberChunk {
         guild: GuildId::from(guild),
         members,
+    })
+}
+
+/// `MESSAGE_DELETE` の中身。**番号だけが来る。**
+fn deleted(data: &serde_json::Value) -> Option<LiveEvent> {
+    let channel = data.get("channel_id")?.as_str()?.parse::<u64>().ok()?;
+    let id = data.get("id")?.as_str()?.parse::<u64>().ok()?;
+    Some(LiveEvent::Removed {
+        channel: ChannelId::from(channel),
+        id: MessageId::from(id),
     })
 }
 

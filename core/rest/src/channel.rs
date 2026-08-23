@@ -39,9 +39,55 @@ impl RestClient {
     /// ⚠️ 返ってくるのは**作られたメッセージそのもの**である。ただし
     /// Gateway も同じものを `MESSAGE_CREATE` で運んでくるので、
     /// **両方を画面に足すと二重に出る**。
+    /// 発言する (`FR-024`)。`reply_to` があれば返信になる (`FR-028`)。
+    ///
+    /// # ⚠️ 返信は相手に通知が飛ぶ
+    ///
+    /// `allowed_mentions` を書かないと、返信先の相手に通知が飛ぶ。
+    /// これは Discord の既定であり、**公式クライアントもそう動く**。
+    /// 通知を飛ばさない返信を出せるようにするのは、それを選ぶ場所を
+    /// 画面に用意してからである。黙って既定を変えると、
+    /// **返したのに相手が気づかない**。
+    ///
+    /// ⚠️ `fail_if_not_exists` は偽にする。真だと、返信を書いている
+    /// 間に元の発言が消されたときに**書いたものごと弾かれる**
     pub async fn create_message(
         &self,
         channel: ChannelId,
+        content: &str,
+        reply_to: Option<MessageId>,
+    ) -> Result<Message, RestError> {
+        #[derive(serde::Serialize)]
+        struct Reference {
+            message_id: String,
+            fail_if_not_exists: bool,
+        }
+
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            content: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_reference: Option<Reference>,
+        }
+
+        let body = Body {
+            content,
+            message_reference: reply_to.map(|id| Reference {
+                message_id: id.to_string(),
+                fail_if_not_exists: false,
+            }),
+        };
+        self.send(Route::create_message(channel), Some(&body)).await
+    }
+
+    /// 発言を書き換える (`FR-024`)。
+    ///
+    /// ⚠️ **他人の発言は書き換えられない。** サーバが 403 を返す。
+    /// 押せる場所に出さないのが先で、ここはその後ろの守りである
+    pub async fn edit_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
         content: &str,
     ) -> Result<Message, RestError> {
         #[derive(serde::Serialize)]
@@ -49,8 +95,27 @@ impl RestClient {
             content: &'a str,
         }
 
-        self.send(Route::create_message(channel), Some(&Body { content }))
-            .await
+        self.send(
+            Route::edit_message(channel, message),
+            Some(&Body { content }),
+        )
+        .await
+    }
+
+    /// 発言を消す (`FR-024`)。
+    ///
+    /// ⚠️ **取り消せない。** 押す前に確かめる場所を用意すること
+    pub async fn delete_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+    ) -> Result<(), RestError> {
+        self.send::<serde::de::IgnoredAny>(
+            Route::delete_message(channel, message),
+            Option::<&()>::None,
+        )
+        .await?;
+        Ok(())
     }
 
     /// ここまで読んだと伝える (`FR-042`)。

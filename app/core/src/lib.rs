@@ -60,7 +60,7 @@ pub mod session;
 
 use std::borrow::Cow;
 
-use gumicord_model::{ChannelId, GuildId, RoleId, UserId};
+use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
 use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
@@ -194,6 +194,36 @@ impl Panes {
     }
 }
 
+/// 入力欄が何をしているか (`FR-024`, `FR-028`)。
+///
+/// # ⚠️ 3 つの状態を 1 つの入力欄で兼ねる
+///
+/// 新規・返信・編集は、どれも「打って Enter」である。**別々の入力欄を
+/// 出すと、打ち始めてから返信だと気づいて打ち直すことになる。**
+///
+/// ⚠️ **いま何をしているのかが画面に出ていなければならない。** 編集して
+/// いるつもりで新規発言を送る、返信のつもりで独り言を言う、はどちらも
+/// 取り消せない
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Composing {
+    /// 新しく書いている
+    #[default]
+    New,
+    /// この発言への返信を書いている (`FR-028`)
+    Reply(u64),
+    /// この発言を書き換えている (`FR-024`)
+    Edit(u64),
+}
+
+impl Composing {
+    fn target(self) -> Option<u64> {
+        match self {
+            Composing::New => None,
+            Composing::Reply(id) | Composing::Edit(id) => Some(id),
+        }
+    }
+}
+
 /// アプリケーションの状態と、そこから UITree を組み立てる責務。
 pub struct Gumicord {
     theme: Option<Theme>,
@@ -229,6 +259,8 @@ pub struct Gumicord {
     revealed: std::collections::HashSet<u64>,
     /// 開いているメニュー (`FR-024`, `FR-028` の受け皿)。**同時に 1 つだけ**
     floating: Option<crate::menu::Floating>,
+    /// いま入力欄が何をしているか (`FR-024`, `FR-028`)
+    composing: Composing,
     selected_channel: u64,
     /// 入力欄にフォーカスがあるか
     input_focused: bool,
@@ -286,6 +318,7 @@ impl Gumicord {
             match_ctx: MatchContext::new(0.0),
             revealed: std::collections::HashSet::new(),
             floating: None,
+            composing: Composing::New,
             selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),
@@ -584,6 +617,9 @@ impl Application for Gumicord {
         // ⚠️ **開いている上で更に押したら、開き直す。** 閉じるだけだと
         // 「隣の発言のメニューを出す」のに 2 回押すことになる
         let items = hits.iter().find_map(|h| match (h.id, &h.key) {
+            // ⚠️ **入力欄を先に見る。** 発言の一覧の上に重なっているので、
+            // 後ろに置くと入力欄の上で押しても発言のメニューが出る
+            (NodeId::ChatInputField, _) => Some(self.field_menu()),
             (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
             (NodeId::NavChannelListItem, Some(Key::Id(id))) => Some(self.channel_menu(*id)),
             (NodeId::NavGuildListItem, Some(Key::Id(id))) => Some(self.guild_menu(*id)),
@@ -601,20 +637,38 @@ impl Application for Gumicord {
         self.input_focused.then_some(&mut self.input)
     }
 
-    /// `FR-024`: 送信。
+    /// `FR-024`: 送信・書き換え。`FR-028`: 返信。
+    ///
+    /// ⚠️ **何をしているかで送り先が変わる。** ここで [`Composing`] を
+    /// 見落とすと、書き換えたつもりが新しい発言として出る
     fn submit(&mut self) -> bool {
         let body = self.input.text().trim().to_owned();
+        let mode = self.composing;
+
+        // ⚠️ **書き換えで空にするのは「消す」ではない。**
+        // Discord も空の編集は弾く。うっかり全部消して Enter を押した
+        // ときに発言が消えるのは、取り返しがつかない
         if body.is_empty() {
             return false;
         }
         self.input.take();
+        self.composing = Composing::New;
 
         if self.uses_live() {
-            // ⚠️ **ここで一覧に足さない。** 送れたら Gateway が
-            // `MESSAGE_CREATE` を返してくるので、そこで 1 回だけ足る。
-            // 先に足すと、届いたときに同じものが二重に並ぶ
-            self.live
-                .send_message(ChannelId::from(self.selected_channel), body);
+            let channel = ChannelId::from(self.selected_channel);
+            match mode {
+                Composing::Edit(id) => {
+                    self.live.edit_message(channel, MessageId::from(id), body);
+                }
+                // ⚠️ **ここで一覧に足さない。** 送れたら Gateway が
+                // `MESSAGE_CREATE` を返してくるので、そこで 1 回だけ足る。
+                // 先に足すと、届いたときに同じものが二重に並ぶ
+                Composing::Reply(id) => {
+                    self.live
+                        .send_message(channel, body, Some(MessageId::from(id)));
+                }
+                Composing::New => self.live.send_message(channel, body, None),
+            }
             return true;
         }
 
@@ -634,6 +688,13 @@ impl Application for Gumicord {
         // ⚠️ **メニューが先である。** 入力欄のフォーカスより手前に
         // 浮かんでいるので、Esc がそこまで届いてはいけない
         if self.close_menu() {
+            return true;
+        }
+        // ⚠️ **書きかけを捨てる前に、返信・編集をやめる。** 一度に両方
+        // 起きると、打った文字が消えたのか宛先が消えたのかが分からない
+        if self.composing != Composing::New {
+            self.composing = Composing::New;
+            self.input.take();
             return true;
         }
         if !self.input_focused {
@@ -706,13 +767,42 @@ impl Gumicord {
         use crate::menu::{Action, Item};
         let mut items = Vec::new();
 
+        items.push(Item::new(Action::Reply(id), "返信").icon("reply"));
+
+        // ⚠️ **自分の発言だけ。** 他人の発言に編集と削除を出しても、
+        // サーバが 403 を返すだけである。押せる場所に出さないのが先で、
+        // サーバの拒否はその後ろの守りである
+        if self.is_mine(id) {
+            items.push(Item::new(Action::Edit(id), "編集").icon("edit"));
+        }
+
         // ⚠️ **飾りを剥がした素の本文を渡す。** 貼り付けた先で
         // `**太字**` と出るのが、打った人が書いたものである
         if let Some(text) = self.raw_body(id) {
             items.push(Item::new(Action::Copy(text), "本文をコピー").icon("copy"));
         }
         items.push(Item::new(Action::Copy(id.to_string()), "ID をコピー").icon("id"));
+
+        if self.is_mine(id) {
+            items.push(Item::new(Action::Delete(id), "削除").icon("trash").danger());
+        }
         items
+    }
+
+    /// 自分の発言か。
+    ///
+    /// ⚠️ **ログインしていなければ偽である。** demo では誰も自分ではない。
+    /// 「分からない」を「自分である」に化けさせると、他人の発言に
+    /// 編集と削除が並ぶ
+    fn is_mine(&self, id: u64) -> bool {
+        let Some(me) = self.login.session().logged_in().map(|l| l.me.user.id) else {
+            return false;
+        };
+        self.live
+            .store()
+            .messages(ChannelId::from(self.selected_channel))
+            .iter()
+            .any(|m| m.id.get() == id && m.author.id == me)
     }
 
     /// 発言の、打たれたままの本文。
@@ -787,8 +877,95 @@ impl Gumicord {
             crate::menu::Action::MarkRead(channel) => {
                 self.live.mark_read(ChannelId::from(*channel));
             }
+            crate::menu::Action::Reply(id) => {
+                // ⚠️ **書きかけを消さない。** 打ちかけた文にそのまま
+                // 宛先が付くのが、押した人の期待である
+                self.composing = Composing::Reply(*id);
+                self.input_focused = true;
+            }
+            crate::menu::Action::Edit(id) => {
+                // ⚠️ **打たれたままの本文を入れる。** 解析して飾りを剥がした
+                // ものを入れると、押しただけで `**太字**` が消える
+                let Some(text) = self.raw_body(*id) else {
+                    return true;
+                };
+                self.input.take();
+                self.input.insert(&text);
+                self.composing = Composing::Edit(*id);
+                self.input_focused = true;
+            }
+            crate::menu::Action::Delete(id) => {
+                // ⚠️ **確かめる場所をまだ用意していない。** メニューの中に
+                // 埋もれた項目で、押した瞬間に消えるのは危うい。
+                // 確認の窓は `overlay.modal` と一緒に入れる
+                self.live
+                    .delete_message(ChannelId::from(self.selected_channel), MessageId::from(*id));
+                // 書き換えている最中に消したら、書き換えもやめる
+                if self.composing.target() == Some(*id) {
+                    self.composing = Composing::New;
+                    self.input.take();
+                }
+            }
+
+            crate::menu::Action::Cut => {
+                if self.copy_selection() {
+                    self.input.insert("");
+                }
+            }
+            crate::menu::Action::CopySelection => {
+                self.copy_selection();
+            }
+            crate::menu::Action::Paste => {
+                match gumicord_platform::clipboard::text() {
+                    // ⚠️ **改行をそのまま入れない。** 入力欄は 1 行で、
+                    // 貼った瞬間に見えないところへ文字が消える。
+                    // Discord も貼り付けた改行は空白に潰す
+                    Ok(Some(text)) => self.input.insert(&text.replace(['\r', '\n'], " ")),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(%e, "クリップボードを読めなかった"),
+                }
+            }
+            crate::menu::Action::SelectAll => self.input.select_all(),
         }
         true
+    }
+
+    /// 選んだところをクリップボードへ。**何も選んでいなければ何もしない。**
+    fn copy_selection(&mut self) -> bool {
+        let sel = self.input.selection();
+        if sel.is_empty() {
+            return false;
+        }
+        let text = self.input.text()[sel].to_owned();
+        if let Err(e) = gumicord_platform::clipboard::set_text(&text) {
+            tracing::warn!(%e, "クリップボードへ入れられなかった");
+            return false;
+        }
+        true
+    }
+
+    /// 入力欄のメニュー。**机の上だけに出る。**
+    ///
+    /// ⚠️ **できないものを並べない。** 何も選んでいないのに「コピー」、
+    /// 空のクリップボードで「貼り付け」を出しても、押して何も起きないだけ
+    /// である
+    fn field_menu(&self) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item};
+        let mut items = Vec::new();
+
+        if !self.input.selection().is_empty() {
+            items.push(Item::new(Action::Cut, "切り取り").icon("cut"));
+            items.push(Item::new(Action::CopySelection, "コピー").icon("copy"));
+        }
+        // ⚠️ **中身までは見に行かない。** 開いて読むのは他のプログラムから
+        // クリップボードを奪う操作であり、メニューを出すたびにやることでは
+        // ない
+        items.push(Item::new(Action::Paste, "貼り付け").icon("paste"));
+
+        if !self.input.is_empty() {
+            items.push(Item::new(Action::SelectAll, "すべて選択").icon("select_all"));
+        }
+        items
     }
 
     /// ログイン画面 (`FR-001`)。QR を出して読まれるのを待つ。
@@ -1300,24 +1477,56 @@ impl Gumicord {
                 self.status_line(),
             ))
             .child(
-                UiNode::new(NodeId::ChatInput).child(
-                    UiNode::editable(
-                        NodeId::ChatInputField,
-                        Editable {
-                            text: self.input.text().to_owned(),
-                            caret: self.input.caret(),
-                            selection: self.input.selection(),
-                            composing: self.input.composing(),
-                            placeholder: if name.is_empty() {
-                                "メッセージを送信".to_owned()
-                            } else {
-                                format!("#{name} へメッセージを送信")
+                UiNode::new(NodeId::ChatInput)
+                    // ⚠️ **いま何をしているかが画面に出ていなければならない。**
+                    // 編集しているつもりで新規発言を送る、返信のつもりで
+                    // 独り言を言う、はどちらも取り消せない
+                    .child_if(self.composing != Composing::New, || self.composing_bar())
+                    .child(
+                        UiNode::editable(
+                            NodeId::ChatInputField,
+                            Editable {
+                                text: self.input.text().to_owned(),
+                                caret: self.input.caret(),
+                                selection: self.input.selection(),
+                                composing: self.input.composing(),
+                                placeholder: if name.is_empty() {
+                                    "メッセージを送信".to_owned()
+                                } else {
+                                    format!("#{name} へメッセージを送信")
+                                },
                             },
-                        },
-                    )
-                    .with_state_if(self.input_focused, State::Focus),
-                ),
+                        )
+                        .with_state_if(self.input_focused, State::Focus),
+                    ),
             )
+    }
+
+    /// 入力欄の上に出す 1 行。**返信・編集の宛先を出す。**
+    ///
+    /// ⚠️ 相手の名前まで出す。「返信中」だけだと、一覧を巻いたあとに
+    /// 誰への返信だったかが分からなくなる
+    fn composing_bar(&self) -> UiNode {
+        let (verb, slot) = match self.composing {
+            Composing::Reply(_) => ("返信", "reply"),
+            Composing::Edit(_) => ("編集", "edit"),
+            Composing::New => ("", "none"),
+        };
+        let who = self
+            .composing
+            .target()
+            .and_then(|id| self.message_rows().into_iter().find(|m| m.id == id))
+            .map(|m| m.author);
+
+        let text = match (&self.composing, who) {
+            (Composing::Reply(_), Some(a)) => format!("{a} に{verb}中"),
+            // ⚠️ 巻いて見えなくなった相手は引けない。**それでも状態は出す**
+            (Composing::Reply(_), None) => format!("{verb}中"),
+            _ => format!("{verb}中"),
+        };
+        UiNode::new(NodeId::ChatInputToolbar)
+            .with_key(Key::Slot(slot))
+            .child(UiNode::text(NodeId::PrimitiveText, text).with_key(Key::Slot(slot)))
     }
 
     /// 一覧の下に出す 1 行。
@@ -1879,6 +2088,129 @@ mod tests {
 
     fn app() -> Gumicord {
         Gumicord::demo()
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  返信と編集 (`FR-024`, `FR-028`)
+
+    /// ⚠️ **いま何をしているかが画面に出ていなければならない。**
+    ///
+    /// 編集しているつもりで新規発言を送る、返信のつもりで独り言を言う、
+    /// はどちらも取り消せない
+    #[test]
+    fn 返信と編集は画面に出る() {
+        let bar = |c: Composing| {
+            let mut a = app();
+            a.composing = c;
+            let mut out = None;
+            a.build_tree(Panes::Four).walk(&mut |n, _| {
+                if n.id == NodeId::ChatInputToolbar {
+                    out = n.key.clone();
+                }
+            });
+            out
+        };
+        assert_eq!(bar(Composing::New), None, "何もしていないのに出ている");
+        assert_eq!(bar(Composing::Reply(1)), Some(Key::Slot("reply")));
+        assert_eq!(bar(Composing::Edit(1)), Some(Key::Slot("edit")));
+    }
+
+    /// ⚠️ **Esc は書きかけを捨てる前に、返信・編集をやめる。**
+    ///
+    /// 一度に両方起きると、打った文字が消えたのか宛先が消えたのかが
+    /// 分からない
+    #[test]
+    fn esc_は返信をやめてから閉じる() {
+        let mut a = app();
+        a.input_focused = true;
+        a.composing = Composing::Reply(1);
+        a.input.insert("書きかけ");
+
+        assert!(a.cancel_input());
+        assert_eq!(a.composing, Composing::New, "返信のままである");
+        assert!(a.input_focused, "フォーカスまで外れた");
+    }
+
+    /// ⚠️ **書き換えで空にするのは「消す」ではない。**
+    ///
+    /// うっかり全部消して Enter を押したときに発言が消えるのは、
+    /// 取り返しがつかない
+    #[test]
+    fn 空のまま送っても何も起きない() {
+        let mut a = app();
+        a.composing = Composing::Edit(1);
+        assert!(!a.submit());
+        assert_eq!(a.composing, Composing::Edit(1), "編集をやめてしまった");
+    }
+
+    /// 送ったら新規に戻ること。**戻らないと次の発言まで返信になる**
+    #[test]
+    fn 送ったら新規に戻る() {
+        let mut a = app();
+        a.composing = Composing::Reply(1);
+        a.input.insert("やあ");
+        assert!(a.submit());
+        assert_eq!(a.composing, Composing::New);
+    }
+
+    /// ⚠️ **他人の発言に編集と削除を出さない。**
+    ///
+    /// サーバが 403 を返すだけである。押せる場所に出さないのが先で、
+    /// サーバの拒否はその後ろの守りである
+    #[test]
+    fn 他人の発言には編集と削除を出さない() {
+        use crate::menu::Action;
+        // demo ではログインしていないので、誰の発言も自分のものではない
+        let a = app();
+        let items = a.message_menu(1);
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i.action, Action::Edit(_) | Action::Delete(_))),
+            "他人の発言に編集か削除が出ている"
+        );
+        // 返信は誰の発言にも出る
+        assert!(items.iter().any(|i| matches!(i.action, Action::Reply(_))));
+    }
+
+    /// ⚠️ **入力欄を先に見る。** 発言の一覧の上に重なっているので、
+    /// 後ろに置くと入力欄の上で押しても発言のメニューが出る
+    #[test]
+    fn 入力欄の上では入力欄のメニューが出る() {
+        use crate::menu::Action;
+        let mut a = app();
+        let hits = [
+            hit_of(NodeId::ChatInputField, None),
+            hit_of(NodeId::ChatMessage, Some(Key::Id(1))),
+        ];
+        assert!(a.context_menu(&hits, (0.0, 0.0)));
+
+        let items = &a.floating.as_ref().expect("開いていない").items;
+        assert!(
+            items.iter().any(|i| i.action == Action::Paste),
+            "発言のメニューが出ている"
+        );
+    }
+
+    /// ⚠️ **できないものを並べない。** 何も選んでいないのに「コピー」を
+    /// 出しても、押して何も起きないだけである
+    #[test]
+    fn 選んでいなければ切り取りとコピーを出さない() {
+        use crate::menu::Action;
+        let mut a = app();
+        let has = |a: &Gumicord, want: Action| a.field_menu().iter().any(|i| i.action == want);
+
+        assert!(!has(&a, Action::CopySelection));
+        assert!(!has(&a, Action::SelectAll), "空なのに全選択が出ている");
+        assert!(has(&a, Action::Paste), "貼り付けはいつでも出る");
+
+        a.input.insert("あいう");
+        assert!(has(&a, Action::SelectAll));
+        assert!(!has(&a, Action::CopySelection), "まだ選んでいない");
+
+        a.input.select_all();
+        assert!(has(&a, Action::CopySelection));
+        assert!(has(&a, Action::Cut));
     }
 
     // ═══════════════════════════════════════════════════════════════

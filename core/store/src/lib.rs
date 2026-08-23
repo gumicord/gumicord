@@ -641,6 +641,39 @@ impl Store {
         true
     }
 
+    /// 書き換わった 1 件を差し替える (`FR-024`)。**変わったら真**。
+    ///
+    /// # ⚠️ 知らない発言を足さない
+    ///
+    /// `MESSAGE_UPDATE` は**開いていないチャンネルのぶんも来る**し、
+    /// 巻き戻して読んでいない古い発言のぶんも来る。手元に無いものを
+    /// ここで足すと、一覧の途中に 1 件だけ飛び地ができる。
+    ///
+    /// ⚠️ **中身が部分的にしか入っていないことがある。** 埋め込みが
+    /// 後から解決されたときの `MESSAGE_UPDATE` は本文を含まない。
+    /// だが Discord は完全な形で送ってくるのが普通なので、丸ごと
+    /// 差し替える。**足りない形が来たら、そこは次の取得で埋まる**
+    pub fn update_message(&mut self, message: Message) -> bool {
+        let Some(list) = self.messages.get_mut(&message.channel_id) else {
+            return false;
+        };
+        let Some(slot) = list.iter_mut().find(|m| m.id == message.id) else {
+            return false;
+        };
+        *slot = message;
+        true
+    }
+
+    /// 消えた 1 件を取り除く (`FR-024`)。**変わったら真**。
+    pub fn remove_message(&mut self, channel: ChannelId, id: MessageId) -> bool {
+        let Some(list) = self.messages.get_mut(&channel) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|m| m.id != id);
+        before != list.len()
+    }
+
     /// 利用者が Discord で並べ替えた順を教える。
     ///
     /// ⚠️ **名前順ではない。** 自分で並べた順以外で出すと、
@@ -731,6 +764,55 @@ mod tests {
             mentions: Vec::new(),
             mention_everyone: false,
         }
+    }
+
+    /// ⚠️ **手元に無い発言を書き換えで足さない。**
+    ///
+    /// `MESSAGE_UPDATE` は開いていないチャンネルのぶんも、巻き戻して
+    /// 読んでいない古い発言のぶんも来る。足すと一覧の途中に飛び地ができる
+    #[test]
+    fn 知らない発言は書き換えで足さない() {
+        let mut s = Store::new();
+        s.set_backlog(ChannelId::from(9u64), vec![message(1, 9)]);
+
+        // 同じチャンネルの、手元に無い発言
+        let mut other = message(2, 9);
+        other.content = "後から来た".to_owned();
+        assert!(!s.update_message(other));
+        assert_eq!(s.messages(ChannelId::from(9u64)).len(), 1);
+
+        // そもそも開いていないチャンネル
+        assert!(!s.update_message(message(3, 8)));
+        assert!(s.messages(ChannelId::from(8u64)).is_empty());
+    }
+
+    #[test]
+    fn 書き換えは中身を差し替える() {
+        let mut s = Store::new();
+        s.set_backlog(ChannelId::from(9u64), vec![message(1, 9), message(2, 9)]);
+
+        let mut edited = message(1, 9);
+        edited.content = "直した".to_owned();
+        assert!(s.update_message(edited));
+
+        let list = s.messages(ChannelId::from(9u64));
+        assert_eq!(list.len(), 2, "件数が変わった");
+        assert_eq!(list[0].content, "直した");
+        assert_eq!(list[1].content, "その 2", "隣まで書き換わった");
+    }
+
+    #[test]
+    fn 消すと一覧から抜ける() {
+        let mut s = Store::new();
+        let ch = ChannelId::from(9u64);
+        s.set_backlog(ch, vec![message(1, 9), message(2, 9)]);
+
+        assert!(s.remove_message(ch, MessageId::from(1u64)));
+        assert_eq!(s.messages(ch).len(), 1);
+        assert_eq!(s.messages(ch)[0].id, MessageId::from(2u64));
+
+        // 2 回消しても落ちない。**変わらなかったと言うだけ**
+        assert!(!s.remove_message(ch, MessageId::from(1u64)));
     }
 
     /// ⚠️ **ギルドは名前順ではない。** 届いた順のまま出す。
