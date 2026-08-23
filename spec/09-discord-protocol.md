@@ -112,8 +112,36 @@ Close: code=4014 reason="Disallowed intent(s)."
 }
 ```
 
-> `NFR-020` の「公式クライアントと同等の identify プロパティ」は、**検出を回避するためではなく、
-> サーバーに嘘の情報を渡さないため**の要件である。`client_build_number` などは実際の値に追随させる。
+### ⚠️ 2026-08-23: 方針を反転させた
+
+**それまでは「公式クライアントを騙らない」方針だった。** `browser` も `device` も `Gumicord` と名乗り、`client_build_number` は送らず、REST には `X-Super-Properties` を付けていなかった。その状態で日常的に使ったところ、**Discord に検知されアカウントのパスワード再設定を求められた。**
+
+利用者の判断でこれを反転させ、公式デスクトップクライアントと同じ名乗りを送るようにした。
+
+> ⚠️ **これは利用規約に反する。** 公式クライアント以外から利用者トークンで接続すること自体が規約違反であり、名乗りを整えても**安全になるわけではない**。見分けが付きにくくなるだけで、アカウントを失う可能性は消えない。
+
+#### 実装で守っていること
+
+| | |
+|---|---|
+| 出所は 1 つ | [`gumicord_model::identity`]。Gateway の `properties` も REST の `X-Super-Properties` も同じ物から作る |
+| **食い違わせない** | 「Gateway では Windows のデスクトップ、REST では別の何か」は片方が嘘である。**食い違いそのものが目印になる** |
+| `User-Agent` も同じ | `browser_user_agent` に書いた文字列と HTTP の `User-Agent` が違えば、それもまた食い違いである |
+| 版は差し替えられる | `GUMICORD_CLIENT_BUILD` / `GUMICORD_CLIENT_VERSION`。**埋め込みの値は数週間で古くなる** |
+
+#### REST に載せるヘッダ
+
+| ヘッダ | 中身 |
+|---|---|
+| `X-Super-Properties` | `properties` を base64 にしたもの |
+| `X-Discord-Locale` | `ja-JP` など |
+| `X-Debug-Options` | `bugReporterEnabled` |
+| `User-Agent` | `browser_user_agent` と同じ |
+
+#### まだやっていないこと
+
+- **`/science` へ何も送っていない。** 公式クライアントは操作の記録を定期的に送っており、**沈黙していること自体が目印になりうる**。ただし偽の操作記録を作って流すことになるので、効き目と引き換えに何を送るかは別に決める
+- **ビルド番号を実測していない。** 本物は `https://discord.com/app` が読み込む JS の中にある。起動時に取りに行けば古くならない
 
 ## 4. 圧縮: zstd-stream ✅
 

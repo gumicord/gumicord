@@ -56,6 +56,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use gumicord_model::identity::Identity;
 use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, MessageId, Token, UserId};
 use serde::Deserialize;
 use serde_json::json;
@@ -563,24 +564,32 @@ struct Payload {
 
 /// identify のペイロード ([`spec/09-discord-protocol.md`] 3 章)。
 ///
-/// ⚠️ **公式クライアントを騙らない** (`NFR-020`)。`browser` も `device` も
-/// Gumicord である。版と OS は実際の値を送る。
+/// ⚠️ **名乗りは [`gumicord_model::identity`] が 1 か所で決める。**
+/// ここで組み立て直すと、REST の `X-Super-Properties` と食い違う。
+/// **食い違いそのものが目印になる**
 fn identify(token: &Token) -> serde_json::Value {
     json!({
         "op": OP_IDENTIFY,
         "d": {
             "token": token.expose(),
             "capabilities": CAPABILITIES,
-            "properties": {
-                "os": std::env::consts::OS,
-                "browser": "Gumicord",
-                "device": "Gumicord",
-                "system_locale": locale(),
-                "client_version": env!("CARGO_PKG_VERSION"),
-                "release_channel": "stable",
+            "properties": Identity::detect().properties(),
+            "presence": {
+                "status": "unknown",
+                "since": 0,
+                "activities": [],
+                "afk": false,
             },
             "compress": false,
-            "client_state": { "guild_versions": {} },
+            "client_state": {
+                "guild_versions": {},
+                "highest_last_message_id": "0",
+                "read_state_version": 0,
+                "user_guild_settings_version": -1,
+                "user_settings_version": -1,
+                "private_channels_version": "0",
+                "api_code_version": 0,
+            },
         },
     })
 }
@@ -590,17 +599,6 @@ fn identify(token: &Token) -> serde_json::Value {
 /// ⚠️ **意味の内訳は未検証である。** 仕様に載っている値をそのまま送っている。
 /// 分かったら名前付きの定数に割る
 const CAPABILITIES: u32 = 161789;
-
-/// システムの言語。分からなければ英語を名乗る。
-///
-/// **嘘をつくくらいなら既定を送る** (`NFR-020`)
-fn locale() -> String {
-    std::env::var("LANG")
-        .ok()
-        .and_then(|l| l.split('.').next().map(|s| s.replace('_', "-")))
-        .filter(|l| !l.is_empty())
-        .unwrap_or_else(|| "en-US".to_owned())
-}
 
 // ─────────────────────────────────────────────── 接続 1 本
 
@@ -1046,21 +1044,31 @@ mod tests {
         );
     }
 
-    /// identify に嘘が入っていない (`NFR-020`)。
-    /// **公式クライアントの版を騙らない**
+    /// identify の名乗りが [`gumicord_model::identity`] と同じであること
+    /// (`NFR-020`)。
+    ///
+    /// # ⚠️ かつてここは逆の試験だった
+    ///
+    /// 2026-08-23 まで、この試験は「`browser` は `Gumicord` である」ことを
+    /// 確かめていた。**騙らないという方針だった。**
+    ///
+    /// 実際に走らせたところ Discord に検知され、パスワードの再設定を
+    /// 求められた。利用者の判断で方針を反転させている
+    /// ([`spec/09-discord-protocol.md`] 3 章)。
+    ///
+    /// ⚠️ **ここで押さえるのは「騙らないこと」ではなく「食い違わないこと」**
+    /// になった。Gateway と REST で違うことを名乗れば、**食い違いそのものが
+    /// 目印になる**
     #[test]
-    fn identify_does_not_impersonate_the_official_client() {
+    fn identify_matches_the_rest_headers() {
         let payload = identify(&Token::new("t"));
         let props = &payload["d"]["properties"];
 
-        assert_eq!(props["browser"], "Gumicord");
-        assert_eq!(props["device"], "Gumicord");
-        assert_eq!(props["client_version"], env!("CARGO_PKG_VERSION"));
-        assert!(
-            props.get("client_build_number").is_none(),
-            "公式の build number を騙っている"
-        );
+        assert_eq!(*props, Identity::detect().properties(), "名乗りが食い違う");
         assert_eq!(payload["d"]["token"], "t");
+        // 利用者トークンの形である。**`intents` は bot の形**
+        assert!(payload["d"]["capabilities"].is_number());
+        assert!(payload["d"].get("intents").is_none());
     }
 
     /// READY が読める。**知らないフィールドで落ちない**

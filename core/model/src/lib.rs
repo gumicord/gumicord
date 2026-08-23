@@ -22,6 +22,7 @@
 //! 仕様: [`spec/09-discord-protocol.md`]
 
 pub mod asset;
+pub mod identity;
 pub mod snowflake;
 pub mod token;
 

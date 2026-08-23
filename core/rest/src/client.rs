@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gumicord_model::Token;
+use gumicord_model::identity::Identity;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
@@ -81,6 +82,9 @@ pub struct RestClient {
     http: reqwest::Client,
     token: Option<Token>,
     limiter: Arc<Mutex<RateLimiter>>,
+    /// こちらが何者だと名乗るか。**Gateway と同じ物である**
+    /// ([`gumicord_model::identity`])
+    identity: Arc<Identity>,
 }
 
 impl core::fmt::Debug for RestClient {
@@ -95,10 +99,12 @@ impl core::fmt::Debug for RestClient {
 impl RestClient {
     /// トークン無しで作る。ログインの前に使う
     pub fn anonymous() -> Result<Self, RestError> {
+        let identity = Arc::new(Identity::detect());
         Ok(RestClient {
-            http: build_http()?,
+            http: build_http(&identity)?,
             token: None,
             limiter: Arc::new(Mutex::new(RateLimiter::new())),
+            identity,
         })
     }
 
@@ -108,6 +114,7 @@ impl RestClient {
             http: self.http.clone(),
             token: Some(token),
             limiter: Arc::clone(&self.limiter),
+            identity: Arc::clone(&self.identity),
         }
     }
 
@@ -205,6 +212,14 @@ impl RestClient {
             Method::Delete => self.http.delete(url),
         };
 
+        // ⚠️ **すべての要求に名乗りを載せる。** 公式クライアントは
+        // 例外なく送っており、**無いことが目印になる**
+        // ([`gumicord_model::identity`])
+        req = req
+            .header("X-Super-Properties", self.identity.super_properties())
+            .header("X-Discord-Locale", &self.identity.system_locale)
+            .header("X-Debug-Options", "bugReporterEnabled");
+
         // ⚠️ 利用者のトークンには `Bot ` を付けない。付けると弾かれる
         if let Some(t) = &self.token {
             req = req.header("Authorization", t.expose());
@@ -240,10 +255,11 @@ impl RestClient {
     }
 }
 
-fn build_http() -> Result<reqwest::Client, RestError> {
+fn build_http(identity: &Identity) -> Result<reqwest::Client, RestError> {
     Ok(reqwest::Client::builder()
-        // 公式クライアントと同等の通信挙動を目指す ([00-vision.md](../../../spec/00-vision.md))
-        .user_agent(concat!("Gumicord/", env!("CARGO_PKG_VERSION")))
+        // ⚠️ **名乗りの中の `browser_user_agent` と同じ文字列である。**
+        // 違えば、それ自体が食い違いである ([`gumicord_model::identity`])
+        .user_agent(identity.user_agent())
         .build()?)
 }
 
