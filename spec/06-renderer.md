@@ -359,6 +359,7 @@ layout(node, constraints) -> Size
 | `cross` | 交差軸での子の扱い (`Stretch` / `Start` / `Center`) |
 | `width` / `height` | 既定の寸法。テーマの `width` / `height` が優先される |
 | `scroll` | はみ出しを切り、スクロールできるか |
+| `hugs_content` | 重ねの中で、**親いっぱいに広がらない**か (印だけ) |
 | `follows_cross` | 交差軸の大きさを**決めない**。親が決めた分をもらうだけか |
 | `anchor_end` | スクロール位置の既定が末尾か (メッセージ一覧) |
 

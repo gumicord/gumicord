@@ -637,12 +637,12 @@ impl<'a> Cx<'a, '_, '_> {
     /// 重ねの子の大きさ。指定があればそれ、なければ親いっぱい。
     fn stack_size(child: &UiNode, ci: &Intrinsic, measured: Size, inner: Rect) -> Size {
         Size::new(
-            if explicit(child, ci, true).is_some() {
+            if ci.hugs_content || explicit(child, ci, true).is_some() {
                 measured.w
             } else {
                 inner.w
             },
-            if explicit(child, ci, false).is_some() {
+            if ci.hugs_content || explicit(child, ci, false).is_some() {
                 measured.h
             } else {
                 inner.h
@@ -1169,6 +1169,36 @@ mod scrollbar_tests {
         assert_eq!(bar.rect.right(), 400.0, "右端に付く");
         assert_eq!(bar.rect.y, 0.0, "スクロールしても上端のまま");
         assert_eq!(bar.rect.h, 100.0, "枠いっぱいの高さ");
+    }
+
+    /// ⚠️ **重ねの中でも、印は中身の大きさで置かれる。**
+    ///
+    /// 広げると 56×48 の赤い丸がサーバの絵を覆う。実際にそうなった
+    #[test]
+    fn a_badge_does_not_fill_the_stack_it_sits_on() {
+        let item = styled(NodeId::NavGuildListItem, |s| {
+            s.width = Some(56.0);
+            s.height = Some(48.0);
+        })
+        .child(UiNode::new(NodeId::NavGuildListItemIcon))
+        .child(UiNode::text(NodeId::NavGuildListItemBadge, "1".to_owned()));
+
+        let r = layout(
+            &item,
+            Size::new(56.0, 48.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+
+        let icon = r.find(NodeId::NavGuildListItemIcon).expect("絵がある").rect;
+        assert_eq!((icon.w, icon.h), (56.0, 48.0), "絵は入れ物いっぱい");
+
+        let badge = r
+            .find(NodeId::NavGuildListItemBadge)
+            .expect("印がある")
+            .rect;
+        assert!(badge.w < 56.0, "印は数字のぶんだけ: {}", badge.w);
+        assert!(badge.h < 48.0, "印は 1 行ぶんだけ: {}", badge.h);
     }
 
     /// ⚠️ **余白の内側へ入らない。**

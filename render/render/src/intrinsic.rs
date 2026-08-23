@@ -52,6 +52,19 @@ pub struct Intrinsic {
     pub height: Option<f32>,
     /// はみ出しを切り、スクロールできるか
     pub scroll: bool,
+    /// 重ねの中で、**親いっぱいに広がらない**か。
+    ///
+    /// # ⚠️ 重ねの子は既定で広がる
+    ///
+    /// サーバの絵もスクロールバーの摘みも、入れ物の形をそのまま使いたい。
+    /// だから大きさを書かない子は親の矩形をもらう。
+    ///
+    /// **印は違う。** メンションの数は数字のぶんの幅しか要らない。同じ
+    /// 規則を当てると、56×48 の赤い丸がアイコンを覆う。実際にそうなった。
+    ///
+    /// 大きさを書けば済む話ではない。**桁が増えれば横に伸びる**ものなので、
+    /// 幅を焼き付けるわけにはいかない。
+    pub hugs_content: bool,
     /// 交差軸の大きさを**決めない**。親が決めた分をもらうだけか。
     ///
     /// ⚠️ **自分の欄は左側の幅を決めない。** 幅を決めるのはサーバ一覧と
@@ -81,6 +94,7 @@ impl Intrinsic {
             width: None,
             height: None,
             scroll: false,
+            hugs_content: false,
             follows_cross: false,
             single_line: false,
             anchor_end: false,
@@ -124,6 +138,12 @@ impl Intrinsic {
     /// 1 行に収める。はみ出したら「…」で切る
     const fn one_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// 重ねの中でも、中身の大きさで置かれる
+    const fn hugs_content(mut self) -> Self {
+        self.hugs_content = true;
         self
     }
 
@@ -205,7 +225,8 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // 出た瞬間にサーバの絵が右へずれる。左端へ寄せるのは
         // テーマの `margin` の仕事である
         NavGuildListItemPill => Intrinsic::stack().w(4.0),
-        NavGuildListItemBadge => Intrinsic::row(),
+        // ⚠️ **重ねの中で広がらない。** 数字のぶんの幅しか要らない
+        NavGuildListItemBadge => Intrinsic::row().one_line().hugs_content(),
 
         // ⚠️ **これ自体は巻かない。** 中の `layout.scroll` だけが巻く。
         // 全部を 1 つの領域にすると、下まで巻いたときに**見出しも自分も
