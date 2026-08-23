@@ -45,6 +45,29 @@ const MIN_THUMB: f32 = 24.0;
 /// 一番下に貼り付ける。メッセージ一覧の初期値に使う
 pub const SCROLL_TO_END: f32 = f32::MAX;
 
+/// スクロール位置を覚えるときの値。
+///
+/// # ⚠️ 一番下は「数」ではなく「意図」で持つ
+///
+/// 位置を px で覚えると、新しいメッセージが来て中身が伸びたぶんだけ
+/// **見ている場所が上へずれる**。一番下で待っている人にとって、それは
+/// 「新しい行が来たのに見えない」ということである。
+///
+/// そこで、一番下に着いたときだけ [`SCROLL_TO_END`] を覚える。
+/// [`layout`] は最後に `clamp` するので、中身が伸びれば伸びた先の
+/// 一番下になる。
+///
+/// **末尾に貼り付く一覧だけの話である。** サーバ一覧の一番下まで
+/// 巻いた人は「一番下に居たい」のではなく、そこにあるサーバを見て
+/// いるので、増えたときに勝手に動いてはいけない。
+pub fn remember(id: NodeId, at: f32, max: f32) -> f32 {
+    if intrinsic(id).anchor_end && at >= max {
+        SCROLL_TO_END
+    } else {
+        at
+    }
+}
+
 /// 配置が決まったノード 1 個。
 #[derive(Debug, Clone)]
 pub struct Placed<'a> {
@@ -826,6 +849,68 @@ mod tests {
             .rfind(|p| p.node.id == NodeId::ChatMessage)
             .unwrap();
         assert_eq!(last.rect.bottom(), 100.0);
+    }
+
+    /// メッセージ一覧を建てる。`n` 件 × 50px
+    fn messages(n: u64) -> UiNode {
+        let mut list = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0));
+        for i in 0..n {
+            list =
+                list.child(styled(NodeId::ChatMessage, |s| s.height = Some(50.0)).with_id_key(i));
+        }
+        UiNode::new(NodeId::ChatView).child(list)
+    }
+
+    /// ⚠️ **一番下で待っていたら、新しい行が来てもそこに居続ける。**
+    ///
+    /// 位置を px で覚えると、増えたぶんだけ見ている場所が上へずれ、
+    /// **来たはずの行が見えない**
+    #[test]
+    fn a_list_pinned_to_the_bottom_follows_new_rows() {
+        let mut scroll = ScrollState::new();
+        // 一番下まで巻いた、という意図を覚えている
+        scroll.insert(NodeId::ChatMessageList, SCROLL_TO_END);
+
+        for n in [10, 11, 20] {
+            let tree = messages(n);
+            let r = layout(&tree, Size::new(400.0, 100.0), &mut shaper(), &scroll);
+            let last = r
+                .placed
+                .iter()
+                .rfind(|p| p.node.id == NodeId::ChatMessage)
+                .expect("メッセージがある");
+            assert_eq!(last.rect.bottom(), 100.0, "{n} 件でも一番下に居る");
+        }
+    }
+
+    /// 途中で止めていたら、そこに残る。**勝手に追いかけない**
+    #[test]
+    fn a_list_stopped_midway_stays_where_it_was() {
+        let mut scroll = ScrollState::new();
+        scroll.insert(NodeId::ChatMessageList, 100.0);
+
+        let tree = messages(20);
+        let r = layout(&tree, Size::new(400.0, 100.0), &mut shaper(), &scroll);
+        let first = r
+            .placed
+            .iter()
+            .find(|p| p.node.id == NodeId::ChatMessage)
+            .expect("メッセージがある");
+        assert_eq!(first.rect.y, -100.0, "100px 巻いた場所のまま");
+    }
+
+    /// ⚠️ **末尾に貼り付かない一覧では、一番下でも意図にしない。**
+    ///
+    /// サーバ一覧の一番下まで巻いた人は「一番下に居たい」のではなく、
+    /// そこにあるサーバを見ている。増えたときに動いてはいけない
+    #[test]
+    fn only_lists_that_anchor_to_the_end_stick_there() {
+        assert_eq!(
+            remember(NodeId::ChatMessageList, 400.0, 400.0),
+            SCROLL_TO_END
+        );
+        assert_eq!(remember(NodeId::ChatMessageList, 399.0, 400.0), 399.0);
+        assert_eq!(remember(NodeId::NavGuildList, 400.0, 400.0), 400.0);
     }
 
     /// スクロールした子には切り取りが付く。枠の外に出た項目は当たらない

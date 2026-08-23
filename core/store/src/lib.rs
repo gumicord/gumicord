@@ -22,9 +22,9 @@ pub mod db;
 
 pub use db::{Db, DbError, Snapshot, default_path};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use gumicord_model::{Asset, Channel, ChannelId, Guild, GuildId, Message};
+use gumicord_model::{Asset, Channel, ChannelId, Guild, GuildId, Message, MessageId};
 
 /// 正規化された状態。
 ///
@@ -378,6 +378,40 @@ impl Store {
         self.messages.insert(channel, list);
     }
 
+    /// 一番古いもの。**続きを頼む起点である**
+    pub fn oldest_message(&self, channel: ChannelId) -> Option<MessageId> {
+        self.messages.get(&channel)?.first().map(|m| m.id)
+    }
+
+    /// 古いほうを前へ継ぎ足す。**足した件数を返す。**
+    ///
+    /// `list` は**古い順**で渡すこと。Discord は新しい順で返すので、
+    /// 反転するのは呼び出し側の仕事である ([`gumicord_rest`] と同じ約束)。
+    ///
+    /// ⚠️ **既にあるものは足さない。** 遡っている最中に同じ範囲を二度
+    /// 頼むことはあり、そのとき重なった分をそのまま入れると**同じ行が
+    /// 二度出る**。
+    ///
+    /// ⚠️ **まだ開いていないチャンネルには足さない。** 途中だけある
+    /// 歯抜けの履歴になり、間に何があったのかを言えなくなる
+    pub fn prepend_messages(&mut self, channel: ChannelId, list: Vec<Message>) -> usize {
+        let Some(existing) = self.messages.get_mut(&channel) else {
+            return 0;
+        };
+        let known: HashSet<MessageId> = existing.iter().map(|m| m.id).collect();
+        let mut older: Vec<Message> = list
+            .into_iter()
+            .filter(|m| !known.contains(&m.id))
+            .collect();
+        if older.is_empty() {
+            return 0;
+        }
+        let added = older.len();
+        older.append(existing);
+        *existing = older;
+        added
+    }
+
     /// 新着を末尾に足す。**足したら真。**
     ///
     /// ⚠️ 開いていないチャンネルの分は溜めない。開いたときに取り直すので、
@@ -679,6 +713,49 @@ mod tests {
         assert!(s.push_message(message(1, 10)));
         assert!(!s.push_message(message(1, 10)));
         assert_eq!(s.messages(ch).len(), 1);
+    }
+
+    /// 遡った分は**前へ**付く。順は古いままである
+    #[test]
+    fn older_messages_go_in_front() {
+        let mut s = Store::new();
+        let ch = ChannelId::from(10u64);
+        s.set_backlog(ch, vec![message(5, 10), message(6, 10)]);
+
+        assert_eq!(s.oldest_message(ch), Some(MessageId::from(5u64)));
+        assert_eq!(
+            s.prepend_messages(ch, vec![message(3, 10), message(4, 10)]),
+            2
+        );
+
+        let ids: Vec<u64> = s.messages(ch).iter().map(|m| m.id.get()).collect();
+        assert_eq!(ids, vec![3, 4, 5, 6]);
+        assert_eq!(s.oldest_message(ch), Some(MessageId::from(3u64)));
+    }
+
+    /// ⚠️ **重なった分は捨てる。** 同じ範囲を二度頼むことはあり、
+    /// そのまま入れると同じ行が二度出る
+    #[test]
+    fn an_overlapping_page_does_not_duplicate_rows() {
+        let mut s = Store::new();
+        let ch = ChannelId::from(10u64);
+        s.set_backlog(ch, vec![message(4, 10), message(5, 10)]);
+
+        assert_eq!(
+            s.prepend_messages(ch, vec![message(3, 10), message(4, 10)]),
+            1
+        );
+        let ids: Vec<u64> = s.messages(ch).iter().map(|m| m.id.get()).collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    /// ⚠️ **開いていないチャンネルには足さない。** 歯抜けの履歴になる
+    #[test]
+    fn a_channel_that_was_never_opened_gets_nothing() {
+        let mut s = Store::new();
+        let ch = ChannelId::from(10u64);
+        assert_eq!(s.prepend_messages(ch, vec![message(1, 10)]), 0);
+        assert!(!s.has_messages(ch));
     }
 }
 

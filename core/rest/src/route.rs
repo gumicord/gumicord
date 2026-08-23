@@ -120,6 +120,18 @@ impl Route {
         )
     }
 
+    /// `GET /channels/:id/messages?before=` — その 1 件より**古いほう**。
+    ///
+    /// ⚠️ **`before` もバケットの鍵には入れない。** どこまで遡ったかで
+    /// 制限が分かれてしまう。[`Route::messages`] と同じ入れ物である
+    pub fn messages_before(channel: ChannelId, limit: u8, before: MessageId) -> Self {
+        Self::scoped(
+            Method::Get,
+            format!("/channels/{channel}/messages?limit={limit}&before={before}"),
+            format!("/channels/{channel}/messages"),
+        )
+    }
+
     /// `POST /channels/:id/messages` — S4 実測: 上限 5 / 回復 1.00 秒
     pub fn create_message(channel: ChannelId) -> Self {
         Self::scoped(

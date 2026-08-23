@@ -337,6 +337,32 @@ impl Application for Gumicord {
         self.images.take()
     }
 
+    /// 一覧が動いた。**上端に近づいたら過去を取りに行く** (`FR-020`)。
+    ///
+    /// ⚠️ **上端ちょうどまで待たない。** 着いてから頼むと、着いた瞬間から
+    /// 返ってくるまで何も無い場所を見ることになる。手前で頼めば、たいてい
+    /// 着く前に届いている。
+    ///
+    /// ⚠️ **まだ 1 件も出ていないうちは頼まない。** はみ出していない一覧の
+    /// 「上端」は開いた直後の状態でもあり、開くたびに叩くことになる
+    fn scrolled(&mut self, id: NodeId, at: f32, max: f32) {
+        /// 上端からこれだけの距離に入ったら、次の頁を頼む (論理 px)
+        const REACH: f32 = 400.0;
+
+        if id != NodeId::ChatMessageList || max <= 0.0 || at > REACH {
+            return;
+        }
+        let channel = ChannelId::from(self.selected_channel);
+        self.live.load_older(channel);
+    }
+
+    /// 上へ足したので、**見ている場所を動かさないでほしい**
+    fn keep_place(&mut self) -> Option<NodeId> {
+        self.live
+            .take_prepended()
+            .then_some(NodeId::ChatMessageList)
+    }
+
     /// 背景の知らせを取り込む。**ここが唯一の入り口である。**
     fn wake(&mut self) -> bool {
         let mut changed = self.login.poll();

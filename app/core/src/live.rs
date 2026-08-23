@@ -105,6 +105,13 @@ pub enum LiveEvent {
         channel: ChannelId,
         list: Vec<Message>,
     },
+    /// もっと遡った分。**古い順で、いま持っているものより前に付く**。
+    ///
+    /// 空なら**そこが一番古い**。もう頼まない
+    Older {
+        channel: ChannelId,
+        list: Vec<Message>,
+    },
     /// 誰かが打ち始めた
     Typing {
         channel: ChannelId,
@@ -131,6 +138,16 @@ pub struct Live {
     link: Link,
     /// 取りに行った (行っている) チャンネル。**二重に叩かないため**
     requested: HashSet<ChannelId>,
+    /// いま遡っている最中のチャンネル。
+    ///
+    /// ⚠️ **これが無いと、上端で待っている間に何回も叩く。** スクロールは
+    /// 1 回の操作で何度も来るので、1 回目の応答を待たずに次を投げてしまう
+    paging: HashSet<ChannelId>,
+    /// これ以上古いものが無いチャンネル。**先頭に着いたら二度と頼まない**
+    exhausted: HashSet<ChannelId>,
+    /// 上へ足したので、見ている場所を動かしてほしくない。
+    /// **1 回だけ効く** ([`Live::take_prepended`])
+    prepended: bool,
     /// トークンが弾かれた。アプリが後始末をしたら下ろす
     rejected: bool,
     /// 前回開いていたチャンネル (`NFR-011`)
@@ -202,6 +219,9 @@ impl Live {
             link: Link::Idle,
             status: None,
             requested: HashSet::new(),
+            paging: HashSet::new(),
+            exhausted: HashSet::new(),
+            prepended: false,
             rejected: false,
             last_channel: None,
             subs: None,
@@ -368,6 +388,60 @@ impl Live {
         });
     }
 
+    /// もっと古いほうを取りに行く (`FR-020`)。
+    ///
+    /// ⚠️ **上端に着いたことを、来るたびに叩かない。** スクロールは 1 回の
+    /// 操作で何度も来る。1 回目の応答を待たずに次を投げると、同じ範囲を
+    /// 何度も頼んでレート制限に当たる。
+    ///
+    /// ⚠️ **一番古いところまで行ったら二度と頼まない。** 空が返るたびに
+    /// また頼むと、上端に居るあいだ叩き続けることになる。
+    ///
+    /// まだ 1 件も持っていないときは何もしない。**起点が無い**
+    pub fn load_older(&mut self, channel: ChannelId) {
+        if self.exhausted.contains(&channel) || self.paging.contains(&channel) {
+            return;
+        }
+        let Some(before) = self.store.oldest_message(channel) else {
+            return;
+        };
+        let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
+            return;
+        };
+        self.paging.insert(channel);
+
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
+        rt.spawn(async move {
+            let list = match rest.messages_before(channel, BACKLOG, before).await {
+                // ⚠️ Discord は**新しい順**で返す。画面は古い順に積む
+                Ok(mut list) => {
+                    list.reverse();
+                    list
+                }
+                Err(e) => {
+                    // ⚠️ **空として送る。** 送らないと `paging` が下りず、
+                    // そのチャンネルは二度と遡れなくなる
+                    tracing::warn!(%e, channel = %channel, "遡れなかった");
+                    Vec::new()
+                }
+            };
+            let _ = tx.send(LiveEvent::Older { channel, list });
+            waker.wake();
+        });
+    }
+
+    /// 上へ足したか。**1 回だけ真を返す。**
+    ///
+    /// 見ている場所を動かさないために、描く側がこれを見る
+    pub fn take_prepended(&mut self) -> bool {
+        std::mem::take(&mut self.prepended)
+    }
+
+    /// もう遡れないか。**「読み込み中」を出しっぱなしにしないために要る**
+    pub fn is_exhausted(&self, channel: ChannelId) -> bool {
+        self.exhausted.contains(&channel)
+    }
+
     /// 送る (`FR-024`)。
     ///
     /// ⚠️ **画面には足さない。** 送れたら Gateway が `MESSAGE_CREATE` を
@@ -395,6 +469,8 @@ impl Live {
         }
         self.store = Store::new();
         self.requested.clear();
+        self.paging.clear();
+        self.exhausted.clear();
         self.last_channel = None;
     }
     /// 届いた並びを Store へ入れる。
@@ -511,7 +587,30 @@ impl Live {
                 if let Some(db) = &self.db {
                     db.save_messages(channel, list.clone());
                 }
+                // 履歴を丸ごと置き直したので、**遡り直せる**
+                self.exhausted.remove(&channel);
                 self.store.set_backlog(channel, list);
+                true
+            }
+            LiveEvent::Older { channel, list } => {
+                self.paging.remove(&channel);
+                // 空 = そこが一番古い。**もう頼まない**
+                if list.is_empty() {
+                    self.exhausted.insert(channel);
+                    return false;
+                }
+                if let Some(db) = &self.db {
+                    db.save_messages(channel, list.clone());
+                }
+                let added = self.store.prepend_messages(channel, list);
+                if added == 0 {
+                    // 全部知っていた。**もう一度頼んでも同じものが来る**
+                    self.exhausted.insert(channel);
+                    return false;
+                }
+                // ⚠️ **見ている場所を動かさない。** 上へ足したぶんだけ
+                // 中身が伸びるので、そのままだと読んでいた行が下へ逃げる
+                self.prepended = true;
                 true
             }
             LiveEvent::Link(link) => {
@@ -694,6 +793,91 @@ mod tests {
             .map(|m| &*m.content)
             .collect();
         assert_eq!(bodies, vec!["ふるい", "あたらしい"]);
+    }
+
+    /// 遡った分は前に付き、**見ている場所を保ってほしいと 1 回だけ言う**
+    #[test]
+    fn an_older_page_goes_in_front_and_asks_to_hold_the_place() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(5, "いま")],
+        });
+        assert!(!live.take_prepended(), "まだ何も足していない");
+
+        assert!(live.apply(LiveEvent::Older {
+            channel: ch(),
+            list: vec![message(3, "むかし"), message(4, "すこしむかし")],
+        }));
+
+        let bodies: Vec<_> = live
+            .store()
+            .messages(ch())
+            .iter()
+            .map(|m| &*m.content)
+            .collect();
+        assert_eq!(bodies, vec!["むかし", "すこしむかし", "いま"]);
+
+        assert!(live.take_prepended(), "場所を保ってほしい");
+        assert!(!live.take_prepended(), "**1 回だけ**");
+    }
+
+    /// ⚠️ **空が返ったら二度と頼まない。**
+    ///
+    /// 上端に居るあいだスクロールは何度も来る。空のたびにまた頼むと、
+    /// そこに居るだけで叩き続けることになる
+    #[test]
+    fn reaching_the_beginning_stops_the_asking() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(5, "いま")],
+        });
+        assert!(!live.is_exhausted(ch()));
+
+        assert!(!live.apply(LiveEvent::Older {
+            channel: ch(),
+            list: Vec::new(),
+        }));
+        assert!(live.is_exhausted(ch()));
+    }
+
+    /// 全部知っていた頁も**そこが先頭**である。もう一度頼んでも同じ
+    #[test]
+    fn a_page_we_already_had_also_stops_the_asking() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(5, "いま")],
+        });
+
+        assert!(!live.apply(LiveEvent::Older {
+            channel: ch(),
+            list: vec![message(5, "いま")],
+        }));
+        assert!(live.is_exhausted(ch()));
+        assert!(!live.take_prepended(), "何も足していないので動かさない");
+    }
+
+    /// 履歴を丸ごと取り直したら、**また遡れる**
+    #[test]
+    fn a_fresh_backlog_lets_us_page_back_again() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(5, "いま")],
+        });
+        live.apply(LiveEvent::Older {
+            channel: ch(),
+            list: Vec::new(),
+        });
+        assert!(live.is_exhausted(ch()));
+
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(5, "いま"), message(6, "もっといま")],
+        });
+        assert!(!live.is_exhausted(ch()));
     }
 
     /// ⚠️ **REST が先に返っていたらキャッシュで上書きしない。**

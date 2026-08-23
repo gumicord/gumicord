@@ -1,6 +1,6 @@
 //! チャンネルとメッセージの REST 呼び出し (`FR-020`, `FR-024`)。
 
-use gumicord_model::{Channel, ChannelId, Message};
+use gumicord_model::{Channel, ChannelId, Message, MessageId};
 
 use crate::{RestClient, RestError, Route};
 
@@ -14,6 +14,23 @@ impl RestClient {
     /// `limit` の上限は 100。超えて頼むと Discord が弾く
     pub async fn messages(&self, channel: ChannelId, limit: u8) -> Result<Vec<Message>, RestError> {
         self.get(Route::messages(channel, limit.clamp(1, 100)))
+            .await
+    }
+
+    /// その 1 件より**古いほう**を取ってくる (`FR-020`)。
+    ///
+    /// ⚠️ **境目の 1 件は含まれない。** `before` に渡した本人は返ってこない
+    /// ので、そのまま前へ継ぎ足してよい。ここを取り違えると 1 件だけ
+    /// 重なって出る。
+    ///
+    /// 空で返ってきたら**そこが一番古い**。呼び出し側は、もう頼まない
+    pub async fn messages_before(
+        &self,
+        channel: ChannelId,
+        limit: u8,
+        before: MessageId,
+    ) -> Result<Vec<Message>, RestError> {
+        self.get(Route::messages_before(channel, limit.clamp(1, 100), before))
             .await
     }
 
@@ -88,5 +105,16 @@ mod tests {
 
         assert_ne!(a.path, b.path);
         assert_eq!(a.bucket_key, b.bucket_key);
+    }
+
+    /// ⚠️ **どこまで遡ったかで制限を分けない。** 継ぎ足しは同じ入れ物である
+    #[test]
+    fn paging_back_shares_the_bucket() {
+        let ch = ChannelId::from(1u64);
+        let first = Route::messages(ch, 50);
+        let next = Route::messages_before(ch, 50, gumicord_model::MessageId::from(9u64));
+
+        assert!(next.path.contains("before=9"));
+        assert_eq!(first.bucket_key, next.bucket_key);
     }
 }

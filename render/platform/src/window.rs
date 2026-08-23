@@ -94,6 +94,21 @@ pub trait Application {
     /// タイトルバーの操作はここへ来る前にプラットフォーム層が処理する。
     fn pressed(&mut self, hits: &[Hit]) -> bool;
 
+    /// スクロール領域が動いた。`at` は先頭からの距離、`max` ははみ出し量。
+    ///
+    /// **上端に着いたら過去を取りに行く**ような判断はアプリの仕事である。
+    /// プラットフォーム層は「どこまで巻いたか」を伝えるだけで、それが
+    /// 何の一覧なのかを知らない。
+    fn scrolled(&mut self, _id: NodeId, _at: f32, _max: f32) {}
+
+    /// 上へ足したので、**見ている場所を動かさないでほしい**一覧。
+    ///
+    /// 描く直前に呼ばれ、**1 回だけ効く**。伸びたのが上か下かを知って
+    /// いるのはアプリだけである
+    fn keep_place(&mut self) -> Option<NodeId> {
+        None
+    }
+
     fn title(&self) -> String;
 
     /// いま入力を受け取る文書 (`PLT-001`)。`None` ならテキスト入力は起きない。
@@ -469,10 +484,15 @@ impl Host {
         let caret_on = self.caret_on;
         // ⚠️ **描く前に入れる。** このフレームで使えるようにするため
         let images = self.app.take_images();
+        // 上へ足したものがあれば、見ている場所を保つ。**1 フレームだけ**
+        let keep_place = self.app.keep_place();
 
         let (stats, backend) = {
             let Some(r) = &mut self.renderer else { return };
             r.set_caret_visible(caret_on);
+            if let Some(id) = keep_place {
+                r.keep_place(id);
+            }
             for image in &images {
                 r.put_image(image);
             }
@@ -631,7 +651,11 @@ impl ApplicationHandler for Host {
                 // スクロールバーを引いている間は、それ以外を見ない。
                 // 摘みから指がはみ出しても掴んだままにする (OS の作法)
                 if let (Some(grab), Some(r)) = (self.scroll_grab, &mut self.renderer) {
-                    if r.drag_scrollbar(&grab, self.cursor.1) {
+                    let moved = r.drag_scrollbar(&grab, self.cursor.1);
+                    let owner = grab.owner();
+                    let (at, max) = r.scroll_place(owner);
+                    self.app.scrolled(owner, at, max);
+                    if moved {
                         self.request_redraw();
                     }
                     return;
@@ -675,9 +699,15 @@ impl ApplicationHandler for Host {
                     .iter()
                     .find(|h| gumicord_render::intrinsic(h.id).scroll)
                     .map(|h| h.id);
-                if let Some(id) = target
-                    && r.scroll_by(id, dy)
-                {
+                let Some(id) = target else { return };
+                let moved = r.scroll_by(id, dy);
+                let (at, max) = r.scroll_place(id);
+                // ⚠️ **動かなかったときも伝える。** 上端に着いてからさらに
+                // 巻き上げるのが「もっと読みたい」の合図であり、そこでは
+                // もう位置が動かない。動いたときだけ伝えると**過去を
+                // 取りに行く合図が永久に来ない**
+                self.app.scrolled(id, at, max);
+                if moved {
                     self.request_redraw();
                 }
             }

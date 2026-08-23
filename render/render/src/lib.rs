@@ -73,6 +73,13 @@ pub struct ScrollGrab {
     grab: f32,
 }
 
+impl ScrollGrab {
+    /// 掴んでいるスクロールバーが動かす領域
+    pub fn owner(&self) -> NodeId {
+        self.bar.owner
+    }
+}
+
 /// UITree を描くもの。
 pub struct Renderer {
     gpu: Gpu,
@@ -86,6 +93,8 @@ pub struct Renderer {
     overflow: std::collections::HashMap<NodeId, f32>,
     /// 直前のフレームに置かれたスクロールバー
     scrollbars: Vec<ScrollBar>,
+    /// 上へ足されたので、見ている場所を保ちたい領域。**1 フレームだけ効く**
+    keep_place: Option<NodeId>,
     /// キャレットをいま描くか。
     ///
     /// ⚠️ **点滅の刻みはプラットフォーム層が持つ。** 速さは OS の設定で
@@ -112,6 +121,7 @@ impl Renderer {
             hits: Vec::new(),
             overflow: std::collections::HashMap::new(),
             scrollbars: Vec::new(),
+            keep_place: None,
             caret_visible: true,
         })
     }
@@ -175,15 +185,42 @@ impl Renderer {
             .clamp(0.0, max);
 
         let next = (cur + delta).clamp(0.0, max);
-        self.scroll.insert(id, next);
+        self.scroll.insert(id, layout::remember(id, next, max));
 
         // 半ピクセルに満たない動きは、描き直しても見た目が変わらない
         (next - cur).abs() >= 0.5
     }
 
+    /// いまどこを見ているか。`(先頭からの距離, はみ出し量)`。
+    ///
+    /// ⚠️ **どちらも直前のフレームの寸法で言っている。** 「一番下」を
+    /// 意図として覚えていても、ここでは px に直して返す
+    pub fn scroll_place(&self, id: NodeId) -> (f32, f32) {
+        let max = self.overflow.get(&id).copied().unwrap_or(0.0);
+        let default = if intrinsic(id).anchor_end { max } else { 0.0 };
+        let at = self
+            .scroll
+            .get(&id)
+            .copied()
+            .unwrap_or(default)
+            .clamp(0.0, max);
+        (at, max)
+    }
+
     /// スクロール位置を直接置く。[`SCROLL_TO_END`] で一番下に貼り付く。
     pub fn set_scroll(&mut self, id: NodeId, at: f32) {
         self.scroll.insert(id, at);
+    }
+
+    /// 上へ足したので、**見ている場所を動かさないでほしい**。
+    ///
+    /// 次の 1 フレームだけ効く。伸びた量を測って、そのぶん位置を下げる。
+    ///
+    /// ⚠️ **足す側が言う。** レンダラには、伸びたのが上なのか下なのかを
+    /// 知る手がかりが無い。新着が下に付いたときにこれを効かせると、
+    /// **読んでいる場所が勝手に動く**
+    pub fn keep_place(&mut self, id: NodeId) {
+        self.keep_place = Some(id);
     }
 
     /// スクロールバーを掴む。座標は**論理 px**。
@@ -218,8 +255,14 @@ impl Renderer {
 
         let t = ((y - grab.grab - grab.bar.track.y) / travel).clamp(0.0, 1.0);
         let next = t * max;
-        let cur = self.scroll.get(&grab.bar.owner).copied().unwrap_or(0.0);
-        self.scroll.insert(grab.bar.owner, next);
+        let cur = self
+            .scroll
+            .get(&grab.bar.owner)
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, max);
+        self.scroll
+            .insert(grab.bar.owner, layout::remember(grab.bar.owner, next, max));
         (next - cur).abs() >= 0.5
     }
 
@@ -234,7 +277,31 @@ impl Renderer {
     /// 1 フレーム描く。木は**スタイル解決済み**でなければならない。
     pub fn render(&mut self, root: &UiNode) -> FrameStats {
         let viewport = self.viewport();
-        let layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
+        let mut layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
+
+        // ⚠️ **上へ足されたぶんだけ、見ている場所を下げる。**
+        //
+        // 位置は先頭から測っているので、前に 50 件付くとその高さのぶん
+        // だけ読んでいた行が下へ逃げる。**遡ったのに読んでいた場所を
+        // 見失う**のでは、遡る意味がない。
+        //
+        // 伸びた量は「はみ出し量の差」で分かる。枠の大きさは変わって
+        // いないので、増えたぶんがそのまま上に足された高さである。
+        //
+        // ⚠️ **もう一度測り直す。** 描いてから直すと、その 1 フレームだけ
+        // 飛んで見える。継ぎ足しは滅多に起きないので、そのときだけ 2 度測る
+        if let Some(id) = self.keep_place.take()
+            && let (Some(before), Some(after)) =
+                (self.overflow.get(&id).copied(), layout.overflow.get(&id))
+        {
+            let grew = after - before;
+            let at = self.scroll.get(&id).copied().unwrap_or(0.0);
+            // 一番下に貼り付いている人は動かさない。**意図のほうが強い**
+            if grew > 0.0 && at != layout::SCROLL_TO_END {
+                self.scroll.insert(id, (at + grew).min(*after));
+                layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
+            }
+        }
 
         self.hits.clear();
         self.hits.extend(layout.placed.iter().map(|p| Hit {
