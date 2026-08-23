@@ -40,6 +40,9 @@ pub static ICONS: &[(&str, IconDef)] = &[
     ("window.maximize", WINDOW_MAXIMIZE),
     ("window.restore", WINDOW_RESTORE),
     ("window.close", WINDOW_CLOSE),
+    // ⚠️ 同じ絵だが、名前が違えば意味が違う。タイトルバーの外で
+    // `window.close` と書くと「窓を閉じる」に読める
+    ("close", WINDOW_CLOSE),
     ("channel.text", CHANNEL_TEXT),
     ("channel.voice", CHANNEL_VOICE),
     ("folder", FOLDER),

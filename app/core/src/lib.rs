@@ -106,6 +106,9 @@ const FOLDER_TILES: usize = 4;
 ///
 /// ⚠️ **ここに挙げていないノードにホバー状態は立たない。** テーマが
 /// `when.state = hover` を書いても効かないので、増やすときはここも見る。
+/// 返信・編集をやめるボタンの slot。**押した先と組み立てる先で同じ字を使う**
+const CANCEL_COMPOSING: &str = "cancel_composing";
+
 const INTERACTIVE: &[NodeId] = &[
     NodeId::NavGuildListHome,
     NodeId::NavGuildListItem,
@@ -595,6 +598,9 @@ impl Application for Gumicord {
                     changed |= self.selected_channel != *id;
                     self.selected_channel = *id;
                 }
+                (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
+                    changed |= self.stop_composing();
+                }
                 // ⚠️ **メッセージ単位で開く。** 走りごとに開けるには
                 // 走りごとの当たり判定が要り、それは走りをノードにする
                 // ことを意味する。それはできない ([`crate::markdown`])
@@ -692,9 +698,7 @@ impl Application for Gumicord {
         }
         // ⚠️ **書きかけを捨てる前に、返信・編集をやめる。** 一度に両方
         // 起きると、打った文字が消えたのか宛先が消えたのかが分からない
-        if self.composing != Composing::New {
-            self.composing = Composing::New;
-            self.input.take();
+        if self.stop_composing() {
             return true;
         }
         if !self.input_focused {
@@ -1502,6 +1506,32 @@ impl Gumicord {
             )
     }
 
+    /// 返信・編集をやめる。**変わったら真。**
+    ///
+    /// # ⚠️ 返信と編集で、打った文字の扱いが違う
+    ///
+    /// 返信をやめたときに打った文字まで消すと、**宛先を外しただけの
+    /// つもりが書いたものごと消える**。返信をやめても、それは
+    /// そのまま送れる文である。
+    ///
+    /// 編集はその逆で、入力欄にあるのは**元の発言の中身**であって
+    /// 利用者が書いたものではない。やめたら消す。残すと、次の発言が
+    /// 書き換えようとしていた本文から始まる
+    fn stop_composing(&mut self) -> bool {
+        match self.composing {
+            Composing::New => false,
+            Composing::Reply(_) => {
+                self.composing = Composing::New;
+                true
+            }
+            Composing::Edit(_) => {
+                self.composing = Composing::New;
+                self.input.take();
+                true
+            }
+        }
+    }
+
     /// 入力欄の上に出す 1 行。**返信・編集の宛先を出す。**
     ///
     /// ⚠️ 相手の名前まで出す。「返信中」だけだと、一覧を巻いたあとに
@@ -1527,6 +1557,23 @@ impl Gumicord {
         UiNode::new(NodeId::ChatInputToolbar)
             .with_key(Key::Slot(slot))
             .child(UiNode::text(NodeId::PrimitiveText, text).with_key(Key::Slot(slot)))
+            // ⚠️ **右端へ寄せるのに空きを挟む。** クライアントが余白の
+            // 幅を書くと、テーマがバーの余白を変えたときに揃わなくなる
+            .child(UiNode::new(NodeId::LayoutSpacer))
+            // ⚠️ **やめる道を画面に出す。** Esc でもやめられるが、
+            // それを知らない人には**抜け出せない状態**に見える
+            .child(
+                UiNode::new(NodeId::PrimitiveButton)
+                    .with_key(Key::Slot(CANCEL_COMPOSING))
+                    .with_state_if(
+                        self.is_hovered(
+                            NodeId::PrimitiveButton,
+                            Some(&Key::Slot(CANCEL_COMPOSING)),
+                        ),
+                        State::Hover,
+                    )
+                    .child(UiNode::icon(NodeId::PrimitiveIcon, "close")),
+            )
     }
 
     /// 一覧の下に出す 1 行。
@@ -2113,6 +2160,65 @@ mod tests {
         assert_eq!(bar(Composing::New), None, "何もしていないのに出ている");
         assert_eq!(bar(Composing::Reply(1)), Some(Key::Slot("reply")));
         assert_eq!(bar(Composing::Edit(1)), Some(Key::Slot("edit")));
+    }
+
+    /// ⚠️ **やめる道が画面に出ていること。**
+    ///
+    /// Esc でもやめられるが、それを知らない人には**抜け出せない状態**に
+    /// 見える
+    #[test]
+    fn 返信中は取り消しのボタンが出る() {
+        let cancel = |c: Composing| {
+            let mut a = app();
+            a.composing = c;
+            let mut found = false;
+            a.build_tree(Panes::Four).walk(&mut |n, _| {
+                found |=
+                    n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(CANCEL_COMPOSING));
+            });
+            found
+        };
+        assert!(!cancel(Composing::New), "何もしていないのに出ている");
+        assert!(cancel(Composing::Reply(1)));
+        assert!(cancel(Composing::Edit(1)));
+    }
+
+    /// ⚠️ **返信と編集で、打った文字の扱いが違う。**
+    ///
+    /// 返信をやめたときに打った文字まで消すと、宛先を外しただけのつもりが
+    /// 書いたものごと消える。編集の入力欄にあるのは元の発言の中身であって、
+    /// 利用者が書いたものではない
+    #[test]
+    fn 返信をやめても書いた文は残り編集をやめたら消える() {
+        let press = |c: Composing| {
+            let mut a = app();
+            a.composing = c;
+            a.input.insert("書いた文");
+            let hits = [hit_of(
+                NodeId::PrimitiveButton,
+                Some(Key::Slot(CANCEL_COMPOSING)),
+            )];
+            assert!(a.pressed(&hits), "何も起きなかった");
+            assert_eq!(a.composing, Composing::New, "やめていない");
+            a.input.text().to_owned()
+        };
+        assert_eq!(press(Composing::Reply(1)), "書いた文", "返信で消えた");
+        assert_eq!(press(Composing::Edit(1)), "", "編集で残った");
+    }
+
+    /// ⚠️ **他のボタンで取り消してはいけない。**
+    ///
+    /// `Key::Slot(CANCEL_COMPOSING)` の定数がパターンではなく**束縛**として
+    /// 読まれると、あらゆる `primitive.button` がここへ落ちる。
+    /// 見た目は同じに動くので、押すまで気づけない
+    #[test]
+    fn 別のボタンでは取り消されない() {
+        let mut a = app();
+        a.composing = Composing::Reply(1);
+        let hits = [hit_of(NodeId::PrimitiveButton, Some(Key::Slot("その他")))];
+
+        a.pressed(&hits);
+        assert_eq!(a.composing, Composing::Reply(1), "別のボタンで取り消された");
     }
 
     /// ⚠️ **Esc は書きかけを捨てる前に、返信・編集をやめる。**
