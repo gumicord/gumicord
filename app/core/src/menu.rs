@@ -1,4 +1,18 @@
-//! 浮かせるもの — コンテクストメニュー (`FR-024`, `FR-028` の受け皿)。
+//! 浮かせるもの — コンテクストメニューと確認の窓 (`FR-024`, `FR-028`)。
+//!
+//! # ⚠️ 戻せないことの前には窓を挟む
+//!
+//! メニューの中に埋もれた「削除」を押した瞬間に発言が消えるのは危うい。
+//! 隣の項目と 1 行しか離れていないうえ、**消した発言は戻せない**。
+//!
+//! ```text
+//!   副ボタン ──▶ overlay.menu ──「削除」──▶ overlay.modal ──「削除する」──▶ 消える
+//!                                              └──「やめる」──▶ 何も起きない
+//! ```
+//!
+//! ⚠️ **窓は「本当に？」だけを出さない。** 何が消えるのかを一緒に出す。
+//! 一覧が入れ替わったあとに窓だけ残っていると、押した人が思っているものと
+//! 違うものが消えうる ([`Confirm::preview`])。
 //!
 //! # ⚠️ 開いている間は、下を押させない
 //!
@@ -25,12 +39,83 @@ use gumicord_uitree::{Anchor, Key, NodeId, UiNode};
 
 /// 浮かんでいるもの。**同時に 1 つだけ。**
 ///
-/// ⚠️ 2 つ開くと、どちらを閉じるのかが押した場所から決まらなくなる
+/// ⚠️ 2 つ開くと、どちらを閉じるのかが押した場所から決まらなくなる。
+/// メニューと窓を別々の場所に持たず 1 つの列挙にしてあるのは、
+/// **持ち方の側で「同時に 1 つ」を守るため**である
 #[derive(Debug, Clone, PartialEq)]
-pub struct Floating {
+pub enum Floating {
+    /// 操作の並び
+    Menu(Menu),
+    /// 戻せないことの前に挟む窓
+    Confirm(Confirm),
+}
+
+/// コンテクストメニュー。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Menu {
     /// 押された場所 (論理 px)。**置き場所ではない**
     pub at: (f32, f32),
     pub items: Vec<Item>,
+}
+
+/// 確かめてから進む窓。
+///
+/// ⚠️ **「本当に？」だけでは足りない。** 何が起きるのか ([`Self::body`]) と、
+/// 何に対して起きるのか ([`Self::preview`]) を出す
+#[derive(Debug, Clone, PartialEq)]
+pub struct Confirm {
+    /// 見出し。**何をしようとしているか**
+    pub title: String,
+    /// 起きること。**「戻せない」ならそう書く**
+    pub body: String,
+    /// 対象そのもの。無ければ出さない
+    pub preview: Option<String>,
+    /// 進むほうを押したときに起きること
+    pub action: Action,
+    /// 進むほうの文字。
+    ///
+    /// ⚠️ **「はい」にしない。** 見出しを読み飛ばした人にとって、
+    /// 「はい」は何に対する「はい」か分からない。動詞を書く
+    pub confirm: String,
+    /// 戻せない操作か。テーマが赤く出す
+    pub danger: bool,
+}
+
+/// 窓に出す 1 行。**何が起きるかの対象を示すためだけのものである。**
+///
+/// ⚠️ **全文を出さない。** 窓は読ませる場所ではなく、どれのことかが
+/// 分かれば足りる。長い発言をそのまま出すと窓が画面を埋める。
+///
+/// ⚠️ **改行を潰す。** 1 行の場所なので、そのまま入れると 2 行目以降が
+/// 見えないところへ消える。
+///
+/// 中身が無ければ `None`。**添付だけの発言で空の枠を出しても、何も
+/// 伝わらない**
+pub fn preview_line(body: &str) -> Option<String> {
+    /// ここまでで切る (文字数)。**桁ではなく読める長さで決める**
+    const LIMIT: usize = 60;
+
+    let one_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return None;
+    }
+    // ⚠️ **バイトで切らない。** 日本語の途中で切ると壊れる
+    if one_line.chars().count() <= LIMIT {
+        return Some(one_line);
+    }
+    let mut out: String = one_line.chars().take(LIMIT).collect();
+    out.push('…');
+    Some(out)
+}
+
+/// 窓のボタンの番号。**位置ではなく意味で指す。**
+///
+/// ⚠️ 番号を入れ替えたときに、押される先が黙って入れ替わってはならない
+pub mod button {
+    /// やめる
+    pub const CANCEL: usize = 0;
+    /// 進む
+    pub const CONFIRM: usize = 1;
 }
 
 /// メニューの項目 1 つ。
@@ -115,6 +200,33 @@ pub enum Present {
 impl Floating {
     /// 浮かせる層を組む。**開いているときだけ呼ぶこと。**
     pub fn node(&self, how: Present, hovered: Option<usize>) -> UiNode {
+        match self {
+            Floating::Menu(m) => m.node(how, hovered),
+            Floating::Confirm(c) => c.node(hovered),
+        }
+    }
+
+    /// メニューなら中の項目。窓なら空
+    pub fn items(&self) -> &[Item] {
+        match self {
+            Floating::Menu(m) => &m.items,
+            Floating::Confirm(_) => &[],
+        }
+    }
+}
+
+/// 層と暗幕で包む。**中身が何であれ、包み方は同じである。**
+///
+/// ⚠️ **覆いを先に置く。** 描く順は木の順なので、後ろに置くと中身の上に
+/// 暗幕が掛かる
+fn layer(scrim: &'static str, body: UiNode) -> UiNode {
+    UiNode::new(NodeId::OverlayLayer)
+        .child(UiNode::new(NodeId::OverlayScrim).with_key(Key::Slot(scrim)))
+        .child(body)
+}
+
+impl Menu {
+    fn node(&self, how: Present, hovered: Option<usize>) -> UiNode {
         let menu = UiNode::new(NodeId::OverlayMenu).children(
             self.items
                 .iter()
@@ -133,18 +245,64 @@ impl Floating {
                 .child(menu),
         };
 
-        // ⚠️ **覆いを先に置く。** 描く順は木の順なので、後ろに置くと
-        // メニューの上に暗幕が掛かる
-        UiNode::new(NodeId::OverlayLayer)
+        // 机の上では暗くしない。**暗くすると、下を読みながら選ぶという
+        // 当たり前のことができなくなる**
+        layer(
+            match how {
+                Present::Popover => "quiet",
+                Present::Sheet => "dim",
+            },
+            body,
+        )
+    }
+}
+
+impl Confirm {
+    /// 窓を組む。
+    ///
+    /// ⚠️ **端末で包み方を変えない。** メニューと違い、窓は押した場所とは
+    /// 関係のないところ (画面の真ん中) に出る。机の上でも携帯でも同じである
+    fn node(&self, hovered: Option<usize>) -> UiNode {
+        let modal = UiNode::new(NodeId::OverlayModal)
+            .child(UiNode::text(NodeId::OverlayModalTitle, &self.title))
+            .child(UiNode::text(NodeId::OverlayModalBody, &self.body))
+            .child_if(self.preview.is_some(), || {
+                UiNode::text(
+                    NodeId::OverlayModalPreview,
+                    self.preview.as_deref().unwrap_or_default(),
+                )
+            })
             .child(
-                UiNode::new(NodeId::OverlayScrim).with_key(Key::Slot(match how {
-                    // 机の上では暗くしない。**暗くすると、下を読みながら
-                    // 選ぶという当たり前のことができなくなる**
-                    Present::Popover => "quiet",
-                    Present::Sheet => "dim",
-                })),
-            )
-            .child(body)
+                UiNode::new(NodeId::OverlayModalActions)
+                    // ⚠️ **やめるほうを先に置く。** 押し間違えたときに
+                    // 起きることが軽いほうを、指と目が先に当たる場所に置く
+                    .child(self.button(button::CANCEL, "やめる", "cancel", hovered))
+                    .child(self.button(
+                        button::CONFIRM,
+                        &self.confirm,
+                        if self.danger { "danger" } else { "confirm" },
+                        hovered,
+                    )),
+            );
+
+        // ⚠️ **窓のときは必ず暗くする。** 後ろが読めたままだと、窓が
+        // 出ていることに気付かずに下を押そうとする
+        layer("dim", modal)
+    }
+
+    fn button(
+        &self,
+        index: usize,
+        label: &str,
+        slot: &'static str,
+        hovered: Option<usize>,
+    ) -> UiNode {
+        UiNode::new(NodeId::OverlayModalAction)
+            // ⚠️ **番号で指す。** 文字で指すと、言語を変えた瞬間に
+            // どちらが押されたか分からなくなる
+            .with_key(Key::Index(index as u32))
+            .with_state_if(hovered == Some(index), gumicord_uitree::State::Hover)
+            .child(UiNode::text(NodeId::OverlayModalActionLabel, label).with_key(Key::Slot(slot)))
     }
 }
 
@@ -174,13 +332,24 @@ mod tests {
     use super::*;
 
     fn menu() -> Floating {
-        Floating {
+        Floating::Menu(Menu {
             at: (10.0, 20.0),
             items: vec![
                 Item::new(Action::Copy("a".into()), "本文をコピー"),
                 Item::new(Action::MarkRead(1), "既読にする").danger(),
             ],
-        }
+        })
+    }
+
+    fn confirm() -> Floating {
+        Floating::Confirm(Confirm {
+            title: "この発言を削除しますか".to_owned(),
+            body: "削除した発言は元に戻せません。".to_owned(),
+            preview: Some("おはよう".to_owned()),
+            action: Action::Delete(1),
+            confirm: "削除する".to_owned(),
+            danger: true,
+        })
     }
 
     fn ids(n: &UiNode) -> Vec<NodeId> {
@@ -254,5 +423,153 @@ mod tests {
             }
         });
         assert_eq!(keys, vec![Some(Key::Index(0)), Some(Key::Index(1))]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  確認の窓
+
+    fn texts(n: &UiNode, want: NodeId) -> Vec<String> {
+        let mut out = Vec::new();
+        n.walk(&mut |c, _| {
+            if c.id == want
+                && let Some(s) = c.content.as_text()
+            {
+                out.push(s.to_owned());
+            }
+        });
+        out
+    }
+
+    /// ⚠️ **窓は必ず暗くする。** 後ろが読めたままだと、窓が出ていることに
+    /// 気付かずに下を押そうとする
+    #[test]
+    fn 窓は後ろを暗くする() {
+        let n = confirm().node(Present::Popover, None);
+        let mut slot = None;
+        n.walk(&mut |c, _| {
+            if c.id == NodeId::OverlayScrim {
+                slot = c.key.clone();
+            }
+        });
+        assert_eq!(slot, Some(Key::Slot("dim")));
+    }
+
+    /// ⚠️ **端末で包み方を変えない。** 窓は押した場所と関係のないところに
+    /// 出るので、机の上でも携帯でも同じである
+    #[test]
+    fn 窓は端末で変わらない() {
+        let pop = ids(&confirm().node(Present::Popover, None));
+        let sheet = ids(&confirm().node(Present::Sheet, None));
+        assert_eq!(pop, sheet);
+        assert!(pop.contains(&NodeId::OverlayModal));
+        // ⚠️ **基準の点を持たない。** 持つと押した場所に出てしまう
+        assert!(!pop.contains(&NodeId::OverlayPopover));
+        assert!(!pop.contains(&NodeId::OverlaySheet));
+    }
+
+    /// ⚠️ **やめるほうを先に置く。** 押し間違えたときに起きることが
+    /// 軽いほうを、指と目が先に当たる場所に置く
+    #[test]
+    fn やめるほうが先に来る() {
+        let labels = texts(
+            &confirm().node(Present::Popover, None),
+            NodeId::OverlayModalActionLabel,
+        );
+        assert_eq!(labels, vec!["やめる", "削除する"]);
+    }
+
+    /// ⚠️ **「はい」にしない。** 見出しを読み飛ばした人には、何に対する
+    /// 「はい」か分からない
+    #[test]
+    fn 進むほうの文字は動詞である() {
+        let labels = texts(
+            &confirm().node(Present::Popover, None),
+            NodeId::OverlayModalActionLabel,
+        );
+        assert!(!labels.contains(&"はい".to_owned()));
+    }
+
+    /// ⚠️ **番号で指す。** 文字で指すと、言語を変えた瞬間にどちらが
+    /// 押されたか分からなくなる
+    #[test]
+    fn ボタンは番号で指す() {
+        let mut keys = Vec::new();
+        confirm().node(Present::Popover, None).walk(&mut |c, _| {
+            if c.id == NodeId::OverlayModalAction {
+                keys.push(c.key.clone());
+            }
+        });
+        assert_eq!(
+            keys,
+            vec![
+                Some(Key::Index(button::CANCEL as u32)),
+                Some(Key::Index(button::CONFIRM as u32))
+            ]
+        );
+    }
+
+    /// 消えるものそのものを出す。**「本当に？」だけでは何が消えるか
+    /// 分からない**
+    #[test]
+    fn 何が消えるのかを一緒に出す() {
+        let n = confirm().node(Present::Popover, None);
+        assert_eq!(texts(&n, NodeId::OverlayModalPreview), vec!["おはよう"]);
+    }
+
+    /// 中身が無ければ枠ごと出さない。**空の枠は何も伝えない**
+    #[test]
+    fn 出すものが無ければ枠を出さない() {
+        let Floating::Confirm(mut c) = confirm() else {
+            unreachable!()
+        };
+        c.preview = None;
+        let n = Floating::Confirm(c).node(Present::Popover, None);
+        assert!(!ids(&n).contains(&NodeId::OverlayModalPreview));
+    }
+
+    /// 指が乗っているボタンだけが光る
+    #[test]
+    fn 指の乗ったボタンだけが光る() {
+        let n = confirm().node(Present::Popover, Some(button::CONFIRM));
+        let mut hovered = Vec::new();
+        n.walk(&mut |c, _| {
+            if c.id == NodeId::OverlayModalAction {
+                hovered.push(c.states.contains(gumicord_uitree::State::Hover));
+            }
+        });
+        assert_eq!(hovered, vec![false, true]);
+    }
+
+    // ── 出す 1 行
+
+    /// 短い本文はそのまま出る
+    #[test]
+    fn 短い本文はそのまま出る() {
+        assert_eq!(preview_line("おはよう"), Some("おはよう".to_owned()));
+    }
+
+    /// ⚠️ **改行を潰す。** 1 行の場所なので、そのまま入れると 2 行目
+    /// 以降が見えないところへ消える
+    #[test]
+    fn 改行は空白に潰れる() {
+        assert_eq!(
+            preview_line("いち\nに\r\nさん"),
+            Some("いち に さん".to_owned())
+        );
+    }
+
+    /// ⚠️ **バイトで切らない。** 日本語の途中で切ると壊れる
+    #[test]
+    fn 長い本文は文字数で切れる() {
+        let out = preview_line(&"あ".repeat(200)).expect("出るはず");
+        assert_eq!(out.chars().count(), 61, "60 文字 + …");
+        assert!(out.ends_with('…'));
+    }
+
+    /// 添付だけの発言は本文が空である。**空の枠を出しても何も伝わらない**
+    #[test]
+    fn 中身が無ければ出さない() {
+        assert_eq!(preview_line(""), None);
+        assert_eq!(preview_line("   \n\t "), None);
     }
 }

@@ -342,6 +342,23 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         OverlayMenuItemLabel => Intrinsic::row().cross(Cross::Center).one_line(),
         OverlayMenuSeparator => Intrinsic::row().h(1.0).cross(Cross::Stretch),
 
+        // 確かめる窓は**基準の点を持たない**。押した場所ではなく画面の
+        // 真ん中に出る。重ねの子は流れにも従わず中央に置かれるので、
+        // 中身の大きさになる (`hugs_content`) だけで真ん中に来る
+        OverlayModal => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
+        OverlayModalTitle => Intrinsic::row().cross(Cross::Center),
+        // ⚠️ **1 行に切らない。** 何が起きるかの説明は、切り詰めると
+        // 一番大事な後半が「…」に化ける
+        OverlayModalBody => Intrinsic::column().cross(Cross::Stretch),
+        // 消えるものそのもの。**こちらは切ってよい** — 長い発言の全文を
+        // 出す場所ではなく、どれのことかが分かれば足りる
+        OverlayModalPreview => Intrinsic::row().cross(Cross::Center).one_line(),
+        OverlayModalActions => Intrinsic::row().cross(Cross::Stretch),
+        // ⚠️ **ボタンは横幅を等分する。** 縦に積む (`column`) のは
+        // 交差軸が横になり、`Center` で文字が真ん中に来るからである
+        OverlayModalAction => Intrinsic::column().grow(1.0).cross(Cross::Center),
+        OverlayModalActionLabel => Intrinsic::row().cross(Cross::Center).one_line(),
+
         // ── layout.* — プラグインの語彙
         //
         // row / column が既定で余りを取るのは、これが「入れ物」として使われる

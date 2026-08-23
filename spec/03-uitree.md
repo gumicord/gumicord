@@ -290,6 +290,13 @@ M1 で公開するフィールド。
 | `overlay.menu.item.icon` | — | 操作の絵 |
 | `overlay.menu.item.label` | — | 操作の名前 |
 | `overlay.menu.separator` | — | 操作の区切り |
+| `overlay.modal` | — | 確かめてから進む窓 (FR-024) |
+| `overlay.modal.title` | — | 窓の見出し。何をしようとしているか |
+| `overlay.modal.body` | — | 何が起きるかの説明 |
+| `overlay.modal.preview` | — | これから起きることの対象そのもの |
+| `overlay.modal.actions` | — | 窓のボタン群 |
+| `overlay.modal.action` | — | 窓のボタン 1 つ (key で番号を持つ) |
+| `overlay.modal.action.label` | — | ボタンの文字 (slot で cancel/confirm/danger) |
 
 ### `primitive.*` — プラグインも生成できる
 
@@ -322,7 +329,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 96 個** (中核 65 / プラグインも生成可 31)。
+**合計 103 個** (中核 65 / プラグインも生成可 38)。
 
 <!-- END GENERATED: node-ids -->
 
@@ -334,7 +341,7 @@ M1 で公開するフィールド。
 
 | 領域 | 理由 |
 |---|---|
-| ~~`overlay.*`~~ | **一部を決めた**。層・覆い・浮かぶ箱・面・操作の並びまで。まだ決めていないのは `overlay.tooltip` / `overlay.modal` / `overlay.toast` で、これらは急がない |
+| ~~`overlay.*`~~ | **一部を決めた**。層・覆い・浮かぶ箱・面・操作の並び・**確認の窓**まで。まだ決めていないのは `overlay.tooltip` / `overlay.toast` で、これらは急がない |
 | `settings.*` (設定画面) | プラグインの設定画面 (`EXT-035`) と併せて設計する必要がある |
 | `chat.message.reactions` | `FR-029` が M2 のため |
 | `member_list.*` | `FR-043` が M2 のため |

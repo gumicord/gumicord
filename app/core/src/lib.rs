@@ -121,6 +121,7 @@ const INTERACTIVE: &[NodeId] = &[
     NodeId::PrimitiveButton,
     NodeId::LayoutScrollbarThumb,
     NodeId::OverlayMenuItem,
+    NodeId::OverlayModalAction,
 ];
 
 /// 画面に出すペインの数 (`PLT-046`)。
@@ -557,13 +558,20 @@ impl Application for Gumicord {
         // つもりで押した場所のチャンネルへ移動する
         if self.floating.is_some() {
             let item = hits.iter().find_map(|h| match (h.id, &h.key) {
-                (NodeId::OverlayMenuItem, Some(Key::Index(i))) => Some(*i as usize),
+                (NodeId::OverlayMenuItem | NodeId::OverlayModalAction, Some(Key::Index(i))) => {
+                    Some(*i as usize)
+                }
                 _ => None,
             });
             return match item {
                 Some(i) => self.run_action(i),
-                // 外を押したら閉じるだけ
-                None => self.close_menu(),
+                // ⚠️ **窓の外を押しても閉じない。** メニューは押し間違えても
+                // 閉じるだけだが、窓は「まだ決めていない」ことを示している。
+                // 外を押して消えると、決めたのか消えたのかが分からない
+                None => match &self.floating {
+                    Some(crate::menu::Floating::Confirm(_)) => false,
+                    _ => self.close_menu(),
+                },
             };
         }
 
@@ -841,10 +849,12 @@ impl Gumicord {
         vec![Item::new(Action::Copy(id.to_string()), "ID をコピー").icon("id")]
     }
 
-    /// いま指が乗っているメニューの項目。
+    /// いま指が乗っているメニューの項目、または窓のボタン。
     fn hovered_item(&self) -> Option<usize> {
         match &self.hovered {
-            Some((NodeId::OverlayMenuItem, Some(Key::Index(i)))) => Some(*i as usize),
+            Some((NodeId::OverlayMenuItem | NodeId::OverlayModalAction, Some(Key::Index(i)))) => {
+                Some(*i as usize)
+            }
             _ => None,
         }
     }
@@ -854,7 +864,7 @@ impl Gumicord {
         if items.is_empty() {
             return self.close_menu();
         }
-        self.floating = Some(crate::menu::Floating { at, items });
+        self.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu { at, items }));
         true
     }
 
@@ -862,15 +872,68 @@ impl Gumicord {
         self.floating.take().is_some()
     }
 
-    /// 項目を押した。
+    /// 項目を押した。**メニューの項目にも、窓のボタンにも来る。**
     fn run_action(&mut self, index: usize) -> bool {
         let Some(f) = self.floating.take() else {
             return false;
         };
-        let Some(item) = f.items.get(index) else {
-            return true;
+        let action = match &f {
+            crate::menu::Floating::Menu(m) => match m.items.get(index) {
+                Some(item) => item.action.clone(),
+                None => return true,
+            },
+            crate::menu::Floating::Confirm(c) => match index {
+                crate::menu::button::CONFIRM => c.action.clone(),
+                // ⚠️ **やめるほうは何もしない。** 窓は既に閉じている
+                _ => return true,
+            },
         };
-        match &item.action {
+
+        // ⚠️ **窓を挟むものは、ここで折り返して窓を開く。** 開いたら
+        // その先へは進まない。次に来るのは窓のボタンからである
+        if let Some(confirm) = self.needs_confirming(&f, &action) {
+            self.floating = Some(crate::menu::Floating::Confirm(confirm));
+            return true;
+        }
+
+        self.perform(action)
+    }
+
+    /// この操作の前に窓を挟むか。**挟むなら、その窓の中身を返す。**
+    ///
+    /// ⚠️ **既に窓から来たものには、もう一度挟まない。** 挟むと窓が
+    /// 出続けて永久に進めない
+    fn needs_confirming(
+        &self,
+        from: &crate::menu::Floating,
+        action: &crate::menu::Action,
+    ) -> Option<crate::menu::Confirm> {
+        if matches!(from, crate::menu::Floating::Confirm(_)) {
+            return None;
+        }
+        match action {
+            // ⚠️ **消した発言は戻せない。** メニューの中に埋もれた 1 行で
+            // 押した瞬間に消えるのは危うい
+            crate::menu::Action::Delete(id) => Some(crate::menu::Confirm {
+                title: "この発言を削除しますか".to_owned(),
+                body: "削除した発言は元に戻せません。".to_owned(),
+                // 何が消えるのかを一緒に出す。**「本当に？」だけでは、
+                // 一覧が入れ替わったときに違うものを消しうる**
+                preview: self
+                    .raw_body(*id)
+                    .as_deref()
+                    .and_then(crate::menu::preview_line),
+                action: action.clone(),
+                confirm: "削除する".to_owned(),
+                danger: true,
+            }),
+            _ => None,
+        }
+    }
+
+    /// 窓を挟まずに、その場でやる。
+    fn perform(&mut self, action: crate::menu::Action) -> bool {
+        match &action {
             crate::menu::Action::Copy(text) => {
                 // ⚠️ **失敗を黙って飲まない。** 「コピーした」と思って
                 // 貼り付けたら前のものが出てくる、が一番困る
@@ -899,9 +962,8 @@ impl Gumicord {
                 self.input_focused = true;
             }
             crate::menu::Action::Delete(id) => {
-                // ⚠️ **確かめる場所をまだ用意していない。** メニューの中に
-                // 埋もれた項目で、押した瞬間に消えるのは危うい。
-                // 確認の窓は `overlay.modal` と一緒に入れる
+                // ⚠️ **ここへ来るのは窓で確かめた後だけである**
+                // ([`Self::needs_confirming`])
                 self.live
                     .delete_message(ChannelId::from(self.selected_channel), MessageId::from(*id));
                 // 書き換えている最中に消したら、書き換えもやめる
@@ -2336,7 +2398,7 @@ mod tests {
         ];
         assert!(a.context_menu(&hits, (0.0, 0.0)));
 
-        let items = &a.floating.as_ref().expect("開いていない").items;
+        let items = a.floating.as_ref().expect("開いていない").items();
         assert!(
             items.iter().any(|i| i.action == Action::Paste),
             "発言のメニューが出ている"
@@ -2390,7 +2452,13 @@ mod tests {
     fn 発言を副ボタンで押すとメニューが開く() {
         let a = with_menu();
         assert!(a.floating.is_some());
-        assert_eq!(a.floating.as_ref().map(|f| f.at), Some((10.0, 20.0)));
+        assert_eq!(
+            a.floating.as_ref().and_then(|f| match f {
+                crate::menu::Floating::Menu(m) => Some(m.at),
+                _ => None,
+            }),
+            Some((10.0, 20.0))
+        );
     }
 
     /// ⚠️ **開いている間は下へ渡さない。**
@@ -2417,13 +2485,13 @@ mod tests {
     #[test]
     fn 項目を押すと閉じる() {
         let mut a = with_menu();
-        a.floating = Some(crate::menu::Floating {
+        a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
             at: (0.0, 0.0),
             items: vec![crate::menu::Item::new(
                 crate::menu::Action::MarkRead(1),
                 "既読にする",
             )],
-        });
+        }));
         let hits = [hit_of(NodeId::OverlayMenuItem, Some(Key::Index(0)))];
         assert!(a.pressed(&hits));
         assert!(a.floating.is_none());
@@ -2442,6 +2510,273 @@ mod tests {
 
         assert!(a.cancel_input(), "2 回目でフォーカスが外れていない");
         assert!(!a.input_focused);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  削除の前に確かめる (`FR-024`)
+
+    /// 「削除」1 項目だけのメニューを開いた状態。
+    ///
+    /// ⚠️ **`message_menu` を通さない。** あちらは自分の発言かどうかを
+    /// 見るので、ログインしていない demo では削除が並ばない。ここで
+    /// 見たいのは並び方ではなく、押した後に何が起きるかである
+    fn with_delete_menu() -> Gumicord {
+        let mut a = app();
+        a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
+            at: (0.0, 0.0),
+            items: vec![crate::menu::Item::new(crate::menu::Action::Delete(1), "削除").danger()],
+        }));
+        // 消えたことを外から見るための印。**確かめた後にだけ消える**
+        a.composing = Composing::Edit(1);
+        a
+    }
+
+    fn press_menu(a: &mut Gumicord, index: u32) -> bool {
+        a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(index)))])
+    }
+
+    fn press_button(a: &mut Gumicord, index: usize) -> bool {
+        a.pressed(&[hit_of(
+            NodeId::OverlayModalAction,
+            Some(Key::Index(index as u32)),
+        )])
+    }
+
+    fn is_confirm(a: &Gumicord) -> bool {
+        matches!(a.floating, Some(crate::menu::Floating::Confirm(_)))
+    }
+
+    /// ⚠️ **メニューの「削除」を押しただけでは消えない。**
+    ///
+    /// メニューの中に埋もれた 1 行で、押した瞬間に消えるのは危うい。
+    /// 隣の項目と 1 行しか離れておらず、消した発言は戻せない
+    #[test]
+    fn 削除は一度押しただけでは消えない() {
+        let mut a = with_delete_menu();
+        assert!(press_menu(&mut a, 0));
+        assert!(is_confirm(&a), "確認の窓が出ていない");
+        assert_eq!(a.composing, Composing::Edit(1), "確かめる前に消えている");
+    }
+
+    /// やめたら何も起きない。**窓も閉じる**
+    #[test]
+    fn やめるを押したら何も起きない() {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+
+        assert!(press_button(&mut a, crate::menu::button::CANCEL));
+        assert!(a.floating.is_none(), "窓が閉じていない");
+        assert_eq!(a.composing, Composing::Edit(1), "やめたのに消えている");
+    }
+
+    /// 確かめたら進む。**ここで初めて消える**
+    #[test]
+    fn 削除するを押したら消える() {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+
+        assert!(press_button(&mut a, crate::menu::button::CONFIRM));
+        assert!(a.floating.is_none(), "窓が閉じていない");
+        // 書き換えている最中に消したら、書き換えもやめる
+        assert_eq!(a.composing, Composing::New, "消えていない");
+    }
+
+    /// ⚠️ **窓の外を押しても閉じない。**
+    ///
+    /// メニューは押し間違えても閉じるだけだが、窓は「まだ決めていない」
+    /// ことを示している。外を押して消えると、決めたのか消えたのかが
+    /// 分からない
+    #[test]
+    fn 窓は外を押しても閉じない() {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+
+        assert!(
+            !a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]),
+            "何かが変わってしまった"
+        );
+        assert!(is_confirm(&a), "外を押しただけで窓が消えた");
+    }
+
+    /// Esc なら閉じる。**閉じ方が 1 つも無いのは行き止まりである**
+    #[test]
+    fn 窓は_esc_で閉じる() {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+
+        assert!(a.cancel_input());
+        assert!(a.floating.is_none(), "Esc で閉じない");
+        assert_eq!(a.composing, Composing::Edit(1), "Esc で消えている");
+    }
+
+    /// ⚠️ **窓から来たものにもう一度窓を挟まない。** 挟むと窓が出続けて
+    /// 永久に進めない
+    #[test]
+    fn 窓は二度出ない() {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+        press_button(&mut a, crate::menu::button::CONFIRM);
+        assert!(a.floating.is_none(), "窓がもう一度出ている");
+    }
+
+    /// 窓が出ているあいだは、下のチャンネルへ届かない
+    #[test]
+    fn 窓が出ている間は下を押しても届かない() {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+        let before = a.selected_channel;
+
+        a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]);
+        assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
+    }
+
+    /// ⚠️ **戻せない操作以外に窓を挟まない。** 何を押しても窓が出ると、
+    /// 窓そのものが読まれなくなる
+    #[test]
+    fn 戻せる操作には窓を挟まない() {
+        let mut a = app();
+        a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
+            at: (0.0, 0.0),
+            items: vec![crate::menu::Item::new(
+                crate::menu::Action::MarkRead(1),
+                "既読にする",
+            )],
+        }));
+        press_menu(&mut a, 0);
+        assert!(a.floating.is_none(), "既読にするだけで窓が出た");
+    }
+
+    /// 窓を置いた結果の矩形。
+    ///
+    /// ⚠️ **テーマの数値を読んでも、置いた結果は分からない。**
+    /// `cd72d6f` の ✕ はこれで見つかった
+    fn placed_confirm(w: f32, h: f32) -> Vec<(NodeId, gumicord_render::Rect)> {
+        let mut a = with_delete_menu();
+        press_menu(&mut a, 0);
+        assert!(is_confirm(&a));
+
+        // ⚠️ demo には本文が無いので、出す 1 行をここで入れる。
+        // **無いまま測ると、一番幅を食う行を測り損ねる**
+        if let Some(crate::menu::Floating::Confirm(c)) = &mut a.floating {
+            c.preview = crate::menu::preview_line(
+                "おはようございます。今日はよろしくお願いします。長めの本文です",
+            );
+        }
+
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(w, h),
+            scale: 1.0,
+        };
+        let tree = a.build(&cx);
+        gumicord_render::layout_for_test(&tree, cx.viewport)
+    }
+
+    fn all_of(
+        placed: &[(NodeId, gumicord_render::Rect)],
+        id: NodeId,
+    ) -> Vec<gumicord_render::Rect> {
+        placed
+            .iter()
+            .filter(|(i, _)| *i == id)
+            .map(|(_, r)| *r)
+            .collect()
+    }
+
+    fn one_of(placed: &[(NodeId, gumicord_render::Rect)], id: NodeId) -> gumicord_render::Rect {
+        let all = all_of(placed, id);
+        assert_eq!(all.len(), 1, "{id:?} が {} 個ある", all.len());
+        all[0]
+    }
+
+    fn contains(outer: gumicord_render::Rect, inner: gumicord_render::Rect) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w
+            && inner.y + inner.h <= outer.y + outer.h
+    }
+
+    /// ⚠️ **窓の中身が窓からはみ出さないこと。**
+    ///
+    /// はみ出したボタンは「出ているのに押せない」という壊れ方をする
+    #[test]
+    fn 窓の中身は窓からはみ出さない() {
+        let placed = placed_confirm(1280.0, 800.0);
+        let modal = one_of(&placed, NodeId::OverlayModal);
+        assert!(modal.w > 0.0 && modal.h > 0.0, "窓が潰れている {modal:?}");
+
+        for id in [
+            NodeId::OverlayModalTitle,
+            NodeId::OverlayModalBody,
+            NodeId::OverlayModalPreview,
+            NodeId::OverlayModalActions,
+        ] {
+            let r = one_of(&placed, id);
+            assert!(contains(modal, r), "{id:?} {r:?} が窓 {modal:?} から出た");
+        }
+
+        let buttons = all_of(&placed, NodeId::OverlayModalAction);
+        assert_eq!(buttons.len(), 2, "ボタンが 2 つ無い");
+        for b in &buttons {
+            assert!(b.w > 0.0 && b.h > 0.0, "ボタンが潰れている {b:?}");
+            assert!(contains(modal, *b), "ボタン {b:?} が窓 {modal:?} から出た");
+        }
+
+        // ⚠️ **文字がボタンからはみ出さないこと。** はみ出すと、押せる
+        // 場所と読める場所がずれる
+        for (label, button) in all_of(&placed, NodeId::OverlayModalActionLabel)
+            .iter()
+            .zip(&buttons)
+        {
+            assert!(
+                contains(*button, *label),
+                "文字 {label:?} がボタン {button:?} から出た"
+            );
+        }
+    }
+
+    /// ⚠️ **2 つのボタンが重ならないこと。** 重なると、上のボタンしか
+    /// 押せないのに下のボタンも見えている状態になる
+    #[test]
+    fn 二つのボタンは重ならない() {
+        let placed = placed_confirm(1280.0, 800.0);
+        let b = all_of(&placed, NodeId::OverlayModalAction);
+        assert_eq!(b.len(), 2);
+        let (left, right) = (b[0], b[1]);
+        assert!(
+            left.x + left.w <= right.x + 0.01,
+            "やめる {left:?} と 削除する {right:?} が重なっている"
+        );
+    }
+
+    /// 窓は押した場所ではなく**画面の真ん中**に出る
+    #[test]
+    fn 窓は画面の真ん中に出る() {
+        let (w, h) = (1280.0, 800.0);
+        let modal = one_of(&placed_confirm(w, h), NodeId::OverlayModal);
+        let cx = modal.x + modal.w / 2.0;
+        let cy = modal.y + modal.h / 2.0;
+        assert!((cx - w / 2.0).abs() < 1.0, "横にずれている {modal:?}");
+        assert!((cy - h / 2.0).abs() < 1.0, "縦にずれている {modal:?}");
+    }
+
+    /// ⚠️ **狭い窓でも入りきること。** 携帯の幅で画面からはみ出すと、
+    /// 「やめる」に手が届かなくなる
+    #[test]
+    fn 狭い窓でも収まる() {
+        let (w, h) = (400.0, 700.0);
+        let placed = placed_confirm(w, h);
+        let modal = one_of(&placed, NodeId::OverlayModal);
+        assert!(
+            modal.x >= 0.0 && modal.x + modal.w <= w + 0.01,
+            "画面から出た {modal:?} (幅 {w})"
+        );
+        assert!(
+            modal.y >= 0.0 && modal.y + modal.h <= h + 0.01,
+            "画面から出た {modal:?} (高さ {h})"
+        );
+        for b in all_of(&placed, NodeId::OverlayModalAction) {
+            assert!(contains(modal, b), "ボタン {b:?} が窓 {modal:?} から出た");
+        }
     }
 
     /// ⚠️ **開いていないときは層を載せない。**

@@ -222,6 +222,13 @@ define_node_ids! {
     OverlayMenuItemIcon,      "overlay.menu.item.icon",          None,    Plugin, "操作の絵";
     OverlayMenuItemLabel,     "overlay.menu.item.label",         None,    Plugin, "操作の名前";
     OverlayMenuSeparator,     "overlay.menu.separator",          None,    Plugin, "操作の区切り";
+    OverlayModal,             "overlay.modal",                   None,    Plugin, "確かめてから進む窓 (FR-024)";
+    OverlayModalTitle,        "overlay.modal.title",             None,    Plugin, "窓の見出し。何をしようとしているか";
+    OverlayModalBody,         "overlay.modal.body",              None,    Plugin, "何が起きるかの説明";
+    OverlayModalPreview,      "overlay.modal.preview",           None,    Plugin, "これから起きることの対象そのもの";
+    OverlayModalActions,      "overlay.modal.actions",           None,    Plugin, "窓のボタン群";
+    OverlayModalAction,       "overlay.modal.action",            None,    Plugin, "窓のボタン 1 つ (key で番号を持つ)";
+    OverlayModalActionLabel,  "overlay.modal.action.label",      None,    Plugin, "ボタンの文字 (slot で cancel/confirm/danger)";
 
     // ─────────────────────────── primitive.* — プラグインが使う描画語彙
     PrimitiveText,            "primitive.text",                  None,    Plugin, "文字列";

@@ -650,6 +650,65 @@
       "style": { "height": 1, "background": "$color.border", "margin": [4, 0, 4, 0] }
     },
     {
+      "select": "overlay.modal",
+      "style": {
+        "background": "$color.bg.raised",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.lg",
+        "padding": [20, 20, 16, 20],
+        "shadow": "$shadow.raised",
+        "gap": "$space.2",
+        "minWidth": 320,
+        "maxWidth": 440
+      }
+    },
+    {
+      "select": "overlay.modal.title",
+      "style": { "font": "$font.title", "color": "$color.text.primary" }
+    },
+    {
+      "select": "overlay.modal.body",
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "overlay.modal.preview",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.muted",
+        "background": "$color.bg.sunken",
+        "radius": "$radius.sm",
+        "padding": [8, 10, 8, 10]
+      }
+    },
+    {
+      "select": "overlay.modal.actions",
+      "style": { "gap": "$space.2", "margin": [8, 0, 0, 0] }
+    },
+    {
+      "select": "overlay.modal.action",
+      "style": {
+        "background": "$color.bg.hover",
+        "radius": "$radius.sm",
+        "padding": [9, 12, 9, 12],
+        "transition": "$motion.fast"
+      }
+    },
+    {
+      "select": "overlay.modal.action",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.bg.selected" }
+    },
+    {
+      "select": "overlay.modal.action.label",
+      "style": { "font": "$font.small", "color": "$color.text.primary" }
+    },
+    {
+      "select": "overlay.modal.action.label",
+      "when": { "slot": "danger" },
+      "style": { "color": "$color.danger" }
+    },
+    {
       "select": "chat.message.reply_ref",
       "style": { "font": "$font.small", "color": "$color.text.muted", "opacity": 0.8 }
     },
