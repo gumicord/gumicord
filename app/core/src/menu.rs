@@ -1,105 +1,89 @@
-//! 浮かせるもの — コンテクストメニューと確認の窓 (`FR-024`, `FR-028`)。
+//! Floating surfaces: context menus and confirmation dialogs.
 //!
-//! # ⚠️ 戻せないことの前には窓を挟む
-//!
-//! メニューの中に埋もれた「削除」を押した瞬間に発言が消えるのは危うい。
-//! 隣の項目と 1 行しか離れていないうえ、**消した発言は戻せない**。
+//! Irreversible actions get a dialog first. Delete sits one row from its
+//! neighbours in a menu, and a deleted message cannot be recovered.
 //!
 //! ```text
-//!   副ボタン ──▶ overlay.menu ──「削除」──▶ overlay.modal ──「削除する」──▶ 消える
-//!                                              └──「やめる」──▶ 何も起きない
+//!   right click -> overlay.menu -- delete --> overlay.modal -- delete --> gone
+//!                                                          -- cancel --> nothing
 //! ```
 //!
-//! ⚠️ **窓は「本当に？」だけを出さない。** 何が消えるのかを一緒に出す。
-//! 一覧が入れ替わったあとに窓だけ残っていると、押した人が思っているものと
-//! 違うものが消えうる ([`Confirm::preview`])。
+//! The dialog shows *what* is about to go, not just "are you sure": if the
+//! list changed while the dialog was open, the wrong thing could otherwise be
+//! deleted ([`Confirm::preview`]).
 //!
-//! # ⚠️ 開いている間は、下を押させない
+//! While something is open, nothing underneath may be clicked. A press hits
+//! both, so without a rule the click passes through and navigates to whatever
+//! the user was trying to dismiss the menu over. The layer therefore spans
+//! the window and absorbs the press.
 //!
-//! メニューを出したまま下の一覧が押せると、**メニューを閉じるつもりで
-//! 押したチャンネルに移動する**。押した場所は当たり判定としては両方に
-//! 掛かっているので、こちらが「上が開いているなら上だけ」と決めなければ
-//! 素通りする。
+//! Unavailable items are omitted rather than greyed out; a greyed row only
+//! adds to the search for a clickable one.
 //!
-//! そのために [`Floating`] が開いている間は、層が窓いっぱいに広がって
-//! 当たりを受け止める。外を押したら閉じるだけで、下へは渡さない。
-//!
-//! # ⚠️ 押せない項目を出さない
-//!
-//! 「自分の発言でないのに削除」「まだできないのに返信」を灰色で並べるのは、
-//! 押せる場所を探す手間を増やすだけである。**できることだけを並べる。**
-//!
-//! # 携帯では下から出す
-//!
-//! 指で押す画面に、指の下へ出るメニューは向かない。**押した場所が
-//! メニューで隠れる。** 携帯では画面の下から面を出す ([`Present`])。
-//! 中身は同じで、包み方だけが変わる。
+//! On a touch screen the menu comes up from the bottom instead of under the
+//! finger, which would hide what was pressed. Same items, different wrapper.
 
 use gumicord_uitree::{Anchor, Key, NodeId, UiNode};
 
-/// 浮かんでいるもの。**同時に 1 つだけ。**
+/// Whatever is currently floating. At most one at a time.
 ///
-/// ⚠️ 2 つ開くと、どちらを閉じるのかが押した場所から決まらなくなる。
-/// メニューと窓を別々の場所に持たず 1 つの列挙にしてあるのは、
-/// **持ち方の側で「同時に 1 つ」を守るため**である
+/// Two open surfaces would make it ambiguous which one a press dismisses.
+/// One enum rather than two fields, so the representation enforces that.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Floating {
-    /// 操作の並び
     Menu(Menu),
-    /// 戻せないことの前に挟む窓
+    /// Shown before an irreversible action.
     Confirm(Confirm),
 }
 
-/// コンテクストメニュー。
+/// A context menu.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Menu {
-    /// 押された場所 (論理 px)。**置き場所ではない**
+    /// Where the press happened, in logical px. Not where the menu goes.
     pub at: (f32, f32),
     pub items: Vec<Item>,
 }
 
-/// 確かめてから進む窓。
+/// A dialog that confirms before proceeding.
 ///
-/// ⚠️ **「本当に？」だけでは足りない。** 何が起きるのか ([`Self::body`]) と、
-/// 何に対して起きるのか ([`Self::preview`]) を出す
+/// "Are you sure" is not enough: it states what happens ([`Self::body`]) and
+/// what it happens to ([`Self::preview`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Confirm {
-    /// 見出し。**何をしようとしているか**
+    /// What is about to be done.
     pub title: String,
-    /// 起きること。**「戻せない」ならそう書く**
+    /// What will happen. Says so when it cannot be undone.
     pub body: String,
-    /// 対象そのもの。無ければ出さない
+    /// The subject itself. Omitted when absent.
     pub preview: Option<String>,
-    /// 進むほうを押したときに起きること
+    /// Performed when the confirming button is pressed.
     pub action: Action,
-    /// 進むほうの文字。
+    /// The confirming button's label.
     ///
-    /// ⚠️ **「はい」にしない。** 見出しを読み飛ばした人にとって、
-    /// 「はい」は何に対する「はい」か分からない。動詞を書く
+    /// A verb, never "yes": someone who skimmed the title cannot tell what
+    /// "yes" applies to.
     pub confirm: String,
-    /// 戻せない操作か。テーマが赤く出す
+    /// Irreversible, which the theme paints in red.
     pub danger: bool,
 }
 
-/// 窓に出す 1 行。**何が起きるかの対象を示すためだけのものである。**
+/// One line identifying what an action applies to.
 ///
-/// ⚠️ **全文を出さない。** 窓は読ませる場所ではなく、どれのことかが
-/// 分かれば足りる。長い発言をそのまま出すと窓が画面を埋める。
+/// Not the full text: the dialog only has to make clear *which* item this is,
+/// and a long message would fill the screen. Newlines collapse, since
+/// anything past the first line would be invisible here.
 ///
-/// ⚠️ **改行を潰す。** 1 行の場所なので、そのまま入れると 2 行目以降が
-/// 見えないところへ消える。
-///
-/// 中身が無ければ `None`。**添付だけの発言で空の枠を出しても、何も
-/// 伝わらない**
+/// `None` when there is nothing to show — an empty box for an
+/// attachment-only message conveys nothing.
 pub fn preview_line(body: &str) -> Option<String> {
-    /// ここまでで切る (文字数)。**桁ではなく読める長さで決める**
+    /// Cut here, counted in characters.
     const LIMIT: usize = 60;
 
     let one_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.is_empty() {
         return None;
     }
-    // ⚠️ **バイトで切らない。** 日本語の途中で切ると壊れる
+    // Counted in characters: cutting by byte splits multi-byte text.
     if one_line.chars().count() <= LIMIT {
         return Some(one_line);
     }
@@ -108,25 +92,22 @@ pub fn preview_line(body: &str) -> Option<String> {
     Some(out)
 }
 
-/// 窓のボタンの番号。**位置ではなく意味で指す。**
-///
-/// ⚠️ 番号を入れ替えたときに、押される先が黙って入れ替わってはならない
+/// Dialog button indices, named so that reordering them cannot silently
+/// change which one an action is wired to.
 pub mod button {
-    /// やめる
     pub const CANCEL: usize = 0;
-    /// 進む
     pub const CONFIRM: usize = 1;
 }
 
-/// メニューの項目 1 つ。
+/// One menu item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
-    /// 押されたときに何をするか
+    /// What happens when pressed.
     pub action: Action,
     pub label: String,
-    /// 左に出す絵。無ければ出さない
+    /// Icon shown at the left, if any.
     pub icon: Option<&'static str>,
-    /// **消える操作**か。テーマが赤く出す
+    /// A destructive action, which the theme paints in red.
     pub danger: bool,
 }
 
@@ -151,54 +132,47 @@ impl Item {
     }
 }
 
-/// 項目を押したときに起きること。
+/// What pressing an item does.
 ///
-/// ⚠️ **ここに「何を」の情報まで入れる。** 「コピー」とだけ持って、
-/// 対象は別に覚えておく作りにすると、メニューを開いたあとに一覧が
-/// 入れ替わったときに**別のものをコピーする**
+/// Each variant carries its subject. Holding only the verb and remembering
+/// the subject elsewhere would act on the wrong thing when the list changes
+/// while the menu is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// 文字をクリップボードへ
+    /// Copy text to the clipboard.
     Copy(String),
-    /// チャンネルを既読にする
+    /// Mark a channel read.
     MarkRead(u64),
-    /// この発言に返信する (`FR-028`)
+    /// Reply to this message.
     Reply(u64),
-    /// この発言を書き換える (`FR-024`)
+    /// Edit this message.
     Edit(u64),
-    /// この発言を消す (`FR-024`)
+    /// Delete this message.
     Delete(u64),
 
-    // ── 入力欄の中 (机の上だけ)
-    //
-    // ⚠️ **携帯には出さない。** 触る画面には OS の選択操作があり、
-    // そちらのほうが指に合っている。副ボタンは机の上にしか無いので、
-    // 何もしなくてもここへは来ない
-    /// 選んだところを切り取る
+    // Input-field actions, desktop only. Touch screens have the OS's own
+    // selection UI, which suits a finger better; since there is no secondary
+    // button there, these are never reached anyway.
     Cut,
-    /// 選んだところをコピーする
     CopySelection,
-    /// クリップボードの中身を貼る
     Paste,
-    /// 全部選ぶ
     SelectAll,
 }
 
-/// メニューをどう包むか。
+/// How a menu is wrapped.
 ///
-/// ⚠️ **中身は同じである。** 変わるのは包み方だけで、項目を減らしたり
-/// 増やしたりはしない。同じ操作が端末によって出たり出なかったりするのは、
-/// 覚えられない
+/// The items never change with it. An action that appears on one device and
+/// not another cannot be learned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Present {
-    /// 押した場所に浮かべる (机の上)
+    /// Floating at the press point (desktop).
     Popover,
-    /// 画面の下から出す (携帯)
+    /// Rising from the bottom of the screen (touch).
     Sheet,
 }
 
 impl Floating {
-    /// 浮かせる層を組む。**開いているときだけ呼ぶこと。**
+    /// Builds the floating layer. Call only while something is open.
     pub fn node(&self, how: Present, hovered: Option<usize>) -> UiNode {
         match self {
             Floating::Menu(m) => m.node(how, hovered),
@@ -206,7 +180,7 @@ impl Floating {
         }
     }
 
-    /// メニューなら中の項目。窓なら空
+    /// The menu's items, or empty for a dialog.
     pub fn items(&self) -> &[Item] {
         match self {
             Floating::Menu(m) => &m.items,
@@ -215,10 +189,10 @@ impl Floating {
     }
 }
 
-/// 層と暗幕で包む。**中身が何であれ、包み方は同じである。**
+/// Wraps content in the layer and scrim.
 ///
-/// ⚠️ **覆いを先に置く。** 描く順は木の順なので、後ろに置くと中身の上に
-/// 暗幕が掛かる
+/// The scrim comes first: drawing follows tree order, so putting it last
+/// would paint it over the content.
 fn layer(scrim: &'static str, body: UiNode) -> UiNode {
     UiNode::new(NodeId::OverlayLayer)
         .child(UiNode::new(NodeId::OverlayScrim).with_key(Key::Slot(scrim)))
@@ -235,8 +209,8 @@ impl Menu {
         );
 
         let body = match how {
-            // ⚠️ **基準の点だけを渡す。** 返すのも押し込むのもレンダラの
-            // 仕事である ([`gumicord_uitree::Anchor`])
+            // Only the anchor point; flipping and clamping are the
+            // renderer's job.
             Present::Popover => UiNode::new(NodeId::OverlayPopover)
                 .with_anchor(Anchor::at(self.at.0, self.at.1))
                 .child(menu),
@@ -245,8 +219,8 @@ impl Menu {
                 .child(menu),
         };
 
-        // 机の上では暗くしない。**暗くすると、下を読みながら選ぶという
-        // 当たり前のことができなくなる**
+        // Desktop does not dim: dimming would stop the obvious act of
+        // reading what is underneath while choosing.
         layer(
             match how {
                 Present::Popover => "quiet",
@@ -258,10 +232,10 @@ impl Menu {
 }
 
 impl Confirm {
-    /// 窓を組む。
+    /// Builds the dialog.
     ///
-    /// ⚠️ **端末で包み方を変えない。** メニューと違い、窓は押した場所とは
-    /// 関係のないところ (画面の真ん中) に出る。机の上でも携帯でも同じである
+    /// Unlike a menu, this appears centred rather than where the press
+    /// happened, so the presentation is the same on every device.
     fn node(&self, hovered: Option<usize>) -> UiNode {
         let modal = UiNode::new(NodeId::OverlayModal)
             .child(UiNode::text(NodeId::OverlayModalTitle, &self.title))
@@ -274,8 +248,8 @@ impl Confirm {
             })
             .child(
                 UiNode::new(NodeId::OverlayModalActions)
-                    // ⚠️ **やめるほうを先に置く。** 押し間違えたときに
-                    // 起きることが軽いほうを、指と目が先に当たる場所に置く
+                    // Cancel first: the lighter outcome sits where the eye
+                    // and the finger land first.
                     .child(self.button(button::CANCEL, "やめる", "cancel", hovered))
                     .child(self.button(
                         button::CONFIRM,
@@ -285,8 +259,8 @@ impl Confirm {
                     )),
             );
 
-        // ⚠️ **窓のときは必ず暗くする。** 後ろが読めたままだと、窓が
-        // 出ていることに気付かずに下を押そうとする
+        // A dialog always dims: leaving the background legible invites
+        // pressing it without noticing the dialog.
         layer("dim", modal)
     }
 
@@ -298,8 +272,8 @@ impl Confirm {
         hovered: Option<usize>,
     ) -> UiNode {
         UiNode::new(NodeId::OverlayModalAction)
-            // ⚠️ **番号で指す。** 文字で指すと、言語を変えた瞬間に
-            // どちらが押されたか分からなくなる
+            // Addressed by index: by label, changing the language would
+            // lose track of which button was pressed.
             .with_key(Key::Index(index as u32))
             .with_state_if(hovered == Some(index), gumicord_uitree::State::Hover)
             .child(UiNode::text(NodeId::OverlayModalActionLabel, label).with_key(Key::Slot(slot)))
@@ -309,8 +283,8 @@ impl Confirm {
 impl Item {
     fn node(&self, index: usize, hovered: bool) -> UiNode {
         UiNode::new(NodeId::OverlayMenuItem)
-            // ⚠️ **番号で指す。** 名前で指すと、同じ名前の項目が 2 つ
-            // 並んだときに片方しか押せない
+            // Addressed by index: by name, two items sharing a label would
+            // leave one unreachable.
             .with_key(Key::Index(index as u32))
             .with_state_if(hovered, gumicord_uitree::State::Hover)
             .child_if(self.icon.is_some(), || {
@@ -358,17 +332,17 @@ mod tests {
         out
     }
 
-    /// ⚠️ **暗幕はメニューより先に置く。** 後ろに置くと、描く順が木の順
-    /// なのでメニューの上に暗幕が掛かる
+    /// Drawing follows tree order, so a scrim placed last would paint over
+    /// the menu.
     #[test]
     fn the_scrim_comes_before_the_menu() {
         let order = ids(&menu().node(Present::Popover, None));
         let scrim = order.iter().position(|i| *i == NodeId::OverlayScrim);
         let m = order.iter().position(|i| *i == NodeId::OverlayMenu);
-        assert!(scrim < m, "暗幕がメニューより後ろにある {order:?}");
+        assert!(scrim < m, "the scrim comes after the menu {order:?}");
     }
 
-    /// 机の上では点に浮かべ、携帯では下から出す
+    /// Desktop floats at a point; touch rises from the bottom.
     #[test]
     fn only_the_presentation_changes_per_device() {
         let pop = ids(&menu().node(Present::Popover, None));
@@ -380,8 +354,8 @@ mod tests {
         assert!(!sheet.contains(&NodeId::OverlayPopover));
     }
 
-    /// ⚠️ **中身は端末で変わらない。** 同じ操作が出たり出なかったりすると
-    /// 覚えられない
+    /// An action that appears on one device and not another cannot be
+    /// learned.
     #[test]
     fn the_items_are_the_same_on_every_device() {
         let labels = |how| {
@@ -399,7 +373,7 @@ mod tests {
         assert_eq!(labels(Present::Popover).len(), 2);
     }
 
-    /// 基準の点はそのまま運ばれること。**置き場所を先に決めない**
+    /// The anchor is carried through; the position is decided later.
     #[test]
     fn the_anchor_point_is_carried_through_untouched() {
         let n = menu().node(Present::Popover, None);
@@ -412,8 +386,7 @@ mod tests {
         assert_eq!(found, Some(Anchor::at(10.0, 20.0)));
     }
 
-    /// ⚠️ **番号で指す。** 名前で指すと、同じ名前の項目が 2 つ並んだ
-    /// ときに片方しか押せない
+    /// By name, two items sharing a label would leave one unreachable.
     #[test]
     fn items_are_addressed_by_index() {
         let mut keys = Vec::new();
@@ -426,7 +399,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  確認の窓
+    //  Confirmation dialog
 
     fn texts(n: &UiNode, want: NodeId) -> Vec<String> {
         let mut out = Vec::new();
@@ -440,8 +413,8 @@ mod tests {
         out
     }
 
-    /// ⚠️ **窓は必ず暗くする。** 後ろが読めたままだと、窓が出ていることに
-    /// 気付かずに下を押そうとする
+    /// Leaving the background legible invites pressing it without noticing
+    /// the dialog.
     #[test]
     fn the_dialog_dims_what_is_behind_it() {
         let n = confirm().node(Present::Popover, None);
@@ -454,21 +427,20 @@ mod tests {
         assert_eq!(slot, Some(Key::Slot("dim")));
     }
 
-    /// ⚠️ **端末で包み方を変えない。** 窓は押した場所と関係のないところに
-    /// 出るので、机の上でも携帯でも同じである
+    /// The dialog appears independently of where the press was, so the
+    /// presentation is the same everywhere.
     #[test]
     fn the_dialog_is_the_same_on_every_device() {
         let pop = ids(&confirm().node(Present::Popover, None));
         let sheet = ids(&confirm().node(Present::Sheet, None));
         assert_eq!(pop, sheet);
         assert!(pop.contains(&NodeId::OverlayModal));
-        // ⚠️ **基準の点を持たない。** 持つと押した場所に出てしまう
+        // No anchor, or it would appear at the press point.
         assert!(!pop.contains(&NodeId::OverlayPopover));
         assert!(!pop.contains(&NodeId::OverlaySheet));
     }
 
-    /// ⚠️ **やめるほうを先に置く。** 押し間違えたときに起きることが
-    /// 軽いほうを、指と目が先に当たる場所に置く
+    /// The lighter outcome sits where the eye and the finger land first.
     #[test]
     fn the_cancel_button_comes_first() {
         let labels = texts(
@@ -478,8 +450,7 @@ mod tests {
         assert_eq!(labels, vec!["やめる", "削除する"]);
     }
 
-    /// ⚠️ **「はい」にしない。** 見出しを読み飛ばした人には、何に対する
-    /// 「はい」か分からない
+    /// Someone who skimmed the title cannot tell what "yes" applies to.
     #[test]
     fn the_confirming_button_is_labelled_with_a_verb() {
         let labels = texts(
@@ -489,8 +460,8 @@ mod tests {
         assert!(!labels.contains(&"はい".to_owned()));
     }
 
-    /// ⚠️ **番号で指す。** 文字で指すと、言語を変えた瞬間にどちらが
-    /// 押されたか分からなくなる
+    /// By label, changing the language would lose track of which button was
+    /// pressed.
     #[test]
     fn buttons_are_addressed_by_index() {
         let mut keys = Vec::new();
@@ -508,15 +479,14 @@ mod tests {
         );
     }
 
-    /// 消えるものそのものを出す。**「本当に？」だけでは何が消えるか
-    /// 分からない**
+    /// "Are you sure" alone does not say what is about to go.
     #[test]
     fn it_shows_what_is_about_to_be_deleted() {
         let n = confirm().node(Present::Popover, None);
         assert_eq!(texts(&n, NodeId::OverlayModalPreview), vec!["おはよう"]);
     }
 
-    /// 中身が無ければ枠ごと出さない。**空の枠は何も伝えない**
+    /// An empty box conveys nothing, so it is omitted entirely.
     #[test]
     fn no_preview_box_appears_when_there_is_nothing_to_show() {
         let Floating::Confirm(mut c) = confirm() else {
@@ -527,7 +497,7 @@ mod tests {
         assert!(!ids(&n).contains(&NodeId::OverlayModalPreview));
     }
 
-    /// 指が乗っているボタンだけが光る
+    /// Only the hovered button highlights.
     #[test]
     fn only_the_hovered_button_highlights() {
         let n = confirm().node(Present::Popover, Some(button::CONFIRM));
@@ -540,16 +510,16 @@ mod tests {
         assert_eq!(hovered, vec![false, true]);
     }
 
-    // ── 出す 1 行
+    // ── preview_line
 
-    /// 短い本文はそのまま出る
+    /// A short body passes through unchanged.
     #[test]
     fn a_short_body_is_shown_as_is() {
         assert_eq!(preview_line("おはよう"), Some("おはよう".to_owned()));
     }
 
-    /// ⚠️ **改行を潰す。** 1 行の場所なので、そのまま入れると 2 行目
-    /// 以降が見えないところへ消える
+    /// This is a one-line slot; anything past the first line would be
+    /// invisible.
     #[test]
     fn newlines_collapse_into_spaces() {
         assert_eq!(
@@ -558,15 +528,16 @@ mod tests {
         );
     }
 
-    /// ⚠️ **バイトで切らない。** 日本語の途中で切ると壊れる
+    /// Cutting by byte would split multi-byte text.
     #[test]
     fn a_long_body_is_cut_by_character_count() {
-        let out = preview_line(&"あ".repeat(200)).expect("出るはず");
-        assert_eq!(out.chars().count(), 61, "60 文字 + …");
+        let out = preview_line(&"あ".repeat(200)).expect("expected a preview");
+        assert_eq!(out.chars().count(), 61, "60 characters plus the ellipsis");
         assert!(out.ends_with('…'));
     }
 
-    /// 添付だけの発言は本文が空である。**空の枠を出しても何も伝わらない**
+    /// An attachment-only message has an empty body, and an empty box
+    /// conveys nothing.
     #[test]
     fn an_empty_body_yields_no_preview() {
         assert_eq!(preview_line(""), None);

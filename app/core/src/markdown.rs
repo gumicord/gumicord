@@ -1,80 +1,66 @@
-//! 本文を UITree にする (`FR-021`)。
+//! Turns a parsed message body into UITree nodes.
 //!
-//! 解析そのものは [`gumicord_markdown`] が済ませている。ここがやるのは
-//! **その結果を、テーマが決めた見た目に着せ替えてノードにする**ことだけである。
+//! Parsing already happened in [`gumicord_markdown`]; this only dresses the
+//! result in whatever the theme decided and emits nodes.
 //!
-//! # ⚠️ 行の中の飾りはノードにしない
+//! Inline decoration does not become nodes. Separate nodes wrap
+//! independently, so a bold run inside a sentence would break the line at the
+//! wrong place. Inline content becomes a list of [`Span`]s inside one node,
+//! and only vertically stacked things — paragraphs, headings, quotes, lists,
+//! code blocks — become nodes of their own.
 //!
-//! 太字を別のノードにして横に並べる、は動かない。並べたノードは
-//! **それぞれが独立して折り返す**ので、`これは **とても長い** 文章` の
-//! 行末が合わなくなる ([`spec/06-renderer.md`] 6.6)。
+//! What bold *looks* like is not decided here. "This is bold" is a parse
+//! fact; "weight 700" is the theme's. This looks up `primitive.text` by
+//! `when.slot` and carries whatever the theme wrote; a theme that writes
+//! nothing changes nothing.
 //!
-//! だから行の中は [`Span`] の並びにして 1 つのノードへ入れ、
-//! **縦に積まれるもの** — 段落・見出し・引用・箇条書き・コードブロック —
-//! だけをノードにする。
-//!
-//! # ⚠️ 太字を何で表すかを、ここで決めない
-//!
-//! 「太字である」は解析の結果だが、「太さ 700 である」はテーマの判断である。
-//! ここは `primitive.text` の `when.slot` を引いて、**テーマが書いた値を
-//! そのまま運ぶ**。テーマが何も書かなければ何も変わらない。
-//!
-//! ```json
-//! { "select": "primitive.text", "when": { "slot": "bold" },
-//!   "style": { "font": { "weight": 700 } } }
-//! ```
-//!
-//! | slot | いつ |
+//! | slot | applies to |
 //! |---|---|
 //! | `bold` `italic` `underline` `strike` | `**` `*` `__` `~~` |
 //! | `spoiler` | `\|\|` |
-//! | `code` | `` ` `` (行の中) |
-//! | `link` | リンクと裸の URL |
+//! | `code` | inline `` ` `` |
+//! | `link` | links and bare URLs |
 //! | `mention` | `<@1>` `<#1>` `<@&1>` `@everyone` |
-//! | `h1` `h2` `h3` `subtext` | 見出しと `-# ` |
-//! | `quote_bar` | 引用の左の線 |
-//! | `bullet` | 箇条書きの印 |
+//! | `h1` `h2` `h3` `subtext` | headings and `-# ` |
+//! | `quote_bar` | the rule beside a quote |
+//! | `bullet` | list markers |
 //!
-//! # ⚠️ 名前が引けなくても、番号を出さない
-//!
-//! `<@123>` の相手を知らないことは普通にある。そのときに `<@123>` と
-//! 出すのは**打った人が書いた文字ではない**し、`@123` は嘘である。
-//! `@不明なユーザー` と出す。
+//! An unresolvable `<@123>` renders as a Japanese "unknown user" label rather
+//! than the raw id: the id is not what the author typed, and `@123` is a lie.
 
 use gumicord_markdown::{Block, Deco, Inline, InlineKind, Item, Marker, Mention};
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::{Content, Key, Line, NodeId, Span, Style, UiNode};
 
-/// 箇条書きの深さごとの slot。
+/// Slot per list depth.
 ///
-/// ⚠️ **字下げの幅をここで決めない。** どれだけ下げるかは見た目の判断で
-/// あり、テーマの領分である。ここが渡すのは「何段目か」だけ。
-/// slot は静的な文字列でなければならないので、並べて持つ
+/// How far to indent is the theme's decision; this only reports the level.
+/// Listed out because a slot must be a `&'static str`.
 const DEPTH: &[&str] = &["li0", "li1", "li2", "li3", "li4"];
 
-/// 飾りを、テーマが決めた見た目へ翻訳するところ。
+/// Translates parse facts into whatever the theme decided they look like.
 pub struct Ink<'a> {
     theme: Option<&'a Theme>,
     ctx: MatchContext,
-    /// スポイラーを開けてあるか。**メッセージ単位である**
+    /// Whether spoilers are revealed, per message.
     ///
-    /// ⚠️ 走りごとに開けるには走りごとの当たり判定が要り、それは走りを
-    /// ノードにすることを意味する。それはできない (モジュールの説明を見よ)。
-    /// M1 は「押したらそのメッセージのスポイラーが全部開く」で通す
+    /// Per-span revealing would need per-span hit testing, which would mean
+    /// making spans into nodes — which this module cannot do. For now,
+    /// pressing one spoiler reveals all of them in that message.
     revealed: bool,
-    /// いま何時か (UTC 秒)。**フレームの頭で 1 回読んだもの**
+    /// The time, in UTC seconds, read once at the head of the frame.
     ///
-    /// ⚠️ ここで時計を読まない。組んでいる最中に時刻が動くと、隣り合う
-    /// 相対表示が食い違う
+    /// Never read the clock here: time moving mid-build makes adjacent
+    /// relative timestamps disagree.
     now: i64,
-    /// 組んだ結果が持つ秒数のうち、**一番短いもの**。
+    /// The shortest time any rendered timestamp stays valid for.
     ///
-    /// 相対表示が 1 つも無ければ `None` = 描き直す理由が無い (`NFR-005`)。
-    /// `&self` のまま組むので [`Cell`](std::cell::Cell) で溜める
+    /// `None` when nothing here changes with time, so there is no reason to
+    /// redraw. A [`Cell`](std::cell::Cell) because building takes `&self`.
     holds: std::cell::Cell<Option<i64>>,
 }
 
-/// 名前を引く相手。**アプリの一覧を知っているのは呼ぶ側である。**
+/// Resolves ids to names. Only the caller knows the directories.
 pub trait Names {
     fn user(&self, id: u64) -> Option<String>;
     fn channel(&self, id: u64) -> Option<String>;
@@ -92,15 +78,14 @@ impl<'a> Ink<'a> {
         }
     }
 
-    /// 組んだ結果が、**あと何秒そのままでよいか**。
+    /// How many seconds the built nodes stay valid for.
     ///
-    /// `None` は「時間で変わるものが無い」= 寝たままでよい (`NFR-005`)。
-    /// 呼ぶのは [`Self::blocks`] の後である
+    /// `None` means nothing changes with time. Read after [`Self::blocks`].
     pub fn holds_for(&self) -> Option<i64> {
         self.holds.get()
     }
 
-    /// 「あと何秒持つか」を溜める。**一番短いものが残る**
+    /// Accumulates validity; the shortest wins.
     fn hold(&self, secs: i64) {
         let next = match self.holds.get() {
             Some(cur) => cur.min(secs),
@@ -109,10 +94,10 @@ impl<'a> Ink<'a> {
         self.holds.set(Some(next));
     }
 
-    /// `primitive.text` のその slot に、テーマが書いたもの。
+    /// What the theme wrote for `primitive.text` in that slot.
     ///
-    /// テーマが無ければ空である。**空は「何も変えない」という意味**であり、
-    /// 誤りではない
+    /// Empty with no theme, which means "change nothing" rather than an
+    /// error.
     fn slot(&self, slot: &'static str) -> Style {
         match self.theme {
             Some(t) => t.style_for(NodeId::PrimitiveText, &self.ctx.with_slot(Some(slot))),
@@ -120,7 +105,7 @@ impl<'a> Ink<'a> {
         }
     }
 
-    /// 本文を、縦に積むノードの並びにする。
+    /// Turns a body into vertically stacked nodes.
     pub fn blocks(&self, blocks: &[Block], names: &dyn Names) -> Vec<UiNode> {
         blocks.iter().map(|b| self.block(b, names)).collect()
     }
@@ -152,7 +137,7 @@ impl<'a> Ink<'a> {
                         .collect::<Vec<_>>(),
                 )
                 .with_key(Key::Slot("list")),
-            // ⚠️ **中身は飾らない。** コードの中の `**` は文字である
+            // Contents are not decorated: `**` inside code is literal.
             Block::Code { lang, text } => UiNode::new(NodeId::PrimitiveCodeBlock)
                 .with_content(Content::Text(text.clone()))
                 .with_key(Key::Slot(lang_slot(lang.as_deref()))),
@@ -164,8 +149,8 @@ impl<'a> Ink<'a> {
             Marker::Bullet => "•".to_owned(),
             Marker::Number(n) => format!("{n}."),
         };
-        // ⚠️ 字下げは印ではなく**行そのもの**に付ける。印に付けると、
-        // 折り返した 2 行目が印の下へ潜り込む
+        // Indent the row, not the marker: indenting the marker tucks the
+        // wrapped second line underneath it.
         let depth = DEPTH
             .get(it.depth as usize)
             .or(DEPTH.last())
@@ -185,7 +170,7 @@ impl<'a> Ink<'a> {
         n
     }
 
-    /// 行の中を [`Span`] の並びにする。
+    /// Turns inline content into [`Span`]s.
     pub fn spans(&self, inlines: &[Inline], names: &dyn Names) -> Vec<Span> {
         inlines
             .iter()
@@ -202,12 +187,12 @@ impl<'a> Ink<'a> {
                 (label.clone().unwrap_or_else(|| url.clone()), Some("link"))
             }
             InlineKind::Mention(m) => (mention_text(*m, names), Some("mention")),
-            // 絵文字は絵である。**取ってくるまでは名前で出す** —
-            // 何も出さないと、絵文字だけの本文が空になる
+            // Emoji are images, but until one is fetched the name stands in;
+            // showing nothing would empty an emoji-only message.
             InlineKind::Emoji { name, .. } => (format!(":{name}:"), Some("mention")),
             InlineKind::Timestamp { at, format } => {
                 let (text, holds) = stamp(self.now, *at, *format);
-                // 時間で変わるものがあれば、そのぶんで起き直す
+                // Anything that changes with time schedules a redraw.
                 if let Some(secs) = holds {
                     self.hold(secs);
                 }
@@ -229,14 +214,16 @@ impl<'a> Ink<'a> {
                 style.overlay(&self.slot(slot));
             }
         }
-        // 種類は飾りより後に重ねる。リンクの色が太字に消されないため
+        // Kind is layered after decoration, so bold cannot erase a link's
+        // colour.
         if let Some(slot) = extra {
             style.overlay(&self.slot(slot));
         }
         span_of(text, &style, hidden)
     }
 
-    /// 単独の走りを 1 つ作る。箇条書きの印のように、飾りが 1 つだけのとき
+    /// One standalone span, for cases with a single decoration such as a
+    /// list marker.
     fn dressed(&self, text: String, slot: &'static str, hidden: bool) -> Span {
         span_of(text, &self.slot(slot), hidden)
     }
@@ -256,10 +243,10 @@ fn span_of(text: String, style: &Style, hidden: bool) -> Span {
     }
 }
 
-/// ```` ```rust ```` の `rust` を slot にする。
+/// Maps a fence's info string to a slot.
 ///
-/// ⚠️ **静的な名前しか slot になれない。** 知らない言語は `code` に落ちる。
-/// 言語ごとに色を変えたいテーマは、知っている言語ぶんだけ書けばよい
+/// Slots must be static names, so unknown languages fall back to `code`. A
+/// theme colouring by language only writes rules for the ones it knows.
 fn lang_slot(lang: Option<&str>) -> &'static str {
     const KNOWN: &[&str] = &[
         "rust", "js", "ts", "python", "json", "html", "css", "sh", "sql", "go", "java", "c", "cpp",
@@ -270,8 +257,8 @@ fn lang_slot(lang: Option<&str>) -> &'static str {
     KNOWN.iter().find(|k| **k == l).copied().unwrap_or("code")
 }
 
-/// ⚠️ **引けなかったときに番号を出さない。** `<@123>` は打った人が
-/// 書いた文字ではないし、`@123` は嘘である
+/// An unresolved mention never shows the raw id: `<@123>` is not what the
+/// author typed, and `@123` is a lie.
 fn mention_text(m: Mention, names: &dyn Names) -> String {
     match m {
         Mention::User(id) => match names.user(id) {
@@ -291,22 +278,17 @@ fn mention_text(m: Mention, names: &dyn Names) -> String {
     }
 }
 
-/// `<t:…>` の表示と、**その表示が変わるまでの秒数**。
+/// Renders a `<t:…>` and reports how long that rendering stays valid.
 ///
-/// # なぜ 2 つ返すのか
+/// The relative form changes on its own: rendered once and then left alone,
+/// "just now" would sit there for hours, while redrawing every second would
+/// mean never sleeping. Knowing when the text next changes allows sleeping
+/// until exactly then — a minute for "3 minutes ago", a day for "3 days ago".
 ///
-/// 相対表示 (`R`) は「3 分前」のように**時間で変わる**。出したきり寝て
-/// しまうと、開きっぱなしの画面で「たった今」が何時間も残る。かといって
-/// 毎秒描き直すのは `NFR-005` (非アクティブ時に描画を停止する) に反する。
+/// Absolute forms return `None`: nothing to wake for.
 ///
-/// **次に文字が変わる時刻が分かれば、そこまで寝ていられる。** 「3 分前」
-/// なら次は 1 分後、「3 日前」なら次は明日である。だから表示と一緒に
-/// 「いつまで持つか」を返す。
-///
-/// 絶対表示は変わらないので `None` を返す。**寝たままでよい。**
-///
-/// ⚠️ **`now` を引数で受ける。** ここで時計を読むと、同じフレームの中で
-/// 時刻が動き、隣り合う相対表示が食い違う。試験もできなくなる
+/// `now` is an argument. Reading the clock here would let time move within a
+/// frame, making adjacent timestamps disagree, and would make this untestable.
 fn stamp(now: i64, at: i64, format: char) -> (String, Option<i64>) {
     if format == 'R' {
         let (text, holds) = relative(now, at);
@@ -314,23 +296,21 @@ fn stamp(now: i64, at: i64, format: char) -> (String, Option<i64>) {
     }
 
     let local = at + gumicord_platform::local_utc_offset_minutes() as i64 * 60;
-    // ⚠️ **負の余りにならないよう `div_euclid` を使う。** 1970 年より前の
-    // 時刻も打てるし、時差で 1 日戻ることもある
+    // `div_euclid` to avoid negative remainders: timestamps before 1970 are
+    // typeable, and a time zone can push the date back a day.
     let days = local.div_euclid(86_400);
     let secs = local.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);
     let (h, min, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
 
-    // ⚠️ **知らない書式は既定 (`f`) として出す。** 解析側が通した以上、
-    // ここで空文字にすると本文から時刻だけが消える
+    // Unknown formats fall back to `f`: the parser accepted it, so emitting
+    // nothing would delete the timestamp from the body.
     let text = match format {
-        // 時刻だけ
         't' => format!("{h:02}:{min:02}"),
         'T' => format!("{h:02}:{min:02}:{s:02}"),
-        // 日付だけ
         'd' => format!("{y:04}/{m:02}/{d:02}"),
         'D' => format!("{y}年{m}月{d}日"),
-        // 日付と時刻。**曜日が付くのは `F` だけ**
+        // Only `F` carries the weekday.
         'F' => format!(
             "{y}年{m}月{d}日({}) {h:02}:{min:02}",
             WEEKDAYS[weekday(days)]
@@ -340,39 +320,34 @@ fn stamp(now: i64, at: i64, format: char) -> (String, Option<i64>) {
     (text, None)
 }
 
-/// 曜日の名前。**日曜始まり** ([`weekday`] がそう返す)
+/// Weekday names, Sunday first, matching [`weekday`].
 const WEEKDAYS: [&str; 7] = ["日", "月", "火", "水", "木", "金", "土"];
 
-/// 1970-01-01 からの日数を曜日にする。`0` が日曜。
+/// Days since 1970-01-01 to a weekday, `0` being Sunday.
 ///
-/// ⚠️ **1970-01-01 は木曜である。** そこから逆算するので `+4` する
+/// The `+4` is because 1970-01-01 was a Thursday.
 fn weekday(days: i64) -> usize {
     (days + 4).rem_euclid(7) as usize
 }
 
-/// `<t:…:R>` の相対表示と、**その表示が持つ秒数**。
+/// The relative rendering of a `<t:…:R>`, and how long it stays valid.
 ///
-/// ⚠️ **持つ秒数は必ず 1 以上を返す。** ちょうど境目のときに 0 を返すと、
-/// 描いては起き描いては起きで回り続ける
+/// Validity is always at least one second: returning zero exactly on a
+/// boundary would spin between drawing and waking.
 ///
-/// # ⚠️ 月と年はおおよそである
-///
-/// 30 日を 1 か月、365 日を 1 年として数える。**暦の上の「1 か月前」とは
-/// ずれる。** 相対表示は「だいたいいつか」を伝えるものであり、正確な日付が
-/// 要るなら `<t:…:D>` を使うべきである。ここで暦を持ち出すと、閏年と月の
-/// 大小のために「1 か月前」が 28〜31 日のどれかに揺れる
+/// Months and years are approximated as 30 and 365 days. A relative timestamp
+/// conveys roughly when, and `<t:…:D>` exists for exact dates; using a real
+/// calendar here would make "a month ago" mean anything from 28 to 31 days.
 fn relative(now: i64, at: i64) -> (String, i64) {
-    /// これ以上先は寝ていてよい上限 (秒)。**1 時間。**
-    ///
-    /// 「3 年前」の次の変化は 1 年後だが、そこまで待つ約束をする意味は
-    /// 無い。窓が閉じるほうが先である
+    /// Longest sleep to promise. "3 years ago" next changes in a year, but
+    /// the window will close long before that.
     const MAX_SLEEP: i64 = 3_600;
 
     let diff = now - at;
     let ago = diff >= 0;
     let n = diff.unsigned_abs() as i64;
 
-    // (1 単位の秒数, 単位の名前)
+    // (seconds per unit, unit name)
     let (unit, name) = match n {
         0..60 => (1, "秒"),
         60..3_600 => (60, "分"),
@@ -385,26 +360,25 @@ fn relative(now: i64, at: i64) -> (String, i64) {
     let count = n / unit;
     let text = format!("{count} {name}{}", if ago { "前" } else { "後" });
 
-    // 次に文字が変わるのは、いまの単位の切れ目である。
-    // ⚠️ **未来は逆向きに減っていく。** 「3 分後」は 1 分経つと「2 分後」に
-    // なるので、切れ目の取り方が過去と違う
+    // The text next changes at the current unit's boundary. Future times
+    // count down instead of up, so the boundary is taken the other way.
     let holds = if ago {
         unit - (n % unit)
     } else {
-        // 「0 秒後」の次は「0 秒前」である。境目をまたぐまで
+        // "in 0 seconds" becomes "0 seconds ago" at the crossing.
         let r = n % unit;
         if r == 0 { unit } else { r }
     };
     (text, holds.clamp(1, MAX_SLEEP))
 }
 
-/// 1970-01-01 からの日数を年月日に直す。
+/// Days since 1970-01-01 to a calendar date.
 ///
-/// Howard Hinnant の `civil_from_days`。**閏年の規則を自前で書かないため**に
-/// 既知のものをそのまま使う。3 月始まりに座標をずらして、閏日を年の末尾へ
-/// 追いやるのが要点である。
+/// Howard Hinnant's `civil_from_days`, used verbatim rather than writing leap
+/// year rules by hand. It shifts the origin to March so leap days fall at the
+/// end of the year.
 ///
-/// 出典: <https://howardhinnant.github.io/date_algorithms.html>
+/// <https://howardhinnant.github.io/date_algorithms.html>
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -449,9 +423,8 @@ mod tests {
         }
     }
 
-    /// 試験の中の「いま」。2023-11-15 06:13:20 UTC。
-    ///
-    /// ⚠️ **時計を読まない。** 読むと、走らせる時刻によって結果が変わる
+    /// "Now" for the tests: 2023-11-15 06:13:20 UTC. Fixed, so results do
+    /// not depend on when the suite runs.
     const NOW: i64 = 1_700_000_000;
 
     fn ink_with(json: &str) -> Theme {
@@ -469,8 +442,7 @@ mod tests {
         }
     }
 
-    /// ⚠️ **テーマが何も書かなければ、何も変わらない。**
-    /// クライアントが太字の見た目を持っていないことの確認である
+    /// Confirms the client holds no opinion about what bold looks like.
     #[test]
     fn without_a_theme_nothing_is_decorated() {
         let spans = spans_of(None, "**太い**", &NoNames);
@@ -563,7 +535,7 @@ mod tests {
         assert!(!shown.spans(c, &NoNames)[0].hidden);
     }
 
-    /// コードブロックの中身は飾らない
+    /// Fenced contents are not decorated.
     #[test]
     fn a_fenced_block_keeps_its_contents_verbatim() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
@@ -573,7 +545,7 @@ mod tests {
         assert_eq!(nodes[0].content.as_text(), Some("**a**"));
     }
 
-    /// 知らない言語でも落ちず、`code` に落ちること
+    /// An unknown language must fall back to `code` rather than fail.
     #[test]
     fn an_unknown_language_falls_back_to_the_default_slot() {
         assert_eq!(lang_slot(Some("rust")), "rust");
@@ -582,7 +554,7 @@ mod tests {
         assert_eq!(lang_slot(None), "code");
     }
 
-    /// ⚠️ 1970 年より前と閏日で崩れないこと
+    /// Survives dates before 1970 and leap days.
     #[test]
     fn the_date_conversion_survives_leap_years_and_negative_days() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
@@ -597,7 +569,7 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════
     //  `<t:…>` (`FR-021`)
 
-    /// ⚠️ **1970-01-01 は木曜である。** ここを間違えると全部の曜日がずれる
+    /// 1970-01-01 was a Thursday; getting this wrong shifts every weekday.
     #[test]
     fn the_weekday_counts_from_a_thursday() {
         assert_eq!(WEEKDAYS[weekday(0)], "木");
@@ -608,50 +580,47 @@ mod tests {
         assert_eq!(WEEKDAYS[weekday(19_676)], "水");
     }
 
-    /// 書式ごとに出るものが違うこと。
-    ///
-    /// ⚠️ **時差で結果が変わるので、中身の時刻までは見ない。**
-    /// この機械の時間帯に依らず言えることだけを見る
+    /// Only what holds regardless of this machine's time zone is asserted.
     #[test]
     fn each_format_renders_differently() {
         let at = |f| stamp(NOW, NOW, f).0;
 
-        // 時刻だけ。日付は出さない
+        // Time only.
         assert!(!at('t').contains('年'), "{}", at('t'));
         assert_eq!(at('t').len(), 5, "hh:mm のはず: {}", at('t'));
         assert_eq!(at('T').len(), 8, "hh:mm:ss のはず: {}", at('T'));
 
-        // 日付だけ。時刻は出さない
+        // Date only.
         assert!(!at('d').contains(':'), "{}", at('d'));
         assert!(!at('D').contains(':'), "{}", at('D'));
         assert!(at('D').contains('年') && at('D').contains('日'));
 
-        // 日付と時刻の両方
+        // Both.
         assert!(at('f').contains('年') && at('f').contains(':'));
         assert!(at('F').contains('年') && at('F').contains(':'));
 
-        // ⚠️ **曜日が付くのは `F` だけ**
+        // Only `F` carries the weekday.
         let has_weekday = |s: &str| WEEKDAYS.iter().any(|w| s.contains(&format!("({w})")));
         assert!(has_weekday(&at('F')), "{}", at('F'));
         assert!(!has_weekday(&at('f')), "{}", at('f'));
     }
 
-    /// ⚠️ **知らない書式でも時刻を消さない。** 解析側が通した以上、
-    /// ここで空にすると本文から時刻だけが消える
+    /// The parser accepted it, so emitting nothing would delete the
+    /// timestamp from the body.
     #[test]
     fn an_unknown_format_renders_as_the_default() {
         assert_eq!(stamp(NOW, NOW, 'z').0, stamp(NOW, NOW, 'f').0);
     }
 
-    /// 絶対表示は時間で変わらない。**寝たままでよい** (`NFR-005`)
+    /// Absolute forms never change, so nothing has to wake for them.
     #[test]
     fn an_absolute_timestamp_asks_for_no_redraw() {
         for f in ['t', 'T', 'd', 'D', 'f', 'F', 'z'] {
-            assert_eq!(stamp(NOW, NOW, f).1, None, "{f} が描き直しを求めている");
+            assert_eq!(stamp(NOW, NOW, f).1, None, "{f} asked for a redraw");
         }
     }
 
-    /// 相対表示は単位を切り替えながら出る
+    /// The relative form steps up through units.
     #[test]
     fn a_relative_timestamp_steps_up_through_units() {
         let ago = |secs: i64| relative(NOW, NOW - secs).0;
@@ -669,78 +638,86 @@ mod tests {
         assert_eq!(ago(31_536_000), "1 年前");
     }
 
-    /// 未来の時刻は「後」で出る。**Discord は未来も打てる**
+    /// Discord allows future timestamps.
     #[test]
     fn a_future_timestamp_reads_as_from_now() {
         assert_eq!(relative(NOW, NOW + 90).0, "1 分後");
         assert_eq!(relative(NOW, NOW + 86_400 * 3).0, "3 日後");
     }
 
-    /// ⚠️ **次に文字が変わる頃に起きる。** 早すぎると `NFR-005` に反し、
-    /// 遅すぎると「たった今」が何時間も残る
+    /// Too early wastes frames; too late leaves "just now" up for hours.
     #[test]
     fn it_sleeps_until_the_text_would_change() {
         let holds = |secs: i64| relative(NOW, NOW - secs).1;
 
-        // 秒の桁は毎秒変わる
+        // Seconds change every second.
         assert_eq!(holds(0), 1);
         assert_eq!(holds(59), 1);
-        // 「1 分前」は次の分まで持つ
+        // "1 minute ago" holds until the next minute.
         assert_eq!(holds(60), 60);
         assert_eq!(holds(90), 30);
-        // 「1 時間前」は次の時まで持つ
+        // "1 hour ago" holds until the next hour.
         assert_eq!(holds(3_600), 3_600);
         assert_eq!(holds(3_610), 3_590);
     }
 
-    /// ⚠️ **必ず 1 秒以上を返す。** 0 を返すと、描いては起き描いては起きで
-    /// 回り続ける
+    /// Zero would spin between drawing and waking.
     #[test]
     fn it_never_reports_less_than_one_second() {
         for d in [-100_000i64, -3_600, -60, -1, 0, 1, 59, 60, 3_600, 86_400] {
             let (_, holds) = relative(NOW, NOW - d);
-            assert!(holds >= 1, "差 {d} 秒で {holds} 秒を返した");
+            assert!(
+                holds >= 1,
+                "a {d} second difference reported {holds} seconds"
+            );
         }
     }
 
-    /// ⚠️ **遠い過去のために長い約束をしない。** 「3 年前」の次の変化は
-    /// 1 年後だが、そこまで待つ意味は無い。窓が閉じるほうが先である
+    /// "3 years ago" next changes in a year, but the window will close long
+    /// before that.
     #[test]
     fn even_the_distant_past_is_revisited_within_an_hour() {
         let (_, holds) = relative(NOW, NOW - 86_400 * 400);
         assert_eq!(holds, 3_600);
     }
 
-    /// 相対表示が 1 つでもあれば、木は「あと何秒持つか」を知っている
+    /// One relative timestamp is enough for the tree to know its validity.
     #[test]
     fn a_relative_timestamp_asks_for_a_redraw() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
-        assert_eq!(ink.holds_for(), None, "組む前から要求している");
+        assert_eq!(
+            ink.holds_for(),
+            None,
+            "asked for a redraw before anything was built"
+        );
 
         ink.blocks(
             &gumicord_markdown::parse(&format!("<t:{}:R>", NOW - 90)),
             &NoNames,
         );
-        assert_eq!(ink.holds_for(), Some(30), "分の切れ目まで");
+        assert_eq!(
+            ink.holds_for(),
+            Some(30),
+            "should hold until the minute boundary"
+        );
     }
 
-    /// ⚠️ **一番早く変わるものに合わせる。** 遅いほうに合わせると、
-    /// 速いほうが止まって見える
+    /// Following the slower one would leave the faster one looking frozen.
     #[test]
     fn it_follows_whichever_changes_soonest() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
         ink.blocks(
             &gumicord_markdown::parse(&format!(
                 "<t:{}:R> と <t:{}:R>",
-                NOW - 3_610, // 3590 秒持つ
-                NOW - 90,    // 30 秒持つ
+                NOW - 3_610, // holds 3590 seconds
+                NOW - 90,    // holds 30 seconds
             )),
             &NoNames,
         );
         assert_eq!(ink.holds_for(), Some(30));
     }
 
-    /// ⚠️ **絶対表示だけなら寝たままでよい** (`NFR-005`)
+    /// Absolute timestamps alone give no reason to wake.
     #[test]
     fn absolute_timestamps_alone_never_wake_it() {
         let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
