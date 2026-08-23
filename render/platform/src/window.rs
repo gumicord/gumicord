@@ -138,6 +138,12 @@ pub trait Application {
     /// である。
     fn start(&mut self, _waker: Waker) {}
 
+    /// アトラスが絵を忘れた。**取ってきたぶんを入れ直す。**
+    ///
+    /// ⚠️ 忘れられた顔は、頼み直さなければ二度と出てこない。取ってきた
+    /// ものは円盤に残っているので、往復は起きない
+    fn images_dropped(&mut self) {}
+
     /// 取ってきた画像を引き取る。**描く直前に呼ばれる。**
     ///
     /// ⚠️ **レンダラは網に触らない** ([`spec/02-architecture.md`])。
@@ -486,6 +492,15 @@ impl Host {
 
         let caret_on = self.caret_on;
         // ⚠️ **描く前に入れる。** このフレームで使えるようにするため
+        // ⚠️ **絵を忘れたなら、先に伝える。** 伝えてから引き取らないと、
+        // 入れ直すぶんがこのフレームに間に合わない
+        if self
+            .renderer
+            .as_mut()
+            .is_some_and(Renderer::took_image_recycle)
+        {
+            self.app.images_dropped();
+        }
         let images = self.app.take_images();
         // 上へ足したものがあれば、見ている場所を保つ。**1 フレームだけ**
         let keep_place = self.app.keep_place();

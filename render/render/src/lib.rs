@@ -368,6 +368,15 @@ impl Renderer {
         self.text.put_image(&self.gpu.queue, image);
     }
 
+    /// 絵を忘れたか。**1 回だけ真を返す。**
+    ///
+    /// アトラスの絵の側が埋まったとき、まとめて忘れて詰め直す。
+    /// ⚠️ **真のときは、取ってきた側が入れ直しを頼み直す必要がある。**
+    /// 頼まないと、忘れられた顔は二度と出てこない
+    pub fn took_image_recycle(&mut self) -> bool {
+        self.text.took_image_recycle()
+    }
+
     /// その画像を既に持っているか。**取りに行くかの判断に使う**
     pub fn has_image(&self, url: &str) -> bool {
         self.text.has_image(url)

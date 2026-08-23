@@ -80,12 +80,19 @@ const DEFAULT_THEME: &str = include_str!("../../../examples/themes/midnight/them
 /// (`EXT-015`, E2) ができたら消える。
 const THEME_ENV: &str = "GUMICORD_THEME";
 
-/// サーバアイコンとアバターを CDN に頼むときの辺の長さ。
+/// CDN に頼む絵の、論理 px での辺の長さ。**実際に描く大きさである**
 ///
-/// ⚠️ **2 の冪でないと Discord が丸める。** 画面の 2 倍まで見込んで
-/// 大きめに取り、実際に使う大きさへはこちらで縮める
-const ICON_PX: u16 = 128;
-const AVATAR_PX: u16 = 128;
+/// # ⚠️ 描く大きさより大きく頼まない
+///
+/// アトラスは 1 枚 2048×2048 しかない。40px で描くものを 128px で頼むと
+/// **10 倍の面積を食い**、すぐ埋まって新しい顔が出なくなる。実際に
+/// 溢れた (`アトラスの絵の側が溢れた`)。
+///
+/// 公式クライアントも描く大きさで頼んでいる。
+const GUILD_ICON_PX: f32 = 48.0;
+const MESSAGE_AVATAR_PX: f32 = 40.0;
+/// 自分の欄とメンバー一覧。どちらも 32px の丸である
+const SMALL_AVATAR_PX: f32 = 32.0;
 
 /// 閉じたフォルダに敷き詰める枚数。Discord と同じく 2×2 まで。
 ///
@@ -185,6 +192,8 @@ pub struct Gumicord {
     login: Login,
     /// 本物のデータ (C2, C3)。**demo との分かれ目はここが空かどうか**
     live: Live,
+    /// 画面の拡大率。**CDN に頼む絵の大きさを決めるのに要る**
+    scale: f32,
     /// ポインタが乗っているノード
     hovered: Option<(NodeId, Option<Key>)>,
     /// ポインタが入っている、一番内側の巻ける領域。
@@ -243,6 +252,7 @@ impl Gumicord {
             waker: None,
             login,
             live,
+            scale: 1.0,
             hovered: None,
             hovered_scroll: None,
             selected_guild: guild,
@@ -278,6 +288,19 @@ impl Gumicord {
     /// ⚠️ **摘みを掴んでいる間は、指が一覧の外へ出ても消えない。**
     /// 掴んでいる間はホバーを更新しない ([`Self::hover_changed`] を
     /// 呼ばない) ためである。ここが変わると掴んだ先が消える
+    /// その大きさで描く絵を、CDN に何 px で頼むか。
+    ///
+    /// ⚠️ **画面の拡大率を掛ける。** 200% の画面で 40px の丸を 40px で
+    /// 頼むと、拡大されてぼやける。
+    ///
+    /// ⚠️ **2 の冪へ切り上がる** ([`gumicord_model::Asset::with_size`])。
+    /// Discord が受けるのがその値だけだからで、切り上げはあちらの都合に
+    /// 合わせているだけである
+    fn asset_px(&self, logical: f32) -> u16 {
+        let px = (logical * self.scale.max(1.0)).ceil();
+        px.clamp(16.0, 4096.0) as u16
+    }
+
     fn scrollbar(&self, owner: NodeId) -> Option<UiNode> {
         (self.hovered_scroll == Some(owner)).then(scrollbar_node)
     }
@@ -345,6 +368,15 @@ impl Application for Gumicord {
     /// ⚠️ ここで**要る絵を注文する**。木を組んだ直後なので、いま画面に
     /// 出ているものが分かっている。一覧を先読みして全部取りに行くと、
     /// 何百枚も要求することになる
+    /// アトラスが絵を忘れた。**もう一度読み直す。**
+    ///
+    /// ⚠️ **円盤には残っているので、網へは出ない。** 読み直して入れ直す
+    /// だけである。1 フレームだけ顔が消える
+    fn images_dropped(&mut self) {
+        tracing::debug!("アトラスが絵を忘れた。読み直す");
+        self.images.forget_requested();
+    }
+
     fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
         for url in std::mem::take(&mut self.wanted_images) {
             self.images.request(&url);
@@ -533,6 +565,9 @@ impl Application for Gumicord {
     ///
     /// [4] と [6] (プラグインの介入) はまだない。入るのはこの間である。
     fn build(&mut self, cx: &FrameCx) -> UiNode {
+        // ⚠️ **頼む絵の大きさが DPI で変わる。** 木を組む前に控える
+        self.scale = cx.scale;
+
         // [3] UITree 構築
         let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
 
@@ -897,7 +932,9 @@ impl Gumicord {
 
         let mut avatar = UiNode::image(
             NodeId::NavUserPanelAvatar,
-            me.display_avatar().with_size(AVATAR_PX).url(),
+            me.display_avatar()
+                .with_size(self.asset_px(SMALL_AVATAR_PX))
+                .url(),
         );
         if let Some(s) = status {
             // ⚠️ **鍵で色を分ける。** 4 つしかない決まった値なので、
@@ -982,7 +1019,7 @@ impl Gumicord {
                         NodeId::NavMemberListItemAvatar,
                         m.member
                             .display_avatar(guild, user)
-                            .with_size(AVATAR_PX)
+                            .with_size(self.asset_px(SMALL_AVATAR_PX))
                             .url(),
                     )
                     .with_data(id)
@@ -1330,7 +1367,7 @@ impl Gumicord {
                             .live
                             .store()
                             .guild_icon(row.id)
-                            .map(|a| a.with_size(ICON_PX).url()),
+                            .map(|a| a.with_size(self.asset_px(GUILD_ICON_PX)).url()),
                         unread,
                         mentions,
                         folder_of_own: None,
@@ -1376,7 +1413,7 @@ impl Gumicord {
                         .live
                         .store()
                         .guild_icon(*id)
-                        .map(|a| a.with_size(ICON_PX).url()),
+                        .map(|a| a.with_size(self.asset_px(GUILD_ICON_PX)).url()),
                     unread: self.live.store().guild_unread(*id).0,
                     mentions: self.live.store().guild_unread(*id).1,
                     folder_of_own: None,
@@ -1499,7 +1536,7 @@ impl Gumicord {
                             Some(x) => x.display_avatar(guild, &m.author),
                             None => m.author.display_avatar(),
                         }
-                        .with_size(AVATAR_PX)
+                        .with_size(self.asset_px(MESSAGE_AVATAR_PX))
                         .url(),
                     ),
                     // ⚠️ **一番上の「色を付けている」役職が勝つ。**

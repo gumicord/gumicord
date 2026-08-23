@@ -654,6 +654,10 @@ struct Atlas {
     entries: HashMap<AtlasKey, Option<GlyphEntry>>,
     shelves: Shelves,
     uploaded: usize,
+    /// 前回作り直してから何枚入れたか。**空回りを見分けるために要る**
+    images_since_recycle: usize,
+    /// 絵を作り直した。**呼び出し側が取りに来る** ([`Atlas::took_recycle`])
+    recycled: bool,
 }
 
 impl Atlas {
@@ -679,7 +683,45 @@ impl Atlas {
             entries: HashMap::new(),
             shelves: Shelves::new(),
             uploaded: 0,
+            images_since_recycle: 0,
+            recycled: false,
         }
+    }
+
+    /// 絵の側を丸ごと空けて、詰め直せるようにする。
+    ///
+    /// # ⚠️ 追い出すのではなく、忘れる
+    ///
+    /// 棚詰めは途中の 1 枚を空けられない。**要らなくなった 1 枚だけを
+    /// 抜くことができない**以上、まとめて忘れるしかない。
+    ///
+    /// 忘れた絵は取ってきた側が持っている (円盤にも残っている) ので、
+    /// **次のフレームで入れ直される**。1 フレームだけ顔が消える。
+    ///
+    /// ⚠️ **文字の側は触らない。** 本文が虫食いになるのは、顔が 1 枚
+    /// 消えるよりずっと悪い。
+    ///
+    /// ⚠️ **入れた枚数が少ないうちは作り直さない。** 入りきらない大きさの
+    /// ものを頼まれているなら、何度作り直しても入らない。**作り直しては
+    /// 溢れ、溢れては作り直す**空回りになる
+    fn recycle_images(&mut self) -> bool {
+        /// これだけ入ってから溢れたなら、詰め直す価値がある
+        const WORTH_IT: usize = 16;
+
+        if self.images_since_recycle < WORTH_IT {
+            return false;
+        }
+        tracing::info!(images = self.images_since_recycle, "アトラスの絵を詰め直す");
+        self.entries.retain(|k, _| !matches!(k, AtlasKey::Image(_)));
+        self.shelves.reset_images();
+        self.images_since_recycle = 0;
+        self.recycled = true;
+        true
+    }
+
+    /// 絵を忘れたか。**1 回だけ真を返す**
+    fn took_recycle(&mut self) -> bool {
+        std::mem::take(&mut self.recycled)
     }
 }
 
@@ -696,6 +738,14 @@ impl Shelves {
             glyphs_full: false,
             images_full: false,
         }
+    }
+
+    /// 絵の棚を空にする。**文字の棚は触らない**
+    fn reset_images(&mut self) {
+        self.image_x = ATLAS_SIZE;
+        self.image_top = ATLAS_SIZE;
+        self.image_shelf_h = 0;
+        self.images_full = false;
     }
 
     /// 空き場所を 1 つ取る。**取れなければ `None`**
@@ -991,6 +1041,34 @@ mod shelf_tests {
         assert!(!s.glyphs_full);
     }
 
+    /// ⚠️ **詰め直せば、また入る。** 棚詰めは途中の 1 枚を空けられない
+    /// ので、まとめて忘れるしかない
+    #[test]
+    fn resetting_the_picture_side_makes_room_again() {
+        let mut s = Shelves::new();
+        while s.alloc(256, 256, Side::Image).is_some() {}
+        assert!(s.images_full);
+
+        s.reset_images();
+        assert!(!s.images_full);
+        assert!(s.alloc(256, 256, Side::Image).is_some());
+    }
+
+    /// ⚠️ **詰め直しても文字の側は動かない。**
+    /// 本文が虫食いになるのは、顔が 1 枚消えるよりずっと悪い
+    #[test]
+    fn resetting_the_picture_side_leaves_the_glyphs_alone() {
+        let mut s = Shelves::new();
+        s.alloc(20, 20, Side::Glyph).expect("入る");
+        let (before_x, before_y) = (s.cursor_x, s.cursor_y);
+
+        s.alloc(128, 128, Side::Image).expect("入る");
+        s.reset_images();
+
+        assert_eq!((s.cursor_x, s.cursor_y), (before_x, before_y));
+        assert!(!s.glyphs_full);
+    }
+
     /// ⚠️ **重ならない。** 両側から詰めても、同じ場所を 2 度渡さない
     #[test]
     fn the_two_sides_never_overlap() {
@@ -1226,21 +1304,43 @@ impl TextEngine {
             return false;
         }
 
-        let entry = self.atlas.insert(
-            queue,
-            image.width,
-            image.height,
-            &image.rgba,
-            Placement {
-                left: 0,
-                top: 0,
-                // 画像は色そのものを使う。文字のように色を掛けない
-                is_color: true,
-            },
-            Side::Image,
-        );
+        let place = |atlas: &mut Atlas| {
+            atlas.insert(
+                queue,
+                image.width,
+                image.height,
+                &image.rgba,
+                Placement {
+                    left: 0,
+                    top: 0,
+                    // 画像は色そのものを使う。文字のように色を掛けない
+                    is_color: true,
+                },
+                Side::Image,
+            )
+        };
+
+        // 入らなければ絵の側を詰め直して、1 度だけやり直す。
+        //
+        // ⚠️ **やり直すのは 1 度きり。** 空いた場所にも入らないなら、
+        // 入りきらない大きさのものを頼まれている
+        let mut entry = place(&mut self.atlas);
+        if entry.is_none() && self.atlas.recycle_images() {
+            entry = place(&mut self.atlas);
+        }
+        if entry.is_some() {
+            self.atlas.images_since_recycle += 1;
+        }
         self.atlas.entries.insert(key, entry);
         entry.is_some()
+    }
+
+    /// 絵を忘れたか。**1 回だけ真を返す。**
+    ///
+    /// 真のとき、取ってきた側は**入れ直しを頼み直す**必要がある。
+    /// 頼まないと、忘れられた顔は二度と出てこない
+    pub fn took_image_recycle(&mut self) -> bool {
+        self.atlas.took_recycle()
     }
 
     /// 既にアトラスに入っている画像。**無ければ `None`** で、
