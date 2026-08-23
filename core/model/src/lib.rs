@@ -117,12 +117,49 @@ impl User {
     }
 }
 
+/// 役職 1 つ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: RoleId,
+    #[serde(default)]
+    pub name: String,
+    /// 大きいほど上。**名前の色を決めるのは一番上の色付き役職である**
+    #[serde(default)]
+    pub position: i64,
+    /// メンバー一覧で**別の見出しとして立てるか**
+    #[serde(default)]
+    pub hoist: bool,
+    /// `0xRRGGBB`。⚠️ **0 は「黒」ではなく「色を付けていない」**
+    ///
+    /// # ⚠️ `Option` なのは `null` で来ても落ちないためである
+    ///
+    /// `#[serde(default)]` が効くのは**フィールドが無いとき**だけで、
+    /// `"color": null` は誤りになる。役職 1 つが読めないと
+    /// [`crate::de::lenient_vec`] がその役職ごと落とし、**名前まで
+    /// 引けなくなる**。色が出ないどころか見出しが消える。
+    #[serde(default)]
+    pub color: Option<u32>,
+}
+
+impl Role {
+    /// 付けられている色 (`0xRRGGBB`)。**付けていなければ `None`**
+    ///
+    /// ⚠️ **0 を黒として扱わない。** Discord では 0 が「色を付けていない」
+    /// であり、黒く塗ると全員の名前が読めなくなる。
+    ///
+    /// ⚠️ **ここは色を「持っている」だけである。** どこに出すかを決めるのは
+    /// テーマである ([`gumicord_uitree::UiNode::tint`])
+    pub fn tint(&self) -> Option<u32> {
+        self.color.filter(|c| *c != 0)
+    }
+}
+
 /// ギルドの一員。
 ///
 /// # ⚠️ 同じ人でも、ギルドごとに名前も顔も違う
 ///
 /// ```text
-///   User    ねんねこ           全体の名前と顔
+///   User    ねんねこ              全体の名前と顔
 ///   Member  ねこ (このサーバでは)  そのギルドだけの名前と顔
 /// ```
 ///
@@ -137,36 +174,6 @@ impl User {
 /// 持たせるより、**知っている側から渡してもらう**ほうが正しい。
 ///
 /// だから [`Member::guild_avatar`] はギルドを引数に取る。
-/// 役職 1 つ。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Role {
-    pub id: RoleId,
-    #[serde(default)]
-    pub name: String,
-    /// 大きいほど上。**名前の色を決めるのは一番上の色付き役職である**
-    #[serde(default)]
-    pub position: i64,
-    /// メンバー一覧で**別の見出しとして立てるか**
-    #[serde(default)]
-    pub hoist: bool,
-    /// `0xRRGGBB`。⚠️ **0 は「黒」ではなく「色を付けていない」**
-    #[serde(default)]
-    pub color: u32,
-}
-
-impl Role {
-    /// 付けられている色 (`0xRRGGBB`)。**付けていなければ `None`**
-    ///
-    /// ⚠️ **0 を黒として扱わない。** Discord では 0 が「色を付けていない」
-    /// であり、黒く塗ると全員の名前が読めなくなる。
-    ///
-    /// ⚠️ **ここは色を「持っている」だけである。** どこに出すかを決めるのは
-    /// テーマである ([`gumicord_uitree::UiNode::tint`])
-    pub fn tint(&self) -> Option<u32> {
-        (self.color != 0).then_some(self.color)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     /// このギルドだけの呼び名
@@ -803,5 +810,54 @@ mod guild_shape_tests {
         )
         .unwrap();
         assert_eq!(g.name, "x");
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    /// ⚠️ **`"color": null` で落ちない。**
+    ///
+    /// `#[serde(default)]` が効くのはフィールドが無いときだけである。
+    /// 落ちると [`crate::de::lenient_vec`] が役職ごと捨て、**名前まで
+    /// 引けなくなる** — 色が出ないどころか見出しが消える
+    #[test]
+    fn a_null_colour_does_not_take_the_role_with_it() {
+        let raw = r#"{ "id": "55", "name": "管理者", "position": 3, "color": null }"#;
+        let role: Role = serde_json::from_str(raw).expect("読める");
+
+        assert_eq!(role.name, "管理者");
+        assert_eq!(role.tint(), None);
+    }
+
+    /// ⚠️ **0 は黒ではなく「色を付けていない」**
+    #[test]
+    fn zero_is_not_black() {
+        let raw = r#"{ "id": "55", "name": "みんな", "color": 0 }"#;
+        let role: Role = serde_json::from_str(raw).expect("読める");
+        assert_eq!(role.tint(), None);
+    }
+
+    #[test]
+    fn a_colour_comes_through() {
+        let raw = r#"{ "id": "55", "name": "管理者", "color": 14688352 }"#;
+        let role: Role = serde_json::from_str(raw).expect("読める");
+        assert_eq!(role.tint(), Some(14_688_352));
+    }
+
+    /// ⚠️ **読めない役職が 1 つあっても、他の役職を巻き添えにしない**
+    #[test]
+    fn one_unreadable_role_does_not_take_the_guild_with_it() {
+        let raw = r#"{
+            "id": "1", "name": "テスト",
+            "roles": [
+                { "id": "55", "name": "管理者", "color": 100 },
+                { "id": "とんでもない識別子", "name": "壊れている" },
+                { "id": "56", "name": "みんな", "color": null }
+            ]
+        }"#;
+        let guild: Guild = serde_json::from_str(raw).expect("読める");
+        assert_eq!(guild.roles.len(), 2, "読めた 2 つは残る");
     }
 }

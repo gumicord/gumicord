@@ -515,6 +515,13 @@ impl Store {
         // 持ってくることがあり、そのたびにメンバー一覧の見出しが
         // 識別子に戻ってしまう
         if !guild.roles.is_empty() {
+            // ⚠️ **数だけを出す。** 識別子も名前も、どのサーバに入って
+            // いるかを語ってしまう
+            tracing::debug!(
+                roles = guild.roles.len(),
+                colored = guild.roles.iter().filter(|r| r.tint().is_some()).count(),
+                "役職を受け取った"
+            );
             self.roles.insert(id, guild.roles);
         }
 
@@ -1073,7 +1080,7 @@ mod tint_tests {
             name: format!("役職{id}"),
             position,
             hoist: false,
-            color,
+            color: Some(color),
         }
     }
 

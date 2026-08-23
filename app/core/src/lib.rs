@@ -2170,6 +2170,47 @@ mod member_tests {
         let url = a.message_rows()[0].avatar.clone().unwrap();
         assert!(url.contains("/embed/avatars/"), "{url}");
     }
+
+    /// ⚠️ **本文の送信者名も役職の色で出す。**
+    ///
+    /// 一覧だけ色が付いていて本文が白いと、同じ人が別人に見える
+    #[test]
+    fn the_author_name_carries_the_role_colour() {
+        let mut a = app(message(None, None));
+        a.live.store_mut().upsert_guild(gumicord_model::Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: vec![gumicord_model::Role {
+                id: 55u64.into(),
+                name: "管理者".to_owned(),
+                position: 3,
+                hoist: true,
+                color: Some(0x00e0_5260),
+            }],
+        });
+
+        // その役職を持つ人の発言に差し替える
+        let mut m = message(None, None);
+        m.member.as_mut().expect("居る").roles = vec![55u64.into()];
+        a.live
+            .store_mut()
+            .set_backlog(ChannelId::from(10u64), vec![m]);
+
+        assert_eq!(a.message_rows()[0].tint, Some(0x00e0_5260));
+
+        // 木にも載る
+        let tree = a.chat_view();
+        let mut found = None;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessageHeaderAuthor {
+                found = n.tint;
+            }
+        });
+        assert_eq!(found, Some(Color::from_rgb(0x00e0_5260)));
+    }
 }
 
 #[cfg(test)]
@@ -2205,7 +2246,7 @@ mod member_list_tests {
                     name: "管理者".to_owned(),
                     position: 3,
                     hoist: true,
-                    color: 0x00e0_5260,
+                    color: Some(0x00e0_5260),
                 }],
             }]);
         a.selected_guild = 1;
