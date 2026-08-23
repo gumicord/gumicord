@@ -38,6 +38,18 @@ pub struct Style {
     pub max_height: Option<f32>,
     pub opacity: Option<f32>,
     pub shadow: Option<Shadow>,
+    /// 値が変わったときに、そこへ動いていく時間 (ミリ秒)。
+    ///
+    /// # ⚠️ これは見た目ではなく「見た目の変わり方」である
+    ///
+    /// 他のプロパティと違い、これ自身は何も描かない。**次にこのノードの
+    /// スタイルが変わったとき、飛ぶのではなく動く**ことだけを決める。
+    ///
+    /// ⚠️ **継承しない。** 親が動くからといって子まで動かすと、テーマが
+    /// 意図していない場所が一斉に動く。
+    ///
+    /// 仕様: [`spec/04-theme.md`] 3.5
+    pub transition: Option<f32>,
 }
 
 impl Style {
@@ -79,6 +91,7 @@ impl Style {
         overlay_field(&mut self.max_height, &other.max_height);
         overlay_field(&mut self.opacity, &other.opacity);
         overlay_field(&mut self.shadow, &other.shadow);
+        overlay_field(&mut self.transition, &other.transition);
     }
 
     /// 親から継承する。**継承するのは `color` と `font` だけ**である

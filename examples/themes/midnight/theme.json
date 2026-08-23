@@ -43,7 +43,8 @@
 
     "shadow.raised": { "x": 0, "y": 2, "blur": 8, "color": "#00000059" },
 
-    "motion.fast": 120
+    "motion.fast": 120,
+    "motion.slow": 200
   },
 
   "rules": [
@@ -89,7 +90,7 @@
     },
     {
       "select": "chrome.titlebar.control",
-      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+      "style": { "font": "$font.small", "color": "$color.text.secondary", "transition": "$motion.fast" }
     },
     {
       "select": "chrome.titlebar.control",
@@ -122,7 +123,8 @@
         "height": 8,
         "margin": [0, 52, 0, 0],
         "radius": "$radius.full",
-        "background": "$color.text.primary"
+        "background": "$color.text.primary",
+        "transition": "$motion.fast"
       }
     },
     {
@@ -147,7 +149,8 @@
         "height": 48,
         "margin": [0, 0, 0, 8],
         "radius": "$radius.lg",
-        "background": "$color.bg.raised"
+        "background": "$color.bg.raised",
+        "transition": "$motion.fast"
       }
     },
     {
@@ -184,7 +187,8 @@
         "radius": "$radius.lg",
         "background": "$color.bg.hover",
         "padding": [0, 0, 4, 0],
-        "gap": "$space.1"
+        "gap": "$space.1",
+        "transition": "$motion.fast"
       }
     },
     {
@@ -249,7 +253,8 @@
         "radius": "$radius.sm",
         "padding": [6, 8, 6, 8],
         "gap": 6,
-        "color": "$color.text.secondary"
+        "color": "$color.text.secondary",
+        "transition": "$motion.fast"
       }
     },
     {
@@ -345,7 +350,7 @@
     },
     {
       "select": "nav.member_list.item",
-      "style": { "padding": [5, 8, 5, 8], "margin": [0, 8, 0, 8], "gap": "$space.2", "radius": "$radius.md" }
+      "style": { "padding": [5, 8, 5, 8], "margin": [0, 8, 0, 8], "gap": "$space.2", "radius": "$radius.md", "transition": "$motion.fast" }
     },
     {
       "select": "nav.member_list.item",
@@ -419,7 +424,7 @@
 
     {
       "select": "chat.message",
-      "style": { "padding": [4, 16, 4, 16], "gap": "$space.2" }
+      "style": { "padding": [4, 16, 4, 16], "gap": "$space.2", "transition": "$motion.fast" }
     },
     {
       "select": "chat.message",
@@ -557,7 +562,7 @@
     },
     {
       "select": "layout.scrollbar.thumb",
-      "style": { "background": "#ffffff26", "radius": "$radius.full" }
+      "style": { "background": "#ffffff26", "radius": "$radius.full", "transition": "$motion.fast" }
     },
     {
       "select": "layout.scrollbar.thumb",

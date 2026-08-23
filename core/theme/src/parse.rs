@@ -542,6 +542,9 @@ fn style(
             "maxHeight" => s.max_height = length(v, env, &p, diags),
             "opacity" => s.opacity = ratio(v, env, &p, diags),
             "shadow" => s.shadow = shadow(v, env, &p, diags),
+            // ⚠️ **見た目ではなく「見た目の変わり方」である。**
+            // ここ自身は何も描かない
+            "transition" => s.transition = length(v, env, &p, diags),
             _ => diags.warn(
                 &p,
                 Ignored::Property,

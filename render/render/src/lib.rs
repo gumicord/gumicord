@@ -23,12 +23,14 @@ pub mod gpu;
 pub mod icon;
 pub mod intrinsic;
 pub mod layout;
+pub mod motion;
 pub mod text;
 
 pub use geom::{Rect, Size};
 pub use gpu::{GpuError, Presented};
 pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
 pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState};
+pub use motion::Motion;
 pub use text::ImageData;
 
 use gumicord_uitree::{Key, NodeId, UiNode};

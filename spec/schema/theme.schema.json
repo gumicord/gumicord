@@ -172,7 +172,11 @@
         "minHeight": { "$ref": "#/$defs/lengthOrRef" },
         "maxHeight": { "$ref": "#/$defs/lengthOrRef" },
         "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
-        "shadow": { "$ref": "#/$defs/shadowOrRef" }
+        "shadow": { "$ref": "#/$defs/shadowOrRef" },
+        "transition": {
+          "description": "値が変わったときに、そこへ動いていく時間 (ミリ秒)。書いたノードだけが動く (spec/04-theme.md 3.5)",
+          "$ref": "#/$defs/lengthOrRef"
+        }
       }
     },
 

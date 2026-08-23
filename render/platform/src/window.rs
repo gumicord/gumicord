@@ -214,6 +214,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         blink: crate::clock::caret_blink_interval(),
         caret_on: true,
         next_blink: std::time::Instant::now(),
+        motion: gumicord_render::Motion::new(),
     };
     event_loop.run_app(&mut host)?;
     Ok(())
@@ -251,6 +252,8 @@ struct Host {
     caret_on: bool,
     /// 次に切り替える時刻
     next_blink: std::time::Instant,
+    /// 動いている最中のスタイル。**止まったら寝る** (`NFR-005`)
+    motion: gumicord_render::Motion,
 }
 
 impl Host {
@@ -486,6 +489,7 @@ impl Host {
         let images = self.app.take_images();
         // 上へ足したものがあれば、見ている場所を保つ。**1 フレームだけ**
         let keep_place = self.app.keep_place();
+        let moving;
 
         let (stats, backend) = {
             let Some(r) = &mut self.renderer else { return };
@@ -501,9 +505,22 @@ impl Host {
                 scale: r.scale(),
             };
             tracing::trace!(w = cx.viewport.w, h = cx.viewport.h, "描画");
-            let tree = self.app.build(&cx);
+            let mut tree = self.app.build(&cx);
+
+            // ⚠️ **確定したスタイルを、そこへ動かす。**
+            //
+            // 木の形は触らない。動くのは既に決まった値だけである
+            // ([`gumicord_render::motion`])
+            moving = self.motion.apply(&mut tree, std::time::Instant::now());
+
             (r.render(&tree), r.backend())
         };
+
+        // ⚠️ **動いているあいだだけ回す。** 止まったら要求をやめて寝る。
+        // それが `NFR-005` (非アクティブ時に描画を停止する) である
+        if moving {
+            self.request_redraw();
+        }
 
         // ⚠️ **表示できなかったら、もう一度描き直しを要求する。**
         // `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が
