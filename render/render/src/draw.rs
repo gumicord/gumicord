@@ -20,8 +20,8 @@
 //! 枠線はこれとは別に、`color` の下へ一回り大きい角丸矩形を敷いて表現する。
 //! 背景色がない場合はそれができないので、4 辺を細い矩形で描く。
 
-use gumicord_uitree::value::Color;
-use gumicord_uitree::{Content, Style};
+use gumicord_uitree::value::{Color, Font};
+use gumicord_uitree::{Content, Span, Style};
 
 use crate::geom::Rect;
 use crate::intrinsic::{Axis, intrinsic};
@@ -45,6 +45,15 @@ const UNDERLINE_THICKNESS: f32 = 2.0;
 /// テーマが文字色を指定しなかったときの色。
 ///
 /// 真っ白ではなく少し落とす。テーマなしで起動したときに目が痛くならない程度
+/// スポイラーの塗りの角丸 (論理 px)
+const SPOILER_RADIUS: f32 = 3.0;
+/// 下線と打ち消しの太さ (論理 px)
+const LINE_WIDTH: f32 = 1.0;
+/// 下線を行のどこに引くか (行の高さに対する割合)
+const UNDERLINE_AT: f32 = 0.82;
+/// 打ち消しを行のどこに引くか
+const STRIKE_AT: f32 = 0.55;
+
 const FALLBACK_TEXT: Color = Color {
     r: 0xea,
     g: 0xea,
@@ -260,6 +269,11 @@ pub fn build(
             Content::Text(s) if !s.is_empty() => {
                 draw_text(
                     &mut dl, text, device, queue, placed, s, opacity, scale, scissor,
+                );
+            }
+            Content::Rich(spans) if !spans.is_empty() => {
+                draw_rich(
+                    &mut dl, text, device, queue, placed, spans, opacity, scale, scissor,
                 );
             }
             Content::Icon(name) => {
@@ -797,6 +811,156 @@ fn draw_image(
         scissor,
         e.page,
     );
+}
+
+/// 積む前のグリフ 1 個。`(矩形, UV, 色付きか, ページ, 何番目の走りか)`
+type RichGlyph = ([f32; 4], [f32; 4], bool, u32, u32);
+
+/// 飾りの混じった文字を描く (`FR-021`)。
+///
+/// # ⚠️ 走りごとに描かない
+///
+/// 走りを 1 つずつ [`draw_text`] へ渡して横にずらして置く、はできない。
+/// 折り返しが走りごとに独立して決まってしまうためである。整形は
+/// **1 回だけ**行い、出てきた字を走りの番号で塗り分ける。
+#[allow(clippy::too_many_arguments)]
+fn draw_rich(
+    dl: &mut DrawList,
+    text: &mut TextEngine,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    placed: &crate::layout::Placed<'_>,
+    spans: &[Span],
+    opacity: f32,
+    scale: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    let style = &placed.node.style;
+    let runs = rich_runs(spans, style);
+    let base = linear(style.color.unwrap_or(FALLBACK_TEXT), opacity);
+    let colors: Vec<[f32; 4]> = spans
+        .iter()
+        .map(|s| s.color.map_or(base, |c| linear(c, opacity)))
+        .collect();
+
+    // ⚠️ **測るときと同じ折り返し幅を渡す。** 食い違うと行が変わる
+    let max_w = placed.inner.w.is_finite().then_some(placed.inner.w);
+    let size = text.shaper().measure_rich(&runs, max_w);
+    let inner = placed.inner;
+    let oy = ((inner.y + ((inner.h - size.h) * 0.5).max(0.0)) * scale).round();
+    let ox = (inner.x * scale).round();
+
+    let mut out: Vec<RichGlyph> = Vec::new();
+    let rects = text.draw_rich_glyphs(device, queue, &runs, max_w, |e, gx, gy, which| {
+        out.push((
+            [
+                ox + (gx + e.left) as f32,
+                oy + (gy - e.top) as f32,
+                e.w as f32,
+                e.h as f32,
+            ],
+            e.uv,
+            e.is_color,
+            e.page,
+            which,
+        ));
+    });
+
+    // 隠す走りは**先に塗る**。字より後ろに置くと透けて読める
+    for r in &rects {
+        let Some(sp) = spans.get(r.run as usize) else {
+            continue;
+        };
+        if !sp.hidden {
+            continue;
+        }
+        dl.push_rect(
+            [ox + r.rect.x, oy + r.rect.y, r.rect.w, r.rect.h],
+            linear(sp.color.unwrap_or(FALLBACK_TEXT), opacity),
+            SPOILER_RADIUS * scale,
+            0.0,
+            scissor,
+        );
+    }
+
+    for (rect, uv, is_color, page, which) in out {
+        // ⚠️ **隠す走りの字は積まない。** 上から塗るだけでは、
+        // 角丸の外や半透明のところから中身が漏れる
+        if spans.get(which as usize).is_some_and(|s| s.hidden) {
+            continue;
+        }
+        let c = colors.get(which as usize).copied().unwrap_or(base);
+        dl.push_glyph(rect, uv, c, is_color, 0.0, scissor, page);
+    }
+
+    // 線は字の上に引く
+    for r in &rects {
+        let Some(sp) = spans.get(r.run as usize) else {
+            continue;
+        };
+        if sp.hidden || !sp.line.any() {
+            continue;
+        }
+        let c = colors.get(r.run as usize).copied().unwrap_or(base);
+        let w = (LINE_WIDTH * scale).max(1.0);
+        // 行の高さではなく**字の大きさ**を基準にする。行間が広いテーマで
+        // 下線が遠くへ離れないため
+        let em = r.rect.h;
+        if sp.line.under {
+            let y = r.rect.y + em * UNDERLINE_AT;
+            dl.push_rect([ox + r.rect.x, oy + y, r.rect.w, w], c, 0.0, 0.0, scissor);
+        }
+        if sp.line.through {
+            let y = r.rect.y + em * STRIKE_AT;
+            dl.push_rect([ox + r.rect.x, oy + y, r.rect.w, w], c, 0.0, 0.0, scissor);
+        }
+    }
+}
+
+/// [`Span`] の並びを、整形が受け取る形へ直す。
+///
+/// ⚠️ **測るときと描くときで同じものを作ること。** 片方だけ書体の
+/// 引き継ぎ方を変えると、測った幅と描いた幅が食い違い、行末が切れる
+pub(crate) fn rich_runs(spans: &[Span], style: &Style) -> Vec<(String, ResolvedFont)> {
+    let base = ResolvedFont::from_style(style);
+    spans
+        .iter()
+        .map(|s| {
+            let font = match &s.font {
+                // 走りが書いていないところは**ノードの書体を引き継ぐ**
+                Some(f) => ResolvedFont::from_style(&Style {
+                    font: Some(merge_font(style.font.clone(), f.clone())),
+                    ..Style::default()
+                }),
+                None => base.clone(),
+            };
+            (s.text.clone(), font)
+        })
+        .collect()
+}
+
+/// 走りの書体を、ノードの書体の上に重ねる。
+fn merge_font(base: Option<Font>, over: Font) -> Font {
+    let mut f = base.unwrap_or_default();
+    if over.family.is_some() {
+        f.family = over.family;
+    }
+    if over.size.is_some() {
+        f.size = over.size;
+    }
+    if over.line_height.is_some() {
+        f.line_height = over.line_height;
+    }
+    if over.weight.is_some() {
+        f.weight = over.weight;
+    }
+    if over.italic.is_some() {
+        f.italic = over.italic;
+    }
+    if over.letter_spacing.is_some() {
+        f.letter_spacing = over.letter_spacing;
+    }
+    f
 }
 
 #[cfg(test)]

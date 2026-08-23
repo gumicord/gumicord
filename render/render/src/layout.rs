@@ -259,6 +259,13 @@ impl<'a> Cx<'a, '_, '_> {
                 let max_w = inner.w.is_finite().then_some(inner.w);
                 self.text.measure(s, &font, max_w)
             }
+            // 飾りの混じった文字。**混じったまま一度に測る** —
+            // 走りごとに測って足し合わせると、折り返しが入った途端に合わない
+            Content::Rich(spans) => {
+                let runs = crate::draw::rich_runs(spans, &node.style);
+                let max_w = inner.w.is_finite().then_some(inner.w);
+                self.text.measure_rich(&runs, max_w)
+            }
             // アイコンは正方形で、文字と同じ大きさにする。
             // 行の中に混ぜたときに揃うのが自然なため
             Content::Icon(_) => {

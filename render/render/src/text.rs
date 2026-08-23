@@ -209,8 +209,11 @@ impl ResolvedFont {
 /// 整形結果の鍵。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ShapeKey {
-    text: String,
-    font: ResolvedFont,
+    /// 整形する一続きの並び。飾りの無い文字列でも要素 1 つの並びである。
+    ///
+    /// ⚠️ **飾りごとに分けて整形しない。** 分けると折り返しがそれぞれ
+    /// 独立して決まり、`これは **とても長い** 文章` の行末が合わなくなる
+    runs: Vec<(String, ResolvedFont)>,
     /// 折り返し幅 (物理 px を量子化)。`u32::MAX` は折り返さない
     max_w_q: u32,
     /// DPI スケール。変わると物理ピクセルでの整形結果が変わる
@@ -233,6 +236,8 @@ pub struct PlacedGlyph {
     /// この字が乗っている行
     pub line_top: f32,
     pub line_height: f32,
+    /// 何番目の走りから来た字か。**色を変えるのに要る**
+    pub run: u32,
 }
 
 /// 整形済みのテキスト。
@@ -242,6 +247,11 @@ pub struct Shaped {
     pub size: Size,
     /// 原点 (0,0) を左上としたときのグリフ列。位置は物理 px
     pub glyphs: Vec<PlacedGlyph>,
+    /// 走りごとの矩形。下線・打ち消し・スポイラーの塗りに使う。
+    ///
+    /// ⚠️ **行ごとに切れている。** 折り返した走りを 1 つの矩形で塗ると、
+    /// 行間まで塗って本文が読めなくなる ([`Shaped::range_rects`] と同じ理由)
+    pub runs: Vec<RunRect>,
     /// 行の高さ (物理 px)。字が 1 つもないときのキャレットの高さに使う
     pub line_height: f32,
 }
@@ -255,6 +265,13 @@ pub struct TextRect {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+/// 走り 1 つが 1 行の中で占める矩形 (物理 px、原点からの相対)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunRect {
+    pub run: u32,
+    pub rect: TextRect,
 }
 
 impl Shaped {
@@ -404,19 +421,22 @@ impl Shaper {
     }
 
     fn key(&self, text: &str, font: &ResolvedFont, max_w: Option<f32>) -> ShapeKey {
+        self.key_rich(&[(text.to_owned(), font.clone())], max_w)
+    }
+
+    fn key_rich(&self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> ShapeKey {
         ShapeKey {
-            text: text.to_owned(),
-            font: font.clone(),
+            runs: runs.to_vec(),
             max_w_q: max_w.map(quantize).unwrap_or(u32::MAX),
             scale_q: quantize(self.scale),
         }
     }
 
-    fn ensure(&mut self, key: &ShapeKey, text: &str, font: &ResolvedFont, max_w: Option<f32>) {
-        // `entry` を使うと `text` を必ず複製することになる。
+    fn ensure(&mut self, key: &ShapeKey, max_w: Option<f32>) {
+        // `entry` を使うと鍵を必ず複製することになる。
         // 当たる回のほうが圧倒的に多いので、当たりを安く済ませる
         if !self.shaped.contains_key(key) {
-            let shaped = self.shape_uncached(text, font, max_w);
+            let shaped = self.shape_uncached(&key.runs, max_w);
             self.shaped.insert(key.clone(), shaped);
         }
     }
@@ -424,7 +444,18 @@ impl Shaper {
     /// 文字列を整形する。`max_w` は論理 px、`None` なら折り返さない。
     pub fn shape(&mut self, text: &str, font: &ResolvedFont, max_w: Option<f32>) -> &Shaped {
         let key = self.key(text, font, max_w);
-        self.ensure(&key, text, font, max_w);
+        self.ensure(&key, max_w);
+        &self.shaped[&key]
+    }
+
+    /// 飾りの混じった文字列を**一度に**整形する (`FR-021`)。
+    ///
+    /// ⚠️ **走りごとに [`Shaper::shape`] を呼んで横に並べてはいけない。**
+    /// 折り返しがそれぞれ独立して決まるので、行末が合わなくなる。
+    /// 混じったまま 1 つの整形にかけて、はじめて正しい行になる
+    pub fn shape_rich(&mut self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> &Shaped {
+        let key = self.key_rich(runs, max_w);
+        self.ensure(&key, max_w);
         &self.shaped[&key]
     }
 
@@ -433,40 +464,48 @@ impl Shaper {
         self.shape(text, font, max_w).size
     }
 
-    fn shape_uncached(&mut self, text: &str, font: &ResolvedFont, max_w: Option<f32>) -> Shaped {
+    pub fn measure_rich(&mut self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> Size {
+        self.shape_rich(runs, max_w).size
+    }
+
+    /// 走りの並びを**1 つのバッファ**に流して整形する。
+    ///
+    /// ⚠️ 行の高さは全体で 1 つである。走りごとに大きさを変えたいときは
+    /// ここでは足りない。M1 の Markdown では見出しだけが大きさを変え、
+    /// 見出しは別のノードなので足りている
+    fn shape_uncached(&mut self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> Shaped {
         let scale = self.scale;
-        let metrics = Metrics::new(font.size() * scale, font.line_height() * scale);
+        let base = match runs.first() {
+            Some((_, f)) => f.clone(),
+            None => ResolvedFont::from_style(&Style::default()),
+        };
+        let metrics = Metrics::new(base.size() * scale, base.line_height() * scale);
         let mut buf = Buffer::new(&mut self.font_system, metrics);
 
         buf.set_wrap(Wrap::WordOrGlyph);
         buf.set_size(max_w.map(|w| w * scale), None);
 
-        let mut attrs = Attrs::new()
-            .weight(Weight(font.weight))
-            .style(if font.italic {
-                FontStyle::Italic
-            } else {
-                FontStyle::Normal
-            });
-        if let Some(family) = &font.family {
-            attrs = attrs.family(Family::Name(family));
-        }
-        if font.letter_spacing_q != 0 {
-            // テーマは論理 px で書く。cosmic-text は EM で受ける
-            attrs = attrs.letter_spacing(dequantize(font.letter_spacing_q) / font.size());
-        }
-
-        buf.set_text(text, &attrs, Shaping::Advanced, None);
+        let spans: Vec<(&str, Attrs)> = runs
+            .iter()
+            .enumerate()
+            // ⚠️ **番号を持たせる。** これが無いと、整形が済んだあとで
+            // 「この字はどの走りから来たか」を byte 位置で数え直すことに
+            // なる。走りが空文字列を含むと数え直しは合わない
+            .map(|(i, (t, f))| (t.as_str(), attrs_of(f).metadata(i)))
+            .collect();
+        buf.set_rich_text(spans, &attrs_of(&base), Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.font_system, false);
 
         let mut w = 0.0f32;
         let mut h = 0.0f32;
         let mut glyphs = Vec::new();
+        let mut rects: Vec<RunRect> = Vec::new();
         for run in buf.layout_runs() {
             w = w.max(run.line_w);
             h = h.max(run.line_top + run.line_height);
             for g in run.glyphs {
                 let p = g.physical((0.0, run.line_y), 1.0);
+                let which = g.metadata as u32;
                 glyphs.push(PlacedGlyph {
                     cache_key: p.cache_key,
                     x: p.x,
@@ -477,7 +516,26 @@ impl Shaper {
                     advance: g.w,
                     line_top: run.line_top,
                     line_height: run.line_height,
+                    run: which,
                 });
+                // 同じ走りが同じ行で続いている間は 1 つの矩形に伸ばす
+                match rects.last_mut() {
+                    Some(last)
+                        if last.run == which
+                            && (last.rect.y - run.line_top).abs() < f32::EPSILON =>
+                    {
+                        last.rect.w = (g.x + g.w) - last.rect.x;
+                    }
+                    _ => rects.push(RunRect {
+                        run: which,
+                        rect: TextRect {
+                            x: g.x,
+                            y: run.line_top,
+                            w: g.w,
+                            h: run.line_height,
+                        },
+                    }),
+                }
             }
         }
 
@@ -490,9 +548,29 @@ impl Shaper {
             // 収まっていたはずの最後の 1 文字が次の行へ落ちる
             size: Size::new((w / scale).ceil(), (h / scale).ceil()),
             glyphs,
+            runs: rects,
             line_height: metrics.line_height,
         }
     }
+}
+
+/// 書体を `cosmic-text` の言い方へ直す。
+fn attrs_of(font: &ResolvedFont) -> Attrs<'_> {
+    let mut attrs = Attrs::new()
+        .weight(Weight(font.weight))
+        .style(if font.italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        });
+    if let Some(family) = &font.family {
+        attrs = attrs.family(Family::Name(family));
+    }
+    if font.letter_spacing_q != 0 {
+        // テーマは論理 px で書く。cosmic-text は EM で受ける
+        attrs = attrs.letter_spacing(dequantize(font.letter_spacing_q) / font.size());
+    }
+    attrs
 }
 
 /// 整形 ([`Shaper`]) に、GPU 上のグリフアトラスを足したもの。描画で使う。
@@ -548,7 +626,7 @@ impl TextEngine {
         mut f: impl FnMut(&GlyphEntry, i32, i32),
     ) -> Size {
         let key = self.shaper.key(text, font, max_w);
-        self.shaper.ensure(&key, text, font, max_w);
+        self.shaper.ensure(&key, max_w);
 
         let Shaper {
             shaped,
@@ -567,6 +645,44 @@ impl TextEngine {
             }
         }
         s.size
+    }
+
+    /// 飾りの混じった文字を積む。
+    ///
+    /// `f` は `(アトラス上の位置, ずれ, 何番目の走りか)` を受け取る。
+    /// **走りの番号が要る** — 走りごとに色が違うためである。
+    ///
+    /// 走りごとの矩形も返す。下線・打ち消し・スポイラーはそれで塗る
+    pub fn draw_rich_glyphs(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        runs: &[(String, ResolvedFont)],
+        max_w: Option<f32>,
+        mut f: impl FnMut(&GlyphEntry, i32, i32, u32),
+    ) -> Vec<RunRect> {
+        let key = self.shaper.key_rich(runs, max_w);
+        self.shaper.ensure(&key, max_w);
+
+        let Shaper {
+            shaped,
+            font_system,
+            swash,
+            ..
+        } = &mut self.shaper;
+        let atlas = &mut self.atlas;
+
+        let s = &shaped[&key];
+        for g in &s.glyphs {
+            if let Some(e) = atlas.glyph(device, queue, font_system, swash, g.cache_key)
+                && e.w != 0
+            {
+                f(&e, g.x, g.y, g.run);
+            }
+        }
+        // ⚠️ 借用の都合で複製する。走りの数は本文の飾りの数であって、
+        // 字の数ではない。一続きの文で数個である
+        s.runs.clone()
     }
 
     /// アイコンをアトラスへ載せて位置を返す。`size_px` は物理ピクセル。
@@ -1169,6 +1285,116 @@ mod shelf_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain(size: f32) -> ResolvedFont {
+        ResolvedFont::from_font(&Font {
+            size: Some(size),
+            ..Font::default()
+        })
+    }
+
+    fn bold(size: f32) -> ResolvedFont {
+        ResolvedFont::from_font(&Font {
+            size: Some(size),
+            weight: Some(700),
+            ..Font::default()
+        })
+    }
+
+    /// ⚠️ **飾りごとに整形して横に並べてはいけない。**
+    ///
+    /// 並べると折り返しがそれぞれ独立して決まり、行末が合わなくなる。
+    /// ここでは「まとめて整形すると 2 行に折り返す幅」を与えて、
+    /// **一続きの文として折り返していること**を見ている。走りごとに
+    /// 整形していたら、どちらの走りも 1 行に収まって 1 行のままになる
+    #[test]
+    fn 混じった飾りは一続きの文として折り返す() {
+        let mut sh = Shaper::new(1.0);
+        let runs = [
+            ("aaaa ".to_owned(), plain(16.0)),
+            ("bbbb".to_owned(), bold(16.0)),
+        ];
+
+        let one = sh.measure_rich(&runs, None);
+        // どちらの走りも単独なら収まる幅で、まとめると収まらない幅
+        let narrow = one.w * 0.7;
+        let two = sh.measure_rich(&runs, Some(narrow));
+
+        assert!(
+            two.h > one.h,
+            "まとめて折り返していない。1 行 {:?} / 折り返し {:?}",
+            one,
+            two
+        );
+        assert!(two.w <= narrow.ceil(), "折り返し幅を超えている {two:?}");
+    }
+
+    /// 走りの番号が字まで届いていること。**届かないと色が塗り分けられない**
+    #[test]
+    fn 字はどの走りから来たかを覚えている() {
+        let mut sh = Shaper::new(1.0);
+        let runs = [
+            ("ab".to_owned(), plain(16.0)),
+            ("cd".to_owned(), bold(16.0)),
+        ];
+        let shaped = sh.shape_rich(&runs, None);
+
+        let which: Vec<u32> = shaped.glyphs.iter().map(|g| g.run).collect();
+        assert_eq!(which, vec![0, 0, 1, 1], "走りの番号が字に付いていない");
+    }
+
+    /// ⚠️ 折り返した走りを 1 つの矩形で塗ると、行間まで塗って読めなくなる
+    #[test]
+    fn 走りの矩形は行ごとに切れる() {
+        let mut sh = Shaper::new(1.0);
+        let runs = [("aaaa bbbb".to_owned(), plain(16.0))];
+        let wide = sh.measure_rich(&runs, None).w;
+        let shaped = sh.shape_rich(&runs, Some(wide * 0.6));
+
+        assert!(
+            shaped.runs.len() >= 2,
+            "折り返したのに矩形が 1 つしかない {:?}",
+            shaped.runs
+        );
+        let ys: Vec<f32> = shaped.runs.iter().map(|r| r.rect.y).collect();
+        assert!(ys[0] != ys[1], "行が違うのに同じ高さにある {ys:?}");
+    }
+
+    /// 走りが 1 つのときは、飾りの無い文字列と同じ結果になること。
+    /// **同じ道を通っている**ことの確認である
+    #[test]
+    fn 走りが一つなら素の文字列と同じ() {
+        let mut sh = Shaper::new(1.0);
+        let f = plain(16.0);
+        let a = sh.measure("こんにちは world", &f, None);
+        let b = sh.measure_rich(&[("こんにちは world".to_owned(), f)], None);
+        assert_eq!(a, b);
+    }
+
+    /// ⚠️ **走りの切れ目が行に影響してはいけない。**
+    ///
+    /// 同じ書体で 2 つに割った走りは、割らずに 1 つで書いたものと
+    /// **1 ピクセルも違わない**はずである。ここが違うということは、
+    /// 走りごとに独立して置いているということで、飾りを付けた途端に
+    /// 行末がずれる
+    #[test]
+    fn 走りの切れ目は行に影響しない() {
+        let mut sh = Shaper::new(1.0);
+        let f = plain(16.0);
+        let whole = "the quick brown fox jumps over the lazy dog";
+        let split = [
+            ("the quick brown ".to_owned(), f.clone()),
+            ("fox jumps over ".to_owned(), f.clone()),
+            ("the lazy dog".to_owned(), f.clone()),
+        ];
+        for w in [40.0, 80.0, 160.0, 320.0] {
+            assert_eq!(
+                sh.measure(whole, &f, Some(w)),
+                sh.measure_rich(&split, Some(w)),
+                "折り返し幅 {w} で結果が違う"
+            );
+        }
+    }
 
     /// cosmic-text の Han 統合の判定は完全一致なので、そこへ通る形に
     /// なっていること。**ここが崩れると日本語が中国語の書体で描かれる。**

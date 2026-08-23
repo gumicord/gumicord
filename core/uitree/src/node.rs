@@ -18,17 +18,30 @@
 
 use crate::ids::{DataKind, NodeId};
 use crate::style::Style;
-use crate::value::Color;
+use crate::value::{Color, Font};
 use crate::{Key, State, StateSet};
 
 /// ノードが表示する中身。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+///
+/// ⚠️ `Eq` を持たない。[`Span`] が大きさや色 (`f32`) を持つためである
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Content {
     /// 子ノードだけを持つ。コンテナ
     #[default]
     None,
     /// 文字列。整形はレンダラが行う
     Text(String),
+    /// 飾りの混じった文字列 (`FR-021`)。
+    ///
+    /// # ⚠️ 飾りごとにノードを作ってはいけない
+    ///
+    /// 「太字だけ別のノードにして横に並べる」は動かない。並べたノードは
+    /// **それぞれが独立して折り返す**ので、`これは **とても長い** 文章`
+    /// の行末が合わなくなる。行の折り返しは、混じったまま一度に整形して
+    /// はじめて正しく決まる。
+    ///
+    /// だから飾りは中身側に持たせ、ノードは 1 つのままにする
+    Rich(Vec<Span>),
     /// アイコン。**名前で指す。**
     ///
     /// 何が描かれるかはレンダラが決める。名前で指すのは、字として描くのを
@@ -53,6 +66,43 @@ pub enum Content {
     /// 描くのがレンダラの仕事**だからである。文字の位置を知っているのは
     /// 整形したところだけで、アプリはバイト位置しか持てない。
     Editable(Editable),
+}
+
+/// 飾りの付いた一続きの文字。[`Content::Rich`] の要素。
+///
+/// # ⚠️ ここに入るのは**テーマが決めた結果**である
+///
+/// 「太字である」ではなく「太さ 700 である」が入る。太字を何で表すかは
+/// テーマの領分で ([`spec/04-theme.md`])、ここまで来た時点でその判断は
+/// 済んでいる。`Deco::BOLD` のような意味をここへ持ち込むと、
+/// **レンダラが太字の見た目を決めることになる**。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Span {
+    pub text: String,
+    /// 書体。`None` ならノードの書体をそのまま使う
+    pub font: Option<Font>,
+    /// 文字色。`None` ならノードの色
+    pub color: Option<Color>,
+    /// 文字に引く線
+    pub line: Line,
+    /// 中身を隠すか (スポイラー)。
+    ///
+    /// ⚠️ **場所は空けたまま隠す。** 詰めて描くと、開いた瞬間に
+    /// 行の折り返しが変わって本文が飛び跳ねる
+    pub hidden: bool,
+}
+
+/// 文字に引く線。**重ねられる** — `__~~a~~__` は両方引く
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Line {
+    pub under: bool,
+    pub through: bool,
+}
+
+impl Line {
+    pub const fn any(self) -> bool {
+        self.under || self.through
+    }
 }
 
 /// 編集中のテキストと、その上の印。位置は**バイト位置**である。
@@ -107,6 +157,18 @@ impl Content {
     pub fn as_icon(&self) -> Option<&str> {
         match self {
             Content::Icon(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// 飾りの混じった文字。
+    ///
+    /// ⚠️ [`Content::as_text`] はここを返さない。繋げて 1 本の文字列に
+    /// すると飾りが落ちるので、**飾りを見る側が気づかないまま素の文字に
+    /// なる**。見たいなら明示的にこちらを呼ぶこと
+    pub fn as_rich(&self) -> Option<&[Span]> {
+        match self {
+            Content::Rich(s) => Some(s),
             _ => None,
         }
     }
