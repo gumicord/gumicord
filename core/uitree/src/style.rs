@@ -50,6 +50,22 @@ pub struct Style {
     ///
     /// 仕様: [`spec/04-theme.md`] 3.5
     pub transition: Option<f32>,
+    /// 文字に引く線 (`FR-021`)。
+    ///
+    /// # ⚠️ 「下線を引く」と決めるのはテーマである
+    ///
+    /// `__a__` を下線で描くか、色を変えて描くか、太さを変えて描くかは
+    /// **見た目の判断**であって、Markdown の解析結果ではない。
+    /// 解析が言えるのは「ここが `__` で囲まれていた」までである
+    /// ([`spec/04-theme.md`] 3.6)
+    pub decoration: Option<Decoration>,
+}
+
+/// 文字に引く線。**重ねられる** — `__~~a~~__` は両方引く
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Decoration {
+    pub underline: bool,
+    pub strikethrough: bool,
 }
 
 impl Style {
@@ -92,6 +108,7 @@ impl Style {
         overlay_field(&mut self.opacity, &other.opacity);
         overlay_field(&mut self.shadow, &other.shadow);
         overlay_field(&mut self.transition, &other.transition);
+        overlay_field(&mut self.decoration, &other.decoration);
     }
 
     /// 親から継承する。**継承するのは `color` と `font` だけ**である

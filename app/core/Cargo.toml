@@ -13,6 +13,7 @@ gumicord-gateway.workspace = true
 gumicord-rest.workspace = true
 gumicord-store.workspace = true
 gumicord-uitree.workspace = true
+gumicord-markdown.workspace = true
 gumicord-theme.workspace = true
 gumicord-plugin.workspace = true
 gumicord-render.workspace = true

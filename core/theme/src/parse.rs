@@ -14,7 +14,7 @@
 
 use serde_json::{Map, Value};
 
-use gumicord_uitree::{NodeId, State, StateSet};
+use gumicord_uitree::{Decoration, NodeId, State, StateSet};
 
 use crate::cond::{ColorScheme, PlatformSel, When};
 use crate::diag::{Diagnostics, Ignored};
@@ -545,6 +545,7 @@ fn style(
             // ⚠️ **見た目ではなく「見た目の変わり方」である。**
             // ここ自身は何も描かない
             "transition" => s.transition = length(v, env, &p, diags),
+            "decoration" => s.decoration = decoration(v, &p, diags),
             _ => diags.warn(
                 &p,
                 Ignored::Property,
@@ -606,6 +607,42 @@ fn when(obj: &Map<String, Value>, path: &str, diags: &mut Diagnostics) -> Option
         }
     }
     Some(w)
+}
+
+/// `"underline"` / `"strikethrough"` / `"none"`、および空白で並べたもの。
+///
+/// ⚠️ **知らない語が 1 つでもあればプロパティごと捨てる。** 一部だけ効かせると
+/// 「打ち消しは出たのに下線は出ない」という、綴りの誤りに気づけない形の
+/// 壊れ方をする
+fn decoration(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<Decoration> {
+    let Some(text) = v.as_str() else {
+        diags.warn(
+            path,
+            Ignored::Property,
+            format!("decoration は文字列である。{v} を読めない"),
+        );
+        return None;
+    };
+    let mut d = Decoration::default();
+    for word in text.split_whitespace() {
+        match word {
+            "underline" => d.underline = true,
+            "strikethrough" => d.strikethrough = true,
+            // 明示的に「何も引かない」と書けること。前のルールを打ち消せる
+            "none" => {}
+            _ => {
+                diags.warn(
+                    path,
+                    Ignored::Property,
+                    format!(
+                        "未知の decoration {word}。underline / strikethrough / none のいずれかである"
+                    ),
+                );
+                return None;
+            }
+        }
+    }
+    Some(d)
 }
 
 /// `when` の数値。負のウィンドウ幅は意味を持たない。

@@ -54,11 +54,12 @@
 pub mod demo;
 pub mod images;
 pub mod live;
+pub mod markdown;
 pub mod session;
 
 use std::borrow::Cow;
 
-use gumicord_model::{ChannelId, GuildId, RoleId};
+use gumicord_model::{ChannelId, GuildId, RoleId, UserId};
 use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
@@ -200,6 +201,18 @@ pub struct Gumicord {
     /// **その一覧にしかスクロールバーを出さない**
     hovered_scroll: Option<NodeId>,
     selected_guild: u64,
+    /// テーマ照合の文脈。**木を組む前に控える。**
+    ///
+    /// ⚠️ 本文の飾り (太字・リンク) は走りであってノードではないので、
+    /// [`gumicord_theme::resolve`] の走査に乗らない。木を組みながら
+    /// テーマを引くしかなく、そのために要る ([`crate::markdown`])
+    match_ctx: MatchContext,
+    /// スポイラーを開けたメッセージ。
+    ///
+    /// ⚠️ **メッセージ単位である。** 走りごとに開けるには走りごとの
+    /// 当たり判定が要り、それは走りをノードにすることを意味する。
+    /// それはできない ([`crate::markdown`])
+    revealed: std::collections::HashSet<u64>,
     selected_channel: u64,
     /// 入力欄にフォーカスがあるか
     input_focused: bool,
@@ -254,6 +267,8 @@ impl Gumicord {
             hovered: None,
             hovered_scroll: None,
             selected_guild: guild,
+            match_ctx: MatchContext::new(0.0),
+            revealed: std::collections::HashSet::new(),
             selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),
@@ -516,6 +531,12 @@ impl Application for Gumicord {
                     changed |= self.selected_channel != *id;
                     self.selected_channel = *id;
                 }
+                // ⚠️ **メッセージ単位で開く。** 走りごとに開けるには
+                // 走りごとの当たり判定が要り、それは走りをノードにする
+                // ことを意味する。それはできない ([`crate::markdown`])
+                (NodeId::ChatMessage, Some(Key::Id(id))) => {
+                    changed |= self.revealed.insert(*id);
+                }
                 _ => continue,
             }
             break;
@@ -576,13 +597,17 @@ impl Application for Gumicord {
         // ⚠️ **頼む絵の大きさが DPI で変わる。** 木を組む前に控える
         self.scale = cx.scale;
 
+        // ⚠️ **木を組む前に控える。** 本文の飾りは走りであってノードでは
+        // ないので、[5] の走査では拾えない。組みながら引くしかない
+        let ctx = MatchContext::new(cx.viewport.w);
+        self.match_ctx = ctx;
+
         // [3] UITree 構築
         let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
 
         // [5] テーマ解決
         match &self.theme {
             Some(theme) => {
-                let ctx = MatchContext::new(cx.viewport.w);
                 gumicord_theme::resolve(theme, &mut tree, &ctx);
             }
             None => gumicord_theme::resolve::clear(&mut tree),
@@ -1180,7 +1205,7 @@ impl Gumicord {
                             .with_data(m.id),
                     )
             })
-            .child(UiNode::text(NodeId::ChatMessageContent, &m.body).with_data(m.id));
+            .child(self.content_of(m));
 
         UiNode::new(NodeId::ChatMessage)
             .with_id_key(m.id)
@@ -1193,6 +1218,58 @@ impl Gumicord {
             })
             // 送信者行と本文を縦に積む。`layout.column` はこのためにある
             .child(body)
+    }
+
+    /// 本文 (`FR-021`)。
+    ///
+    /// ⚠️ **毎フレーム解析している。** 本文 1 件は数百文字で、解析は
+    /// 文字数に比例するだけなので、いまは測っても出てこない。出てきたら
+    /// メッセージ ID で覚える — が、覚える前に**測ること**
+    fn content_of(&self, m: &MessageRow) -> UiNode {
+        let ink = crate::markdown::Ink::new(
+            self.theme.as_ref(),
+            self.match_ctx,
+            self.revealed.contains(&m.id),
+        );
+        let names = StoreNames {
+            store: self.live.store(),
+            guild: GuildId::from(self.selected_guild),
+        };
+        UiNode::new(NodeId::ChatMessageContent)
+            .with_data(m.id)
+            .children(ink.blocks(&m.blocks, &names))
+    }
+}
+
+/// 番号から名前を引く。**知らないものは知らないと言う。**
+struct StoreNames<'a> {
+    store: &'a gumicord_store::Store,
+    guild: GuildId,
+}
+
+impl crate::markdown::Names for StoreNames<'_> {
+    fn user(&self, id: u64) -> Option<String> {
+        self.store
+            .member(self.guild, UserId::from(id))
+            // ⚠️ **そのサーバでの呼び名が勝つ。** 呼びかけの相手が
+            // 「このサーバでは誰なのか」で出ないと、誰のことか分からない
+            .and_then(|m| {
+                m.nick
+                    .clone()
+                    .or_else(|| m.user.as_ref().map(|u| u.display_name().to_owned()))
+            })
+    }
+
+    fn channel(&self, id: u64) -> Option<String> {
+        self.store
+            .channel(ChannelId::from(id))
+            .and_then(|c| c.name.clone())
+    }
+
+    fn role(&self, id: u64) -> Option<String> {
+        self.store
+            .role_name(self.guild, RoleId::from(id))
+            .map(str::to_owned)
     }
 }
 
@@ -1244,7 +1321,11 @@ struct MessageRow {
     /// 役職の色。**塗る場所はテーマが決める**
     tint: Option<u32>,
     time: String,
-    body: String,
+    /// 解析済みの本文。
+    ///
+    /// ⚠️ **素の文字列を持たない。** 両方持つと、片方だけ見て描く場所が
+    /// 出てくる。本文が飾りを失っていることに気づけるのは、読む人だけである
+    blocks: Vec<gumicord_markdown::Block>,
     mentioned: bool,
 }
 
@@ -1496,7 +1577,7 @@ impl Gumicord {
                     avatar: None,
                     tint: None,
                     time: m.time.to_string(),
-                    body: m.body.to_string(),
+                    blocks: gumicord_markdown::parse(&m.body),
                     mentioned: m.mentioned,
                 })
                 .collect();
@@ -1521,6 +1602,7 @@ impl Gumicord {
                     .as_ref()
                     .or_else(|| self.live.store().member(guild, m.author.id));
 
+                let blocks = gumicord_markdown::parse(&m.content);
                 MessageRow {
                     id: m.id.get(),
                     // ⚠️ **そのサーバでの呼び名が勝つ。** 全体の名前で出すと、
@@ -1543,17 +1625,60 @@ impl Gumicord {
                     // 色を載せるだけで、塗る場所はテーマが決める
                     tint: member.and_then(|x| self.live.store().member_tint(guild, &x.roles)),
                     time: local_time(&m.timestamp),
-                    body: m.content.clone(),
-                    // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
-                    // いまは**自分への返信かどうかだけ**を見ている
                     mentioned: m
                         .referenced_message
                         .as_ref()
-                        .is_some_and(|r| Some(r.author.id) == me),
+                        .is_some_and(|r| Some(r.author.id) == me)
+                        || calls_me(&blocks, me, member.map(|x| x.roles.as_slice())),
+                    blocks,
                 }
             })
             .collect()
     }
+}
+
+/// 本文が自分を呼んでいるか (`FR-022`)。
+///
+/// # ⚠️ コードの中の `<@1>` は呼びかけではない
+///
+/// 素の文字列を `contains` で調べると、`` `<@1>` `` と書いただけで
+/// 相手に通知が飛ぶ。解析した結果を見ること。
+///
+/// ⚠️ **役職も見る。** `@everyone` だけを見ていると、自分の役職が
+/// 呼ばれたときに気づけない
+fn calls_me(
+    blocks: &[gumicord_markdown::Block],
+    me: Option<UserId>,
+    roles: Option<&[RoleId]>,
+) -> bool {
+    use gumicord_markdown::{Block, InlineKind, Mention};
+
+    fn walk(blocks: &[Block], f: &mut impl FnMut(Mention) -> bool) -> bool {
+        blocks.iter().any(|b| match b {
+            Block::Paragraph(c) | Block::Heading { content: c, .. } | Block::Subtext(c) => {
+                c.iter().any(|i| match &i.kind {
+                    InlineKind::Mention(m) => f(*m),
+                    _ => false,
+                })
+            }
+            Block::Quote(inner) => walk(inner, f),
+            Block::List(items) => items.iter().any(|it| {
+                it.content.iter().any(|i| match &i.kind {
+                    InlineKind::Mention(m) => f(*m),
+                    _ => false,
+                })
+            }),
+            // ⚠️ **コードの中は呼びかけではない**
+            Block::Code { .. } => false,
+        })
+    }
+
+    walk(blocks, &mut |m| match m {
+        Mention::User(id) => Some(UserId::from(id)) == me,
+        Mention::Role(id) => roles.is_some_and(|r| r.contains(&RoleId::from(id))),
+        Mention::Everyone | Mention::Here => true,
+        Mention::Channel(_) => false,
+    })
 }
 
 /// 名前の頭 1 文字。アイコンが無いときの代わりに出す
@@ -1603,6 +1728,53 @@ mod tests {
         Gumicord::demo()
     }
 
+    /// ⚠️ **コードの中の `<@1>` は呼びかけではない。**
+    ///
+    /// 素の文字列を `contains` で調べる実装だと、`` `<@1>` `` と書いた
+    /// だけで相手に通知が飛ぶ。ここは解析した結果を見ている (`FR-022`)
+    #[test]
+    fn コードの中のメンションは呼びかけではない() {
+        let me = Some(UserId::from(1));
+        let call = |src: &str| calls_me(&gumicord_markdown::parse(src), me, None);
+
+        assert!(call("やあ <@1>"));
+        assert!(!call("`<@1>` と書くと呼べる"));
+        assert!(!call(
+            "```
+<@1>
+```"
+        ));
+        // 別人は呼ばない
+        assert!(!call("やあ <@2>"));
+    }
+
+    /// ⚠️ **役職も見る。** `@everyone` だけを見ていると、自分の役職が
+    /// 呼ばれたときに気づけない
+    #[test]
+    fn 自分の役職への呼びかけも気づく() {
+        let me = Some(UserId::from(1));
+        let roles = [RoleId::from(9)];
+        let call =
+            |src: &str, r: Option<&[RoleId]>| calls_me(&gumicord_markdown::parse(src), me, r);
+
+        assert!(call("<@&9> 集合", Some(&roles)));
+        assert!(!call("<@&8> 集合", Some(&roles)));
+        assert!(!call("<@&9> 集合", None));
+        assert!(call("@everyone", None));
+        assert!(call("@here", None));
+        // チャンネルは呼びかけではない
+        assert!(!call("<#9> を見て", Some(&roles)));
+    }
+
+    /// 引用と箇条書きの中の呼びかけも拾うこと
+    #[test]
+    fn 入れ子の中の呼びかけも拾う() {
+        let me = Some(UserId::from(1));
+        let call = |src: &str| calls_me(&gumicord_markdown::parse(src), me, None);
+        assert!(call("> やあ <@1>"));
+        assert!(call("- やあ <@1>"));
+        assert!(call("# やあ <@1>"));
+    }
     /// 同梱テーマが常に読める。ここが壊れると起動して真っ黒になる
     #[test]
     fn the_bundled_theme_parses() {
@@ -1754,14 +1926,29 @@ mod input_tests {
         found.expect("入力欄が見つからない")
     }
 
+    /// 本文を読める文字列に戻す。
+    ///
+    /// ⚠️ **飾りは落ちる。** 本文は `chat.message.content` の下に積まれた
+    /// 段落の並びであり、段落の中は走りの並びである (`FR-021`)。
+    /// ここが見ているのは「何が書いてあるか」だけで、どう飾られているかは
+    /// 見ていない
     fn bodies(tree: &UiNode) -> Vec<String> {
         let mut out = Vec::new();
         tree.walk(&mut |n, _| {
-            if n.id == NodeId::ChatMessageContent
-                && let Some(s) = n.content.as_text()
-            {
-                out.push(s.to_owned());
+            if n.id != NodeId::ChatMessageContent {
+                return;
             }
+            let mut text = String::new();
+            n.walk(&mut |c, _| {
+                if let Some(spans) = c.content.as_rich() {
+                    for sp in spans {
+                        text.push_str(&sp.text);
+                    }
+                } else if let Some(s) = c.content.as_text() {
+                    text.push_str(s);
+                }
+            });
+            out.push(text);
         });
         out
     }

@@ -176,6 +176,11 @@
         "transition": {
           "description": "値が変わったときに、そこへ動いていく時間 (ミリ秒)。書いたノードだけが動く (spec/04-theme.md 3.5)",
           "$ref": "#/$defs/lengthOrRef"
+        },
+        "decoration": {
+          "description": "文字に引く線 (spec/04-theme.md 3.6)。空白で並べて重ねられる",
+          "type": "string",
+          "pattern": "^(none|underline|strikethrough)( (none|underline|strikethrough))*$"
         }
       }
     },

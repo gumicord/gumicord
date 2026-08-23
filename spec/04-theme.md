@@ -195,6 +195,42 @@ theme.json ──[JSON Schema 検証]──▶ トークン表 + ルール表
 
 駆動は**時間**である。フレーム数ではない — 60Hz と 144Hz で速さが変わっては `EXT-020` (全プラットフォームで同じ描画結果) を主張できない ([06-renderer.md 9.5](06-renderer.md#95-アニメーションは時間で駆動する))。
 
+### 3.6 `decoration` — 文字に引く線 (`FR-021`)
+
+```json
+{ "select": "primitive.text", "when": { "slot": "underline" },
+  "style": { "decoration": "underline" } },
+{ "select": "primitive.text", "when": { "slot": "strike" },
+  "style": { "decoration": "strikethrough", "color": "$color.text.muted" } }
+```
+
+値は `underline` / `strikethrough` / `none`、および空白で並べたもの (`"underline strikethrough"`)。
+
+> ⚠️ **「下線を引く」と決めるのはテーマである。** `__a__` を下線で描くか、色を変えて描くか、太さを変えて描くかは見た目の判断であって、Markdown の解析結果ではない。解析が言えるのは「ここが `__` で囲まれていた」までである。
+>
+> ⚠️ **知らない語が 1 つでもあればプロパティごと捨てる。** 一部だけ効かせると「打ち消しは出たのに下線は出ない」という、綴りの誤りに気づけない形の壊れ方をする。
+
+### 3.7 本文の飾りは `primitive.text` の `slot` で狙う (`FR-021`)
+
+Markdown の**行の中の飾りはノードではない**。太字を別のノードにして横に並べると、並べたノードがそれぞれ独立して折り返し、行末が合わなくなる ([06-renderer.md 6.6](06-renderer.md#66-飾りの混じった文字-fr-021))。
+
+そのためテーマからは `primitive.text` の `when.slot` で狙う。**重なった飾りは、書いた順に重ねて適用される。**
+
+| slot | いつ |
+|---|---|
+| `bold` `italic` `underline` `strike` | `**` `*` `__` `~~` |
+| `spoiler` | `||`。**隠している間は `color` がそのまま塗りになる** |
+| `code` | `` ` `` (行の中) |
+| `link` `mention` | リンク・裸の URL / `<@1>` `<#1>` `<@&1>` `@everyone` |
+| `h1` `h2` `h3` `subtext` | 見出しと `-# ` |
+| `bullet` | 箇条書きの印 |
+
+縦に積まれるものはノードなので、通常どおり安定 ID で狙える — 引用の線は `primitive.divider` の `slot: "quote_bar"`、コードブロックは `primitive.code_block`、箇条書きの字下げは `layout.row` の `slot: "li0"`〜`"li4"`。
+
+> ⚠️ **字下げの幅を決めるのはテーマである。** クライアントが渡すのは「何段目か」だけで、何 px 下げるかは書かない。
+
+---
+
 ### 3.4 プラグインとの共有語彙
 
 プラグインが生成したノードも、テーマの適用対象になる ([02-architecture.md のパイプライン](02-architecture.md#フレームのパイプライン-) [4] → [5])。

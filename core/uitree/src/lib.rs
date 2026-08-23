@@ -20,7 +20,7 @@ pub mod value;
 
 pub use ids::{DataKind, NodeId, Origin, UnknownNodeId};
 pub use node::{Content, DataRef, Editable, Line, Span, UiNode};
-pub use style::Style;
+pub use style::{Decoration, Style};
 
 /// ノードの状態。テーマの条件分岐に使う (`EXT-013`)。
 ///
