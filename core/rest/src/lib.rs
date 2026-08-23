@@ -1,17 +1,11 @@
-//! Discord REST API クライアント。
+//! Discord REST client: requests, rate limit avoidance, and 429 backoff.
 //!
-//! 責務: リクエスト / バケット単位のレート制限の事前抑制 / 429 からの指数バックオフ。
+//! Rate limits apply per *bucket*, not per route, so routes map to buckets and
+//! buckets map to state. Sequential user-driven requests never exhaust a
+//! bucket — round-trip latency alone spaces them out — so the limiter only
+//! matters for concurrent bursts.
 //!
-//! ⚠️ レート制限は**ルート単位ではなくバケット単位**でかかる。
-//! ルート → バケット ID → 状態 の 2 段のマッピングが必要である。
-//!
-//! S4 の発見: 往復遅延 (321〜833 ms) 自体が自然な間隔になるため、
-//! **逐次リクエストではバケットを使い切れない**。レート制限が実際に問題に
-//! なるのは並行リクエストのバーストであって、ユーザー操作起因の逐次
-//! リクエストではない。
-//!
-//! 要件: `NFR-021`, `NFR-022`, `NFR-024`
-//! 仕様: [`spec/09-discord-protocol.md`]
+//! See `spec/09-discord-protocol.md`.
 
 pub mod auth;
 pub mod build_number;

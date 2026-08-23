@@ -1,17 +1,8 @@
-//! セマンティック UI ツリー。**安定 ID の唯一の定義元。**
+//! Semantic UI tree — the single definition site for stable IDs.
 //!
-//! ここが Gumicord の拡張 ABI そのものである。
-//!
-//! ⚠️ [`ids`] に定義された安定 ID は、**メジャーバージョン内で削除も改名も
-//! できない** (`EXT-003`)。追加のみを許す。これは技術的な制約ではなく
-//! **プロジェクトの約束**であり、破ると BetterDiscord のプラグインが壊れ
-//! 続ける問題を解くという存在理由が消える。
-//!
-//! `spec/03-uitree.md` の安定 ID 一覧と `sdk/src/ids.ts` は、
-//! **このクレートから `cargo xtask gen` で生成する**。手書きで同期しない。
-//!
-//! 要件: `EXT-001`〜`EXT-006`
-//! 仕様: [`spec/03-uitree.md`]
+//! This crate is the extension ABI. Stable IDs in [`ids`] can never be removed
+//! or renamed within a major version; only added. `spec/03-uitree.md` and
+//! `sdk/src/ids.ts` are generated from here by `cargo xtask gen`.
 
 pub mod ids;
 pub mod node;
@@ -22,9 +13,7 @@ pub use ids::{DataKind, NodeId, Origin, UnknownNodeId};
 pub use node::{Anchor, Content, DataRef, Editable, Line, Span, UiNode};
 pub use style::{Decoration, Style};
 
-/// ノードの状態。テーマの条件分岐に使う (`EXT-013`)。
-///
-/// 複数が同時に立ちうる。
+/// Node state a theme can select on. Several can hold at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum State {
     Hover,
@@ -35,11 +24,9 @@ pub enum State {
     Unread,
     Mentioned,
     Loading,
-    /// 直前と同じ送信者が続いている (`EXT-003` により v1.1 で追加)
+    /// The same author posted the previous message.
     Grouped,
-    /// 折り畳まれていて、中身が出ていない。
-    ///
-    /// サーバフォルダに使う (`EXT-003` により v1.2 で追加)
+    /// Folded away; contents are not shown.
     Collapsed,
 }
 
@@ -73,10 +60,9 @@ impl State {
     }
 }
 
-/// 立っている状態の集合。
+/// The set of states that hold.
 ///
-/// 状態はごく少数なのでビットセットで持つ。テーマのセレクタ照合は
-/// ノードごとに走るため、割り当てを避ける。
+/// A bitset because selector matching runs per node and must not allocate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StateSet(u16);
 
@@ -91,7 +77,8 @@ impl StateSet {
         self.0 & (1u16 << s as u16) != 0
     }
 
-    /// すべて含むか。テーマの `when.state` が配列のときに使う (`EXT-013`)。
+    /// Whether every state in `other` holds. A theme's `when.state` array
+    /// requires all of them.
     pub const fn contains_all(self, other: StateSet) -> bool {
         self.0 & other.0 == other.0
     }
@@ -114,17 +101,14 @@ impl FromIterator<State> for StateSet {
     }
 }
 
-/// 同じ親の下で同じ安定 ID を持つノードを区別する鍵。
-///
-/// 差分更新の同一性判定にも使う。**プラグインはこれを読めるがセレクタには
-/// 使えない** (`spec/03-uitree.md` 2.2)。
+/// Distinguishes siblings that share a stable ID, and identifies nodes across
+/// diffs. Plugins can read it but cannot select on it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
-    /// Discord のスノーフレーク
+    /// A Discord snowflake.
     Id(u64),
-    /// 位置による区別 (ウィンドウ操作ボタンなど)
+    /// Position, for things like window control buttons.
     Slot(&'static str),
-    /// 連番
     Index(u32),
 }
 
@@ -141,7 +125,6 @@ mod tests {
         assert_eq!(s.iter().count(), 2);
     }
 
-    /// EXT-013: `when.state` が配列なら**すべて**成立が必要
     #[test]
     fn contains_all_requires_every_state() {
         let node = StateSet::EMPTY.with(State::Hover).with(State::Unread);
@@ -153,13 +136,12 @@ mod tests {
         assert!(node.contains_all(StateSet::EMPTY));
     }
 
-    /// State が 16 個を超えたら StateSet の u16 が溢れる。
-    /// 状態を足すときはここで気づけるようにしておく。
+    /// A seventeenth state would overflow the bitset.
     #[test]
     fn state_count_fits_in_bitset() {
         assert!(
             State::ALL.len() <= 16,
-            "State が 16 個を超えた。StateSet の内部表現を u32 へ広げること"
+            "more than 16 states; widen StateSet to u32"
         );
     }
 }

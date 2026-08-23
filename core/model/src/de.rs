@@ -1,29 +1,25 @@
-//! Discord のデータを**壊れていても読み進める**ための道具。
+//! Deserialisation helpers that keep going when Discord sends something
+//! unexpected.
 //!
-//! # なぜ要るのか
+//! Discord adds fields without notice and mixes in empty shells. Failing a
+//! whole list because one element is unreadable blanks the screen behind it:
+//! a single unavailable-guild shell in READY once made the entire payload
+//! unreadable and the Gateway reconnected forever.
 //!
-//! Discord は予告なくフィールドを足し、形を変え、**中身の無い殻**を混ぜる。
-//! 一覧の要素 1 つが読めないだけで一覧ごと落とすと、その先の画面が丸ごと
-//! 空になる。
-//!
-//! 実際に起きた: READY の `guilds` に落ちているギルドの殻
-//! (`{"id": …, "unavailable": true}`) が 1 つ混ざっただけで READY 全体が
-//! 読めなくなり、**Gateway が永久に繋ぎ直し続けた**。
-//!
-//! ⚠️ ただし**黙って捨てない**。捨てた数は必ず記録に残す。
+//! Nothing is dropped silently — the count is always logged.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
-/// 読めない要素を飛ばして一覧を読む。
+/// Reads a list, skipping elements that fail to deserialise.
 ///
 /// ```ignore
 /// #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
 /// pub guilds: Vec<Guild>,
 /// ```
 ///
-/// ⚠️ **一覧そのものが一覧でなければ誤りである。** 飛ばすのは要素だけで、
-/// 「配列のはずの場所に数値が来た」ようなことは隠さない
+/// A non-list where a list belongs is still an error; only elements are
+/// skipped.
 pub fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -38,7 +34,7 @@ where
             Ok(item) => out.push(item),
             Err(e) => {
                 dropped += 1;
-                tracing::debug!(error = %e, "一覧の要素を読めなかった");
+                tracing::debug!(error = %e, "could not read a list element");
             }
         }
     }
@@ -48,7 +44,7 @@ where
             dropped,
             kept = out.len(),
             type_name = std::any::type_name::<T>(),
-            "読めなかった要素を飛ばした"
+            "skipped unreadable list elements"
         );
     }
     Ok(out)
@@ -65,35 +61,33 @@ mod tests {
         guilds: Vec<Guild>,
     }
 
-    /// **1 つ読めなくても残りは読める。** ここが目的である
     #[test]
     fn an_unreadable_element_does_not_take_the_list_with_it() {
         let h: Holder = serde_json::from_str(
             r#"{"guilds":[
                 {"id":"1","name":"ふつう"},
-                {"識別子すら無い":true},
+                {"no id at all":true},
                 {"id":"3","name":"これも読める"}
             ]}"#,
         )
-        .expect("一覧ごと落ちている");
+        .expect("the whole list failed");
 
         let names: Vec<_> = h.guilds.iter().map(|g| &*g.name).collect();
         assert_eq!(names, vec!["ふつう", "これも読める"]);
     }
 
-    /// 一覧そのものが一覧でなければ**隠さない**
     #[test]
     fn a_non_list_is_still_an_error() {
         assert!(serde_json::from_str::<Holder>(r#"{"guilds":42}"#).is_err());
     }
 
-    /// 落ちているギルドの殻が読める。**これが元の不具合である**
+    /// The shell that caused the original reconnect loop.
     #[test]
     fn an_unavailable_guild_is_a_shell_but_still_readable() {
         let h: Holder =
             serde_json::from_str(r#"{"guilds":[{"id":"1","unavailable":true}]}"#).unwrap();
 
-        assert_eq!(h.guilds.len(), 1, "殻を捨ててしまっている");
+        assert_eq!(h.guilds.len(), 1, "the shell was dropped");
         assert!(h.guilds[0].unavailable);
         assert!(h.guilds[0].name.is_empty());
     }

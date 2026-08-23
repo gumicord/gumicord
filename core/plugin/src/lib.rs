@@ -1,19 +1,9 @@
-//! QuickJS によるプラグインホスト。
+//! QuickJS plugin host: loading, isolation, capability enforcement, and
+//! patching the UITree.
 //!
-//! 責務: プラグインの読み込みと隔離 / ケイパビリティの強制 / 暴走の強制停止 /
-//! UITree への差分パッチ適用。
+//! One `Runtime` + `Context` per plugin. Capabilities are enforced by *not
+//! injecting* the API — an undeclared API does not exist rather than being
+//! refused. Patches receive only the diff; handing over the whole tree costs
+//! two orders of magnitude more.
 //!
-//! **プラグイン 1 個につき `Runtime` と `Context` を 1 組ずつ持つ。**
-//! S3 の実測でこの完全隔離のコストは 11.3 KB であり、隔離のコストを理由に
-//! 妥協する必要はない。
-//!
-//! ⚠️ ケイパビリティは権限チェックのコードではなく**「注入しないこと」**で
-//! 実装する。宣言していない API は拒否されるのではなく**存在しない**。
-//! S3 でプラグインから見える `globalThis` は 78 個で、`require` / `process` /
-//! `fs` / `fetch` / `WebAssembly` はいずれも到達不能であることを確認済み。
-//!
-//! ⚠️ UITree 全体を渡してはならない。S3 の実測で 1601 ノードの往復は 5.242 ms、
-//! 差分のみなら 0.033 ms である。
-//!
-//! 要件: `EXT-030`〜`EXT-053`, `SEC-010`〜`SEC-015`
-//! 仕様: [`spec/05-plugin-api.md`]
+//! See `spec/05-plugin-api.md`.

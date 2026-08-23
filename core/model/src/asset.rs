@@ -1,18 +1,8 @@
-//! CDN に置かれた絵 1 枚。
+//! A single image on the CDN.
 //!
-//! # なぜ URL を組み立てた文字列で持たないのか
-//!
-//! アバターもアイコンも、**どこにあるか**と**どう頼むか**が別々である。
-//! 置き場は Discord が決め、大きさと形式はこちらが決める。文字列を返す
-//! 関数にすると、その 2 つが呼び出しのたびに混ざる:
-//!
-//! ```text
-//!   avatar_url(size)              ← 大きさを知らないと呼べない
-//!   guild_avatar_url(guild, size) ← 引数が増えるたびに全部の呼び出しが変わる
-//! ```
-//!
-//! [`Asset`] は置き場だけを持ち、大きさと形式は後から重ねる。
-//! discord.py の `Asset` と同じ考えである。
+//! Where an image lives is Discord's decision; what size and format to ask for
+//! is ours. A function returning a URL string mixes the two at every call
+//! site, so [`Asset`] carries only the location and the rest is layered on.
 //!
 //! ```
 //! # use gumicord_model::User;
@@ -21,29 +11,23 @@
 //! assert!(url.contains("/embed/avatars/"));
 //! ```
 //!
-//! # ⚠️ 既定は必ず PNG である
-//!
-//! `a_` で始まる印は動く絵 (GIF) だが、**頼むのは静止画である**。R5 の
-//! 読み込みは PNG しか解けないので、動く形を頼むと**動かないどころか
-//! 何も出せない**。動かす仕組みができるまで、この既定は変えない。
+//! The default format is always PNG. An `a_` prefix marks an animated image,
+//! but the decoder only handles PNG, so asking for the animated form would
+//! render nothing at all rather than merely rendering it static.
 
 use std::fmt;
 
 use crate::{GuildId, UserId};
 
-/// CDN の場所。**ここを変えるときは全部同時に変わる**
 const BASE: &str = "https://cdn.discordapp.com";
 
-/// 頼める一番小さい辺
 const MIN_SIZE: u16 = 16;
-/// 頼める一番大きい辺
 const MAX_SIZE: u16 = 4096;
 
-/// 絵の形式。
+/// Image format.
 ///
-/// ⚠️ **`Gif` を選べるが、いま読めるのは `Png` だけである。**
-/// 選べるようにしてあるのは、動く絵を扱う日に [`Asset`] 側を
-/// 触らずに済ませるためである
+/// `Gif` is selectable but not yet decodable; the variant exists so that
+/// adding animation later does not touch [`Asset`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
     #[default]
@@ -64,48 +48,42 @@ impl Format {
     }
 }
 
-/// CDN に置かれた絵 1 枚。
+/// A single image on the CDN.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asset {
-    /// [`BASE`] から下の道筋。**拡張子も `?size=` も含まない**
+    /// Path below [`BASE`], without extension or query.
     path: String,
-    /// Discord が付けた印 (ハッシュ)。既定の絵には無い
+    /// Discord's hash. Empty for built-in images.
     key: String,
-    /// 大きさを選べるか。
+    /// Whether a size can be requested.
     ///
-    /// ⚠️ **既定のアバターは選べない。** 誰が使っても同じ絵なので、
-    /// 大きさを固定しておけば**利用者をまたいで 1 枚を使い回せる**
+    /// Default avatars cannot: everyone sees the same image, so a fixed size
+    /// lets one copy be shared across users.
     resizable: bool,
     format: Format,
     size: Option<u16>,
 }
 
-/// ⚠️ **CDN の道筋を組み立ててよいのはここだけである。**
-///
-/// 同じ形の文字列があちこちに散ると、Discord が置き場を変えた日に
-/// **どこを直せば済むのかが分からなくなる**。
+/// CDN paths are built only here, so a change of layout has one place to fix.
 impl Asset {
-    /// 本人が設定したアバター
     pub fn user_avatar(user: UserId, hash: &str) -> Self {
         Asset::from_key(format!("avatars/{user}/{hash}"), hash)
     }
 
-    /// そのギルドだけのアバター
+    /// An avatar set only within one guild.
     pub fn member_avatar(guild: GuildId, user: UserId, hash: &str) -> Self {
         Asset::from_key(format!("guilds/{guild}/users/{user}/avatars/{hash}"), hash)
     }
 
-    /// 誰にでも配られる既定のアバター。`index` は [`crate::User::default_avatar_index`]
+    /// `index` comes from [`crate::User::default_avatar_index`].
     pub fn default_avatar(index: u64) -> Self {
         Asset::fixed(format!("embed/avatars/{index}"))
     }
 
-    /// サーバアイコン
     pub fn guild_icon(guild: GuildId, hash: &str) -> Self {
         Asset::from_key(format!("icons/{guild}/{hash}"), hash)
     }
 
-    /// 印から作る。`key` が `a_` で始まれば動く絵である
     fn from_key(path: impl Into<String>, key: &str) -> Self {
         Asset {
             path: path.into(),
@@ -116,7 +94,6 @@ impl Asset {
         }
     }
 
-    /// 誰にでも配られる絵。**大きさを選べない**
     fn fixed(path: impl Into<String>) -> Self {
         Asset {
             path: path.into(),
@@ -127,25 +104,20 @@ impl Asset {
         }
     }
 
-    /// Discord が付けた印。既定の絵なら空である
     pub fn key(&self) -> &str {
         &self.key
     }
 
-    /// 動く絵か。
-    ///
-    /// ⚠️ **動く絵でも [`Asset::url`] が返すのは静止画である。**
-    /// これは「動かせる素材がある」という事実であって、いま何を頼むかの
-    /// 話ではない
+    /// Whether animated source material exists. [`Asset::url`] still requests
+    /// a still image.
     pub fn is_animated(&self) -> bool {
         self.key.starts_with("a_")
     }
 
-    /// 辺の長さを決める。
+    /// Sets the edge length.
     ///
-    /// ⚠️ **2 の冪でないと Discord が丸める。** 丸めた結果が何になるかは
-    /// 向こうの都合なので、こちらで 2 の冪へ上げてから頼む。
-    /// 大きさを選べない絵では**何もしない**
+    /// Discord rounds non-powers-of-two by rules of its own, so round up here
+    /// instead. No-op for images that cannot be resized.
     pub fn with_size(mut self, size: u16) -> Self {
         if self.resizable {
             self.size = Some(round_up_pow2(size));
@@ -153,16 +125,13 @@ impl Asset {
         self
     }
 
-    /// 形式を決める。
-    ///
-    /// ⚠️ **`Png` 以外はまだ読めない** (R5)。それでも選べるのは、
-    /// 読めるようになった日にここを触らずに済ませるためである
+    /// Sets the format. Only `Png` is decodable so far; the rest exist so
+    /// that adding decoders later does not touch this type.
     pub fn with_format(mut self, format: Format) -> Self {
         self.format = format;
         self
     }
 
-    /// 頼む先の URL。
     pub fn url(&self) -> String {
         let mut url = format!("{BASE}/{}.{}", self.path, self.format.extension());
         if let Some(size) = self.size {
@@ -178,13 +147,13 @@ impl fmt::Display for Asset {
     }
 }
 
-/// その値以上で一番小さい 2 の冪。範囲の外は端に寄せる
+/// Smallest power of two at least `size`, clamped to the requestable range.
 fn round_up_pow2(size: u16) -> u16 {
     let size = size.clamp(MIN_SIZE, MAX_SIZE);
     if size.is_power_of_two() {
         return size;
     }
-    // MAX_SIZE 自体が 2 の冪なので、これが範囲を超えることはない
+    // MAX_SIZE is itself a power of two, so this cannot exceed the range.
     size.next_power_of_two().min(MAX_SIZE)
 }
 
@@ -196,19 +165,17 @@ mod tests {
     fn a_size_is_rounded_up_to_a_power_of_two() {
         assert_eq!(round_up_pow2(128), 128);
         assert_eq!(round_up_pow2(100), 128);
-        assert_eq!(round_up_pow2(1), MIN_SIZE, "小さすぎるものは端へ");
-        assert_eq!(round_up_pow2(u16::MAX), MAX_SIZE, "大きすぎるものは端へ");
+        assert_eq!(round_up_pow2(1), MIN_SIZE);
+        assert_eq!(round_up_pow2(u16::MAX), MAX_SIZE);
     }
 
-    /// ⚠️ **動く印でも頼むのは png である。** R5 は png しか解けない
     #[test]
     fn an_animated_key_is_still_requested_as_png() {
         let a = Asset::user_avatar(UserId::from(7u64), "a_abc");
-        assert!(a.is_animated(), "動かせる素材であることは分かる");
-        assert!(a.url().ends_with("a_abc.png"), "頼むのは静止画");
+        assert!(a.is_animated());
+        assert!(a.url().ends_with("a_abc.png"));
     }
 
-    /// ⚠️ **既定の絵は大きさを選べない。** 1 枚を使い回すためである
     #[test]
     fn a_fixed_asset_ignores_the_size() {
         let a = Asset::default_avatar(3).with_size(128);
@@ -223,6 +190,6 @@ mod tests {
             .with_size(100)
             .with_format(Format::Webp);
         assert_eq!(a.url(), format!("{BASE}/icons/1/abc.webp?size=128"));
-        assert_eq!(a.to_string(), a.url(), "Display は URL である");
+        assert_eq!(a.to_string(), a.url());
     }
 }

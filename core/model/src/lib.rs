@@ -1,25 +1,12 @@
-//! Discord のドメイン型。
+//! Discord domain types: types and serialisation only, no behaviour.
 //!
-//! Snowflake / Guild / Channel / Message などの型とシリアライズを持つ。
-//! **ここには振る舞いを置かない。** 型と変換だけの層である。
+//! Only fields this client uses are declared; the rest are dropped. Carrying
+//! the raw payload would make it an extension ABI of its own and freeze us to
+//! Discord's shape. Enums always keep an unknown variant, because Discord adds
+//! channel and message kinds without notice and refusing to draw beats
+//! failing to parse.
 //!
-//! # 生のペイロードをそのまま持たない
-//!
-//! Discord の JSON には我々が使わないフィールドが大量にある。全部持つと、
-//! **それ自体が拡張 ABI になってしまい、Discord の変更に追随できなくなる**
-//! ([`spec/03-uitree.md`] 2.4)。
-//!
-//! したがって**使うものだけを宣言し、知らないフィールドは捨てる**。
-//! 足りなくなったら足す。捨てたことで壊れるのは我々だけであり、
-//! テーマやプラグインには波及しない。
-//!
-//! # 知らない値で落ちない
-//!
-//! Discord は予告なく新しいチャンネル種別やメッセージ種別を足す。
-//! **列挙は必ず「知らないもの」を持つ** ([`ChannelKind::Unknown`] など)。
-//! 落ちるより、知らないものとして描かないほうがよい。
-//!
-//! 仕様: [`spec/09-discord-protocol.md`]
+//! See `spec/09-discord-protocol.md`.
 
 pub mod asset;
 pub mod identity;
@@ -36,23 +23,20 @@ pub use token::Token;
 
 use serde::{Deserialize, Serialize};
 
-/// 利用者。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
-    /// 単一の利用者名。**画面に出すのはこれではない** ([`User::display_name`])
+    /// The unique handle. Not what is shown — see [`User::display_name`].
     pub username: String,
-    /// 自分で決めた表示名。設定していなければ `None`
-    #[serde(default)]
     pub global_name: Option<String>,
-    /// 旧来の 4 桁。
+    /// The legacy four digits.
     ///
-    /// ⚠️ **新方式へ移った利用者は `"0"` になるが、ボットは持ったままである。**
-    /// 既定のアバターの選び方が旧方式と新方式で違うので、
-    /// **捨てるとボットの顔が変わる**。だから残して保存もする
+    /// Migrated users report `"0"`, but bots keep theirs, and the default
+    /// avatar is chosen differently in each scheme. Dropping this changes a
+    /// bot's face, so it is kept and persisted.
     #[serde(default)]
     pub discriminator: String,
-    /// アバターの印。**URL ではない** ([`User::avatar`])
+    /// The avatar hash, not a URL — see [`User::avatar`].
     #[serde(default, rename = "avatar")]
     pub avatar_hash: Option<String>,
     #[serde(default)]
@@ -60,38 +44,36 @@ pub struct User {
 }
 
 impl User {
-    /// 画面に出す名前。**`global_name` があればそちら**
     pub fn display_name(&self) -> &str {
         self.global_name.as_deref().unwrap_or(&self.username)
     }
 
-    /// 旧来の 4 桁。**新方式へ移った利用者には無い**。
+    /// The legacy four digits, absent for migrated users.
     ///
-    /// `"0"` も `"0000"` も「無い」の意味で、区別に意味はない。
-    /// ボットは移行の対象外なので、ここが `Some` なら概ねボットである
+    /// `"0"` and `"0000"` both mean absent. `Some` is broadly a bot, since
+    /// bots were not migrated.
     pub fn tag(&self) -> Option<&str> {
         let d = self.discriminator.trim();
         (!d.is_empty() && !d.chars().all(|c| c == '0')).then_some(d)
     }
 
-    /// 本人が設定したアバター。設定していなければ `None`
+    /// The avatar the user set, if any.
     pub fn avatar(&self) -> Option<Asset> {
         let hash = self.avatar_hash.as_ref()?;
         Some(Asset::user_avatar(self.id, hash))
     }
 
-    /// 既定のアバターの通し番号。
-    ///
-    /// # ⚠️ 選び方が 2 通りある
+    /// Which built-in avatar this user gets.
     ///
     /// ```text
-    ///   旧方式 (4 桁を持つ)   4 桁 % 5     → 0〜4
-    ///   新方式 (4 桁が "0")   (id >> 22) % 6 → 0〜5
+    ///   legacy (has four digits)   digits % 5      -> 0..4
+    ///   current (digits are "0")   (id >> 22) % 6  -> 0..5
     /// ```
     ///
-    /// **旧方式は同じ 4 桁の全員が同じ顔になる。** 新方式が識別子から引く
-    /// ようになったのはそのためである。ボットは旧方式のままなので、
-    /// [`User::discriminator`] を捨てると顔が変わってしまう
+    /// The legacy scheme gave everyone sharing four digits the same face,
+    /// which is why the current one derives it from the id. Bots stayed on
+    /// the legacy scheme, so discarding [`User::discriminator`] would change
+    /// their faces.
     pub fn default_avatar_index(&self) -> u64 {
         match self.tag().and_then(|d| d.parse::<u64>().ok()) {
             Some(d) => d % 5,
@@ -99,177 +81,136 @@ impl User {
         }
     }
 
-    /// 誰にでも配られる既定のアバター。**必ずある**。
-    ///
-    /// ⚠️ **大きさを選べない。** 同じ番号の全員が同じ絵なので、
-    /// 揃えておけば**利用者をまたいで 1 枚を使い回せる**
+    /// The built-in avatar. Always exists, and cannot be resized so that one
+    /// copy is shared across users.
     pub fn default_avatar(&self) -> Asset {
         Asset::default_avatar(self.default_avatar_index())
     }
 
-    /// 出すべきアバター。**必ずある**。
+    /// The avatar to show. Always exists.
     ///
-    /// 設定していれば本人のもの、していなければ既定のものである。
-    ///
-    /// ⚠️ **ギルドごとのアバターはここでは見えない。** それを知っているのは
-    /// [`Member`] だけなので、ギルドの中では [`Member::display_avatar`] を使う
+    /// Per-guild avatars are invisible here; inside a guild use
+    /// [`Member::display_avatar`].
     pub fn display_avatar(&self) -> Asset {
         self.avatar().unwrap_or_else(|| self.default_avatar())
     }
 }
 
-/// 役職 1 つ。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     pub id: RoleId,
     #[serde(default)]
     pub name: String,
-    /// 大きいほど上。**名前の色を決めるのは一番上の色付き役職である**
+    /// Higher is above. The topmost coloured role decides a name's colour.
     #[serde(default)]
     pub position: i64,
-    /// メンバー一覧で**別の見出しとして立てるか**
+    /// Whether the member list gives this role its own heading.
     #[serde(default)]
     pub hoist: bool,
-    /// `0xRRGGBB`。⚠️ **0 は「黒」ではなく「色を付けていない」**
+    /// `0xRRGGBB`. Zero means uncoloured, not black.
     ///
-    /// # ⚠️ `Option` なのは `null` で来ても落ちないためである
-    ///
-    /// `#[serde(default)]` が効くのは**フィールドが無いとき**だけで、
-    /// `"color": null` は誤りになる。役職 1 つが読めないと
-    /// [`crate::de::lenient_vec`] がその役職ごと落とし、**名前まで
-    /// 引けなくなる**。色が出ないどころか見出しが消える。
+    /// `Option` because `#[serde(default)]` only covers a missing field, and
+    /// `"color": null` would otherwise fail. A failed role is dropped by
+    /// [`crate::de::lenient_vec`], taking its *name* with it — the heading
+    /// disappears, not just the colour.
     #[serde(default)]
     pub color: Option<u32>,
 }
 
 impl Role {
-    /// 付けられている色 (`0xRRGGBB`)。**付けていなければ `None`**
+    /// The colour, if one is set.
     ///
-    /// ⚠️ **0 を黒として扱わない。** Discord では 0 が「色を付けていない」
-    /// であり、黒く塗ると全員の名前が読めなくなる。
-    ///
-    /// ⚠️ **ここは色を「持っている」だけである。** どこに出すかを決めるのは
-    /// テーマである ([`gumicord_uitree::UiNode::tint`])
+    /// Zero means uncoloured; painting it black would make every name
+    /// unreadable. Where the colour is applied is the theme's decision.
     pub fn tint(&self) -> Option<u32> {
         self.color.filter(|c| *c != 0)
     }
 }
 
-/// ギルドの一員。
+/// A member of a guild.
 ///
-/// # ⚠️ 同じ人でも、ギルドごとに名前も顔も違う
+/// The same person has a different name and face per guild. Only the
+/// overrides are stored; where absent, the [`User`] values apply, and
+/// [`Member::display_name`] / [`Member::display_avatar`] encode that order.
 ///
-/// ```text
-///   User    ねんねこ              全体の名前と顔
-///   Member  ねこ (このサーバでは)  そのギルドだけの名前と顔
-/// ```
-///
-/// 上書きされているところだけが入っていて、**入っていなければ [`User`] の
-/// ものを使う**。[`Member::display_name`] と [`Member::display_avatar`] が
-/// その順序を持っている。
-///
-/// # ⚠️ どのギルドの一員かを、自分では知らない
-///
-/// `MESSAGE_CREATE` に添えて来る `member` には `guild_id` が入っていない。
-/// 入っているのは**メッセージのほう**である。ここに嘘の `guild_id` を
-/// 持たせるより、**知っている側から渡してもらう**ほうが正しい。
-///
-/// だから [`Member::guild_avatar`] はギルドを引数に取る。
+/// A member does not know which guild it belongs to: the `member` attached to
+/// `MESSAGE_CREATE` carries no `guild_id` — the message does. So
+/// [`Member::guild_avatar`] takes the guild as an argument rather than storing
+/// a made-up one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
-    /// このギルドだけの呼び名
-    #[serde(default)]
     pub nick: Option<String>,
-    /// このギルドだけのアバターの印。**URL ではない**
+    /// The per-guild avatar hash, not a URL.
     #[serde(default, rename = "avatar")]
     pub avatar_hash: Option<String>,
     #[serde(default)]
     pub roles: Vec<RoleId>,
-    /// ISO 8601。**表示のための整形は上の層の仕事**
+    /// ISO 8601. Formatting belongs to the layer above.
     #[serde(default)]
     pub joined_at: Option<String>,
-    /// ⚠️ **無いことがある。** `MESSAGE_CREATE` の `member` には
-    /// 送信者が誰かが書かれていない。それはメッセージ側の `author` である
+    /// Often absent: the `member` on `MESSAGE_CREATE` does not say who sent
+    /// the message — that is the message's `author`.
     #[serde(default)]
     pub user: Option<User>,
 }
 
 impl Member {
-    /// このギルドで画面に出す名前。
+    /// `nick` -> `global_name` -> `username`.
     ///
-    /// ```text
-    ///   nick → global_name → username
-    /// ```
-    ///
-    /// `user` を持たない `member` もあるので、そのときは
-    /// **[`User::display_name`] を呼ぶ側で重ねる**
+    /// Some `member` payloads carry no `user`, so the caller supplies one.
     pub fn display_name<'a>(&'a self, user: &'a User) -> &'a str {
         self.nick
             .as_deref()
             .unwrap_or_else(|| self.user.as_ref().unwrap_or(user).display_name())
     }
 
-    /// このギルドだけのアバター。設定していなければ `None`
     pub fn guild_avatar(&self, guild: GuildId, user: UserId) -> Option<Asset> {
         let hash = self.avatar_hash.as_ref()?;
         Some(Asset::member_avatar(guild, user, hash))
     }
 
-    /// このギルドで出すべきアバター。**必ずある**。
-    ///
-    /// ```text
-    ///   ギルドのアバター → 本人のアバター → 既定のアバター
-    /// ```
+    /// Guild avatar -> user avatar -> built-in avatar. Always exists.
     pub fn display_avatar(&self, guild: GuildId, user: &User) -> Asset {
         self.guild_avatar(guild, user.id)
             .unwrap_or_else(|| user.display_avatar())
     }
 }
 
-/// ギルド (サーバー)。
+/// A guild (server).
 ///
-/// # ⚠️ 名前の在処が 2 つある
-///
-/// **利用者トークンの READY では、名前もアイコンも `properties` の中にある。**
+/// The name arrives in one of three shapes:
 ///
 /// ```text
-///   ボット            {"id": …, "name": "…", "icon": …}
-///   利用者 (READY)    {"id": …, "properties": {"name": "…", "icon": …}, …}
-///   落ちている        {"id": …, "unavailable": true}
+///   bot token       {"id": …, "name": "…", "icon": …}
+///   user token      {"id": …, "properties": {"name": "…", "icon": …}, …}
+///   unavailable     {"id": …, "unavailable": true}
 /// ```
 ///
-/// 実際にこれで**サーバ一覧が空になった**。READY は届き、11 件のギルドも
-/// 入っていたのに、名前が空だったので 1 つも出せなかった。
-///
-/// 上の 3 つを [`RawGuild`] が吸収し、ここには平らな形だけが残る。
+/// Missing the second one once left the guild list empty: READY arrived with
+/// all eleven guilds and every name was blank. [`RawGuild`] absorbs all three
+/// so only the flat shape survives here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawGuild")]
 pub struct Guild {
     pub id: GuildId,
-    /// ⚠️ **無いことがある。** 落ちているギルドは識別子だけで来る
+    /// Empty for an unavailable guild, which arrives as an id alone.
     #[serde(default)]
     pub name: String,
-    /// アイコンの印。**URL ではない** ([`Guild::icon`])
+    /// The icon hash, not a URL — see [`Guild::icon`].
     #[serde(default, rename = "icon")]
     pub icon_hash: Option<String>,
-    /// いま落ちている。**名前もチャンネルも入っていない**
     #[serde(default)]
     pub unavailable: bool,
-    /// READY では入っていないことがある。あとから GUILD_CREATE で埋まる。
-    ///
-    /// ⚠️ **読めないチャンネルが 1 つあってもギルドごと落とさない**
+    /// Sometimes absent in READY and filled in later by GUILD_CREATE. One
+    /// unreadable channel must not take the guild with it.
     #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     pub channels: Vec<Channel>,
-    /// 役職。**メンバー一覧の見出しに名前が要る**。
-    ///
-    /// ⚠️ 落ちているギルドには入っていない
+    /// Needed for member list headings. Absent for unavailable guilds.
     #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     pub roles: Vec<Role>,
 }
 
-/// Discord がよこす**3 つの形**をそのまま受ける入れ物。
-///
-/// ⚠️ ここに直接触らないこと。[`Guild`] に変換された後の平らな形だけを使う
+/// Accepts all three shapes Discord sends. Use [`Guild`], not this.
 #[derive(Deserialize)]
 struct RawGuild {
     id: GuildId,
@@ -283,7 +224,7 @@ struct RawGuild {
     channels: Vec<Channel>,
     #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     roles: Vec<Role>,
-    /// 利用者トークンの READY はここに入れてくる
+    /// Where a user token's READY puts the name and icon.
     #[serde(default)]
     properties: Option<GuildProperties>,
 }
@@ -298,8 +239,8 @@ struct GuildProperties {
 
 impl From<RawGuild> for Guild {
     fn from(raw: RawGuild) -> Self {
-        // ⚠️ **上の階層を優先する。** `properties` は「そこにしか無いとき」の
-        // 置き場であって、食い違ったときに勝ってよいものではない
+        // The top level wins: `properties` is a fallback location, not an
+        // authority when the two disagree.
         let (p_name, p_icon) = match raw.properties {
             Some(p) => (p.name, p.icon),
             None => (None, None),
@@ -317,19 +258,17 @@ impl From<RawGuild> for Guild {
 }
 
 impl Guild {
-    /// サーバアイコン。設定していなければ `None`。
+    /// The server icon, if one is set.
     ///
-    /// ⚠️ **サーバには既定のアイコンが無い。** 人と違って Discord は絵を
-    /// 配っていないので、無いときは頭文字を出すしかない
+    /// Unlike users, guilds have no built-in icon; callers fall back to the
+    /// initials.
     pub fn icon(&self) -> Option<Asset> {
         let hash = self.icon_hash.as_ref()?;
         Some(Asset::guild_icon(self.id, hash))
     }
 }
 
-/// チャンネルの種別。
-///
-/// ⚠️ **`Unknown` を消さないこと。** Discord は予告なく種別を足す。
+/// Channel kind. `Unknown` must stay: Discord adds kinds without notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "u8", into = "u8")]
 pub enum ChannelKind {
@@ -344,7 +283,7 @@ pub enum ChannelKind {
     PrivateThread,
     GuildStageVoice,
     GuildForum,
-    /// 我々がまだ知らない種別。**描かないが落ちもしない**
+    /// A kind this client does not know. Not drawn, but not fatal.
     Unknown(u8),
 }
 
@@ -387,7 +326,7 @@ impl From<ChannelKind> for u8 {
 }
 
 impl ChannelKind {
-    /// 文字を読み書きできるか。M1 で表示するのはここだけ
+    /// Whether text can be read and written here.
     pub const fn is_text(self) -> bool {
         matches!(
             self,
@@ -398,12 +337,12 @@ impl ChannelKind {
         )
     }
 
-    /// 見出しであって、開けるものではない
+    /// A heading, not something that opens.
     pub const fn is_category(self) -> bool {
         matches!(self, ChannelKind::GuildCategory)
     }
 
-    /// レンダラのアイコン名 (`gumicord_render::icon`)
+    /// Renderer icon name.
     pub const fn icon(self) -> &'static str {
         match self {
             ChannelKind::GuildVoice | ChannelKind::GuildStageVoice => "channel.voice",
@@ -412,42 +351,40 @@ impl ChannelKind {
     }
 }
 
-/// チャンネル。DM も同じ型で表す。
+/// A channel. DMs use the same type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Channel {
     pub id: ChannelId,
     #[serde(rename = "type")]
     pub kind: ChannelKind,
-    /// DM には無い
+    /// Absent for DMs.
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub guild_id: Option<GuildId>,
-    /// カテゴリへの所属
+    /// The category this belongs to.
     #[serde(default)]
     pub parent_id: Option<ChannelId>,
-    /// 並び順。同じ値なら ID 順
+    /// Sort order; ties break by id.
     #[serde(default)]
     pub position: i32,
     #[serde(default)]
     pub topic: Option<String>,
     #[serde(default)]
     pub nsfw: bool,
-    /// DM と GroupDM の相手
+    /// The other side of a DM or group DM.
     #[serde(default)]
     pub recipients: Vec<User>,
-    /// このチャンネルの一番新しい発言。**未読の判定に要る** (`FR-042`)。
+    /// The newest message here, used to decide unread state.
     ///
-    /// ⚠️ **消えた発言を指していることがある。** 「読んだところより新しい
-    /// ものがあるか」を見るだけなので、実在しなくても構わない
+    /// May point at a deleted message; only the comparison against the read
+    /// marker matters, so it need not exist.
     #[serde(default)]
     pub last_message_id: Option<MessageId>,
 }
 
 impl Channel {
-    /// 画面に出す名前。
-    ///
-    /// **DM には名前が無い**ので、相手の名前を並べて作る。
+    /// The name to show. DMs have none, so recipients are joined instead.
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.name {
             return name.clone();
@@ -463,7 +400,6 @@ impl Channel {
     }
 }
 
-/// 添付ファイル (`FR-025`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: AttachmentId,
@@ -479,7 +415,6 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    /// 画像として表示できるか
     pub fn is_image(&self) -> bool {
         self.content_type
             .as_deref()
@@ -487,7 +422,6 @@ impl Attachment {
     }
 }
 
-/// メッセージ (`FR-020`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub id: MessageId,
@@ -497,7 +431,7 @@ pub struct Message {
     pub author: User,
     #[serde(default)]
     pub content: String,
-    /// ISO 8601。**表示のための整形は上の層の仕事**
+    /// ISO 8601. Formatting belongs to the layer above.
     #[serde(default)]
     pub timestamp: String,
     #[serde(default)]
@@ -506,34 +440,27 @@ pub struct Message {
     pub pinned: bool,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
-    /// 送信者の、このギルドでの姿。
-    ///
-    /// ⚠️ **ここに `user` は入っていない。** 送信者は `author` である。
-    /// DM には最初から無い
+    /// The sender's guild-specific face. Carries no `user` — the sender is
+    /// `author`. Absent in DMs.
     #[serde(default)]
     pub member: Option<Member>,
-    /// 返信元 (`FR-028`)
     #[serde(default)]
     pub referenced_message: Option<Box<Message>>,
-    /// 名指しされた人 (`FR-042`)。
-    ///
-    /// ⚠️ **役職への言及はここに入らない。** 役職で呼ばれたかを知るには
-    /// 自分がそのギルドで何の役職かが要る。まだ持っていない
+    /// People named directly. Role mentions do not appear here; detecting
+    /// those needs our own roles in this guild, which we do not hold.
     #[serde(default)]
     pub mentions: Vec<User>,
-    /// `@everyone` / `@here`
+    /// `@everyone` or `@here`.
     #[serde(default)]
     pub mention_everyone: bool,
 }
 
 impl Message {
-    /// 自分が名指しされているか (`FR-042`)。
+    /// Whether this message names us.
     ///
-    /// ⚠️ **自分の発言は数えない。** 返信に自分を含めることはよくあり、
-    /// そのたびに自分宛ての印が付いてはたまらない。
-    ///
-    /// ⚠️ **役職への言及は見ていない。** 自分の役職を持っていないので、
-    /// `@モデレーター` で呼ばれても気付けない
+    /// Our own messages never count: replies routinely include the sender,
+    /// and marking every one of those would be noise. Role mentions are not
+    /// detected, for the reason on [`Message::mentions`].
     pub fn mentions_me(&self, me: UserId) -> bool {
         if self.author.id == me {
             return false;
@@ -542,7 +469,6 @@ impl Message {
     }
 }
 
-/// 自分自身。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentUser {
     #[serde(flatten)]
@@ -551,7 +477,6 @@ pub struct CurrentUser {
     pub email: Option<String>,
     #[serde(default)]
     pub verified: bool,
-    /// 2 要素認証を設定しているか (`FR-002`)
     #[serde(default, rename = "mfa_enabled")]
     pub mfa_enabled: bool,
 }
@@ -560,24 +485,21 @@ pub struct CurrentUser {
 mod tests {
     use super::*;
 
-    /// **知らないフィールドで落ちない。** Discord は予告なく足す
     #[test]
     fn unknown_fields_are_ignored() {
         let json = r#"{
             "id": "1", "username": "ねんねこ",
-            "まだ知らないフィールド": {"入れ子": [1,2,3]}
+            "a field we do not know": {"nested": [1,2,3]}
         }"#;
         let u: User = serde_json::from_str(json).unwrap();
         assert_eq!(u.username, "ねんねこ");
     }
 
-    /// **知らないチャンネル種別でも落ちない。** 描かないだけ
     #[test]
     fn an_unknown_channel_kind_survives() {
         let c: Channel = serde_json::from_str(r#"{"id":"1","type":99}"#).unwrap();
         assert_eq!(c.kind, ChannelKind::Unknown(99));
         assert!(!c.kind.is_text());
-        // 往復しても値が変わらない
         assert_eq!(serde_json::to_value(c.kind).unwrap(), 99);
     }
 
@@ -594,7 +516,6 @@ mod tests {
         }
     }
 
-    /// 表示名があればそちらを使う
     #[test]
     fn the_display_name_wins_over_the_username() {
         let json = r#"{"id":"1","username":"nenneko","global_name":"ねんねこ"}"#;
@@ -606,7 +527,6 @@ mod tests {
         assert_eq!(u.display_name(), "nenneko");
     }
 
-    /// **DM には名前が無い。** 相手の名前で作る
     #[test]
     fn a_dm_is_named_after_its_recipients() {
         let json = r#"{
@@ -618,23 +538,18 @@ mod tests {
         assert!(c.kind.is_text());
     }
 
-    /// ⚠️ **動くアバターも png で頼む。**
-    ///
-    /// `a_` で始まる印は GIF だが、`.png` を頼めば 1 コマ目が PNG で返る。
-    /// 読める形を頼まないと、**動かないどころか何も出せない** (R5 が読むのは
-    /// PNG だけである)
+    /// An `a_` hash is a GIF, but asking for `.png` returns the first frame.
+    /// The decoder only reads PNG, so requesting the animated form would
+    /// render nothing at all.
     #[test]
     fn even_animated_avatars_are_requested_as_png() {
         let mut u: User = serde_json::from_str(r#"{"id":"7","username":"x"}"#).unwrap();
-        assert!(u.avatar().is_none(), "設定していなければ絵は無い");
+        assert!(u.avatar().is_none());
 
         u.avatar_hash = Some("a_abc".into());
         let a = u.avatar().unwrap();
-        assert!(a.is_animated(), "動かせる素材であることは分かる");
-        assert!(
-            a.with_size(64).url().ends_with("a_abc.png?size=64"),
-            "それでも頼むのは静止画"
-        );
+        assert!(a.is_animated());
+        assert!(a.with_size(64).url().ends_with("a_abc.png?size=64"));
 
         u.avatar_hash = Some("abc".into());
         let a = u.avatar().unwrap();
@@ -642,26 +557,24 @@ mod tests {
         assert!(a.with_size(64).url().ends_with("abc.png?size=64"));
     }
 
-    /// ⚠️ **4 桁を持っているかで既定のアバターの選び方が変わる。**
-    ///
-    /// ボットは移行の対象外なので 4 桁を持ったままである。捨てると
-    /// 新方式として扱われ、**顔が変わる**
+    /// Bots were never migrated, so dropping the four digits would move them
+    /// onto the current scheme and change their faces.
     #[test]
     fn the_default_avatar_depends_on_the_old_four_digits() {
-        // 新方式。`"0"` は「無い」の意味である
+        // Current scheme; "0" means absent.
         let u: User =
             serde_json::from_str(r#"{"id":"4194304","username":"x","discriminator":"0"}"#).unwrap();
         assert_eq!(u.tag(), None);
         assert_eq!(u.default_avatar_index(), 1, "(id >> 22) % 6");
 
-        // 旧方式。4 桁をそのまま 5 で割る
+        // Legacy scheme.
         let u: User =
             serde_json::from_str(r#"{"id":"4194304","username":"x","discriminator":"0007"}"#)
                 .unwrap();
         assert_eq!(u.tag(), Some("0007"));
         assert_eq!(u.default_avatar_index(), 2, "7 % 5");
 
-        // `"0000"` も「無い」である。`"0"` と区別しない
+        // "0000" also means absent.
         let u: User =
             serde_json::from_str(r#"{"id":"4194304","username":"x","discriminator":"0000"}"#)
                 .unwrap();
@@ -669,7 +582,6 @@ mod tests {
         assert_eq!(u.default_avatar_index(), 1);
     }
 
-    /// ⚠️ **出す顔は必ずある。** 設定していない人にも Discord が配っている
     #[test]
     fn everyone_has_a_face() {
         let mut u: User = serde_json::from_str(r#"{"id":"7","username":"x"}"#).unwrap();
@@ -684,10 +596,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ **ギルドの中では、名前も顔もそのギルドのものが勝つ。**
-    ///
-    /// 同じ人でもサーバごとに呼び名を変えている。全体の名前で出すと、
-    /// **そのサーバでは誰なのか分からない**
+    /// People rename themselves per server; showing the global name would
+    /// leave the reader unable to tell who it is.
     #[test]
     fn a_guild_overrides_both_the_name_and_the_face() {
         let user: User =
@@ -695,18 +605,15 @@ mod tests {
                 .unwrap();
         let guild = GuildId::from(1u64);
 
-        // 何も上書きしていない一員
         let m: Member = serde_json::from_str("{}").unwrap();
         assert_eq!(m.display_name(&user), "ねんねこ");
         assert!(m.guild_avatar(guild, user.id).is_none());
         assert!(
             m.display_avatar(guild, &user)
                 .url()
-                .contains("/embed/avatars/"),
-            "本人も設定していないなら既定の絵"
+                .contains("/embed/avatars/")
         );
 
-        // このサーバだけの呼び名と顔
         let m: Member = serde_json::from_str(r#"{"nick":"ねこ","avatar":"xyz"}"#).unwrap();
         assert_eq!(m.display_name(&user), "ねこ");
         assert_eq!(
@@ -715,7 +622,6 @@ mod tests {
         );
     }
 
-    /// `MESSAGE_CREATE` は送信者のギルドでの姿を添えて来る
     #[test]
     fn a_message_carries_the_senders_guild_face() {
         let json = r#"{
@@ -724,14 +630,16 @@ mod tests {
             "member":{"nick":"ねこ","roles":["3"],"joined_at":"2020-01-01T00:00:00+00:00"}
         }"#;
         let m: Message = serde_json::from_str(json).unwrap();
-        let member = m.member.as_ref().expect("member が落ちている");
+        let member = m.member.as_ref().expect("member was dropped");
 
         assert_eq!(member.display_name(&m.author), "ねこ");
         assert_eq!(member.roles, vec![RoleId::from(3u64)]);
-        assert!(member.user.is_none(), "送信者は author のほうである");
+        assert!(
+            member.user.is_none(),
+            "the sender is author, not member.user"
+        );
     }
 
-    /// 返信元が入れ子で入る (`FR-028`)
     #[test]
     fn a_reply_carries_the_message_it_answers() {
         let json = r#"{
@@ -751,7 +659,6 @@ mod tests {
 mod guild_shape_tests {
     use super::*;
 
-    /// ボットの形。名前は上の階層にある
     #[test]
     fn a_bot_style_guild_reads_its_name_from_the_top_level() {
         let g: Guild = serde_json::from_str(r#"{"id":"1","name":"ふつう","icon":"abc"}"#).unwrap();
@@ -760,8 +667,7 @@ mod guild_shape_tests {
         assert!(!g.unavailable);
     }
 
-    /// ⚠️ **利用者トークンの READY は properties の中に入れてくる。**
-    /// これで実際にサーバ一覧が空になった
+    /// The shape that once left the guild list empty.
     #[test]
     fn a_user_style_guild_reads_its_name_from_properties() {
         let g: Guild = serde_json::from_str(
@@ -773,14 +679,13 @@ mod guild_shape_tests {
                 "member_count":3
             }"#,
         )
-        .expect("READY の形を読めない");
+        .expect("cannot read the READY shape");
 
         assert_eq!(g.name, "本物");
         assert_eq!(g.icon_hash.as_deref(), Some("xyz"));
         assert_eq!(g.channels.len(), 1);
     }
 
-    /// 落ちているギルドは識別子だけ。**それでも読める**
     #[test]
     fn an_unavailable_guild_is_just_an_id() {
         let g: Guild = serde_json::from_str(r#"{"id":"1","unavailable":true}"#).unwrap();
@@ -789,8 +694,6 @@ mod guild_shape_tests {
         assert!(g.channels.is_empty());
     }
 
-    /// 両方にあれば**上の階層が勝つ**。
-    /// properties は「そこにしか無いとき」の置き場である
     #[test]
     fn the_top_level_wins_when_both_are_present() {
         let g: Guild =
@@ -799,7 +702,7 @@ mod guild_shape_tests {
         assert_eq!(g.name, "うえ");
     }
 
-    /// 知らないフィールドで落ちない。**READY には 18 個ほど入っている**
+    /// READY carries around eighteen fields this client ignores.
     #[test]
     fn unknown_fields_do_not_break_it() {
         let g: Guild = serde_json::from_str(
@@ -818,47 +721,42 @@ mod guild_shape_tests {
 mod role_tests {
     use super::*;
 
-    /// ⚠️ **`"color": null` で落ちない。**
-    ///
-    /// `#[serde(default)]` が効くのはフィールドが無いときだけである。
-    /// 落ちると [`crate::de::lenient_vec`] が役職ごと捨て、**名前まで
-    /// 引けなくなる** — 色が出ないどころか見出しが消える
+    /// `#[serde(default)]` only covers a missing field. Failing here would
+    /// drop the whole role and take its name with it.
     #[test]
     fn a_null_colour_does_not_take_the_role_with_it() {
         let raw = r#"{ "id": "55", "name": "管理者", "position": 3, "color": null }"#;
-        let role: Role = serde_json::from_str(raw).expect("読める");
+        let role: Role = serde_json::from_str(raw).expect("unreadable");
 
         assert_eq!(role.name, "管理者");
         assert_eq!(role.tint(), None);
     }
 
-    /// ⚠️ **0 は黒ではなく「色を付けていない」**
     #[test]
     fn zero_is_not_black() {
         let raw = r#"{ "id": "55", "name": "みんな", "color": 0 }"#;
-        let role: Role = serde_json::from_str(raw).expect("読める");
+        let role: Role = serde_json::from_str(raw).expect("unreadable");
         assert_eq!(role.tint(), None);
     }
 
     #[test]
     fn a_colour_comes_through() {
         let raw = r#"{ "id": "55", "name": "管理者", "color": 14688352 }"#;
-        let role: Role = serde_json::from_str(raw).expect("読める");
+        let role: Role = serde_json::from_str(raw).expect("unreadable");
         assert_eq!(role.tint(), Some(14_688_352));
     }
 
-    /// ⚠️ **読めない役職が 1 つあっても、他の役職を巻き添えにしない**
     #[test]
     fn one_unreadable_role_does_not_take_the_guild_with_it() {
         let raw = r#"{
             "id": "1", "name": "テスト",
             "roles": [
                 { "id": "55", "name": "管理者", "color": 100 },
-                { "id": "とんでもない識別子", "name": "壊れている" },
+                { "id": "not an id at all", "name": "壊れている" },
                 { "id": "56", "name": "みんな", "color": null }
             ]
         }"#;
-        let guild: Guild = serde_json::from_str(raw).expect("読める");
-        assert_eq!(guild.roles.len(), 2, "読めた 2 つは残る");
+        let guild: Guild = serde_json::from_str(raw).expect("unreadable");
+        assert_eq!(guild.roles.len(), 2);
     }
 }

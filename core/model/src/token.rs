@@ -1,35 +1,23 @@
-//! 認証トークン (`SEC-001`, `SEC-002`, `FR-003`)。
+//! Authentication token.
 //!
-//! # 型で守る
+//! A runtime self-check that scans output for the token is a last resort, not
+//! a defence: it reports a leak after the fact. Wrapping the token in a type
+//! whose `Debug` and `Display` are redacted means `{:?}` cannot leak it at
+//! all, and reaching the value requires calling [`Token::expose`], which is
+//! greppable.
 //!
-//! 仕様は「ログ・エラーメッセージ・クラッシュレポートに出力しない」と定め、
-//! S4 では出力にトークンが混ざっていないかを実行時に自己点検した
-//! ([`spec/09-discord-protocol.md`] 8 章)。
-//!
-//! **点検は最後の砦であって、一次の防御ではない。** 点検は「うっかり出した」
-//! ことを事後に知らせるだけで、出さないことを保証しない。
-//!
-//! そこで `Debug` と `Display` を潰した型に入れる。**`{:?}` で書いても
-//! 出ない**ので、うっかりが起きようがない。中身を取り出すには
-//! [`Token::expose`] を明示的に呼ぶ必要があり、それは grep できる。
-//!
-//! # トークンはアカウントそのものである
-//!
-//! パスワードと同じ重さで扱う。平文のファイルに書かず、
-//! OS のセキュアストレージにだけ置く (`FR-003`)。
-//! プラグインからは決して見えない (`SEC-002`)。
+//! A token is the account. It is stored only in OS secure storage, never in a
+//! plaintext file, and is never visible to plugins.
 
 use core::fmt;
 
-/// Discord の認証トークン。
+/// A Discord authentication token.
 ///
 /// ```
 /// # use gumicord_model::Token;
 /// let t = Token::new("very-secret-token");
-/// // ⚠️ 秘密が漏れない
-/// assert_eq!(format!("{t:?}"), "Token(<秘匿>)");
-/// assert_eq!(t.to_string(), "<秘匿>");
-/// // 取り出すには明示的に呼ぶ
+/// assert_eq!(format!("{t:?}"), "Token(<redacted>)");
+/// assert_eq!(t.to_string(), "<redacted>");
 /// assert_eq!(t.expose(), "very-secret-token");
 /// ```
 #[derive(Clone, PartialEq, Eq)]
@@ -40,10 +28,8 @@ impl Token {
         Token(s.into())
     }
 
-    /// **中身を取り出す。呼ぶ場所は最小限にすること。**
-    ///
-    /// この名前にしてあるのは grep できるようにするためである。
-    /// `as_str` のような無害な名前だと、レビューで見落とす。
+    /// Yields the secret. Named to be greppable; a bland name like `as_str`
+    /// would slip through review.
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -52,12 +38,12 @@ impl Token {
         self.0.is_empty()
     }
 
-    /// 出力にトークンが混ざっていないかの自己点検 ([`spec/09-discord-protocol.md`] 8 章)。
+    /// Checks that output does not contain the token.
     ///
-    /// **型で守っていても、`expose()` した値を組み立てた文字列は素通りする。**
-    /// 応答本文をそのまま記録するような場所では、これで確かめる。
+    /// The type guards formatting, but a string built from `expose()` passes
+    /// straight through. Use this where response bodies are logged.
     ///
-    /// 短すぎるトークンでは誤検出するので、8 文字未満は常に真を返す。
+    /// Always true below 8 characters, where matches would be coincidental.
     pub fn is_absent_from(&self, haystack: &str) -> bool {
         self.0.len() < 8 || !haystack.contains(&self.0)
     }
@@ -65,13 +51,13 @@ impl Token {
 
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token(<秘匿>)")
+        f.write_str("Token(<redacted>)")
     }
 }
 
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<秘匿>")
+        f.write_str("<redacted>")
     }
 }
 
@@ -79,53 +65,45 @@ impl fmt::Display for Token {
 mod tests {
     use super::*;
 
-    /// **SEC-001 の本体。** `{:?}` でも `{}` でも漏れない
     #[test]
     fn a_token_never_prints_itself() {
-        let t = Token::new("MTIzNDU2Nzg5.秘密.abcdefg");
+        let t = Token::new("MTIzNDU2Nzg5.secret.abcdefg");
 
         for s in [format!("{t:?}"), format!("{t}"), format!("{:#?}", t)] {
-            assert!(
-                t.is_absent_from(&s),
-                "SEC-001 違反: 出力にトークンが含まれている: {s}"
-            );
+            assert!(t.is_absent_from(&s), "token leaked into output: {s}");
         }
     }
 
-    /// 入れ子にしても漏れない。**構造体を丸ごと `{:?}` する場面が危ない**
+    /// Formatting a whole struct is where leaks would happen.
     #[test]
     fn a_token_nested_in_a_struct_stays_hidden() {
         #[derive(Debug)]
-        #[allow(dead_code, reason = "`{:?}` に載ることだけが目的の場である")]
+        #[allow(dead_code, reason = "exists only to be formatted")]
         struct Session {
             token: Token,
             user: &'static str,
         }
 
         let s = Session {
-            token: Token::new("MTIzNDU2Nzg5.秘密.abcdefg"),
-            user: "ねんねこ",
+            token: Token::new("MTIzNDU2Nzg5.secret.abcdefg"),
+            user: "nennneko",
         };
         let printed = format!("{s:?}");
 
         assert!(s.token.is_absent_from(&printed));
-        assert!(printed.contains("ねんねこ"), "他の値は見える");
+        assert!(printed.contains("nennneko"), "other fields stay visible");
     }
 
-    /// 取り出すには明示的に呼ぶ。**grep できる名前にしてある**
     #[test]
     fn exposing_is_explicit() {
         let t = Token::new("秘密の値です");
         assert_eq!(t.expose(), "秘密の値です");
     }
 
-    /// 短すぎる値では誤検出する。点検は補助であって保証ではない
+    /// The self-check is an aid, not a guarantee.
     #[test]
     fn the_self_check_ignores_short_tokens() {
         let t = Token::new("ab");
-        assert!(
-            t.is_absent_from("ab が含まれている"),
-            "短い値は偶然一致するので、点検の対象にしない"
-        );
+        assert!(t.is_absent_from("ab appears here"));
     }
 }

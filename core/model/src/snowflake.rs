@@ -1,31 +1,24 @@
-//! Discord の識別子。
+//! Discord identifiers.
 //!
-//! # なぜ専用の型なのか
+//! Distinct types per kind so that passing a channel id where a guild id
+//! belongs fails to compile.
 //!
-//! すべての ID が `u64` だと、ギルド ID を取るところへチャンネル ID を渡しても
-//! 通ってしまう。**型を分けると、その取り違えがコンパイルで止まる。**
-//!
-//! # JSON では文字列である
-//!
-//! Discord は 64 ビットの ID を**文字列**で送ってくる。JavaScript の数値が
-//! 53 ビットしか正確に表せないためである。`serde` の既定では `u64` として
-//! 読めないので、変換をここに閉じ込める。
-//!
-//! 仕様: [`spec/09-discord-protocol.md`]
+//! Discord sends 64-bit ids as JSON *strings*, because JavaScript numbers are
+//! only exact to 53 bits. The conversion is confined here.
 
 use core::fmt;
 use core::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Discord の 64 ビット識別子。
+/// A Discord 64-bit identifier.
 ///
-/// 上位 42 ビットに Discord 紀元 (2015-01-01) からのミリ秒が入っている。
-/// **したがって ID の順序は生成の順序である。** メッセージの並べ替えに使える。
+/// The high 42 bits hold milliseconds since the Discord epoch, so id order is
+/// creation order and can be used for sorting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Snowflake(pub u64);
 
-/// Discord 紀元 (2015-01-01T00:00:00Z) の UNIX ミリ秒
+/// 2015-01-01T00:00:00Z in UNIX milliseconds.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
 impl Snowflake {
@@ -33,9 +26,7 @@ impl Snowflake {
         self.0
     }
 
-    /// 生成された時刻 (UNIX ミリ秒)。
-    ///
-    /// **別途タイムスタンプを持たなくてよい。** ID そのものに入っている。
+    /// Creation time in UNIX milliseconds, carried by the id itself.
     pub const fn created_at_ms(self) -> u64 {
         (self.0 >> 22) + DISCORD_EPOCH_MS
     }
@@ -63,7 +54,7 @@ impl FromStr for Snowflake {
 
 impl Serialize for Snowflake {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        // ⚠️ **文字列で書く。** 数値で書くと、受け取る側 (JS) で桁が落ちる
+        // As a string: a number loses precision on the JavaScript side.
         s.serialize_str(&self.0.to_string())
     }
 }
@@ -72,36 +63,36 @@ impl<'de> Deserialize<'de> for Snowflake {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::{Error, Unexpected};
 
-        // 文字列で来るのが常だが、数値で来ても受ける。
-        // **相手の都合で落ちるより、広く受けるほうがよい**
+        // Strings are the norm, but accept numbers too rather than failing on
+        // the sender's choice of encoding.
         match serde_json::Value::deserialize(d)? {
             serde_json::Value::String(s) => s
                 .parse()
                 .map(Snowflake)
-                .map_err(|_| D::Error::invalid_value(Unexpected::Str(&s), &"64 ビットの整数")),
+                .map_err(|_| D::Error::invalid_value(Unexpected::Str(&s), &"a 64-bit integer")),
             serde_json::Value::Number(n) => n.as_u64().map(Snowflake).ok_or_else(|| {
-                D::Error::invalid_type(Unexpected::Other("数値"), &"64 ビットの整数")
+                D::Error::invalid_type(Unexpected::Other("number"), &"a 64-bit integer")
             }),
             other => Err(D::Error::invalid_type(
                 Unexpected::Other(match other {
                     serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "真偽値",
-                    serde_json::Value::Array(_) => "配列",
-                    _ => "オブジェクト",
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Array(_) => "array",
+                    _ => "object",
                 }),
-                &"文字列または数値",
+                &"a string or a number",
             )),
         }
     }
 }
 
-/// 取り違えをコンパイルで止めるための、種類つきの ID。
+/// Kind-tagged ids, so mixing them up fails to compile.
 ///
 /// ```
 /// # use gumicord_model::{ChannelId, GuildId};
 /// fn open(_: ChannelId) {}
 /// let g = GuildId::from(1u64);
-/// // open(g);  ← 通らない
+/// // open(g);  // does not compile
 /// ```
 macro_rules! define_ids {
     ($($(#[$doc:meta])* $name:ident;)*) => {$(
@@ -141,19 +132,14 @@ macro_rules! define_ids {
 }
 
 define_ids! {
-    /// ギルド (サーバー)
+    /// A guild (server).
     GuildId;
-    /// チャンネル。DM も含む
+    /// A channel, including DMs.
     ChannelId;
-    /// メッセージ
     MessageId;
-    /// 利用者
     UserId;
-    /// 添付
     AttachmentId;
-    /// ロール
     RoleId;
-    /// 絵文字
     EmojiId;
 }
 
@@ -161,7 +147,6 @@ define_ids! {
 mod tests {
     use super::*;
 
-    /// JSON では文字列で来る。**数値として読もうとすると桁が落ちる**
     #[test]
     fn snowflakes_round_trip_as_strings() {
         let id = Snowflake(1_234_567_890_123_456_789);
@@ -170,7 +155,6 @@ mod tests {
         assert_eq!(serde_json::from_str::<Snowflake>(&json).unwrap(), id);
     }
 
-    /// 数値で来ても受ける。相手の都合で落ちない
     #[test]
     fn a_numeric_snowflake_is_accepted_too() {
         assert_eq!(
@@ -186,16 +170,13 @@ mod tests {
         assert!(serde_json::from_str::<Snowflake>("[]").is_err());
     }
 
-    /// ID に時刻が入っている。別途持たなくてよい
     #[test]
     fn a_snowflake_carries_its_own_timestamp() {
-        // Discord 紀元ちょうど
         assert_eq!(Snowflake(0).created_at_ms(), DISCORD_EPOCH_MS);
-        // 1 ミリ秒後 (下位 22 ビットは通し番号)
+        // The low 22 bits are a sequence counter.
         assert_eq!(Snowflake(1 << 22).created_at_ms(), DISCORD_EPOCH_MS + 1);
     }
 
-    /// ID の順序は生成の順序である。メッセージの並べ替えに使える
     #[test]
     fn snowflakes_sort_by_creation_time() {
         let older = Snowflake(1 << 22);
@@ -204,7 +185,6 @@ mod tests {
         assert!(older.created_at_ms() < newer.created_at_ms());
     }
 
-    /// 種類つきの ID も文字列として往復する
     #[test]
     fn typed_ids_serialise_like_snowflakes() {
         let c = ChannelId::from(42u64);
