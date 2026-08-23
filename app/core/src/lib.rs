@@ -1473,38 +1473,47 @@ impl Gumicord {
             .store()
             .messages(ChannelId::from(self.selected_channel))
             .iter()
-            .map(|m| MessageRow {
-                id: m.id.get(),
-                // ⚠️ **そのサーバでの呼び名が勝つ。** 全体の名前で出すと、
-                // 「このサーバでは誰なのか」が分からなくなる
-                author: match &m.member {
-                    Some(x) => x.display_name(&m.author).to_owned(),
-                    None => m.author.display_name().to_owned(),
-                },
-                // ⚠️ **人には必ず顔がある。** 設定していない人には Discord が
-                // 既定の絵を配っていて、頭文字を出すのはこちらの勝手である
-                avatar: Some(
-                    match &m.member {
-                        Some(x) => x.display_avatar(guild, &m.author),
-                        None => m.author.display_avatar(),
-                    }
-                    .with_size(AVATAR_PX)
-                    .url(),
-                ),
-                // ⚠️ **一番上の「色を付けている」役職が勝つ。**
-                // 色を載せるだけで、塗る場所はテーマが決める
-                tint: m
+            .map(|m| {
+                // ⚠️ **REST で取った発言には `member` が付いていない。**
+                //
+                // Discord が添えるのは Gateway の `MESSAGE_CREATE` /
+                // `MESSAGE_UPDATE` だけである。付いていなければ、見かけて
+                // 覚えたほうから引く ([`gumicord_store::Store::member`])
+                let member = m
                     .member
                     .as_ref()
-                    .and_then(|x| self.live.store().member_tint(guild, &x.roles)),
-                time: local_time(&m.timestamp),
-                body: m.content.clone(),
-                // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
-                // いまは**自分への返信かどうかだけ**を見ている
-                mentioned: m
-                    .referenced_message
-                    .as_ref()
-                    .is_some_and(|r| Some(r.author.id) == me),
+                    .or_else(|| self.live.store().member(guild, m.author.id));
+
+                MessageRow {
+                    id: m.id.get(),
+                    // ⚠️ **そのサーバでの呼び名が勝つ。** 全体の名前で出すと、
+                    // 「このサーバでは誰なのか」が分からなくなる
+                    author: match member {
+                        Some(x) => x.display_name(&m.author).to_owned(),
+                        None => m.author.display_name().to_owned(),
+                    },
+                    // ⚠️ **人には必ず顔がある。** 設定していない人には Discord
+                    // が既定の絵を配っていて、頭文字を出すのはこちらの勝手である
+                    avatar: Some(
+                        match member {
+                            Some(x) => x.display_avatar(guild, &m.author),
+                            None => m.author.display_avatar(),
+                        }
+                        .with_size(AVATAR_PX)
+                        .url(),
+                    ),
+                    // ⚠️ **一番上の「色を付けている」役職が勝つ。**
+                    // 色を載せるだけで、塗る場所はテーマが決める
+                    tint: member.and_then(|x| self.live.store().member_tint(guild, &x.roles)),
+                    time: local_time(&m.timestamp),
+                    body: m.content.clone(),
+                    // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
+                    // いまは**自分への返信かどうかだけ**を見ている
+                    mentioned: m
+                        .referenced_message
+                        .as_ref()
+                        .is_some_and(|r| Some(r.author.id) == me),
+                }
             })
             .collect()
     }
@@ -2210,6 +2219,71 @@ mod member_tests {
             }
         });
         assert_eq!(found, Some(Color::from_rgb(0x00e0_5260)));
+    }
+
+    /// ⚠️ **REST で取った発言には `member` が付いていない。**
+    ///
+    /// Discord が添えるのは Gateway の `MESSAGE_CREATE` だけである。
+    /// 発言だけを見ていると、**チャンネルを開いた直後は呼び名も顔も色も
+    /// 出ず、新しい発言が 1 つ来たときだけそこに色が付く**。実際にそうなった
+    #[test]
+    fn a_message_without_a_member_falls_back_to_what_we_have_seen() {
+        let mut a = app(message(None, None));
+        a.live.store_mut().upsert_guild(gumicord_model::Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: vec![gumicord_model::Role {
+                id: 55u64.into(),
+                name: "管理者".to_owned(),
+                position: 3,
+                hoist: true,
+                color: Some(0x00e0_5260),
+            }],
+        });
+        // 一覧か過去の発言で見かけた姿
+        a.live.store_mut().remember_member(
+            1u64.into(),
+            7u64.into(),
+            Member {
+                nick: Some("ねこ".to_owned()),
+                avatar_hash: None,
+                roles: vec![55u64.into()],
+                joined_at: None,
+                user: None,
+            },
+        );
+
+        // REST から来た発言。**`member` が無い**
+        let mut m = message(None, None);
+        m.member = None;
+        a.live
+            .store_mut()
+            .set_backlog(ChannelId::from(10u64), vec![m]);
+
+        let row = &a.message_rows()[0];
+        assert_eq!(row.author, "ねこ", "呼び名も出る");
+        assert_eq!(row.tint, Some(0x00e0_5260), "役職の色も出る");
+    }
+
+    /// 発言に付いていれば**そちらが勝つ**。より新しいので
+    #[test]
+    fn the_member_on_the_message_wins() {
+        let mut a = app(message(Some("いまの呼び名"), None));
+        a.live.store_mut().remember_member(
+            1u64.into(),
+            7u64.into(),
+            Member {
+                nick: Some("むかしの呼び名".to_owned()),
+                avatar_hash: None,
+                roles: Vec::new(),
+                joined_at: None,
+                user: None,
+            },
+        );
+        assert_eq!(a.message_rows()[0].author, "いまの呼び名");
     }
 }
 

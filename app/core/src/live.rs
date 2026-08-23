@@ -700,7 +700,27 @@ impl Live {
             }
             LiveEvent::Members(update) => {
                 let guild = update.guild;
-                self.members.entry(guild).or_default().apply(*update)
+                let changed = self.members.entry(guild).or_default().apply(*update);
+
+                // ⚠️ **ここで見かけた姿を覚えておく。** REST で取った発言には
+                // `member` が付いていないので、本文の呼び名も役職の色も
+                // ここが唯一の出所になることがある
+                if changed && let Some(list) = self.members.get(&guild) {
+                    let seen: Vec<(UserId, gumicord_model::Member)> = list
+                        .rows()
+                        .iter()
+                        .filter_map(|r| match r {
+                            gumicord_gateway::MemberRow::Member(m) => {
+                                Some((m.member.user.as_ref()?.id, m.member.clone()))
+                            }
+                            gumicord_gateway::MemberRow::Group { .. } => None,
+                        })
+                        .collect();
+                    for (user, member) in seen {
+                        self.store.remember_member(guild, user, member);
+                    }
+                }
+                changed
             }
             LiveEvent::Link(link) => {
                 let changed = self.link != link;

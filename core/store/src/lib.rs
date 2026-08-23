@@ -26,7 +26,7 @@ pub use db::{Db, DbError, Snapshot, default_path};
 use std::collections::{HashMap, HashSet};
 
 use gumicord_model::{
-    Asset, Channel, ChannelId, Guild, GuildId, Message, MessageId, Role, RoleId, UserId,
+    Asset, Channel, ChannelId, Guild, GuildId, Member, Message, MessageId, Role, RoleId, UserId,
 };
 
 /// 正規化された状態。
@@ -74,6 +74,24 @@ pub struct Store {
     roles: HashMap<GuildId, Vec<Role>>,
     /// どこまで読んだか (`FR-042`)。**チャンネルごと**
     read: HashMap<ChannelId, ReadMark>,
+    /// 見かけた人の、そのギルドでの姿。
+    ///
+    /// # ⚠️ REST の発言には `member` が付いていない
+    ///
+    /// Discord が発言に `member` を添えるのは **Gateway の
+    /// `MESSAGE_CREATE` / `MESSAGE_UPDATE` だけ**である。
+    /// `GET /channels/:id/messages` で取ってきた過去分には入っていない。
+    ///
+    /// そのままだと、チャンネルを開いた直後は**呼び名もサーバごとの顔も
+    /// 役職の色も出ず**、新しい発言が 1 つ来たときだけそこに色が付く。
+    /// 実際にそうなった。
+    ///
+    /// 姿は発言ではなく**(ギルド, 人) に属する**ので、見かけたところで
+    /// 覚えておいて、発言から引く。
+    ///
+    /// ⚠️ **見かけた人しか居ない。** オフラインで、かつ最近発言していない
+    /// 人は入らない。埋めるには `op 8` で名指しで頼む必要がある (まだ無い)。
+    members: HashMap<(GuildId, UserId), Member>,
 }
 
 /// 1 チャンネルぶんの「どこまで読んだか」。
@@ -354,11 +372,37 @@ impl Store {
         changed
     }
 
+    // ─────────────────────────────── ギルドでの姿 (`FR-043`)
+
+    /// 見かけた人の姿を覚える。**後から来たものが勝つ**
+    pub fn remember_member(&mut self, guild: GuildId, user: UserId, member: Member) {
+        self.members.insert((guild, user), member);
+    }
+
+    /// その人の、そのギルドでの姿。**見かけていなければ `None`**
+    pub fn member(&self, guild: GuildId, user: UserId) -> Option<&Member> {
+        self.members.get(&(guild, user))
+    }
+
+    /// 発言に添えられていた姿を覚える。**REST の分には付いていない**
+    ///
+    /// ⚠️ **ギルドが分からない発言からは覚えない。** REST で取った分には
+    /// `guild_id` も入っていないので、どのギルドでの姿か決められない
+    pub fn remember_from_message(&mut self, message: &Message) {
+        let (Some(guild), Some(member)) = (message.guild_id, message.member.as_ref()) else {
+            return;
+        };
+        self.remember_member(guild, message.author.id, member.clone());
+    }
+
     /// 新しい発言が来た。**チャンネルの一番新しい発言を進める**。
     ///
     /// `me` は自分。自分宛てなら名指しの数を増やす。
     /// **変わったら真** (画面を描き直すかの判断に使う)
     pub fn note_arrival(&mut self, message: &Message, me: Option<UserId>) -> bool {
+        // 姿は発言ではなく (ギルド, 人) に属する。見かけたところで覚える
+        self.remember_from_message(message);
+
         let Some(channel) = self.channels.get_mut(&message.channel_id) else {
             return false;
         };

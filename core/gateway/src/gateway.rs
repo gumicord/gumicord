@@ -659,6 +659,21 @@ impl Connection {
             Step::Received(Some(())) => Ok(None),
             Step::Received(None) => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
             Step::Watch(Some((guild, channel))) => {
+                // ⚠️ **同じ購読を送り直さない。**
+                //
+                // 呼ぶ側は「毎回伝える」でよい — 見ているものが変わった
+                // ことを言い落とすほうが困るからである。だが**同じことを
+                // 何度も線に流してよい理由にはならない**。
+                //
+                // 実機では 1 つのチャンネルを開いているだけで数百回送られ、
+                // Discord に**レート制限で切られた** (`4008`)。切れては
+                // 繋ぎ直し、繋ぎ直しては送り直す循環になっていた。
+                //
+                // 繋ぎ直したときは [`Gateway::resend_subscriptions`] が
+                // 改めて全部送るので、ここで覚えていて構わない。
+                if wanted.get(&guild) == Some(&channel) {
+                    return Ok(None);
+                }
                 wanted.insert(guild, channel);
                 tracing::debug!(%guild, %channel, "購読する");
                 self.send(subscribe(guild, channel)).await?;
