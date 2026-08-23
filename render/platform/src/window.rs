@@ -30,9 +30,19 @@
 //! `GUMICORD_LOG=debug` にすると「サーフェスを作り直す from=… to=…」が出るので、
 //! ずれていればそこで分かる。
 //!
-//! ⚠️ 別件として、**Windows は枠なしウィンドウを最大化するとクライアント領域を
-//! 画面の外へ 8px ほどはみ出させる**。正しい直し方は `WM_NCCALCSIZE` を扱う
-//! ことで、Windows 固有の層として P7 に積んである。
+//! ## 最大化ではみ出す件 (`WM_NCCALCSIZE`) は `winit` が既に直している
+//!
+//! Windows は窓を最大化するとき、**枠の太さのぶんだけ作業領域より大きい**
+//! 矩形にする。枠のある窓ならその枠が画面の外に隠れて辻褄が合うが、枠を
+//! 消した窓では**クライアント領域がそのまま画面の外へ出る**。
+//!
+//! ⚠️ **これを自前で直そうとしないこと。** `winit` は枠なし窓の
+//! `WM_NCCALCSIZE` で、最大化中はクライアント矩形をそのディスプレイの
+//! `rcWork` へ置き換えている
+//! (`winit-0.30.13/src/platform_impl/windows/event_loop.rs` の `WM_NCCALCSIZE`)。
+//! **上から更に内側へ寄せると、今度は窓が枠のぶん小さくなる。**
+//!
+//! ⚠️ **最大化しているかを自前で覚えないこと。** [`Host::maximized`] を見よ。
 //!
 //! # 再描画は待って行う
 //!
@@ -218,7 +228,6 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         renderer: None,
         cursor: (0.0, 0.0),
         zone: Zone::Client,
-        maximized: false,
         scroll_grab: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
@@ -249,7 +258,6 @@ struct Host {
     /// ポインタの位置 (論理 px)
     cursor: (f32, f32),
     zone: Zone,
-    maximized: bool,
     /// 掴んでいるスクロールバー。押している間だけ入る
     scroll_grab: Option<ScrollGrab>,
     /// 押されている修飾キー。Shift での選択と Ctrl+A に使う
@@ -295,13 +303,23 @@ impl Host {
         r.hit_test(self.cursor.0, self.cursor.1).cloned().collect()
     }
 
+    /// いま最大化しているか。
+    ///
+    /// ⚠️ **自前で覚えない。** 最大化はこちらのボタン以外からも起きる —
+    /// Win+↑、画面上端へのスナップ、タスクバーの右クリック、
+    /// タイトルバーのダブルクリック。覚えておいた真偽値はそこで食い違い、
+    /// **最大化中なのに縁がリサイズを掴み、ボタンが 1 回空振りする**
+    fn maximized(&self) -> bool {
+        self.window.as_ref().is_some_and(|w| w.is_maximized())
+    }
+
     /// ウィンドウ操作に関わる領域かを判定する。
     ///
     /// 縁のリサイズだけは UITree の外側の話なので座標で見る。それ以外は
     /// **UITree の安定 ID で見る**。タイトルバーの位置や大きさをテーマが
     /// 変えても、ここが追随できるようにするためである。
     fn zone_at(&self, hits: &[Hit]) -> Zone {
-        if !self.maximized
+        if !self.maximized()
             && let Some(r) = &self.renderer
         {
             let v = r.viewport();
@@ -676,7 +694,23 @@ impl ApplicationHandler for Host {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                tracing::debug!(w = size.width, h = size.height, "リサイズ");
+                // ⚠️ 最大化のときは画面の実寸も残す。「はみ出している」を
+                // 憶測ではなく引き算で言えるようにするためである。
+                // 出るはずの値は `画面 - タスクバー` で、`画面 + 枠 × 2` なら
+                // はみ出している
+                let screen = self
+                    .window
+                    .as_ref()
+                    .and_then(|w| w.current_monitor())
+                    .map(|m| m.size());
+                tracing::debug!(
+                    w = size.width,
+                    h = size.height,
+                    max = self.maximized(),
+                    screen_w = screen.map(|s| s.width),
+                    screen_h = screen.map(|s| s.height),
+                    "リサイズ"
+                );
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
@@ -779,10 +813,7 @@ impl ApplicationHandler for Host {
                         }
                     }
                     Zone::Control("minimize") => w.set_minimized(true),
-                    Zone::Control("maximize") => {
-                        self.maximized = !self.maximized;
-                        w.set_maximized(self.maximized);
-                    }
+                    Zone::Control("maximize") => w.set_maximized(!w.is_maximized()),
                     Zone::Control("close") => event_loop.exit(),
                     Zone::Control(other) => {
                         tracing::debug!(slot = other, "知らないタイトルバーのボタン");
