@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "core/markdown",
     "core/model",
     "core/gateway",
     "core/rest",
@@ -29,6 +30,7 @@ authors = ["ねんねこ"]
 # バージョンはスパイク S1〜S4 で実際にビルド・動作確認したものを採用している。
 [workspace.dependencies]
 # 内部クレート
+gumicord-markdown = { path = "core/markdown" }
 gumicord-model = { path = "core/model" }
 gumicord-gateway = { path = "core/gateway" }
 gumicord-rest = { path = "core/rest" }
