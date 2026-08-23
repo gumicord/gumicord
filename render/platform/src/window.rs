@@ -104,6 +104,16 @@ pub trait Application {
     /// タイトルバーの操作はここへ来る前にプラットフォーム層が処理する。
     fn pressed(&mut self, hits: &[Hit]) -> bool;
 
+    /// 副ボタン (右) で押された。再描画が要るなら `true`。
+    ///
+    /// `at` は論理 px、ウィンドウの左上から。**押された場所そのもの**で
+    /// あって、そこへメニューを置けという意味ではない。どこへ置くかは
+    /// 中身とウィンドウの大きさが分かってから決まる
+    /// ([`gumicord_uitree::Anchor`])
+    fn context_menu(&mut self, _hits: &[Hit], _at: (f32, f32)) -> bool {
+        false
+    }
+
     /// スクロール領域が動いた。`at` は先頭からの距離、`max` ははみ出し量。
     ///
     /// **上端に着いたら過去を取りに行く**ような判断はアプリの仕事である。
@@ -848,6 +858,24 @@ impl ApplicationHandler for Host {
                 ..
             } => {
                 self.scroll_grab = None;
+            }
+
+            // 副ボタン。
+            //
+            // ⚠️ **窓の操作に関わるところでは出さない。** タイトルバーを
+            // 右クリックしたときに出るのは OS の窓メニューであって、
+            // アプリのメニューではない
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if self.zone == Zone::Client {
+                    let hits = self.hits();
+                    if self.app.context_menu(&hits, self.cursor) {
+                        self.request_redraw();
+                    }
+                }
             }
 
             // ⚠️ **ここでフォーカスを見てはならない。** 非アクティブな窓でも、

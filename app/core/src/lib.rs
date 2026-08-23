@@ -55,6 +55,7 @@ pub mod demo;
 pub mod images;
 pub mod live;
 pub mod markdown;
+pub mod menu;
 pub mod session;
 
 use std::borrow::Cow;
@@ -116,6 +117,7 @@ const INTERACTIVE: &[NodeId] = &[
     NodeId::ChromeTitlebarControl,
     NodeId::PrimitiveButton,
     NodeId::LayoutScrollbarThumb,
+    NodeId::OverlayMenuItem,
 ];
 
 /// 画面に出すペインの数 (`PLT-046`)。
@@ -178,6 +180,18 @@ impl Panes {
     pub fn members(self) -> bool {
         self == Panes::Four
     }
+
+    /// メニューをどう包むか (`FR-024`, `FR-028` の受け皿)。
+    ///
+    /// ⚠️ **端末の種類ではなく幅で決める。** 窓を狭くした机の上でも、
+    /// 指の下にメニューが出るより下から出たほうが読める。
+    /// 「携帯かどうか」を聞くと、狭くした窓で不便なままになる
+    pub fn present(self) -> crate::menu::Present {
+        match self {
+            Panes::One => crate::menu::Present::Sheet,
+            _ => crate::menu::Present::Popover,
+        }
+    }
 }
 
 /// アプリケーションの状態と、そこから UITree を組み立てる責務。
@@ -213,6 +227,8 @@ pub struct Gumicord {
     /// 当たり判定が要り、それは走りをノードにすることを意味する。
     /// それはできない ([`crate::markdown`])
     revealed: std::collections::HashSet<u64>,
+    /// 開いているメニュー (`FR-024`, `FR-028` の受け皿)。**同時に 1 つだけ**
+    floating: Option<crate::menu::Floating>,
     selected_channel: u64,
     /// 入力欄にフォーカスがあるか
     input_focused: bool,
@@ -269,6 +285,7 @@ impl Gumicord {
             selected_guild: guild,
             match_ctx: MatchContext::new(0.0),
             revealed: std::collections::HashSet::new(),
+            floating: None,
             selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),
@@ -500,6 +517,20 @@ impl Application for Gumicord {
     }
 
     fn pressed(&mut self, hits: &[Hit]) -> bool {
+        // ⚠️ **開いている間は下へ渡さない。** 渡すと、メニューを閉じる
+        // つもりで押した場所のチャンネルへ移動する
+        if self.floating.is_some() {
+            let item = hits.iter().find_map(|h| match (h.id, &h.key) {
+                (NodeId::OverlayMenuItem, Some(Key::Index(i))) => Some(*i as usize),
+                _ => None,
+            });
+            return match item {
+                Some(i) => self.run_action(i),
+                // 外を押したら閉じるだけ
+                None => self.close_menu(),
+            };
+        }
+
         let mut changed = false;
 
         // 入力欄の外を押したらフォーカスが外れる
@@ -548,6 +579,23 @@ impl Application for Gumicord {
         changed
     }
 
+    /// 副ボタン。押されたものからメニューの中身を決める。
+    fn context_menu(&mut self, hits: &[Hit], at: (f32, f32)) -> bool {
+        // ⚠️ **開いている上で更に押したら、開き直す。** 閉じるだけだと
+        // 「隣の発言のメニューを出す」のに 2 回押すことになる
+        let items = hits.iter().find_map(|h| match (h.id, &h.key) {
+            (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
+            (NodeId::NavChannelListItem, Some(Key::Id(id))) => Some(self.channel_menu(*id)),
+            (NodeId::NavGuildListItem, Some(Key::Id(id))) => Some(self.guild_menu(*id)),
+            _ => None,
+        });
+        match items {
+            Some(items) => self.open_menu(at, items),
+            // 何も無いところで押したら、開いていたものを閉じるだけ
+            None => self.close_menu(),
+        }
+    }
+
     /// `PLT-001`: 入力を受け取るのは、フォーカスのある入力欄だけである
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
         self.input_focused.then_some(&mut self.input)
@@ -583,6 +631,11 @@ impl Application for Gumicord {
     }
 
     fn cancel_input(&mut self) -> bool {
+        // ⚠️ **メニューが先である。** 入力欄のフォーカスより手前に
+        // 浮かんでいるので、Esc がそこまで届いてはいけない
+        if self.close_menu() {
+            return true;
+        }
         if !self.input_focused {
             return false;
         }
@@ -631,11 +684,111 @@ impl Gumicord {
             self.login_screen()
         };
 
-        UiNode::new(NodeId::AppRoot).child(
-            UiNode::new(NodeId::AppWindow)
-                .child(self.titlebar())
-                .child(UiNode::new(NodeId::AppScreen).child(screen)),
-        )
+        UiNode::new(NodeId::AppRoot)
+            .child(
+                UiNode::new(NodeId::AppWindow)
+                    .child(self.titlebar())
+                    .child(UiNode::new(NodeId::AppScreen).child(screen)),
+            )
+            // ⚠️ **開いているときだけ載せる。** 常に載せると、窓いっぱいの
+            // 層が当たりを受け止め続けて、何も押せなくなる
+            .child_if(self.floating.is_some(), || {
+                let f = self.floating.as_ref().expect("直前に確かめた");
+                f.node(panes.present(), self.hovered_item())
+            })
+    }
+
+    /// 発言のメニュー (`FR-024`, `FR-028` の受け皿)。
+    ///
+    /// ⚠️ **できることだけを並べる。** 返信・編集・削除はまだ無いので
+    /// 出さない。灰色で並べても、押せる場所を探す手間が増えるだけである
+    fn message_menu(&self, id: u64) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item};
+        let mut items = Vec::new();
+
+        // ⚠️ **飾りを剥がした素の本文を渡す。** 貼り付けた先で
+        // `**太字**` と出るのが、打った人が書いたものである
+        if let Some(text) = self.raw_body(id) {
+            items.push(Item::new(Action::Copy(text), "本文をコピー").icon("copy"));
+        }
+        items.push(Item::new(Action::Copy(id.to_string()), "ID をコピー").icon("id"));
+        items
+    }
+
+    /// 発言の、打たれたままの本文。
+    ///
+    /// ⚠️ **組み立てたノードから拾わない。** ノードに載っているのは
+    /// 解析して飾りを剥がした後の文字で、`<@123>` は `@みどり` に
+    /// なっている。それは打った人が書いたものではない
+    fn raw_body(&self, id: u64) -> Option<String> {
+        if !self.uses_live() {
+            return None;
+        }
+        self.live
+            .store()
+            .messages(ChannelId::from(self.selected_channel))
+            .iter()
+            .find(|m| m.id.get() == id)
+            .map(|m| m.content.clone())
+    }
+
+    fn channel_menu(&self, id: u64) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item};
+        let mut items = Vec::new();
+        if self.live.store().is_unread(ChannelId::from(id)) {
+            items.push(Item::new(Action::MarkRead(id), "既読にする").icon("check"));
+        }
+        items.push(Item::new(Action::Copy(id.to_string()), "ID をコピー").icon("id"));
+        items
+    }
+
+    fn guild_menu(&self, id: u64) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item};
+        vec![Item::new(Action::Copy(id.to_string()), "ID をコピー").icon("id")]
+    }
+
+    /// いま指が乗っているメニューの項目。
+    fn hovered_item(&self) -> Option<usize> {
+        match &self.hovered {
+            Some((NodeId::OverlayMenuItem, Some(Key::Index(i)))) => Some(*i as usize),
+            _ => None,
+        }
+    }
+
+    /// メニューを開く。**同じ場所で開き直したら閉じる。**
+    fn open_menu(&mut self, at: (f32, f32), items: Vec<crate::menu::Item>) -> bool {
+        if items.is_empty() {
+            return self.close_menu();
+        }
+        self.floating = Some(crate::menu::Floating { at, items });
+        true
+    }
+
+    fn close_menu(&mut self) -> bool {
+        self.floating.take().is_some()
+    }
+
+    /// 項目を押した。
+    fn run_action(&mut self, index: usize) -> bool {
+        let Some(f) = self.floating.take() else {
+            return false;
+        };
+        let Some(item) = f.items.get(index) else {
+            return true;
+        };
+        match &item.action {
+            crate::menu::Action::Copy(text) => {
+                // ⚠️ **失敗を黙って飲まない。** 「コピーした」と思って
+                // 貼り付けたら前のものが出てくる、が一番困る
+                if let Err(e) = gumicord_platform::clipboard::set_text(text) {
+                    tracing::warn!(%e, "クリップボードへ入れられなかった");
+                }
+            }
+            crate::menu::Action::MarkRead(channel) => {
+                self.live.mark_read(ChannelId::from(*channel));
+            }
+        }
+        true
     }
 
     /// ログイン画面 (`FR-001`)。QR を出して読まれるのを待つ。
@@ -1726,6 +1879,120 @@ mod tests {
 
     fn app() -> Gumicord {
         Gumicord::demo()
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  コンテクストメニュー (`FR-024`, `FR-028` の受け皿)
+
+    fn hit_of(id: NodeId, key: Option<Key>) -> Hit {
+        Hit {
+            id,
+            key,
+            rect: gumicord_render::Rect::ZERO,
+            clip: None,
+        }
+    }
+
+    fn with_menu() -> Gumicord {
+        let mut a = app();
+        let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+        assert!(
+            a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)),
+            "メニューが開かなかった"
+        );
+        a
+    }
+
+    #[test]
+    fn 発言を副ボタンで押すとメニューが開く() {
+        let a = with_menu();
+        assert!(a.floating.is_some());
+        assert_eq!(a.floating.as_ref().map(|f| f.at), Some((10.0, 20.0)));
+    }
+
+    /// ⚠️ **開いている間は下へ渡さない。**
+    ///
+    /// 渡すと、メニューを閉じるつもりで押した場所のチャンネルへ移動する。
+    /// 押した場所は当たり判定としては両方に掛かっているので、こちらが
+    /// 「上が開いているなら上だけ」と決めなければ素通りする
+    #[test]
+    fn 開いている間は下を押しても届かない() {
+        let mut a = with_menu();
+        let before = a.selected_channel;
+        // 下にあるチャンネルへの当たりを一緒に渡す
+        let hits = [hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))];
+
+        assert!(a.pressed(&hits), "閉じるという変化はある");
+        assert!(a.floating.is_none(), "閉じていない");
+        assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
+    }
+
+    /// 項目を押したら、その操作が走って閉じる。
+    ///
+    /// ⚠️ **試験でクリップボードへ書かない。** 走らせた人の手元の
+    /// コピー内容が消える。ここで見たいのは「押したら閉じる」だけである
+    #[test]
+    fn 項目を押すと閉じる() {
+        let mut a = with_menu();
+        a.floating = Some(crate::menu::Floating {
+            at: (0.0, 0.0),
+            items: vec![crate::menu::Item::new(
+                crate::menu::Action::MarkRead(1),
+                "既読にする",
+            )],
+        });
+        let hits = [hit_of(NodeId::OverlayMenuItem, Some(Key::Index(0)))];
+        assert!(a.pressed(&hits));
+        assert!(a.floating.is_none());
+    }
+
+    /// ⚠️ **Esc はメニューが先である。** 入力欄のフォーカスより手前に
+    /// 浮かんでいるので、そこまで届いてはいけない
+    #[test]
+    fn esc_はメニューを先に閉じる() {
+        let mut a = with_menu();
+        a.input_focused = true;
+
+        assert!(a.cancel_input(), "何も起きなかった");
+        assert!(a.floating.is_none(), "メニューが閉じていない");
+        assert!(a.input_focused, "入力欄のフォーカスまで外れた");
+
+        assert!(a.cancel_input(), "2 回目でフォーカスが外れていない");
+        assert!(!a.input_focused);
+    }
+
+    /// ⚠️ **開いていないときは層を載せない。**
+    ///
+    /// 常に載せると、窓いっぱいの層が当たりを受け止め続けて何も押せなくなる
+    #[test]
+    fn 閉じている間は層を組まない() {
+        let has_layer = |a: &Gumicord| {
+            let mut found = false;
+            a.build_tree(Panes::Four).walk(&mut |n, _| {
+                found |= n.id == NodeId::OverlayLayer;
+            });
+            found
+        };
+        assert!(!has_layer(&app()));
+        assert!(has_layer(&with_menu()));
+    }
+
+    /// 何も無いところで押したら、開いていたものを閉じるだけ
+    #[test]
+    fn 何も無いところで副ボタンを押すと閉じる() {
+        let mut a = with_menu();
+        assert!(a.context_menu(&[], (0.0, 0.0)));
+        assert!(a.floating.is_none());
+    }
+
+    /// ⚠️ **端末の種類ではなく幅で決める。** 窓を狭くした机の上でも、
+    /// 指の下にメニューが出るより下から出たほうが読める
+    #[test]
+    fn 狭い窓では下から出す() {
+        use crate::menu::Present;
+        assert_eq!(Panes::One.present(), Present::Sheet);
+        assert_eq!(Panes::Two.present(), Present::Popover);
+        assert_eq!(Panes::Four.present(), Present::Popover);
     }
 
     /// ⚠️ **コードの中の `<@1>` は呼びかけではない。**

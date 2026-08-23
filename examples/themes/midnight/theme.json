@@ -574,6 +574,82 @@
       }
     },
     {
+      "select": "overlay.scrim",
+      "when": { "slot": "dim" },
+      "style": { "background": "#00000080" }
+    },
+    {
+      "select": "overlay.popover",
+      "style": {
+        "background": "$color.bg.raised",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.md",
+        "padding": [6, 0, 6, 0],
+        "shadow": "$shadow.raised",
+        "minWidth": 180
+      }
+    },
+    {
+      "select": "overlay.sheet",
+      "style": {
+        "background": "$color.bg.raised",
+        "radius": "$radius.lg",
+        "padding": [8, 0, 16, 0],
+        "shadow": "$shadow.raised"
+      }
+    },
+    {
+      "select": "overlay.sheet.handle",
+      "style": {
+        "width": 36,
+        "height": 4,
+        "radius": "$radius.sm",
+        "background": "$color.text.muted",
+        "margin": [4, 0, 10, 0]
+      }
+    },
+    {
+      "select": "overlay.menu",
+      "style": { "gap": 1, "padding": [0, 6, 0, 6] }
+    },
+    {
+      "select": "overlay.menu.item",
+      "style": {
+        "gap": 10,
+        "padding": [7, 10, 7, 10],
+        "radius": "$radius.sm",
+        "transition": "$motion.fast"
+      }
+    },
+    {
+      "select": "overlay.menu.item",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.bg.hover" }
+    },
+    {
+      "select": "overlay.menu.item.icon",
+      "style": { "width": 16, "height": 16, "color": "$color.text.secondary" }
+    },
+    {
+      "select": "overlay.menu.item.icon",
+      "when": { "slot": "danger" },
+      "style": { "color": "$color.danger" }
+    },
+    {
+      "select": "overlay.menu.item.label",
+      "style": { "font": "$font.small", "color": "$color.text.primary" }
+    },
+    {
+      "select": "overlay.menu.item.label",
+      "when": { "slot": "danger" },
+      "style": { "color": "$color.danger" }
+    },
+    {
+      "select": "overlay.menu.separator",
+      "style": { "height": 1, "background": "$color.border", "margin": [4, 0, 4, 0] }
+    },
+    {
       "select": "chat.message.reply_ref",
       "style": { "font": "$font.small", "color": "$color.text.muted", "opacity": 0.8 }
     },

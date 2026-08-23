@@ -536,7 +536,7 @@ impl Live {
     ///
     /// ⚠️ **失敗しても画面は戻さない。** 戻すと、開いたのに未読へ戻る
     /// という一番分かりにくい動きになる。次に開いたときに送り直される
-    fn mark_read(&mut self, channel: ChannelId) -> bool {
+    pub fn mark_read(&mut self, channel: ChannelId) -> bool {
         if !self.store.mark_read(channel) {
             return false;
         }
