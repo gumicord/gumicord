@@ -240,6 +240,12 @@ M1 で公開するフィールド。
 | `nav.user_panel.presence` | — | ステータスの点 (key で online/idle/dnd/invisible を区別) |
 | `nav.user_panel.name` | — | 自分の表示名 |
 | `nav.user_panel.status` | — | ステータスの言葉 (FR-043) |
+| `nav.member_list` | — | メンバー一覧 (FR-043) |
+| `nav.member_list.group` | — | 役職やオンラインの見出し |
+| `nav.member_list.item` | `MemberData` | メンバー 1 人 (FR-043) |
+| `nav.member_list.item.avatar` | `MemberData` | その人のアバター |
+| `nav.member_list.item.presence` | `MemberData` | ステータスの点 (key で online/idle/dnd を区別) |
+| `nav.member_list.item.name` | `MemberData` | そのサーバでの表示名 |
 
 ### `chat.*`
 
@@ -300,7 +306,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 79 個** (中核 58 / プラグインも生成可 21)。
+**合計 85 個** (中核 64 / プラグインも生成可 21)。
 
 <!-- END GENERATED: node-ids -->
 

@@ -268,6 +268,9 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
                 icon_hash: row.get(2)?,
                 unavailable: false,
                 channels: Vec::new(),
+                // ⚠️ **役職は残さない。** メンバー一覧は繋がってから
+                // 取り直すもので、キャッシュから出しても古いだけである
+                roles: Vec::new(),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -671,6 +674,7 @@ mod tests {
                 nsfw: false,
                 recipients: Vec::new(),
             }],
+            roles: Vec::new(),
         }
     }
 

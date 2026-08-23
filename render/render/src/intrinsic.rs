@@ -148,6 +148,8 @@ impl Intrinsic {
 
 /// 既定のサイドバー幅。Discord の慣習に合わせてある
 const CHANNEL_LIST_W: f32 = 240.0;
+/// メンバー一覧の幅。Discord の慣習に合わせてある
+const MEMBER_LIST_W: f32 = 240.0;
 /// 独自タイトルバーの高さ (`PLT-020`)
 const TITLEBAR_H: f32 = 32.0;
 /// タイトルバーのボタン 1 個の幅。Windows の慣習値
@@ -235,6 +237,21 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         NavUserPanelStatus => Intrinsic::row().grow(1.0).one_line(),
         // ⚠️ **アバターの隅に重なる。** 流れの中に置くと名前が右へずれる
         NavUserPanelPresence => Intrinsic::stack().w(12.0).h(12.0),
+
+        // ── nav.member_list — 右端。**チャットの隣に立つ細い列**
+        //
+        // ⚠️ **これ自体が巻く。** 見出しも一緒に流れてよい。役職の見出しは
+        // その群の先頭であって、一覧全体の見出しではない
+        NavMemberList => Intrinsic::column()
+            .w(MEMBER_LIST_W)
+            .cross(Cross::Stretch)
+            .scrollable(),
+        NavMemberListGroup => Intrinsic::row().cross(Cross::Center).one_line(),
+        NavMemberListItem => Intrinsic::row().cross(Cross::Center),
+        NavMemberListItemAvatar => Intrinsic::stack().w(32.0).h(32.0),
+        // ⚠️ **アバターの隅に重なる。** 流れの中に置くと名前が右へずれる
+        NavMemberListItemPresence => Intrinsic::stack().w(12.0).h(12.0),
+        NavMemberListItemName => Intrinsic::row().grow(1.0).one_line(),
 
         // ── chat.*
         ChatView => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
@@ -343,6 +360,7 @@ mod tests {
                 // ⚠️ **`nav.channel_list` は入らない。** 見出しと自分を
                 // 巻かないので、巻くのは中の `layout.scroll` だけである
                 NodeId::NavDmList,
+                NodeId::NavMemberList,
                 NodeId::ChatMessageList,
                 NodeId::LayoutScroll,
             ]

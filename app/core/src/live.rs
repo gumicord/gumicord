@@ -112,6 +112,8 @@ pub enum LiveEvent {
         channel: ChannelId,
         list: Vec<Message>,
     },
+    /// メンバー一覧の差分 (`FR-043`)
+    Members(Box<gumicord_gateway::member_list::MemberListUpdate>),
     /// 誰かが打ち始めた
     Typing {
         channel: ChannelId,
@@ -156,6 +158,15 @@ pub struct Live {
     subs: Option<Subscriptions>,
     /// チャンネルごとの、いま入力中の人。**残さない。消えてよいもの**
     typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
+    /// ギルドごとのメンバー一覧 (`FR-043`)。
+    ///
+    /// ⚠️ **キャッシュに残さない。** 誰がオンラインかは開いた瞬間の話で
+    /// あって、次の起動で出してよいものではない。
+    ///
+    /// ⚠️ **本当はチャンネルごとである。** 見える人はチャンネルの権限で
+    /// 変わる。いまは 1 ギルドにつき 1 チャンネルしか購読しないので
+    /// ギルドで引いて足りる
+    members: std::collections::HashMap<GuildId, gumicord_gateway::MemberList>,
     /// 自分。**自分の「入力中」を出さないために要る**
     me: Option<UserId>,
     /// 自分のステータス。
@@ -226,6 +237,7 @@ impl Live {
             last_channel: None,
             subs: None,
             typing: std::collections::HashMap::new(),
+            members: std::collections::HashMap::new(),
             me: None,
         }
     }
@@ -251,6 +263,12 @@ impl Live {
     #[cfg(test)]
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    /// ⚠️ 試験から知らせを 1 つ流し込むためだけにある
+    #[cfg(test)]
+    pub fn apply_for_test(&mut self, event: LiveEvent) -> bool {
+        self.apply(event)
     }
 
     /// 前回開いていたチャンネル。**そこを開いた状態で起動する**
@@ -325,6 +343,11 @@ impl Live {
     /// 自分のステータス。**分からなければ `None`**
     pub fn status(&self) -> Option<Status> {
         self.status
+    }
+
+    /// そのサーバのメンバー一覧。**まだ届いていなければ空**
+    pub fn members(&self, guild: GuildId) -> Option<&gumicord_gateway::MemberList> {
+        self.members.get(&guild).filter(|m| !m.is_empty())
     }
 
     /// 自分が誰かを教える。**自分の入力中を出さないために要る**
@@ -471,6 +494,8 @@ impl Live {
         self.requested.clear();
         self.paging.clear();
         self.exhausted.clear();
+        self.members.clear();
+        self.typing.clear();
         self.last_channel = None;
     }
     /// 届いた並びを Store へ入れる。
@@ -613,6 +638,10 @@ impl Live {
                 self.prepended = true;
                 true
             }
+            LiveEvent::Members(update) => {
+                let guild = update.guild;
+                self.members.entry(guild).or_default().apply(*update)
+            }
             LiveEvent::Link(link) => {
                 let changed = self.link != link;
                 self.link = link;
@@ -639,6 +668,7 @@ impl Live {
                 icon_hash: g.icon_hash.clone(),
                 unavailable: false,
                 channels: self.store.channels_of(g.id).cloned().collect(),
+                roles: Vec::new(),
             })
             .collect();
         db.save_guilds(guilds);
@@ -677,6 +707,12 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                 "GUILD_CREATE" | "GUILD_UPDATE" => match serde_json::from_value::<Guild>(data) {
                     Ok(g) => send(LiveEvent::GuildChanged(Box::new(g))),
                     Err(e) => tracing::warn!(%e, "{kind} を読めなかった"),
+                },
+                // ⚠️ **op 14 を送っていないと来ない。** 購読の
+                // `channels` に範囲を書いているのがその頼みである
+                "GUILD_MEMBER_LIST_UPDATE" => match gumicord_gateway::member_list::parse(&data) {
+                    Some(u) => send(LiveEvent::Members(Box::new(u))),
+                    None => tracing::warn!("メンバー一覧を読めなかった"),
                 },
                 "TYPING_START" => {
                     if let Some(e) = typing_event(&data) {

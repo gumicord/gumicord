@@ -62,6 +62,21 @@ export interface DmData {
   readonly mentionCount: number;
 }
 
+/**
+ * メンバー一覧に出る 1 人。
+ *
+ * ⚠️ 役職は識別子ではなく**名前**で出る。識別子は利用者にとって意味を持たず、
+ * プラグインが表示に使えば数字が並ぶだけになる。
+ */
+export interface MemberData {
+  readonly user: UserData;
+  /** そのサーバでの呼び名。付けていなければ `user.displayName` と同じ */
+  readonly displayName: string;
+  /** `online` / `idle` / `dnd` / `offline` */
+  readonly status: string;
+  readonly roles: readonly string[];
+}
+
 export interface AttachmentData {
   readonly id: string;
   readonly filename: string;

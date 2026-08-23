@@ -58,7 +58,7 @@ pub mod session;
 
 use std::borrow::Cow;
 
-use gumicord_model::{ChannelId, GuildId};
+use gumicord_model::{ChannelId, GuildId, RoleId};
 use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
@@ -102,6 +102,7 @@ const INTERACTIVE: &[NodeId] = &[
     NodeId::NavGuildListFolder,
     NodeId::NavChannelListItem,
     NodeId::NavDmListItem,
+    NodeId::NavMemberListItem,
     NodeId::ChatMessage,
     NodeId::ChromeTitlebarControl,
     NodeId::PrimitiveButton,
@@ -123,6 +124,8 @@ const INTERACTIVE: &[NodeId] = &[
 /// M1.2 の X1 でナビゲーション状態と一緒に入る。いまは窓を広げれば戻る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panes {
+    /// ギルド + チャンネル + チャット + メンバー
+    Four,
     /// ギルド + チャンネル + チャット
     Three,
     /// チャンネル + チャット
@@ -132,6 +135,11 @@ pub enum Panes {
 }
 
 impl Panes {
+    /// メンバー一覧まで出せる下限 (論理 px)。
+    ///
+    /// ⚠️ **メンバー一覧が真っ先に消える。** 誰が居るかは、何が書いてあるか
+    /// より後で構わない。Discord も狭くするとここから畳む
+    const FOUR: f32 = 1140.0;
     /// 3 ペインを保てる下限 (論理 px)。
     /// ギルド 64 + チャンネル 240 に、チャットが窮屈にならない幅を足した値
     const THREE: f32 = 900.0;
@@ -139,7 +147,9 @@ impl Panes {
     const TWO: f32 = 600.0;
 
     pub fn for_width(w: f32) -> Self {
-        if w >= Self::THREE {
+        if w >= Self::FOUR {
+            Panes::Four
+        } else if w >= Self::THREE {
             Panes::Three
         } else if w >= Self::TWO {
             Panes::Two
@@ -149,11 +159,15 @@ impl Panes {
     }
 
     pub fn guilds(self) -> bool {
-        self == Panes::Three
+        matches!(self, Panes::Four | Panes::Three)
     }
 
     pub fn channels(self) -> bool {
         self != Panes::One
+    }
+
+    pub fn members(self) -> bool {
+        self == Panes::Four
     }
 }
 
@@ -551,6 +565,7 @@ impl Gumicord {
             UiNode::new(NodeId::AppScreenMain)
                 .children(self.sidebar(panes))
                 .child(self.chat_view())
+                .children(panes.members().then(|| self.member_list()).flatten())
         } else {
             self.login_screen()
         };
@@ -842,6 +857,119 @@ impl Gumicord {
         }
 
         Some(UiNode::new(NodeId::NavUserPanel).child(avatar).child(lines))
+    }
+
+    /// メンバー一覧 (`FR-043`)。**右端に立つ**。
+    ///
+    /// ```text
+    ///   ┌──────────────────┐
+    ///   │ 管理者 — 2        │  ← 見出し
+    ///   │ ◎ ねんねこ        │
+    ///   │ ◎ すぴき          │
+    ///   │ オンライン — 5    │
+    ///   └──────────────────┘
+    /// ```
+    ///
+    /// # ⚠️ 届いていなければ**出さない**
+    ///
+    /// 空の列を出すと「このサーバには誰も居ない」と読める。まだ来て
+    /// いないだけなので、来るまでは列ごと畳む。
+    ///
+    /// # ⚠️ 見出しは名前にする。識別子を出さない
+    ///
+    /// Discord が寄越すのは `"online"` `"offline"` か**役職の識別子**で
+    /// ある。18 桁の数字が並んでも利用者にできることは増えないので、
+    /// 名前が分からない役職の見出しは**飛ばす**。
+    ///
+    /// # ⚠️ 100 人目までしか出ない
+    ///
+    /// `op 14` で頼んでいるのが 0〜99 番目だからである。巻いた先を
+    /// 頼み直す仕組みはまだない ([`gumicord_gateway::member_list`])。
+    fn member_list(&self) -> Option<UiNode> {
+        use gumicord_gateway::MemberRow;
+
+        let guild = GuildId::from(self.selected_guild);
+        let list = self.live.members(guild)?;
+
+        let mut out = UiNode::new(NodeId::NavMemberList);
+        for row in list.rows() {
+            match row {
+                MemberRow::Group { id, count } => {
+                    let Some(name) = self.group_name(guild, id) else {
+                        continue;
+                    };
+                    out = out.child(UiNode::text(
+                        NodeId::NavMemberListGroup,
+                        format!("{name} — {count}"),
+                    ));
+                }
+                MemberRow::Member(m) => {
+                    let Some(user) = m.member.user.as_ref() else {
+                        continue;
+                    };
+                    let id = user.id.get();
+
+                    // ⚠️ **そのサーバでの呼び名と顔が勝つ。** 全体の名前で
+                    // 出すと「このサーバでは誰なのか」が分からなくなる
+                    let avatar = UiNode::image(
+                        NodeId::NavMemberListItemAvatar,
+                        m.member
+                            .display_avatar(guild, user)
+                            .with_size(AVATAR_PX)
+                            .url(),
+                    )
+                    .with_data(id)
+                    // ⚠️ **鍵で色を分ける。** 決まった値しか来ないので、
+                    // テーマが `when.slot` で飾り分けられる
+                    .child(
+                        UiNode::new(NodeId::NavMemberListItemPresence)
+                            .with_key(Key::Slot(m.status.as_wire()))
+                            .with_data(id),
+                    );
+
+                    out = out.child(
+                        UiNode::new(NodeId::NavMemberListItem)
+                            .with_id_key(id)
+                            .with_data(id)
+                            .with_state_if(
+                                self.hovered_id(NodeId::NavMemberListItem, id),
+                                State::Hover,
+                            )
+                            .child(avatar)
+                            .child(
+                                UiNode::text(
+                                    NodeId::NavMemberListItemName,
+                                    m.member.display_name(user).to_owned(),
+                                )
+                                .with_data(id),
+                            ),
+                    );
+                }
+            }
+        }
+
+        // 見出ししか出せなかったときも、出すものが無いのと同じである
+        if out.children.is_empty() {
+            return None;
+        }
+        Some(out.children(self.scrollbar(NodeId::NavMemberList)))
+    }
+
+    /// メンバー一覧の見出しの名前。**分からなければ `None`**
+    fn group_name(&self, guild: GuildId, id: &str) -> Option<Cow<'_, str>> {
+        match id {
+            "online" => Some(Cow::Borrowed("オンライン")),
+            "offline" => Some(Cow::Borrowed("オフライン")),
+            // ⚠️ **役職の名前を知らないなら出さない。** 識別子のままでは
+            // 見出しとして読めない
+            other => {
+                let role = other.parse::<u64>().ok()?;
+                self.live
+                    .store()
+                    .role_name(guild, RoleId::from(role))
+                    .map(Cow::Borrowed)
+            }
+        }
     }
 
     fn chat_view(&self) -> UiNode {
@@ -1403,7 +1531,11 @@ mod responsive_tests {
     /// 幅で段が切り替わること。境界のちょうどの値は広いほうに入る
     #[test]
     fn panes_are_chosen_by_width() {
-        assert_eq!(Panes::for_width(1280.0), Panes::Three);
+        assert_eq!(Panes::for_width(1600.0), Panes::Four);
+        assert_eq!(Panes::for_width(1140.0), Panes::Four);
+        // ⚠️ **メンバー一覧が真っ先に消える。** 誰が居るかは、
+        // 何が書いてあるかより後で構わない
+        assert_eq!(Panes::for_width(1139.0), Panes::Three);
         assert_eq!(Panes::for_width(900.0), Panes::Three);
         assert_eq!(Panes::for_width(899.0), Panes::Two);
         assert_eq!(Panes::for_width(600.0), Panes::Two);
@@ -1892,6 +2024,7 @@ mod member_tests {
                     nsfw: false,
                     recipients: Vec::new(),
                 }],
+                roles: Vec::new(),
             }]);
         a.live
             .store_mut()
@@ -1927,6 +2060,143 @@ mod member_tests {
         let a = app(message(None, None));
         let url = a.message_rows()[0].avatar.clone().unwrap();
         assert!(url.contains("/embed/avatars/"), "{url}");
+    }
+}
+
+#[cfg(test)]
+mod member_list_tests {
+    use super::*;
+    use gumicord_gateway::member_list;
+    use serde_json::json;
+
+    /// 役職 1 つを持つギルドと、その中のチャンネルを開いた状態
+    fn app() -> Gumicord {
+        let mut a = Gumicord::demo();
+        a.live
+            .store_mut()
+            .replace_guilds(vec![gumicord_model::Guild {
+                id: 1u64.into(),
+                name: "テスト".to_owned(),
+                icon_hash: None,
+                unavailable: false,
+                channels: vec![gumicord_model::Channel {
+                    id: 10u64.into(),
+                    kind: gumicord_model::ChannelKind::GuildText,
+                    name: Some("いっぱん".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: None,
+                    position: 0,
+                    topic: None,
+                    nsfw: false,
+                    recipients: Vec::new(),
+                }],
+                roles: vec![gumicord_model::Role {
+                    id: 55u64.into(),
+                    name: "管理者".to_owned(),
+                    position: 3,
+                    hoist: true,
+                }],
+            }]);
+        a.selected_guild = 1;
+        a.selected_channel = 10;
+        a
+    }
+
+    fn sync(a: &mut Gumicord, items: Vec<serde_json::Value>) {
+        let raw = json!({
+            "guild_id": "1",
+            "member_count": 9,
+            "online_count": 2,
+            "ops": [{ "op": "SYNC", "range": [0, 99], "items": items }],
+        });
+        let update = member_list::parse(&raw).expect("読める");
+        a.live
+            .apply_for_test(live::LiveEvent::Members(Box::new(update)));
+    }
+
+    fn person(id: &str, name: &str) -> serde_json::Value {
+        json!({ "member": {
+            "user": { "id": id, "username": name },
+            "roles": [],
+            "presence": { "status": "online" },
+        }})
+    }
+
+    fn texts(node: &UiNode) -> Vec<String> {
+        let mut out = Vec::new();
+        node.walk(&mut |n, _| {
+            if let Some(t) = n.content.as_text() {
+                out.push(t.to_owned());
+            }
+        });
+        out
+    }
+
+    /// ⚠️ **届いていなければ列ごと出さない。**
+    /// 空の列は「誰も居ない」と読める
+    #[test]
+    fn nothing_arrived_means_no_column() {
+        let a = app();
+        assert!(a.member_list().is_none());
+
+        let tree = a.build_tree(Panes::Four);
+        let mut found = false;
+        tree.walk(&mut |n, _| found |= n.id == NodeId::NavMemberList);
+        assert!(!found);
+    }
+
+    /// 見出しは**名前**で出る。役職の識別子は出さない
+    #[test]
+    fn headings_come_out_as_names() {
+        let mut a = app();
+        sync(
+            &mut a,
+            vec![
+                json!({ "group": { "id": "55", "count": 1 } }),
+                person("7", "ねんねこ"),
+                json!({ "group": { "id": "online", "count": 1 } }),
+                person("8", "すぴき"),
+            ],
+        );
+
+        let list = a.member_list().expect("出る");
+        assert_eq!(
+            texts(&list),
+            vec!["管理者 — 1", "ねんねこ", "オンライン — 1", "すぴき"]
+        );
+    }
+
+    /// ⚠️ **知らない役職の見出しは飛ばす。**
+    /// 18 桁の数字が並んでも、利用者にできることは増えない
+    #[test]
+    fn a_role_we_cannot_name_is_skipped() {
+        let mut a = app();
+        sync(
+            &mut a,
+            vec![
+                json!({ "group": { "id": "999999999999999999", "count": 1 } }),
+                person("7", "ねんねこ"),
+            ],
+        );
+
+        assert_eq!(texts(&a.member_list().expect("出る")), vec!["ねんねこ"]);
+    }
+
+    /// ⚠️ **狭いときはメンバー一覧から畳む。** チャットより後で構わない
+    #[test]
+    fn the_column_is_the_first_thing_to_go() {
+        let mut a = app();
+        sync(&mut a, vec![person("7", "ねんねこ")]);
+
+        let has = |a: &Gumicord, panes| {
+            let tree = a.build_tree(panes);
+            let mut found = false;
+            tree.walk(&mut |n, _| found |= n.id == NodeId::NavMemberList);
+            found
+        };
+        assert!(has(&a, Panes::Four));
+        assert!(!has(&a, Panes::Three));
+        assert!(!has(&a, Panes::One));
     }
 }
 
@@ -1967,6 +2237,7 @@ mod channel_selection_tests {
                     recipients: Vec::new(),
                 },
             ],
+            roles: Vec::new(),
         }
     }
 
@@ -2017,6 +2288,7 @@ mod folder_tests {
             icon_hash: icon.map(|s| s.to_owned()),
             unavailable: false,
             channels: Vec::new(),
+            roles: Vec::new(),
         }
     }
 

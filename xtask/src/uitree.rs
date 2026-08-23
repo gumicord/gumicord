@@ -202,11 +202,20 @@ fn render_typescript() -> String {
     }
     out.push_str("}\n\n");
 
-    out.push_str(
-        "import type {\n  \
-         MessageData,\n  GuildData,\n  ChannelData,\n  CategoryData,\n  DmData,\n  \
-         AttachmentData,\n  EmbedData,\n} from \"./data.js\";\n",
-    );
+    // ⚠️ **取り込む型は表から拾う。** ここを手で並べていたせいで、
+    // `DataKind` を 1 つ足しただけで生成物が型検査を通らなくなった
+    let mut kinds: Vec<&str> = Vec::new();
+    for id in NodeId::ALL {
+        let kind = id.data_kind();
+        if kind != DataKind::None && !kinds.contains(&kind.as_str()) {
+            kinds.push(kind.as_str());
+        }
+    }
+    out.push_str("import type {\n");
+    for kind in kinds {
+        out.push_str(&format!("  {kind},\n"));
+    }
+    out.push_str("} from \"./data.js\";\n");
     out
 }
 

@@ -16,6 +16,7 @@
 
 pub mod gateway;
 pub mod guild_order;
+pub mod member_list;
 pub mod proto;
 pub mod remote_auth;
 pub mod status;
@@ -23,6 +24,7 @@ pub mod zstd_stream;
 
 pub use gateway::{Event, Fatal, Gateway, GatewayError, Ready, Subscriptions};
 pub use guild_order::Folder;
+pub use member_list::{MemberEntry, MemberList, MemberRow};
 pub use remote_auth::{RemoteAuth, RemoteAuthError, RemoteAuthEvent, ScannedUser};
 pub use zstd_stream::ZstdStream;
 

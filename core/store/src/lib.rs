@@ -24,7 +24,7 @@ pub use db::{Db, DbError, Snapshot, default_path};
 
 use std::collections::{HashMap, HashSet};
 
-use gumicord_model::{Asset, Channel, ChannelId, Guild, GuildId, Message, MessageId};
+use gumicord_model::{Asset, Channel, ChannelId, Guild, GuildId, Message, MessageId, Role, RoleId};
 
 /// 正規化された状態。
 ///
@@ -67,6 +67,8 @@ pub struct Store {
     sidebar: Vec<FolderRow>,
     /// 閉じているフォルダ。**残す** — 開き直すのは利用者の仕事ではない
     collapsed: std::collections::HashSet<u64>,
+    /// ギルドごとの役職。**メンバー一覧の見出しを名前にするために要る**
+    roles: HashMap<GuildId, Vec<Role>>,
 }
 
 /// サーバ一覧の 1 行。**フォルダか、サーバか。**
@@ -232,6 +234,18 @@ impl Store {
         self.guilds.get(&id)
     }
 
+    /// その役職の名前。**知らなければ `None`**。
+    ///
+    /// ⚠️ **識別子を名前の代わりに出さない。** メンバー一覧の見出しに
+    /// 18 桁の数字が並んでも、利用者にできることは何も増えない
+    pub fn role_name(&self, guild: GuildId, role: RoleId) -> Option<&str> {
+        self.roles
+            .get(&guild)?
+            .iter()
+            .find(|r| r.id == role)
+            .map(|r| &*r.name)
+    }
+
     pub fn channel(&self, id: ChannelId) -> Option<&Channel> {
         self.channels.get(&id)
     }
@@ -356,6 +370,13 @@ impl Store {
                 self.channels.insert(c.id, c);
             }
             self.guild_channels.insert(id, ids);
+        }
+
+        // ⚠️ **空の役職で上書きしない。** `GUILD_UPDATE` は名前だけを
+        // 持ってくることがあり、そのたびにメンバー一覧の見出しが
+        // 識別子に戻ってしまう
+        if !guild.roles.is_empty() {
+            self.roles.insert(id, guild.roles);
         }
 
         // 届いた順を覚える。**並び順が分からないものはこの順に落とす**
@@ -492,6 +513,7 @@ mod tests {
                     recipients: Vec::new(),
                 })
                 .collect(),
+            roles: Vec::new(),
         }
     }
 
@@ -679,6 +701,7 @@ mod tests {
             icon_hash: None,
             unavailable: true,
             channels: Vec::new(),
+            roles: Vec::new(),
         });
         assert_eq!(s.guilds().count(), 0);
     }
@@ -772,6 +795,7 @@ mod folder_tests {
                 icon_hash: None,
                 unavailable: false,
                 channels: Vec::new(),
+                roles: Vec::new(),
             },
             Guild {
                 id: 2u64.into(),
@@ -779,6 +803,7 @@ mod folder_tests {
                 icon_hash: None,
                 unavailable: false,
                 channels: Vec::new(),
+                roles: Vec::new(),
             },
             Guild {
                 id: 3u64.into(),
@@ -786,6 +811,7 @@ mod folder_tests {
                 icon_hash: None,
                 unavailable: false,
                 channels: Vec::new(),
+                roles: Vec::new(),
             },
         ]);
         s

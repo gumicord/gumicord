@@ -137,6 +137,29 @@ impl User {
 /// 持たせるより、**知っている側から渡してもらう**ほうが正しい。
 ///
 /// だから [`Member::guild_avatar`] はギルドを引数に取る。
+/// 役職 1 つ。
+///
+/// # ⚠️ 色はまだ持たない
+///
+/// Discord は役職に色を持たせ、公式クライアントは名前をその色で出す。
+/// だが**データが見た目を決める**のはこの設計にまだ場所が無い
+/// (サーバフォルダの色と同じ宿題である)。テーマが決めた色を、データが
+/// 上書きしてよいかを決めていないうちは持ち込まない。
+///
+/// ここにあるのは**並べ方と名前**だけである。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: RoleId,
+    #[serde(default)]
+    pub name: String,
+    /// 大きいほど上。**メンバー一覧の見出しの順である**
+    #[serde(default)]
+    pub position: i64,
+    /// メンバー一覧で**別の見出しとして立てるか**
+    #[serde(default)]
+    pub hoist: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     /// このギルドだけの呼び名
@@ -222,6 +245,11 @@ pub struct Guild {
     /// ⚠️ **読めないチャンネルが 1 つあってもギルドごと落とさない**
     #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     pub channels: Vec<Channel>,
+    /// 役職。**メンバー一覧の見出しに名前が要る**。
+    ///
+    /// ⚠️ 落ちているギルドには入っていない
+    #[serde(default, deserialize_with = "crate::de::lenient_vec")]
+    pub roles: Vec<Role>,
 }
 
 /// Discord がよこす**3 つの形**をそのまま受ける入れ物。
@@ -238,6 +266,8 @@ struct RawGuild {
     unavailable: bool,
     #[serde(default, deserialize_with = "crate::de::lenient_vec")]
     channels: Vec<Channel>,
+    #[serde(default, deserialize_with = "crate::de::lenient_vec")]
+    roles: Vec<Role>,
     /// 利用者トークンの READY はここに入れてくる
     #[serde(default)]
     properties: Option<GuildProperties>,
@@ -266,6 +296,7 @@ impl From<RawGuild> for Guild {
             icon_hash: raw.icon.or(p_icon),
             unavailable: raw.unavailable,
             channels: raw.channels,
+            roles: raw.roles,
         }
     }
 }

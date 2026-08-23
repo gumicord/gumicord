@@ -40,6 +40,12 @@ export type NodeId =
   | "nav.user_panel.presence"
   | "nav.user_panel.name"
   | "nav.user_panel.status"
+  | "nav.member_list"
+  | "nav.member_list.group"
+  | "nav.member_list.item"
+  | "nav.member_list.item.avatar"
+  | "nav.member_list.item.presence"
+  | "nav.member_list.item.name"
   | "chat.view"
   | "chat.header"
   | "chat.header.title"
@@ -128,6 +134,10 @@ export interface DataByNode {
   "nav.channel_list.item.name": ChannelData;
   "nav.channel_list.item.badge": ChannelData;
   "nav.dm_list.item": DmData;
+  "nav.member_list.item": MemberData;
+  "nav.member_list.item.avatar": MemberData;
+  "nav.member_list.item.presence": MemberData;
+  "nav.member_list.item.name": MemberData;
   "chat.header": ChannelData;
   "chat.header.title": ChannelData;
   "chat.header.topic": ChannelData;
@@ -147,11 +157,12 @@ export interface DataByNode {
 }
 
 import type {
-  MessageData,
   GuildData,
-  ChannelData,
   CategoryData,
+  ChannelData,
   DmData,
+  MemberData,
+  MessageData,
   AttachmentData,
   EmbedData,
 } from "./data.js";
