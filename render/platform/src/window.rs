@@ -649,6 +649,12 @@ impl ApplicationHandler for Host {
             }
 
             WindowEvent::CursorLeft { .. } => {
+                // ⚠️ **摘みを引いている間は出ていったことにしない。**
+                // 窓の外まで引くのは普通の操作であり、ここで手を離した
+                // ことにすると、掴んでいる最中にスクロールバーが消える
+                if self.scroll_grab.is_some() {
+                    return;
+                }
                 if self.app.hover_changed(&[]) {
                     self.request_redraw();
                 }

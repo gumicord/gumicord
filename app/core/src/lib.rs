@@ -172,6 +172,9 @@ pub struct Gumicord {
     live: Live,
     /// ポインタが乗っているノード
     hovered: Option<(NodeId, Option<Key>)>,
+    /// ポインタが入っている、一番内側の巻ける領域。
+    /// **その一覧にしかスクロールバーを出さない**
+    hovered_scroll: Option<NodeId>,
     selected_guild: u64,
     selected_channel: u64,
     /// 入力欄にフォーカスがあるか
@@ -226,6 +229,7 @@ impl Gumicord {
             login,
             live,
             hovered: None,
+            hovered_scroll: None,
             selected_guild: guild,
             selected_channel: channel,
             input_focused: false,
@@ -241,6 +245,26 @@ impl Gumicord {
             Some((hid, hkey)) => *hid == id && hkey.as_ref() == key,
             None => false,
         }
+    }
+
+    /// その一覧のスクロールバー。**ポインタがその一覧の中にあるときだけ出す。**
+    ///
+    /// 出しっぱなしにすると、48px の丸が並ぶだけのサーバ一覧の右端に
+    /// いつも 1 本線が入る。**触っていない一覧の巻き具合は、いま要る話ではない**。
+    ///
+    /// # なぜ「巻いている間」ではないのか
+    ///
+    /// 「巻いている間だけ」にすると、止めた後に消すための時計が要る。
+    /// イベントループは `ControlFlow::Wait` で寝ており、時計で起こすのは
+    /// `NFR-005` (非アクティブ時に描画を止める) と噛み合わない。
+    /// **巻くにはその一覧の上にポインタが要る**以上、居場所で決めれば
+    /// 時計を持たずに同じことになる。
+    ///
+    /// ⚠️ **摘みを掴んでいる間は、指が一覧の外へ出ても消えない。**
+    /// 掴んでいる間はホバーを更新しない ([`Self::hover_changed`] を
+    /// 呼ばない) ためである。ここが変わると掴んだ先が消える
+    fn scrollbar(&self, owner: NodeId) -> Option<UiNode> {
+        (self.hovered_scroll == Some(owner)).then(scrollbar_node)
     }
 
     fn hovered_id(&self, node: NodeId, id: u64) -> bool {
@@ -355,15 +379,28 @@ impl Application for Gumicord {
     }
 
     fn hover_changed(&mut self, hits: &[Hit]) -> bool {
+        let mut changed = false;
+
+        // ⚠️ **一番内側の巻ける領域を採る。** `hits` は手前から並ぶので、
+        // 最初に見つかったものが一番内側である
+        let scroll = hits
+            .iter()
+            .find(|h| gumicord_render::intrinsic(h.id).scroll)
+            .map(|h| h.id);
+        if scroll != self.hovered_scroll {
+            self.hovered_scroll = scroll;
+            changed = true;
+        }
+
         let next = hits
             .iter()
             .find(|h| INTERACTIVE.contains(&h.id))
             .map(|h| (h.id, h.key.clone()));
-        if next == self.hovered {
-            return false;
+        if next != self.hovered {
+            self.hovered = next;
+            changed = true;
         }
-        self.hovered = next;
-        true
+        changed
     }
 
     fn pressed(&mut self, hits: &[Hit]) -> bool {
@@ -583,7 +620,7 @@ impl Gumicord {
 
             list = list.child(self.guild_item(&g));
         }
-        list.child(scrollbar())
+        list.children(self.scrollbar(NodeId::NavGuildList))
     }
 
     /// サーバ 1 個。**フォルダの中でも外でも同じものである**
@@ -705,7 +742,7 @@ impl Gumicord {
 
         UiNode::new(NodeId::NavChannelList)
             .child(UiNode::text(NodeId::NavChannelListHeader, title))
-            .child(list.child(scrollbar()))
+            .child(list.children(self.scrollbar(NodeId::LayoutScroll)))
     }
 
     /// 左側全体。**一覧の下に自分が居座る**。
@@ -808,7 +845,7 @@ impl Gumicord {
             messages = messages.child(self.message(m, prev == Some(&*m.author)));
             prev = Some(&m.author);
         }
-        messages = messages.child(scrollbar());
+        messages = messages.children(self.scrollbar(NodeId::ChatMessageList));
 
         UiNode::new(NodeId::ChatView)
             .child(header)
@@ -1248,7 +1285,7 @@ fn local_time(iso: &str) -> String {
 /// はみ出し量はレイアウトしないと分からないので、テーマにもクライアントにも
 /// 書けない。ここが渡すのは「この一覧にはスクロールバーがある」ことだけで、
 /// 幅・余白・色はテーマが決める。
-fn scrollbar() -> UiNode {
+fn scrollbar_node() -> UiNode {
     UiNode::new(NodeId::LayoutScrollbar).child(UiNode::new(NodeId::LayoutScrollbarThumb))
 }
 
@@ -1701,6 +1738,47 @@ mod user_panel_tests {
 
         // ⚠️ 伸びると、チャットから幅を奪う
         assert_eq!(gumicord_render::intrinsic(NodeId::NavSidebar).grow, 0.0);
+    }
+
+    /// スクロールバーは**触っている一覧にしか出ない**。
+    ///
+    /// 出しっぱなしだと、丸が並ぶだけのサーバ一覧の右端にいつも線が入る
+    #[test]
+    fn only_the_list_under_the_pointer_has_a_scrollbar() {
+        let mut a = Gumicord::demo();
+
+        // どこにも居ないうちは、どの一覧にも出ない
+        assert!(!names(&a.guild_list()).contains(&NodeId::LayoutScrollbar));
+        assert!(!names(&a.channel_list()).contains(&NodeId::LayoutScrollbar));
+
+        a.hovered_scroll = Some(NodeId::NavGuildList);
+        assert!(names(&a.guild_list()).contains(&NodeId::LayoutScrollbar));
+        // 隣の一覧には出ない
+        assert!(!names(&a.channel_list()).contains(&NodeId::LayoutScrollbar));
+    }
+
+    /// ⚠️ **一番内側の巻ける領域を採る。** チャンネル一覧の中身は
+    /// `layout.scroll` であって `nav.channel_list` ではない
+    #[test]
+    fn the_innermost_scroll_region_wins() {
+        let mut a = Gumicord::demo();
+        let hit = |id| Hit {
+            id,
+            key: None,
+            rect: gumicord_render::Rect::ZERO,
+            clip: None,
+        };
+
+        // 手前から並ぶ。項目 → 内側の巻ける領域 → 外側の入れ物
+        a.hover_changed(&[
+            hit(NodeId::NavChannelListItem),
+            hit(NodeId::LayoutScroll),
+            hit(NodeId::NavChannelList),
+        ]);
+        assert_eq!(a.hovered_scroll, Some(NodeId::LayoutScroll));
+
+        a.hover_changed(&[]);
+        assert_eq!(a.hovered_scroll, None);
     }
 
     /// 一番狭いときは一覧ごと消える。**自分も一緒に消える**
