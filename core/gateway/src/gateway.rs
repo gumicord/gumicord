@@ -56,7 +56,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, MessageId, Token};
+use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, MessageId, Token, UserId};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
@@ -234,7 +234,16 @@ pub struct Gateway {
     ///
     /// ⚠️ **繋ぎ直すたびに送り直す。** 購読は接続に紐づく
     wanted: std::collections::HashMap<GuildId, ChannelId>,
-    requests: tokio::sync::mpsc::UnboundedReceiver<(GuildId, ChannelId)>,
+    requests: tokio::sync::mpsc::UnboundedReceiver<Request>,
+}
+
+/// Gateway へ流す頼みごと。
+#[derive(Debug, Clone)]
+enum Request {
+    /// このチャンネルを見ている (`op 14`)
+    Watch(GuildId, ChannelId),
+    /// この人たちの、このギルドでの姿が要る (`op 8`)
+    Members(GuildId, Vec<UserId>),
 }
 
 /// 「このチャンネルを見ている」と Gateway へ伝える手。
@@ -251,7 +260,7 @@ pub struct Gateway {
 /// 購読しないと、新着も入力中の表示も一切届かない。
 #[derive(Clone, Debug)]
 pub struct Subscriptions {
-    tx: tokio::sync::mpsc::UnboundedSender<(GuildId, ChannelId)>,
+    tx: tokio::sync::mpsc::UnboundedSender<Request>,
 }
 
 impl Subscriptions {
@@ -259,7 +268,27 @@ impl Subscriptions {
     ///
     /// **何度呼んでもよい。** 同じものは送り直されるだけである
     pub fn watch(&self, guild: GuildId, channel: ChannelId) {
-        let _ = self.tx.send((guild, channel));
+        let _ = self.tx.send(Request::Watch(guild, channel));
+    }
+
+    /// この人たちの、このギルドでの姿を頼む (`op 8`)。
+    ///
+    /// # なぜ要るのか
+    ///
+    /// ⚠️ **REST で取った発言には `member` が付いていない。** 呼び名も
+    /// サーバごとの顔も役職の色も、これを頼まないと出てこない。
+    /// 公式クライアントも同じで、チャンネルを開いた直後は名前が白い。
+    ///
+    /// ⚠️ **1 回 100 人まで。** 超えると Discord が弾く。分けるのは
+    /// 呼び出し側の仕事である。
+    ///
+    /// ⚠️ **同じ人を何度も頼まない。** これも線に流す payload であり、
+    /// 出しすぎればレート制限で接続ごと切られる (`4008`)
+    pub fn request_members(&self, guild: GuildId, users: Vec<UserId>) {
+        if users.is_empty() {
+            return;
+        }
+        let _ = self.tx.send(Request::Members(guild, users));
     }
 }
 
@@ -288,13 +317,12 @@ fn connect_url(resume_host: Option<&str>) -> String {
 
 /// `op 14` — 見ているものを伝える。
 ///
-/// `channels` の `[[0, 99]]` は「メンバー一覧の 0〜99 番目が要る」という
-/// 意味である。**この形でないと購読そのものが成立しない**ので、一覧を
-/// 出さない画面でも送る。
+/// `channels` の範囲は「メンバー一覧の何番目から何番目が要るか」で
+/// ある。**この形でないと購読そのものが成立しない**ので、一覧を出さない
+/// 画面でも送る。
 ///
-/// ⚠️ **頼んだ範囲しか来ない。** これが [`crate::member_list`] が
-/// 100 人目で止まる理由である。巻いた先を見せるには、範囲を広げて
-/// 送り直す必要がある
+/// ⚠️ **頼んだ範囲しか来ない** ([`MEMBER_RANGES`])。それより下を見せるには、
+/// 巻いた先を頼み直す必要がある ([`crate::member_list`])
 fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
     json!({
         "op": OP_GUILD_SUBSCRIBE,
@@ -303,7 +331,33 @@ fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
             "typing": true,
             "threads": false,
             "activities": true,
-            "channels": { channel.get().to_string(): [[0, 99]] },
+            "channels": { channel.get().to_string(): MEMBER_RANGES },
+        },
+    })
+}
+
+/// メンバー一覧のどこまでを頼むか。
+///
+/// ⚠️ **1 回に 3 つまで。** 公式クライアントも 3 つ送っており、それより
+/// 多いと Discord は黙って残りを無視する。100 人ずつなので 300 人まで。
+///
+/// ⚠️ **それより下は巻いたときに頼み直すしかない。** その仕組みはまだ無い
+/// ([`crate::member_list`])
+const MEMBER_RANGES: [[u32; 2]; 3] = [[0, 99], [100, 199], [200, 299]];
+
+/// `op 8` — この人たちの、このギルドでの姿を頼む。
+///
+/// ⚠️ **`user_ids` は 1 回 100 人まで。** 分けるのは呼び出し側の仕事である。
+///
+/// `presences` は頼まない。**要らないものを運ばせない** — 姿が欲しいので
+/// あって、いま online かどうかはメンバー一覧のほうが持っている。
+fn request_members(guild: GuildId, users: &[UserId]) -> serde_json::Value {
+    json!({
+        "op": OP_REQUEST_MEMBERS,
+        "d": {
+            "guild_id": guild.get().to_string(),
+            "user_ids": users.iter().map(|u| u.get().to_string()).collect::<Vec<_>>(),
+            "presences": false,
         },
     })
 }
@@ -491,6 +545,8 @@ const OP_RECONNECT: u8 = 7;
 const OP_INVALID_SESSION: u8 = 9;
 const OP_HELLO: u8 = 10;
 const OP_HEARTBEAT_ACK: u8 = 11;
+/// `op 8` — 名指しでメンバーを頼む。**1 回 100 人まで**
+const OP_REQUEST_MEMBERS: u8 = 8;
 /// 見ているギルドとチャンネルを伝える。**利用者トークンでは必須**
 const OP_GUILD_SUBSCRIBE: u8 = 14;
 
@@ -624,7 +680,7 @@ impl Connection {
     async fn pump(
         &mut self,
         session: &mut Option<SessionInfo>,
-        requests: &mut tokio::sync::mpsc::UnboundedReceiver<(GuildId, ChannelId)>,
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
         wanted: &mut std::collections::HashMap<GuildId, ChannelId>,
     ) -> Result<Option<Event>, GatewayError> {
         if let Some(payload) = self.queued.pop_front() {
@@ -634,7 +690,7 @@ impl Connection {
         enum Step {
             Beat,
             Received(Option<()>),
-            Watch(Option<(GuildId, ChannelId)>),
+            Watch(Option<Request>),
         }
 
         let step = tokio::select! {
@@ -658,7 +714,12 @@ impl Connection {
             }
             Step::Received(Some(())) => Ok(None),
             Step::Received(None) => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
-            Step::Watch(Some((guild, channel))) => {
+            Step::Watch(Some(Request::Members(guild, users))) => {
+                tracing::debug!(%guild, users = users.len(), "メンバーを名指しで頼む");
+                self.send(request_members(guild, &users)).await?;
+                Ok(None)
+            }
+            Step::Watch(Some(Request::Watch(guild, channel))) => {
                 // ⚠️ **同じ購読を送り直さない。**
                 //
                 // 呼ぶ側は「毎回伝える」でよい — 見ているものが変わった

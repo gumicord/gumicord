@@ -114,6 +114,13 @@ pub enum LiveEvent {
     },
     /// メンバー一覧の差分 (`FR-043`)
     Members(Box<gumicord_gateway::member_list::MemberListUpdate>),
+    /// 名指しで頼んだ人の姿 (`op 8` の返事)。
+    ///
+    /// ⚠️ **REST の発言には姿が付いていないので、ここが唯一の出所になる**
+    MemberChunk {
+        guild: GuildId,
+        members: Vec<gumicord_model::Member>,
+    },
     /// 誰かが打ち始めた
     Typing {
         channel: ChannelId,
@@ -158,6 +165,14 @@ pub struct Live {
     subs: Option<Subscriptions>,
     /// いま画面に出ているチャンネル。**開いている間は読んだことにする**
     watching: Option<ChannelId>,
+    /// 姿を名指しで頼んだ人。
+    ///
+    /// ⚠️ **これが無いと同じ人を何度も頼む。** `op 8` も線に流す payload で
+    /// あり、出しすぎればレート制限で接続ごと切られる (`4008`)。
+    ///
+    /// ⚠️ **返ってこなかった人も入れたままにする。** 消えた人・見えない
+    /// 人は永久に返ってこないので、諦めない限り頼み続けることになる
+    asked_members: HashSet<(GuildId, UserId)>,
     /// チャンネルごとの、いま入力中の人。**残さない。消えてよいもの**
     typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
     /// ギルドごとのメンバー一覧 (`FR-043`)。
@@ -239,6 +254,7 @@ impl Live {
             last_channel: None,
             subs: None,
             watching: None,
+            asked_members: HashSet::new(),
             typing: std::collections::HashMap::new(),
             members: std::collections::HashMap::new(),
             me: None,
@@ -470,6 +486,47 @@ impl Live {
         self.exhausted.contains(&channel)
     }
 
+    /// そのチャンネルに出ている人の姿を、まとめて頼む (`FR-043`)。
+    ///
+    /// # ⚠️ REST で取った発言には `member` が付いていない
+    ///
+    /// Discord が添えるのは Gateway の `MESSAGE_CREATE` だけである。
+    /// **公式クライアントも同じで、チャンネルを開いた直後は名前が白く、
+    /// 少し遅れて色が付く。** これはその「少し遅れて」に当たる。
+    ///
+    /// ⚠️ **知らない人だけを頼む。** 既に姿を持っている人まで頼むと、
+    /// チャンネルを開くたびに何十人ぶんも線に流すことになる。
+    ///
+    /// ⚠️ **1 回 100 人まで。** 超えると Discord が弾く
+    fn fill_members(&mut self, channel: ChannelId) {
+        /// `op 8` の 1 回の上限
+        const CHUNK: usize = 100;
+
+        let Some(subs) = &self.subs else { return };
+        let Some(guild) = self.store.channel(channel).and_then(|c| c.guild_id) else {
+            return;
+        };
+
+        let mut want: Vec<UserId> = Vec::new();
+        for m in self.store.messages(channel) {
+            let user = m.author.id;
+            if self.store.member(guild, user).is_some() {
+                continue;
+            }
+            if !self.asked_members.insert((guild, user)) {
+                continue;
+            }
+            want.push(user);
+        }
+        if want.is_empty() {
+            return;
+        }
+        tracing::debug!(users = want.len(), "知らない人の姿を頼む");
+        for part in want.chunks(CHUNK) {
+            subs.request_members(guild, part.to_vec());
+        }
+    }
+
     /// そこまで読んだことにする (`FR-042`)。**変わったら真**。
     ///
     /// # ⚠️ 画面を先に直し、サーバへは後から伝える
@@ -528,6 +585,7 @@ impl Live {
         self.paging.clear();
         self.exhausted.clear();
         self.watching = None;
+        self.asked_members.clear();
         self.members.clear();
         self.typing.clear();
         self.last_channel = None;
@@ -675,6 +733,8 @@ impl Live {
                 // 履歴を丸ごと置き直したので、**遡り直せる**
                 self.exhausted.remove(&channel);
                 self.store.set_backlog(channel, list);
+                // ⚠️ **REST の発言には姿が付いていない。** 名指しで頼む
+                self.fill_members(channel);
                 true
             }
             LiveEvent::Older { channel, list } => {
@@ -688,6 +748,7 @@ impl Live {
                     db.save_messages(channel, list.clone());
                 }
                 let added = self.store.prepend_messages(channel, list);
+                self.fill_members(channel);
                 if added == 0 {
                     // 全部知っていた。**もう一度頼んでも同じものが来る**
                     self.exhausted.insert(channel);
@@ -719,6 +780,18 @@ impl Live {
                     for (user, member) in seen {
                         self.store.remember_member(guild, user, member);
                     }
+                }
+                changed
+            }
+            LiveEvent::MemberChunk { guild, members } => {
+                let mut changed = false;
+                for m in members {
+                    // 誰か分からない姿は覚えない
+                    let Some(user) = m.user.as_ref().map(|u| u.id) else {
+                        continue;
+                    };
+                    self.store.remember_member(guild, user, m);
+                    changed = true;
                 }
                 changed
             }
@@ -794,6 +867,12 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                     Some(u) => send(LiveEvent::Members(Box::new(u))),
                     None => tracing::warn!("メンバー一覧を読めなかった"),
                 },
+                // ⚠️ **`op 8` で名指しで頼んだ返事である。**
+                // REST の発言には姿が付いていないので、ここが唯一の出所になる
+                "GUILD_MEMBERS_CHUNK" => match members_chunk(&data) {
+                    Some(e) => send(e),
+                    None => tracing::warn!("メンバーの返事を読めなかった"),
+                },
                 "TYPING_START" => {
                     if let Some(e) = typing_event(&data) {
                         send(e);
@@ -833,6 +912,25 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
 ///
 /// DM には `member` が無い。名前が分からなければ**出さない** —
 /// 「誰かが入力中」とだけ出しても、利用者にできることが増えない
+/// `GUILD_MEMBERS_CHUNK` から姿を取り出す。
+///
+/// ⚠️ **読めない 1 人で全部を捨てない。** Discord は予告なく形を変える
+fn members_chunk(data: &serde_json::Value) -> Option<LiveEvent> {
+    let guild = data.get("guild_id")?.as_str()?.parse::<u64>().ok()?;
+    let members: Vec<gumicord_model::Member> = data
+        .get("members")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| serde_json::from_value(m.clone()).ok())
+        .collect();
+
+    tracing::debug!(members = members.len(), "頼んだ人の姿が届いた");
+    Some(LiveEvent::MemberChunk {
+        guild: GuildId::from(guild),
+        members,
+    })
+}
+
 fn typing_event(data: &serde_json::Value) -> Option<LiveEvent> {
     let channel = data.get("channel_id")?.as_str()?.parse::<u64>().ok()?;
     let user = data.get("user_id")?.as_str()?.parse::<u64>().ok()?;
