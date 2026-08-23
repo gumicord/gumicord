@@ -53,6 +53,33 @@ impl RestClient {
             .await
     }
 
+    /// ここまで読んだと伝える (`FR-042`)。
+    ///
+    /// ⚠️ **応答は捨ててよい。** 返ってくるのは次に使う token だけで、
+    /// 未読の表示に要るものは何も無い。**画面はもう既読になっている**
+    /// ので、失敗しても記録するだけでよい。
+    ///
+    /// ⚠️ **他の端末にも効く。** これは手元の見た目ではなく、
+    /// アカウントの状態を変える呼び出しである
+    pub async fn ack_message(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+    ) -> Result<(), RestError> {
+        #[derive(serde::Serialize)]
+        struct Body {
+            /// 手動で既読にしたのではない。**通知の数え方が変わる**
+            manual: bool,
+        }
+
+        self.send::<serde::de::IgnoredAny>(
+            Route::ack_message(channel, message),
+            Some(&Body { manual: false }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// 自分が入っているチャンネル (DM とグループ DM)。
     pub async fn dm_channels(&self) -> Result<Vec<Channel>, RestError> {
         self.get(Route::current_user_channels()).await

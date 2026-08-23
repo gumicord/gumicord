@@ -291,6 +291,7 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
                     topic: row.get(5)?,
                     nsfw: false,
                     recipients: Vec::new(),
+                    last_message_id: None,
                 },
             ))
         })?
@@ -394,6 +395,10 @@ fn read_messages(
             attachments: Vec::new(),
             member: member(row.get(8)?, row.get(9)?),
             referenced_message: None,
+            // ⚠️ **残していない。** 未読は READY が持ってくるもので、
+            // キャッシュから作り直す種類のものではない
+            mentions: Vec::new(),
+            mention_everyone: false,
         })
     })?
     .collect()
@@ -673,6 +678,7 @@ mod tests {
                 topic: Some("話題".to_owned()),
                 nsfw: false,
                 recipients: Vec::new(),
+                last_message_id: None,
             }],
             roles: Vec::new(),
         }
@@ -698,6 +704,8 @@ mod tests {
             attachments: Vec::new(),
             member: None,
             referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
         }
     }
 

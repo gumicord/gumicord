@@ -691,6 +691,11 @@ impl Gumicord {
             .with_state_if(hovered, State::Hover)
             .children(self.guild_pill(g, selected, hovered))
             .child(icon)
+            // ⚠️ **未読の丸は出さない。数だけを出す。**
+            // 「未読がある」ことは既に左の印が言っている
+            .children((g.mentions > 0).then(|| {
+                UiNode::text(NodeId::NavGuildListItemBadge, g.mentions.to_string()).with_data(g.id)
+            }))
     }
 
     /// サーバの左端に出る白い印 (Discord の「ピル」)。
@@ -1293,37 +1298,48 @@ impl Gumicord {
             .guild_entries()
             .into_iter()
             .map(|e| match e {
-                GuildEntry::Folder { id, row } => GuildRow {
-                    id,
-                    // 名前が無いフォルダもある。**中身の名前で代わりにする**
-                    name: row.name.clone().unwrap_or_else(|| self.folder_label(row)),
-                    // ⚠️ **フォルダ自体に絵は無い。** 代わりに中身を敷き詰める
-                    icon: None,
-                    unread: false,
-                    mentions: 0,
-                    folder_of_own: Some(id),
-                    in_folder: false,
-                    collapsed: self.live.store().is_collapsed(id),
-                    tint: row.color,
-                    members: self.folder_members(row),
-                },
-                GuildEntry::Guild { row, folder } => GuildRow {
-                    id: row.id.get(),
-                    name: row.name.clone(),
-                    icon: self
-                        .live
-                        .store()
-                        .guild_icon(row.id)
-                        .map(|a| a.with_size(ICON_PX).url()),
-                    // read-state はまだ無い。**無いものを在るように見せない**
-                    unread: false,
-                    mentions: 0,
-                    folder_of_own: None,
-                    in_folder: folder.is_some(),
-                    collapsed: false,
-                    tint: None,
-                    members: Vec::new(),
-                },
+                GuildEntry::Folder { id, row } => {
+                    // ⚠️ **フォルダも中身を畳む。** 閉じているときに中の
+                    // 未読が見えなくなると、閉じた瞬間に気付けなくなる
+                    let (unread, mentions) = row.guilds.iter().fold((false, 0), |acc, g| {
+                        let (u, m) = self.live.store().guild_unread(*g);
+                        (acc.0 || u, acc.1 + m)
+                    });
+                    GuildRow {
+                        id,
+                        // 名前が無いフォルダもある。**中身の名前で代わりにする**
+                        name: row.name.clone().unwrap_or_else(|| self.folder_label(row)),
+                        // ⚠️ **フォルダ自体に絵は無い。** 代わりに中身を敷き詰める
+                        icon: None,
+                        unread,
+                        mentions,
+                        folder_of_own: Some(id),
+                        in_folder: false,
+                        collapsed: self.live.store().is_collapsed(id),
+                        tint: row.color,
+                        members: self.folder_members(row),
+                    }
+                }
+                GuildEntry::Guild { row, folder } => {
+                    // 中のチャンネルを畳んだもの (`FR-042`)
+                    let (unread, mentions) = self.live.store().guild_unread(row.id);
+                    GuildRow {
+                        id: row.id.get(),
+                        name: row.name.clone(),
+                        icon: self
+                            .live
+                            .store()
+                            .guild_icon(row.id)
+                            .map(|a| a.with_size(ICON_PX).url()),
+                        unread,
+                        mentions,
+                        folder_of_own: None,
+                        in_folder: folder.is_some(),
+                        collapsed: false,
+                        tint: None,
+                        members: Vec::new(),
+                    }
+                }
             })
             .collect()
     }
@@ -1361,8 +1377,8 @@ impl Gumicord {
                         .store()
                         .guild_icon(*id)
                         .map(|a| a.with_size(ICON_PX).url()),
-                    unread: false,
-                    mentions: 0,
+                    unread: self.live.store().guild_unread(*id).0,
+                    mentions: self.live.store().guild_unread(*id).1,
                     folder_of_own: None,
                     in_folder: true,
                     collapsed: false,
@@ -1424,8 +1440,8 @@ impl Gumicord {
                     icon: c.kind.icon(),
                     topic: c.topic.clone(),
                     // read-state はまだ無い。**無いものを在るように見せない**
-                    unread: false,
-                    mentions: 0,
+                    unread: self.live.store().is_unread(c.id),
+                    mentions: self.live.store().mentions(c.id),
                     category: false,
                 },
             })
@@ -2089,6 +2105,8 @@ mod member_tests {
                 user: None,
             }),
             referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
         }
     }
 
@@ -2113,6 +2131,7 @@ mod member_tests {
                     topic: None,
                     nsfw: false,
                     recipients: Vec::new(),
+                    last_message_id: None,
                 }],
                 roles: Vec::new(),
             }]);
@@ -2179,6 +2198,7 @@ mod member_list_tests {
                     topic: None,
                     nsfw: false,
                     recipients: Vec::new(),
+                    last_message_id: None,
                 }],
                 roles: vec![gumicord_model::Role {
                     id: 55u64.into(),
@@ -2376,6 +2396,7 @@ mod channel_selection_tests {
                     topic: None,
                     nsfw: false,
                     recipients: Vec::new(),
+                    last_message_id: None,
                 },
                 Channel {
                     id: 11u64.into(),
@@ -2387,6 +2408,7 @@ mod channel_selection_tests {
                     topic: None,
                     nsfw: false,
                     recipients: Vec::new(),
+                    last_message_id: None,
                 },
             ],
             roles: Vec::new(),

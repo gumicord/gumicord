@@ -56,7 +56,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, Token};
+use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, MessageId, Token};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
@@ -139,6 +139,51 @@ pub struct Ready {
     /// ここにサーバの並び順が入っている ([`crate::guild_order`])
     #[serde(default)]
     pub user_settings_proto: Option<String>,
+    /// どこまで読んだか (`FR-042`)。
+    ///
+    /// ⚠️ **形が 2 通りある。** 古い版は配列そのもの、新しい版は
+    /// `{ "entries": [...] }` で来る ([`ReadStates`])
+    #[serde(default)]
+    pub read_state: Option<ReadStates>,
+}
+
+/// READY の `read_state`。**2 通りの形をそのまま受ける入れ物。**
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ReadStates {
+    /// 新しい版
+    Wrapped {
+        #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
+        entries: Vec<ReadState>,
+    },
+    /// 古い版。**配列がそのまま来る**
+    Flat(#[serde(deserialize_with = "gumicord_model::de::lenient_vec")] Vec<ReadState>),
+}
+
+impl ReadStates {
+    pub fn entries(&self) -> &[ReadState] {
+        match self {
+            ReadStates::Wrapped { entries } => entries,
+            ReadStates::Flat(v) => v,
+        }
+    }
+}
+
+/// 1 チャンネルぶんの「どこまで読んだか」。
+///
+/// ⚠️ **チャンネル以外のものも混ざる。** ギルドのイベントや実績にも
+/// 読んだ印が付いており、同じ配列で来る。`id` で引けないものは
+/// **黙って落ちる**ので、選り分けは要らない
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadState {
+    /// チャンネルの識別子
+    pub id: ChannelId,
+    /// ここまで読んだ。**これより新しい発言があれば未読である**
+    #[serde(default)]
+    pub last_message_id: Option<MessageId>,
+    /// 自分宛ての未読の数。**サーバが数えている**
+    #[serde(default)]
+    pub mention_count: u32,
 }
 
 impl Ready {

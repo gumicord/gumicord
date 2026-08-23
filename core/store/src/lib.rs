@@ -13,7 +13,8 @@
 //! | 全文検索 (FTS5) | M2 (`FR-035`) |
 //! | キャッシュの暗号化 | M2 (`SEC-020`)。⚠️ **本文が平文でディスクに残る** |
 //! | 送信キューのオフライン退避 | M2 (`NFR-012`) |
-//! | 未読・既読位置 | READY の `read_state` を読んでいない |
+//! | 未読のミュート | 通知設定 (`FR-041`, M2) を読んでいないので、**黙らせたチャンネルも光る** |
+//! | 未読の保存 | 読んだ印は READY が毎回持ってくるので残していない |
 //!
 //! 要件: `FR-035`, `NFR-011`, `NFR-012`, `SEC-020`, `SEC-021`
 //! 仕様: [`spec/02-architecture.md`]
@@ -24,7 +25,9 @@ pub use db::{Db, DbError, Snapshot, default_path};
 
 use std::collections::{HashMap, HashSet};
 
-use gumicord_model::{Asset, Channel, ChannelId, Guild, GuildId, Message, MessageId, Role, RoleId};
+use gumicord_model::{
+    Asset, Channel, ChannelId, Guild, GuildId, Message, MessageId, Role, RoleId, UserId,
+};
 
 /// 正規化された状態。
 ///
@@ -69,6 +72,25 @@ pub struct Store {
     collapsed: std::collections::HashSet<u64>,
     /// ギルドごとの役職。**メンバー一覧の見出しを名前にするために要る**
     roles: HashMap<GuildId, Vec<Role>>,
+    /// どこまで読んだか (`FR-042`)。**チャンネルごと**
+    read: HashMap<ChannelId, ReadMark>,
+}
+
+/// 1 チャンネルぶんの「どこまで読んだか」。
+///
+/// # ⚠️ 未読は差ではなく大小で決まる
+///
+/// スノーフレークは時刻を含むので、**「読んだ印より大きい発言があるか」**
+/// を見れば未読かどうかが決まる。件数は数えない — 数えるには全部の発言を
+/// 持っている必要があり、開いていないチャンネルの分は持っていない。
+///
+/// 名指しの数だけはサーバが数えて寄越すので、そのまま持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReadMark {
+    /// ここまで読んだ。`None` は**一度も読んでいない**
+    pub seen: Option<MessageId>,
+    /// 自分宛ての未読の数
+    pub mentions: u32,
 }
 
 /// サーバ一覧の 1 行。**フォルダか、サーバか。**
@@ -265,6 +287,94 @@ impl Store {
             .filter_map(|r| Some((r.position, r.tint()?)))
             .max_by_key(|(position, _)| *position)
             .map(|(_, tint)| tint)
+    }
+
+    // ─────────────────────────────────────────── 未読 (`FR-042`)
+
+    /// 読んだ印を置く。READY から来たものをそのまま入れる。
+    ///
+    /// ⚠️ **知らないチャンネルの分も入れる。** `read_state` には
+    /// ギルドのイベントなど、チャンネルでないものの印も混ざっている。
+    /// 選り分けずに持っておいて、引くときにチャンネルとして扱う
+    pub fn set_read_marks(&mut self, marks: impl IntoIterator<Item = (ChannelId, ReadMark)>) {
+        self.read = marks.into_iter().collect();
+    }
+
+    /// そのチャンネルに、まだ読んでいない発言があるか。
+    ///
+    /// ⚠️ **一度も読んでいないチャンネルを未読にしない。**
+    ///
+    /// 入ったばかりのサーバは、全チャンネルが「読んだ印なし」で来る。
+    /// それを未読にすると**入った瞬間に全部が光る**。Discord は入った
+    /// 時刻より前の発言を未読として扱わないので、こちらも印が無ければ
+    /// 未読としない。
+    ///
+    /// ⚠️ **ミュートを見ていない。** 通知設定 (`FR-041`, M2) を読んで
+    /// いないので、**黙らせたチャンネルも光る**
+    pub fn is_unread(&self, channel: ChannelId) -> bool {
+        let Some(last) = self.channels.get(&channel).and_then(|c| c.last_message_id) else {
+            return false;
+        };
+        match self.read.get(&channel).and_then(|m| m.seen) {
+            Some(seen) => last > seen,
+            None => false,
+        }
+    }
+
+    /// そのチャンネルの、自分宛ての未読の数
+    pub fn mentions(&self, channel: ChannelId) -> u32 {
+        self.read.get(&channel).map_or(0, |m| m.mentions)
+    }
+
+    /// そのサーバに未読があるか、名指しが何件あるか。
+    ///
+    /// **中のチャンネルを畳んだもの**である。サーバ一覧の印はこれで決まる
+    pub fn guild_unread(&self, guild: GuildId) -> (bool, u32) {
+        let mut unread = false;
+        let mut mentions = 0;
+        for c in self.channels_of(guild) {
+            unread |= self.is_unread(c.id);
+            mentions += self.mentions(c.id);
+        }
+        (unread, mentions)
+    }
+
+    /// そこまで読んだことにする。**変わったら真**。
+    ///
+    /// ⚠️ **サーバへ伝えるのは呼び出し側の仕事である。** ここは手元の
+    /// 見た目を先に直すだけで、往復を待たない
+    pub fn mark_read(&mut self, channel: ChannelId) -> bool {
+        let last = self.channels.get(&channel).and_then(|c| c.last_message_id);
+        let mark = self.read.entry(channel).or_default();
+        // ⚠️ **一度も読んでいないチャンネルにも印を置く。** 置かないと
+        // 開いても未読のままになる
+        let changed = mark.seen != last || mark.mentions != 0;
+        mark.seen = last;
+        mark.mentions = 0;
+        changed
+    }
+
+    /// 新しい発言が来た。**チャンネルの一番新しい発言を進める**。
+    ///
+    /// `me` は自分。自分宛てなら名指しの数を増やす。
+    /// **変わったら真** (画面を描き直すかの判断に使う)
+    pub fn note_arrival(&mut self, message: &Message, me: Option<UserId>) -> bool {
+        let Some(channel) = self.channels.get_mut(&message.channel_id) else {
+            return false;
+        };
+        // ⚠️ **戻さない。** 遅れて届いた古いものが混ざることがある
+        if channel
+            .last_message_id
+            .is_some_and(|last| last >= message.id)
+        {
+            return false;
+        }
+        channel.last_message_id = Some(message.id);
+
+        if me.is_some_and(|me| message.mentions_me(me)) {
+            self.read.entry(message.channel_id).or_default().mentions += 1;
+        }
+        true
     }
 
     /// そのフォルダに利用者が付けた色。**無ければ `None`**
@@ -540,6 +650,7 @@ mod tests {
                     topic: None,
                     nsfw: false,
                     recipients: Vec::new(),
+                    last_message_id: None,
                 })
                 .collect(),
             roles: Vec::new(),
@@ -566,6 +677,8 @@ mod tests {
             attachments: Vec::new(),
             member: None,
             referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
         }
     }
 
@@ -635,6 +748,7 @@ mod tests {
             topic: None,
             nsfw: false,
             recipients: Vec::new(),
+            last_message_id: None,
         });
         g.channels.push(Channel {
             id: 21u64.into(),
@@ -646,6 +760,7 @@ mod tests {
             topic: None,
             nsfw: false,
             recipients: Vec::new(),
+            last_message_id: None,
         });
 
         let mut s = Store::new();
@@ -681,6 +796,7 @@ mod tests {
             topic: None,
             nsfw: false,
             recipients: Vec::new(),
+            last_message_id: None,
         });
 
         let mut s = Store::new();
@@ -1045,5 +1161,188 @@ mod tint_tests {
         assert_eq!(s.folder_tint(100), Some(0x007c_6cf0));
         assert_eq!(s.folder_tint(200), None);
         assert_eq!(s.folder_tint(999), None);
+    }
+}
+
+#[cfg(test)]
+mod unread_tests {
+    use super::*;
+    use gumicord_model::{ChannelKind, User};
+
+    fn channel(id: u64, last: Option<u64>) -> Channel {
+        Channel {
+            id: ChannelId::from(id),
+            kind: ChannelKind::GuildText,
+            name: Some(format!("ch{id}")),
+            guild_id: Some(GuildId::from(1u64)),
+            parent_id: None,
+            position: 0,
+            topic: None,
+            nsfw: false,
+            recipients: Vec::new(),
+            last_message_id: last.map(MessageId::from),
+        }
+    }
+
+    fn store(channels: Vec<Channel>) -> Store {
+        let mut s = Store::new();
+        s.upsert_guild(Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels,
+            roles: Vec::new(),
+        });
+        s
+    }
+
+    fn user(id: u64) -> User {
+        User {
+            id: gumicord_model::UserId::from(id),
+            username: format!("u{id}"),
+            global_name: None,
+            discriminator: "0".to_owned(),
+            avatar_hash: None,
+            bot: false,
+        }
+    }
+
+    fn message(id: u64, channel: u64, from: u64, to: &[u64]) -> Message {
+        Message {
+            id: MessageId::from(id),
+            channel_id: ChannelId::from(channel),
+            guild_id: Some(GuildId::from(1u64)),
+            author: user(from),
+            content: String::new(),
+            timestamp: String::new(),
+            edited_timestamp: None,
+            pinned: false,
+            attachments: Vec::new(),
+            member: None,
+            referenced_message: None,
+            mentions: to.iter().map(|u| user(*u)).collect(),
+            mention_everyone: false,
+        }
+    }
+
+    /// 読んだ印より新しい発言があれば未読
+    #[test]
+    fn newer_than_the_mark_is_unread() {
+        let mut s = store(vec![channel(10, Some(100))]);
+        let ch = ChannelId::from(10u64);
+
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(99u64)),
+                mentions: 0,
+            },
+        )]);
+        assert!(s.is_unread(ch));
+
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(100u64)),
+                mentions: 0,
+            },
+        )]);
+        assert!(!s.is_unread(ch), "同じところまで読んでいる");
+    }
+
+    /// ⚠️ **一度も読んでいないチャンネルを未読にしない。**
+    ///
+    /// 入ったばかりのサーバは全チャンネルが印なしで来る。未読にすると
+    /// **入った瞬間に全部が光る**
+    #[test]
+    fn a_channel_we_never_read_is_not_unread() {
+        let s = store(vec![channel(10, Some(100))]);
+        assert!(!s.is_unread(ChannelId::from(10u64)));
+    }
+
+    /// サーバの印は**中のチャンネルを畳んだもの**である
+    #[test]
+    fn a_guild_folds_up_its_channels() {
+        let mut s = store(vec![channel(10, Some(100)), channel(11, Some(200))]);
+        s.set_read_marks([
+            (
+                ChannelId::from(10u64),
+                ReadMark {
+                    seen: Some(MessageId::from(100u64)),
+                    mentions: 0,
+                },
+            ),
+            (
+                ChannelId::from(11u64),
+                ReadMark {
+                    seen: Some(MessageId::from(150u64)),
+                    mentions: 3,
+                },
+            ),
+        ]);
+
+        assert_eq!(s.guild_unread(GuildId::from(1u64)), (true, 3));
+    }
+
+    /// 開いたら既読になる。**名指しの数も消える**
+    #[test]
+    fn opening_a_channel_clears_it() {
+        let mut s = store(vec![channel(10, Some(100))]);
+        let ch = ChannelId::from(10u64);
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(50u64)),
+                mentions: 2,
+            },
+        )]);
+
+        assert!(s.mark_read(ch));
+        assert!(!s.is_unread(ch));
+        assert_eq!(s.mentions(ch), 0);
+        assert!(!s.mark_read(ch), "2 度目は何も変わらない");
+    }
+
+    /// 新しい発言が来たらチャンネルの先端が進み、自分宛てなら数が増える
+    #[test]
+    fn an_arrival_moves_the_head_and_counts_mentions() {
+        let mut s = store(vec![channel(10, Some(100))]);
+        let ch = ChannelId::from(10u64);
+        let me = gumicord_model::UserId::from(7u64);
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(100u64)),
+                mentions: 0,
+            },
+        )]);
+        assert!(!s.is_unread(ch));
+
+        assert!(s.note_arrival(&message(101, 10, 8, &[]), Some(me)));
+        assert!(s.is_unread(ch));
+        assert_eq!(s.mentions(ch), 0, "名指しではない");
+
+        assert!(s.note_arrival(&message(102, 10, 8, &[7]), Some(me)));
+        assert_eq!(s.mentions(ch), 1);
+    }
+
+    /// ⚠️ **自分の発言は自分宛てに数えない。**
+    /// 返信に自分を含めることはよくある
+    #[test]
+    fn my_own_message_never_mentions_me() {
+        let mut s = store(vec![channel(10, Some(100))]);
+        let me = gumicord_model::UserId::from(7u64);
+
+        s.note_arrival(&message(101, 10, 7, &[7]), Some(me));
+        assert_eq!(s.mentions(ChannelId::from(10u64)), 0);
+    }
+
+    /// ⚠️ **先端を戻さない。** 遅れて届いた古いものが混ざることがある
+    #[test]
+    fn a_late_old_message_does_not_move_the_head_back() {
+        let mut s = store(vec![channel(10, Some(100))]);
+        assert!(!s.note_arrival(&message(50, 10, 8, &[]), None));
+        assert!(!s.note_arrival(&message(100, 10, 8, &[]), None));
     }
 }

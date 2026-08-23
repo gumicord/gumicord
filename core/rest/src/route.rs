@@ -132,6 +132,18 @@ impl Route {
         )
     }
 
+    /// `POST /channels/:id/messages/:message/ack` — ここまで読んだと伝える。
+    ///
+    /// ⚠️ **バケットの鍵に発言の識別子を入れない。** 入れると 1 回ごとに
+    /// 別の入れ物を覚えることになり、制限を共有できない
+    pub fn ack_message(channel: ChannelId, message: MessageId) -> Self {
+        Self::scoped(
+            Method::Post,
+            format!("/channels/{channel}/messages/{message}/ack"),
+            format!("/channels/{channel}/messages/ack"),
+        )
+    }
+
     /// `POST /channels/:id/messages` — S4 実測: 上限 5 / 回復 1.00 秒
     pub fn create_message(channel: ChannelId) -> Self {
         Self::scoped(

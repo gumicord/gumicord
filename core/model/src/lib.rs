@@ -428,6 +428,12 @@ pub struct Channel {
     /// DM と GroupDM の相手
     #[serde(default)]
     pub recipients: Vec<User>,
+    /// このチャンネルの一番新しい発言。**未読の判定に要る** (`FR-042`)。
+    ///
+    /// ⚠️ **消えた発言を指していることがある。** 「読んだところより新しい
+    /// ものがあるか」を見るだけなので、実在しなくても構わない
+    #[serde(default)]
+    pub last_message_id: Option<MessageId>,
 }
 
 impl Channel {
@@ -501,6 +507,31 @@ pub struct Message {
     /// 返信元 (`FR-028`)
     #[serde(default)]
     pub referenced_message: Option<Box<Message>>,
+    /// 名指しされた人 (`FR-042`)。
+    ///
+    /// ⚠️ **役職への言及はここに入らない。** 役職で呼ばれたかを知るには
+    /// 自分がそのギルドで何の役職かが要る。まだ持っていない
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    /// `@everyone` / `@here`
+    #[serde(default)]
+    pub mention_everyone: bool,
+}
+
+impl Message {
+    /// 自分が名指しされているか (`FR-042`)。
+    ///
+    /// ⚠️ **自分の発言は数えない。** 返信に自分を含めることはよくあり、
+    /// そのたびに自分宛ての印が付いてはたまらない。
+    ///
+    /// ⚠️ **役職への言及は見ていない。** 自分の役職を持っていないので、
+    /// `@モデレーター` で呼ばれても気付けない
+    pub fn mentions_me(&self, me: UserId) -> bool {
+        if self.author.id == me {
+            return false;
+        }
+        self.mention_everyone || self.mentions.iter().any(|u| u.id == me)
+    }
 }
 
 /// 自分自身。

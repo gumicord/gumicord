@@ -156,6 +156,8 @@ pub struct Live {
     last_channel: Option<ChannelId>,
     /// 「見ている」と Gateway へ伝える手。**これが無いと新着が来ない**
     subs: Option<Subscriptions>,
+    /// いま画面に出ているチャンネル。**開いている間は読んだことにする**
+    watching: Option<ChannelId>,
     /// チャンネルごとの、いま入力中の人。**残さない。消えてよいもの**
     typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
     /// ギルドごとのメンバー一覧 (`FR-043`)。
@@ -236,6 +238,7 @@ impl Live {
             rejected: false,
             last_channel: None,
             subs: None,
+            watching: None,
             typing: std::collections::HashMap::new(),
             members: std::collections::HashMap::new(),
             me: None,
@@ -363,6 +366,8 @@ impl Live {
         if let Some(db) = &self.db {
             db.save_last_channel(channel);
         }
+        self.watching = Some(channel);
+        self.mark_read(channel);
 
         // ⚠️ **毎回伝える。** 見ているチャンネルが変わったことを言わないと、
         // そのチャンネルの新着も入力中の表示も来ない
@@ -465,6 +470,34 @@ impl Live {
         self.exhausted.contains(&channel)
     }
 
+    /// そこまで読んだことにする (`FR-042`)。**変わったら真**。
+    ///
+    /// # ⚠️ 画面を先に直し、サーバへは後から伝える
+    ///
+    /// 往復を待って未読の印を消すと、**開いてから消えるまでの間、既に
+    /// 読んでいるものが未読のまま光っている**ことになる。手元を先に直す。
+    ///
+    /// ⚠️ **失敗しても画面は戻さない。** 戻すと、開いたのに未読へ戻る
+    /// という一番分かりにくい動きになる。次に開いたときに送り直される
+    fn mark_read(&mut self, channel: ChannelId) -> bool {
+        if !self.store.mark_read(channel) {
+            return false;
+        }
+        let Some(last) = self.store.channel(channel).and_then(|c| c.last_message_id) else {
+            return true;
+        };
+        let (Some(rt), Some(rest)) = (&self.rt, &self.rest) else {
+            return true;
+        };
+        let rest = rest.clone();
+        rt.spawn(async move {
+            if let Err(e) = rest.ack_message(channel, last).await {
+                tracing::warn!(%e, channel = %channel, "既読を伝えられなかった");
+            }
+        });
+        true
+    }
+
     /// 送る (`FR-024`)。
     ///
     /// ⚠️ **画面には足さない。** 送れたら Gateway が `MESSAGE_CREATE` を
@@ -494,6 +527,7 @@ impl Live {
         self.requested.clear();
         self.paging.clear();
         self.exhausted.clear();
+        self.watching = None;
         self.members.clear();
         self.typing.clear();
         self.last_channel = None;
@@ -553,6 +587,24 @@ impl Live {
                 self.status = ready.status();
                 let order = ready.guild_order();
                 let folders = ready.guild_folders();
+                // ⚠️ **ギルドより先に取る。** 差し替えると `ready` が動く
+                let marks: Vec<(ChannelId, gumicord_store::ReadMark)> = ready
+                    .read_state
+                    .iter()
+                    .flat_map(|r| r.entries())
+                    .map(|e| {
+                        (
+                            e.id,
+                            gumicord_store::ReadMark {
+                                seen: e.last_message_id,
+                                mentions: e.mention_count,
+                            },
+                        )
+                    })
+                    .collect();
+                tracing::debug!(marks = marks.len(), "読んだ印を受け取った");
+                self.store.set_read_marks(marks);
+
                 self.store.replace_guilds(ready.guilds);
                 if !order.is_empty() {
                     self.store.set_preferred_order(order);
@@ -586,8 +638,15 @@ impl Live {
             }
             LiveEvent::Posted(m) => {
                 let channel = m.channel_id;
+                // ⚠️ **開いていないチャンネルの分もここを通る。**
+                // 未読の印は本文を持っていなくても進む
+                let mut changed = self.store.note_arrival(&m, self.me);
+                // 見ているチャンネルなら、来た端から読んだことにする
+                if Some(channel) == self.watching {
+                    changed |= self.mark_read(channel);
+                }
                 if !self.store.push_message(*m) {
-                    return false;
+                    return changed;
                 }
                 // 1 件ずつ書く。**閉じた後も残る**
                 if let (Some(db), Some(last)) = (&self.db, self.store.messages(channel).last()) {
@@ -806,6 +865,8 @@ mod tests {
             attachments: Vec::new(),
             member: None,
             referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
         }
     }
 

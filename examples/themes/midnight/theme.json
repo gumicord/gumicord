@@ -220,6 +220,9 @@
     {
       "select": "nav.guild_list.item.badge",
       "style": {
+        "margin": [28, 0, 0, 32],
+        "borderColor": "$color.bg.sunken",
+        "borderWidth": 2,
         "background": "$color.danger",
         "color": "#ffffff",
         "font": "$font.small",
