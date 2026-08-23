@@ -1,14 +1,12 @@
-//! テーマの値の型。
+//! Theme value types.
 //!
-//! 長さは**常に論理ピクセル**である。物理ピクセルへの変換はレンダラが行う
-//! (`PLT-009`)。ここで DPI を掛けてはならない。
-//!
-//! 仕様: [`spec/04-theme.md`] 3.3, 6, 6.1
+//! Lengths are always logical pixels; converting to physical pixels is the
+//! renderer's job, so never multiply by DPI here.
 
 /// `#RGB` / `#RRGGBB` / `#RRGGBBAA`
 ///
-/// 内部表現はストレートアルファ (乗算済みではない)。レンダラ側の
-/// `BlendState::ALPHA_BLENDING` と対応する (`EXT-024`)。
+/// Straight alpha, not premultiplied, matching the renderer's
+/// `BlendState::ALPHA_BLENDING`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Color {
     pub r: u8,
@@ -25,8 +23,8 @@ impl Color {
         a: 0,
     };
 
-    /// 16 進表記から解析する。受け付けない書式では `None`。
-    /// `0xRRGGBB` から。**Discord が色を渡してくる形である**
+    /// Parses hex notation, returning `None` for anything else.
+    /// From `0xRRGGBB`, which is how Discord sends colours.
     pub const fn from_rgb(rgb: u32) -> Color {
         Color {
             r: ((rgb >> 16) & 0xff) as u8,
@@ -51,7 +49,7 @@ impl Color {
             Some(hi << 4 | lo)
         };
         match hex.len() {
-            // #RGB は各桁を 2 回繰り返す (#abc → #aabbcc)
+            // #RGB doubles each digit: #abc becomes #aabbcc.
             3 => Some(Color {
                 r: nibble(0)? * 17,
                 g: nibble(1)? * 17,
@@ -74,17 +72,17 @@ impl Color {
         }
     }
 
-    /// 完全に不透明か。半透明合成の要否判定に使う (`EXT-024`)。
+    /// Whether blending can be skipped.
     pub const fn is_opaque(self) -> bool {
         self.a == 255
     }
 }
 
-/// 書体。
+/// A font.
 ///
-/// **すべての項目が省略可能である。** 省略された項目は継承元、
-/// 最終的にはクライアント同梱の既定フォントで埋まる。`family` の省略が
-/// `EXT-020` の観点では望ましい ([`spec/04-theme.md`] 9 章)。
+/// Every field is optional; omitted ones come from the inherited style and
+/// finally from the bundled default. Omitting `family` is preferred, so a
+/// theme renders identically everywhere.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Font {
     pub family: Option<String>,
@@ -95,7 +93,7 @@ pub struct Font {
     pub letter_spacing: Option<f32>,
 }
 
-/// 影。
+/// A shadow.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Shadow {
     pub x: f32,
@@ -105,7 +103,7 @@ pub struct Shadow {
     pub color: Color,
 }
 
-/// 内余白 / 外余白。単一値と `[上, 右, 下, 左]` の両方を受ける。
+/// Padding or margin. Accepts one value or `[top, right, bottom, left]`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Edges {
     pub top: f32,
@@ -125,19 +123,19 @@ impl Edges {
     }
 }
 
-/// 背景画像の領域への合わせ方。
+/// How a background image fits its area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Fit {
-    /// 領域を覆う。はみ出す分は切る (既定)
+    /// Covers the area, cropping the overflow. The default.
     #[default]
     Cover,
-    /// 領域に収める。余る分は透明
+    /// Fits inside the area; the remainder is transparent.
     Contain,
-    /// 縦横比を無視して引き伸ばす
+    /// Stretches, ignoring the aspect ratio.
     Stretch,
-    /// 原寸で敷き詰める
+    /// Tiles at native size.
     Tile,
-    /// 原寸のまま 1 枚だけ置く
+    /// Placed once at native size.
     None,
 }
 
@@ -153,7 +151,7 @@ impl Fit {
         })
     }
 
-    /// `position` を見るのはこの 3 つのときだけである。
+    /// Only these three consult `position`.
     pub const fn uses_position(self) -> bool {
         matches!(self, Fit::Cover | Fit::Contain | Fit::None)
     }
@@ -174,21 +172,23 @@ pub enum AssetRef {
     Remote { url: String, host: String },
 }
 
-/// [`AssetRef::parse`] が受け付けなかった理由。
+/// Why [`AssetRef::parse`] refused a reference.
 ///
-/// 呼び出し側はこれを診断に変換する。**どれもテーマ全体を捨てる理由には
-/// ならない** (`EXT-027`)。
+/// Callers turn these into diagnostics. None is a reason to discard the whole
+/// theme.
+///
+/// The messages stay Japanese: they are shown to the theme author.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetError {
-    /// `../` や絶対パスでテーマディレクトリの外を指している
+    /// Escapes the theme directory via `../` or an absolute path.
     EscapesThemeDirectory,
-    /// 拡張子が対応形式でない
+    /// Unsupported file extension.
     UnsupportedFormat,
-    /// http など https 以外のスキーム (`SEC-024`)
+    /// A scheme other than https.
     InsecureScheme,
-    /// manifest.remoteAssets に宣言されていないホスト (`SEC-022`)
+    /// A host not declared in `manifest.remoteAssets`.
     UndeclaredHost(String),
-    /// 書式として解釈できない
+    /// Not parseable at all.
     Malformed,
 }
 
@@ -211,12 +211,12 @@ impl AssetError {
     }
 }
 
-/// 画像として使える拡張子
+/// Extensions usable as images.
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif"];
-/// フォントとして使える拡張子 (`font.family` からの参照。M2)
+/// Extensions usable as fonts.
 const FONT_EXTENSIONS: &[&str] = &["woff2", "ttf", "otf"];
 
-/// アセット参照として何を期待しているか。
+/// What kind of asset a reference is expected to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
     Image,
@@ -240,11 +240,11 @@ impl AssetKind {
 }
 
 impl AssetRef {
-    /// アセット参照を解析し、同時に安全性を検証する。
+    /// Parses an asset reference and validates it at the same time.
     ///
-    /// `declared_hosts` は `manifest.remoteAssets`。空なら外部 URL は
-    /// すべて拒否される。**拒否は「拒む」のではなく「到達しない」**という
-    /// 意味である ([`spec/04-theme.md`] 6.4.1)。
+    /// `declared_hosts` is `manifest.remoteAssets`; empty rejects every
+    /// external URL. Rejection means the host is never contacted, not that a
+    /// request is refused.
     pub fn parse(s: &str, kind: AssetKind, declared_hosts: &[String]) -> Result<Self, AssetError> {
         if s.is_empty() {
             return Err(AssetError::Malformed);
@@ -255,7 +255,7 @@ impl AssetRef {
         if let Some(rest) = s.strip_prefix("https://") {
             return Self::parse_remote(s, rest, declared_hosts);
         }
-        // https 以外のスキームは、それが何であれ外部参照の意図である
+        // Any non-https scheme is an attempt at an external reference.
         if s.contains("://") || s.starts_with("file:") {
             return Err(AssetError::InsecureScheme);
         }
@@ -282,9 +282,9 @@ impl AssetRef {
         if authority.is_empty() {
             return Err(AssetError::Malformed);
         }
-        // ポート番号を落とす。宣言はホスト名で行う
+        // Declarations are by host name, so drop the port.
         let host = authority.split(':').next().unwrap_or(authority);
-        // 大文字小文字を区別しない。宣言側はスキーマが小文字を強制している
+        // Case-insensitive; the schema forces declarations to lower case.
         let host = host.to_ascii_lowercase();
         if host.is_empty() {
             return Err(AssetError::Malformed);
@@ -299,15 +299,15 @@ impl AssetRef {
     }
 
     fn parse_bundled(path: &str, kind: AssetKind) -> Result<Self, AssetError> {
-        // Windows のパス区切りを混ぜさせない。テーマは全プラットフォームで
-        // 同一に振る舞う必要がある (EXT-043)
+        // No Windows separators: a theme must behave identically on every
+        // platform.
         if path.contains('\\') {
             return Err(AssetError::EscapesThemeDirectory);
         }
         if path.starts_with('/') {
             return Err(AssetError::EscapesThemeDirectory);
         }
-        // "C:/..." のようなドライブ文字つき絶対パス
+        // An absolute path with a drive letter, such as "C:/…".
         let bytes = path.as_bytes();
         if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
             return Err(AssetError::EscapesThemeDirectory);
@@ -328,23 +328,24 @@ impl AssetRef {
     }
 }
 
-/// 背景 (`EXT-021`〜`EXT-024`, `EXT-027`)。
+/// A background.
 ///
-/// 合成順序は下から `color` → `image` (`opacity` と `blur` 適用済み) → `tint`。
+/// Composited bottom to top: `color`, then `image` with `opacity` and `blur`
+/// already applied, then `tint`.
 ///
-/// `blur` は**読み込み時に一度だけ**適用する (`EXT-023`)。毎フレームの
-/// 畳み込みは S1 の下限基準 (Intel HD 520) では割に合わない。
+/// `blur` is applied once at load time; convolving every frame does not pay
+/// for itself on the lowest GPU this targets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Background {
-    /// 画像の下に敷く色。画像が読めなかったときのフォールバックでもある
+    /// Painted under the image, and the fallback if the image fails to load.
     pub color: Option<Color>,
     pub image: Option<AssetRef>,
     pub fit: Fit,
-    /// `[x, y]`、各 0.0〜1.0
+    /// `[x, y]`, each 0.0 to 1.0.
     pub position: [f32; 2],
     pub opacity: f32,
     pub blur: f32,
-    /// 画像の上に重ねる色。可読性の確保に使う
+    /// Painted over the image, to keep text legible.
     pub tint: Option<Color>,
 }
 
@@ -363,7 +364,7 @@ impl Default for Background {
 }
 
 impl Background {
-    /// 色だけの背景。`"background": "#111"` の短縮記法に対応する。
+    /// A colour-only background, for the `"background": "#111"` shorthand.
     pub fn solid(color: Color) -> Self {
         Background {
             color: Some(color),
@@ -371,7 +372,7 @@ impl Background {
         }
     }
 
-    /// 画像を伴うか。レンダラのテクスチャ経路が要るかの判定に使う。
+    /// Whether the renderer's texture path is needed.
     pub const fn has_image(&self) -> bool {
         self.image.is_some()
     }
@@ -410,7 +411,7 @@ mod tests {
                 a: 0x14
             })
         );
-        // 大文字も受ける
+        // Upper case is accepted.
         assert_eq!(Color::parse("#FFFFFF"), Color::parse("#ffffff"));
     }
 
@@ -427,11 +428,11 @@ mod tests {
             "#ffffff1",
             "rgb(1,2,3)",
         ] {
-            assert_eq!(Color::parse(s), None, "{s} を受け付けてはならない");
+            assert_eq!(Color::parse(s), None, "{s} must not be accepted");
         }
     }
 
-    /// 相対パスはテーマディレクトリの外へ出られない (spec/04-theme.md 6.3)
+    /// A relative path cannot escape the theme directory.
     #[test]
     fn bundled_asset_cannot_escape() {
         let cases = [
@@ -448,7 +449,7 @@ mod tests {
             assert_eq!(
                 got,
                 Err(AssetError::EscapesThemeDirectory),
-                "{s} を通してはならない"
+                "{s} must not be allowed"
             );
         }
     }
@@ -464,22 +465,22 @@ mod tests {
         assert_eq!(
             AssetRef::parse("assets/bg.gif", AssetKind::Image, &[]),
             Err(AssetError::UnsupportedFormat),
-            "アニメーション形式は EXT-026 で M2"
+            "animated formats are not supported yet"
         );
         assert_eq!(
             AssetRef::parse("assets/bg", AssetKind::Image, &[]),
             Err(AssetError::UnsupportedFormat)
         );
-        // 大文字の拡張子は受ける
+        // Upper-case extensions are accepted.
         assert!(AssetRef::parse("assets/BG.PNG", AssetKind::Image, &[]).is_ok());
-        // 画像の場所にフォントは置けない
+        // A font cannot stand in for an image.
         assert_eq!(
             AssetRef::parse("assets/Inter.woff2", AssetKind::Image, &[]),
             Err(AssetError::UnsupportedFormat)
         );
     }
 
-    /// SEC-022: 宣言されていないホストへは到達しない
+    /// An undeclared host is never contacted.
     #[test]
     fn remote_asset_requires_declaration() {
         let declared = vec!["cdn.example.com".to_string()];
@@ -495,14 +496,14 @@ mod tests {
             AssetRef::parse("https://evil.example/bg.png", AssetKind::Image, &declared),
             Err(AssetError::UndeclaredHost("evil.example".into()))
         );
-        // 宣言が空なら外部は一切通らない
+        // With no declarations, nothing external passes.
         assert!(matches!(
             AssetRef::parse("https://cdn.example.com/bg.png", AssetKind::Image, &[]),
             Err(AssetError::UndeclaredHost(_))
         ));
     }
 
-    /// ポート番号つきでもホスト名で照合する
+    /// Matching is by host name even when a port is present.
     #[test]
     fn remote_asset_ignores_port() {
         let declared = vec!["cdn.example.com".to_string()];
@@ -516,7 +517,7 @@ mod tests {
         );
     }
 
-    /// SEC-024: https のみ
+    /// https only.
     #[test]
     fn remote_asset_rejects_insecure_schemes() {
         let declared = vec!["cdn.example.com".to_string()];
@@ -528,7 +529,7 @@ mod tests {
             assert_eq!(
                 AssetRef::parse(s, AssetKind::Image, &declared),
                 Err(AssetError::InsecureScheme),
-                "{s} を通してはならない"
+                "{s} must not be allowed"
             );
         }
     }

@@ -1,98 +1,84 @@
-//! UITree のノード。
+//! UITree nodes.
 //!
-//! 構造は [`spec/03-uitree.md`] 2 章が定める。
+//! The struct in the spec has no *content*: a stable ID says a node is the
+//! message body, but not what string that body is. [`Content`] fills that in
+//! so the tree can be drawn. It is not part of the extension ABI — plugins
+//! build content only through SDK functions such as `ui.text()`.
 //!
-//! # 仕様の構造体との差分
-//!
-//! 仕様に載る `UiNode` には**中身**がない。`chat.message.content` が
-//! 「本文である」ことは安定 ID が表しているが、**その本文が何という文字列か**は
-//! どのフィールドにも入らない。描画できないので [`Content`] を足している。
-//!
-//! `Content` は拡張 ABI ではない。プラグインは `ui.text()` のような SDK の
-//! 関数を通してのみ中身を作れる ([`spec/05-plugin-api.md`])。
-//!
-//! **レイアウトの方向 (row / column) はここに持たない。** 安定 ID が
-//! 意味を決め、その意味からどう並べるかはレンダラの判断である
-//! ([`spec/06-renderer.md`] 8 章)。テーマがレイアウトを上書きできるように
-//! なるのは `EXT-014` (M2) からで、そのときもここではなくスタイル側に入る。
+//! Layout direction is deliberately absent. The stable ID carries the
+//! meaning, and how that meaning is arranged is the renderer's decision.
+//! When themes gain layout overrides, those will live in the style, not here.
 
 use crate::ids::{DataKind, NodeId};
 use crate::style::Style;
 use crate::value::{Color, Font};
 use crate::{Key, State, StateSet};
 
-/// ノードが表示する中身。
+/// What a node displays.
 ///
-/// ⚠️ `Eq` を持たない。[`Span`] が大きさや色 (`f32`) を持つためである
+/// No `Eq`: [`Span`] carries `f32` sizes and colours.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Content {
-    /// 子ノードだけを持つ。コンテナ
+    /// A container: children only.
     #[default]
     None,
-    /// 文字列。整形はレンダラが行う
+    /// A string. Shaping is the renderer's job.
     Text(String),
-    /// 飾りの混じった文字列 (`FR-021`)。
+    /// Text with mixed decoration.
     ///
-    /// # ⚠️ 飾りごとにノードを作ってはいけない
-    ///
-    /// 「太字だけ別のノードにして横に並べる」は動かない。並べたノードは
-    /// **それぞれが独立して折り返す**ので、`これは **とても長い** 文章`
-    /// の行末が合わなくなる。行の折り返しは、混じったまま一度に整形して
-    /// はじめて正しく決まる。
-    ///
-    /// だから飾りは中身側に持たせ、ノードは 1 つのままにする
+    /// Decoration must not become separate nodes: siblings wrap
+    /// independently, so a bold run inside a sentence would break the line in
+    /// the wrong place. Wrapping is only correct when the whole mixed line is
+    /// shaped at once, so the decoration goes in the content and the node
+    /// stays single.
     Rich(Vec<Span>),
-    /// アイコン。**名前で指す。**
+    /// An icon, addressed by name.
     ///
-    /// 何が描かれるかはレンダラが決める。名前で指すのは、字として描くのを
-    /// やめてテクスチャにしたときに、UITree 側を変えずに済ませるためである。
-    /// **知らない名前は誤りではない**。描かずに進む。
+    /// What gets drawn is the renderer's decision; naming it means switching
+    /// from glyphs to textures later touches nothing here. An unknown name
+    /// is not an error — nothing is drawn.
     Icon(String),
-    /// 画像。**中身ではなく取り出し元の URL を持つ。**
+    /// An image, carried as a URL rather than pixels.
     ///
-    /// ⚠️ **UITree に画素を載せない。** 木は毎フレーム組み直されるので、
-    /// 画素を持たせると 1 フレームごとに数 MB を複製することになる。
-    /// 取ってくるのも復号するのもアプリの仕事で、レンダラは**既に手元に
-    /// あるものだけを描く** (無ければ何も描かない)
+    /// The tree is rebuilt every frame, so pixels here would mean copying
+    /// megabytes per frame. Fetching and decoding belong to the app; the
+    /// renderer draws only what it already holds, and nothing otherwise.
     Image(String),
-    /// QR コード ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
+    /// A QR code, carried as the string to encode.
     ///
-    /// **中身の文字列だけを持つ。** 符号化も描画もレンダラの仕事である。
-    /// QR は角丸矩形の格子なので、自前レンダラでそのまま描ける。
+    /// Encoding and drawing are the renderer's job; a QR code is a grid of
+    /// rounded rectangles, which it already draws.
     Qr(String),
-    /// 編集中のテキスト (`PLT-001`)。
+    /// Text being edited.
     ///
-    /// ただの文字列と分けているのは、**キャレット・選択・変換中の範囲を
-    /// 描くのがレンダラの仕事**だからである。文字の位置を知っているのは
-    /// 整形したところだけで、アプリはバイト位置しか持てない。
+    /// Separate from plain text because drawing the caret, the selection and
+    /// the preedit range is the renderer's job: only the shaper knows where
+    /// characters are, while the app holds byte offsets.
     Editable(Editable),
 }
 
-/// 飾りの付いた一続きの文字。[`Content::Rich`] の要素。
+/// A decorated run of text; an element of [`Content::Rich`].
 ///
-/// # ⚠️ ここに入るのは**テーマが決めた結果**である
-///
-/// 「太字である」ではなく「太さ 700 である」が入る。太字を何で表すかは
-/// テーマの領分で ([`spec/04-theme.md`])、ここまで来た時点でその判断は
-/// 済んでいる。`Deco::BOLD` のような意味をここへ持ち込むと、
-/// **レンダラが太字の見た目を決めることになる**。
+/// Holds the theme's *decision*: "weight 700", never "bold". Carrying the
+/// parse fact this far would put the renderer in charge of what bold looks
+/// like.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Span {
     pub text: String,
-    /// 書体。`None` ならノードの書体をそのまま使う
+    /// `None` uses the node's font.
     pub font: Option<Font>,
-    /// 文字色。`None` ならノードの色
+    /// `None` uses the node's colour.
     pub color: Option<Color>,
-    /// 文字に引く線
+    /// Lines drawn through the text.
     pub line: Line,
-    /// 中身を隠すか (スポイラー)。
+    /// Whether to hide the contents (a spoiler).
     ///
-    /// ⚠️ **場所は空けたまま隠す。** 詰めて描くと、開いた瞬間に
-    /// 行の折り返しが変わって本文が飛び跳ねる
+    /// The space is kept: collapsing it would rewrap the line on reveal and
+    /// make the body jump.
     pub hidden: bool,
 }
 
-/// 文字に引く線。**重ねられる** — `__~~a~~__` は両方引く
+/// Lines drawn through text. Stackable: `__~~a~~__` draws both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Line {
     pub under: bool,
@@ -105,20 +91,16 @@ impl Line {
     }
 }
 
-/// 浮かせたものを置く基準。**論理 px、ウィンドウの左上から。**
+/// Where a floating surface is anchored, in logical px from the window's top
+/// left.
 ///
-/// # ⚠️ これはスタイルではない
+/// Not a style: a theme cannot express where a press happened, and neither is
+/// it user data. Like [`UiNode::tint`], it carries something knowable only at
+/// that moment.
 ///
-/// 押された場所はテーマには書けない。かといって「右クリックしたところ」は
-/// 利用者のデータでもない。[`UiNode::tint`] と同じで、**その瞬間にしか
-/// 分からないことを運ぶ枠**である。
-///
-/// # ⚠️ 置き場所そのものではない
-///
-/// ここに入るのは基準の点だけである。実際にどこへ置くかは、
-/// **中身の大きさとウィンドウの大きさが分かってから**でないと決まらない。
-/// 右端で押されたメニューは左へ返さなければならず、それはレンダラにしか
-/// できない ([`spec/06-renderer.md`])。
+/// Not a position either. Only the anchor point goes here; where the surface
+/// actually lands depends on its size and the window's, and a menu opened at
+/// the right edge has to flip. Only the renderer can decide that.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Anchor {
     pub x: f32,
@@ -131,25 +113,25 @@ impl Anchor {
     }
 }
 
-/// 編集中のテキストと、その上の印。位置は**バイト位置**である。
+/// Text being edited and the marks on it. Offsets are byte offsets.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Editable {
     pub text: String,
-    /// キャレットの位置
+    /// Caret position.
     pub caret: usize,
-    /// 選択範囲。空なら選択なし
+    /// Selection; empty means none.
     pub selection: core::ops::Range<usize>,
-    /// 変換中の範囲。確定していない文字を下線で示す
+    /// The preedit range, underlined until committed.
     pub composing: Option<core::ops::Range<usize>>,
-    /// 入力欄が空のときに薄く出す文字列。**編集の対象ではない**
+    /// Shown faintly when the field is empty. Not editable.
     pub placeholder: String,
 }
 
 impl Content {
-    /// 整形して描く文字列。
+    /// The string to shape and draw.
     ///
-    /// 編集中のテキストも文字列であることに変わりはないので、ここから
-    /// 取れる。空なら代わりに `placeholder` を返す。
+    /// Editable text is still text, so it comes out here too, falling back to
+    /// the placeholder when empty.
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Content::Text(s) => Some(s),
@@ -187,11 +169,11 @@ impl Content {
         }
     }
 
-    /// 飾りの混じった文字。
+    /// Decorated text.
     ///
-    /// ⚠️ [`Content::as_text`] はここを返さない。繋げて 1 本の文字列に
-    /// すると飾りが落ちるので、**飾りを見る側が気づかないまま素の文字に
-    /// なる**。見たいなら明示的にこちらを呼ぶこと
+    /// [`Content::as_text`] deliberately does not return this: joining the
+    /// runs would drop the decoration, and a caller that cares would never
+    /// notice.
     pub fn as_rich(&self) -> Option<&[Span]> {
         match self {
             Content::Rich(s) => Some(s),
@@ -199,65 +181,55 @@ impl Content {
         }
     }
 
-    /// 子ではなく自分自身が何かを描くか。レイアウトが葉として扱う判断に使う
+    /// Whether the node draws something itself; layout treats it as a leaf.
     pub fn is_leaf(&self) -> bool {
         !matches!(self, Content::None)
     }
 }
 
-/// そのノードが表現しているドメインオブジェクトへの参照
-/// ([`spec/03-uitree.md`] 2.4)。
+/// A reference to the domain object a node represents.
 ///
-/// ⚠️ **公開するのは読み取り専用のスナップショットであり、内部の状態そのもの
-/// ではない。** M1.1 では種別と識別子だけを持つ。フィールドの公開は Store
-/// (C5) ができてから、仕様の表に列挙されたものだけを足す。
-///
-/// **フィールドもまた拡張 ABI である。** 追加は自由だが削除と改名は破壊的変更。
+/// A read-only snapshot, never the internal state. Fields are part of the ABI
+/// too: additions are free, removals and renames are breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataRef {
     pub kind: DataKind,
-    /// Discord のスノーフレーク
+    /// A Discord snowflake.
     pub id: u64,
 }
 
-/// UITree のノード 1 個。
+/// One UITree node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiNode {
-    /// 安定 ID。拡張 ABI そのもの
+    /// The stable ID; the extension ABI itself.
     pub id: NodeId,
-    /// 同じ親の下で同じ `id` を持つノードを区別する鍵
+    /// Distinguishes siblings sharing an `id`.
     pub key: Option<Key>,
-    /// 状態。テーマの条件分岐に使う (`EXT-013`)
+    /// State a theme can select on.
     pub states: StateSet,
-    /// このノードが表現しているドメインオブジェクトへの参照
+    /// The domain object this node represents.
     pub data: Option<DataRef>,
-    /// **データが持ってきた色。** 役職の色、サーバフォルダの色。
+    /// A colour the data brought with it: a role's colour, a folder's.
     ///
-    /// # ⚠️ これはスタイルではない。テーマへの材料である
+    /// Not a style but an ingredient for one. The theme decides appearance,
+    /// yet a role's colour is something the user chose in Discord and is not
+    /// the theme's to discard. So the colour is only carried here, and where
+    /// to apply it — text, border, background, nowhere — is the theme's call
+    /// via `$data.tint`.
     ///
-    /// 見た目を決めるのはテーマであって、Discord のデータではない。
-    /// だが「その役職の色」は**利用者が Discord で決めたこと**であり、
-    /// テーマの好みで消してよいものでもない。
-    ///
-    /// そこで、**色はここに載せるだけ**にする。どこに塗るか — 文字色か、
-    /// 縁か、背景か、そもそも塗らないか — はテーマが `$data.tint` で
-    /// 決める ([`spec/04-theme.md`])。
-    ///
-    /// ⚠️ **識別子は載せない。** 色は誰のものかを語らないので、
-    /// テーマが特定のサーバや相手を狙い撃ちにはできない
-    /// (`when.slot` がスノーフレークを弾くのと同じ理由)。
+    /// No identifier travels with it, so a theme cannot single out one guild
+    /// or one person.
     pub tint: Option<Color>,
-    /// 浮かせるときの基準の点。
+    /// The anchor point for a floating surface.
     ///
-    /// ⚠️ **持っているのは浮かぶものだけである。** 流れの中に並ぶノードで
-    /// これを見てはいけない。見ると、親が決めた場所を子が勝手に上書きする
+    /// Only floating nodes carry one. Reading it on a node in the flow would
+    /// let a child override the position its parent chose.
     pub anchor: Option<Anchor>,
-    /// 表示する中身
+    /// What to display.
     pub content: Content,
-    /// テーマとプラグインによって解決された最終的なスタイル。
+    /// The style resolved by the theme and plugins.
     ///
-    /// **構築時は空である。** パイプラインの [5] と [6] が埋める
-    /// ([`spec/02-architecture.md`])。
+    /// Empty at construction; the theme and plugin stages fill it in.
     pub style: Style,
     pub children: Vec<UiNode>,
 }
@@ -277,27 +249,27 @@ impl UiNode {
         }
     }
 
-    /// 文字列を持つノード。
+    /// A node holding text.
     pub fn text(id: NodeId, s: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Text(s.into()))
     }
 
-    /// アイコンを持つノード。
+    /// A node holding an icon.
     pub fn icon(id: NodeId, name: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Icon(name.into()))
     }
 
-    /// 画像を持つノード。**中身ではなく URL** である
+    /// A node holding an image, as a URL rather than pixels.
     pub fn image(id: NodeId, url: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Image(url.into()))
     }
 
-    /// QR コードを持つノード。中身は符号化する前の文字列である
+    /// A node holding a QR code, as the string to encode.
     pub fn qr(id: NodeId, data: impl Into<String>) -> Self {
         UiNode::new(id).with_content(Content::Qr(data.into()))
     }
 
-    /// 編集中のテキストを持つノード (`PLT-001`)。
+    /// A node holding text being edited.
     pub fn editable(id: NodeId, e: Editable) -> Self {
         UiNode::new(id).with_content(Content::Editable(e))
     }
@@ -307,7 +279,7 @@ impl UiNode {
         self
     }
 
-    /// スノーフレークを鍵にする。リスト項目でもっとも多い形。
+    /// Keys by snowflake, which is what list items almost always want.
     pub fn with_id_key(mut self, id: u64) -> Self {
         self.key = Some(Key::Id(id));
         self
@@ -318,7 +290,7 @@ impl UiNode {
         self
     }
 
-    /// 条件つきで状態を立てる。呼び出し側の `if` を減らすためだけのもの。
+    /// Sets a state conditionally, purely to spare the caller an `if`.
     pub fn with_state_if(mut self, cond: bool, state: State) -> Self {
         if cond {
             self.states = self.states.with(state);
@@ -331,34 +303,34 @@ impl UiNode {
         self
     }
 
-    /// 浮かせる場所を指定する。**基準の点だけを渡す。**
+    /// Sets the anchor point for a floating surface.
     ///
-    /// ⚠️ **どこへ置くかを最後に決めるのはレンダラである。** ここで渡すのは
-    /// 「押されたのはここ」までで、画面からはみ出すなら反対側へ返すのは
-    /// レンダラの仕事である。大きさを知らないうちに決められない
+    /// Only the point: flipping it when it would overflow the screen needs
+    /// the surface's size, which only the renderer knows.
     pub fn with_anchor(mut self, anchor: Anchor) -> Self {
         self.anchor = Some(anchor);
         self
     }
 
-    /// データが持ってきた色を載せる。**どこに塗るかはテーマが決める**
+    /// Attaches a colour the data brought. Where it lands is the theme's
+    /// decision.
     pub fn with_tint(mut self, tint: Color) -> Self {
         self.tint = Some(tint);
         self
     }
 
-    /// 色があれば載せる。呼び出し側の `if` を減らすためだけのもの
+    /// Attaches a colour if there is one, purely to spare the caller an
+    /// `if`.
     pub fn with_tint_opt(mut self, tint: Option<Color>) -> Self {
         self.tint = tint;
         self
     }
 
-    /// ドメインオブジェクトへの参照を付ける。
+    /// Attaches a reference to a domain object.
     ///
-    /// 種別は安定 ID が決めるので、呼び出し側は識別子だけを渡す。
-    /// `data` を持たない ID に付けようとした場合は**黙って無視する**。
-    /// ここで落とすと、ID の `data` 種別を後から足したときに呼び出し側が
-    /// 壊れるため。
+    /// The kind comes from the stable ID, so callers pass only the id. IDs
+    /// that carry no `data` ignore it silently: failing here would break
+    /// callers the day an ID gains a data kind.
     pub fn with_data(mut self, id: u64) -> Self {
         let kind = self.id.data_kind();
         if kind != DataKind::None {
@@ -377,7 +349,7 @@ impl UiNode {
         self
     }
 
-    /// 条件つきで子を足す。
+    /// Adds a child conditionally.
     pub fn child_if(self, cond: bool, node: impl FnOnce() -> UiNode) -> Self {
         if cond { self.child(node()) } else { self }
     }
@@ -387,8 +359,7 @@ impl UiNode {
         self
     }
 
-    /// 深さ優先・前順の走査。**これが描画順である**
-    /// ([`spec/06-renderer.md`] 7.5)。
+    /// Depth-first pre-order traversal, which is also the draw order.
     pub fn walk(&self, f: &mut impl FnMut(&UiNode, usize)) {
         self.walk_at(0, f);
     }
@@ -400,7 +371,7 @@ impl UiNode {
         }
     }
 
-    /// ノードの総数。
+    /// Total node count.
     pub fn count(&self) -> usize {
         1 + self.children.iter().map(UiNode::count).sum::<usize>()
     }
@@ -412,7 +383,7 @@ mod tests {
 
     #[test]
     fn data_is_attached_only_where_the_id_declares_it() {
-        // chat.message は MessageData を持つ
+        // chat.message carries MessageData.
         let m = UiNode::new(NodeId::ChatMessage).with_data(42);
         assert_eq!(
             m.data,
@@ -422,12 +393,12 @@ mod tests {
             })
         );
 
-        // layout.row は data を持たない。黙って無視する
+        // layout.row carries none, so this is ignored.
         let r = UiNode::new(NodeId::LayoutRow).with_data(42);
         assert_eq!(r.data, None);
     }
 
-    /// 走査順が描画順である。前順であることを固定する
+    /// Traversal order is draw order; this pins it to pre-order.
     #[test]
     fn walk_is_depth_first_pre_order() {
         let tree = UiNode::new(NodeId::AppRoot)

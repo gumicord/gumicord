@@ -1,28 +1,23 @@
-//! 確定したスタイル。
+//! Resolved style.
 //!
-//! # カスケード規則は 1 つだけである
+//! There is one cascade rule: later rules override earlier ones, per
+//! property. No specificity is computed — not from the selector, not from the
+//! number of `when` clauses. A theme author must be able to read top to
+//! bottom and see why a rule did not take effect.
 //!
-//! | # | 規則 |
-//! |---|---|
-//! | **K1** | ルールは記述順に適用され、後のルールが前のルールを**プロパティ単位で**上書きする |
-//!
-//! CSS の詳細度を計算しない。セレクタの具体性も `when` の数も考慮しない。
-//! テーマ作者が「なぜこのルールが効かないのか」を上から読んで必ず分かる
-//! 状態を優先する ([`spec/04-theme.md`] 5 章)。
-//!
-//! 未指定のプロパティは `None` のままにする。**`None` と「既定値が入っている」
-//! を区別する**ためである。区別できないと [`Style::overlay`] が
-//! 「指定していないのに上書きした」という誤りを起こす。
+//! Unspecified properties stay `None` so that "unset" and "set to the
+//! default" stay distinguishable; without that, [`Style::overlay`] would
+//! overwrite values nobody asked it to.
 
 use crate::value::{Background, Color, Edges, Font, Shadow};
 
-/// 1 ノードに確定したスタイル。
+/// The resolved style of one node.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Style {
     pub background: Option<Background>,
-    /// 前景 (文字色)。**子へ継承する**
+    /// Foreground colour. Inherited by children.
     pub color: Option<Color>,
-    /// 書体。**子へ継承する**
+    /// Font. Inherited by children.
     pub font: Option<Font>,
     pub border_color: Option<Color>,
     pub border_width: Option<f32>,
@@ -38,30 +33,24 @@ pub struct Style {
     pub max_height: Option<f32>,
     pub opacity: Option<f32>,
     pub shadow: Option<Shadow>,
-    /// 値が変わったときに、そこへ動いていく時間 (ミリ秒)。
+    /// Milliseconds to move to a new value.
     ///
-    /// # ⚠️ これは見た目ではなく「見た目の変わり方」である
+    /// Unlike every other property this draws nothing itself: it only says
+    /// that the next change to this node's style should move rather than
+    /// jump.
     ///
-    /// 他のプロパティと違い、これ自身は何も描かない。**次にこのノードの
-    /// スタイルが変わったとき、飛ぶのではなく動く**ことだけを決める。
-    ///
-    /// ⚠️ **継承しない。** 親が動くからといって子まで動かすと、テーマが
-    /// 意図していない場所が一斉に動く。
-    ///
-    /// 仕様: [`spec/04-theme.md`] 3.5
+    /// Not inherited. Animating children because their parent animates would
+    /// set places in motion the theme never asked for.
     pub transition: Option<f32>,
-    /// 文字に引く線 (`FR-021`)。
+    /// Lines drawn through text.
     ///
-    /// # ⚠️ 「下線を引く」と決めるのはテーマである
-    ///
-    /// `__a__` を下線で描くか、色を変えて描くか、太さを変えて描くかは
-    /// **見た目の判断**であって、Markdown の解析結果ではない。
-    /// 解析が言えるのは「ここが `__` で囲まれていた」までである
-    /// ([`spec/04-theme.md`] 3.6)
+    /// Whether `__a__` becomes an underline, a colour change or a weight
+    /// change is the theme's judgement. The parser only reports that it was
+    /// wrapped in `__`.
     pub decoration: Option<Decoration>,
 }
 
-/// 文字に引く線。**重ねられる** — `__~~a~~__` は両方引く
+/// Lines drawn through text. Stackable: `__~~a~~__` draws both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Decoration {
     pub underline: bool,
@@ -69,7 +58,7 @@ pub struct Decoration {
 }
 
 impl Style {
-    /// **K1 の実装。** `other` で指定されているプロパティだけを上書きする。
+    /// Overrides only the properties `other` actually specifies.
     ///
     /// ```
     /// # use gumicord_uitree::{Style, value::Color};
@@ -84,12 +73,11 @@ impl Style {
     /// };
     /// a.overlay(&b);
     /// assert_eq!(a.color, Color::parse("#222"));
-    /// assert_eq!(a.radius, Some(8.0)); // 上書きされない
+    /// assert_eq!(a.radius, Some(8.0)); // untouched
     /// ```
     pub fn overlay(&mut self, other: &Style) {
-        // マクロにしないのは、プロパティを足したときに「書き忘れ」が
-        // コンパイルエラーではなく静かな不具合になるのを避けるため。
-        // 数が増えたら、そのときに網羅性を試験で担保する。
+        // Written out rather than generated: a forgotten property should be
+        // visible here rather than becoming a silent bug.
         overlay_field(&mut self.background, &other.background);
         overlay_field(&mut self.color, &other.color);
         overlay_field(&mut self.font, &other.font);
@@ -111,11 +99,10 @@ impl Style {
         overlay_field(&mut self.decoration, &other.decoration);
     }
 
-    /// 親から継承する。**継承するのは `color` と `font` だけ**である
-    /// ([`spec/04-theme.md`] 6 章)。
+    /// Inherits from a parent. Only `color` and `font` are inherited, and an
+    /// own value wins.
     ///
-    /// 自分で指定している側が優先される。木を歩くのはレイアウト段の仕事で
-    /// あり、ここでは 1 段ぶんの規則だけを定義する。
+    /// Walking the tree is the layout stage's job; this defines one step.
     pub fn inherit_from(&mut self, parent: &Style) {
         if self.color.is_none() {
             self.color = parent.color;
@@ -125,7 +112,7 @@ impl Style {
         }
     }
 
-    /// 何も指定されていないか。
+    /// Whether nothing is specified.
     pub fn is_empty(&self) -> bool {
         *self == Style::default()
     }
@@ -145,7 +132,7 @@ mod tests {
         Color::parse(s)
     }
 
-    /// K1: 後のルールが勝つ
+    /// Later rules win.
     #[test]
     fn later_wins() {
         let mut a = Style {
@@ -159,7 +146,7 @@ mod tests {
         assert_eq!(a.color, color("#222"));
     }
 
-    /// 5.1: 上書きの単位はプロパティであり、ルール全体ではない
+    /// Overriding is per property, not per rule.
     #[test]
     fn overlay_is_per_property() {
         let mut a = Style {
@@ -175,7 +162,7 @@ mod tests {
             a.background,
             Some(Background::solid(color("#222").unwrap()))
         );
-        assert_eq!(a.radius, Some(8.0), "指定のないプロパティは残る");
+        assert_eq!(a.radius, Some(8.0), "unspecified properties survive");
     }
 
     #[test]
@@ -190,7 +177,7 @@ mod tests {
         assert_eq!(a, original);
     }
 
-    /// 継承するのは color と font だけ
+    /// Only colour and font inherit.
     #[test]
     fn only_color_and_font_inherit() {
         let parent = Style {
@@ -209,9 +196,9 @@ mod tests {
 
         assert_eq!(child.color, color("#eee"));
         assert_eq!(child.font, parent.font);
-        assert_eq!(child.radius, None, "radius は継承しない");
-        assert_eq!(child.padding, None, "padding は継承しない");
-        assert_eq!(child.background, None, "background は継承しない");
+        assert_eq!(child.radius, None, "radius does not inherit");
+        assert_eq!(child.padding, None, "padding does not inherit");
+        assert_eq!(child.background, None, "background does not inherit");
     }
 
     #[test]
