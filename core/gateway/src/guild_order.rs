@@ -162,6 +162,8 @@ pub fn from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> Vec<Guil
 const F_FOLDER_ID: u64 = 2;
 /// `GuildFolder.name` (StringValue)
 const F_FOLDER_NAME: u64 = 3;
+/// `GuildFolder.color` (UInt64Value)。**`0xRRGGBB`**
+const F_FOLDER_COLOR: u64 = 4;
 
 /// `PreloadedUserSettings.guild_folders`
 const F_GUILD_FOLDERS: u64 = 14;
@@ -198,6 +200,11 @@ pub struct Folder {
     pub name: Option<String>,
     /// 中身。**並び順つき**
     pub guilds: Vec<GuildId>,
+    /// 利用者が付けた色 (`0xRRGGBB`)。**付けていなければ `None`**
+    ///
+    /// ⚠️ **0 を黒として扱わない。** 付けていないフォルダは Discord では
+    /// 既定の色で出る。黒く塗ると目印が消える
+    pub color: Option<u32>,
 }
 
 impl Folder {
@@ -233,6 +240,11 @@ pub fn folders_from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> 
             out.push(Folder {
                 id: wrapped_varint(body, F_FOLDER_ID),
                 name: wrapped_string(body, F_FOLDER_NAME),
+                // ⚠️ **上位バイトを落とす。** 包みの中は 64 ビットで、
+                // 色は下 3 バイトしか使わない
+                color: wrapped_varint(body, F_FOLDER_COLOR)
+                    .map(|c| (c & 0x00ff_ffff) as u32)
+                    .filter(|c| *c != 0),
                 guilds,
             });
         }

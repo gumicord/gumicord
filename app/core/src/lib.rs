@@ -63,6 +63,7 @@ use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
+use gumicord_uitree::value::Color;
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 use live::Live;
 use session::Login;
@@ -705,8 +706,12 @@ impl Gumicord {
     /// どこまでが 1 つのフォルダなのか見て分からなくなる
     fn folder_face(&self, row: &GuildRow) -> UiNode {
         let id = row.folder_of_own.unwrap_or(row.id);
+        // ⚠️ **色を載せるだけ。** どこに塗るか — 縁か、背景か、目印の色か —
+        // はテーマが `$data.tint` で決める
+        let tint = row.tint.map(Color::from_rgb);
         let node = UiNode::new(NodeId::NavGuildListFolder)
             .with_id_key(id)
+            .with_tint_opt(tint)
             .with_state_if(row.collapsed, State::Collapsed)
             .with_state_if(
                 self.hovered_id(NodeId::NavGuildListFolder, id),
@@ -715,7 +720,7 @@ impl Gumicord {
 
         if !row.collapsed {
             return node
-                .child(UiNode::icon(NodeId::NavGuildListFolderIcon, "folder"))
+                .child(UiNode::icon(NodeId::NavGuildListFolderIcon, "folder").with_tint_opt(tint))
                 .children(row.members.iter().map(|m| self.guild_item(m)));
         }
 
@@ -934,6 +939,14 @@ impl Gumicord {
                             .with_data(id),
                     );
 
+                    // ⚠️ **一番上の「色を付けている」役職が勝つ。**
+                    // 色を載せるだけで、塗る場所はテーマが決める
+                    let tint = self
+                        .live
+                        .store()
+                        .member_tint(guild, &m.member.roles)
+                        .map(Color::from_rgb);
+
                     out = out.child(
                         UiNode::new(NodeId::NavMemberListItem)
                             .with_id_key(id)
@@ -948,7 +961,8 @@ impl Gumicord {
                                     NodeId::NavMemberListItemName,
                                     m.member.display_name(user).to_owned(),
                                 )
-                                .with_data(id),
+                                .with_data(id)
+                                .with_tint_opt(tint),
                             ),
                     );
                 }
@@ -1106,6 +1120,8 @@ struct GuildRow {
     in_folder: bool,
     /// 閉じているフォルダか
     collapsed: bool,
+    /// 利用者が付けたフォルダの色。**塗る場所はテーマが決める**
+    tint: Option<u32>,
     /// フォルダの中身。
     ///
     /// 開いていれば**フォルダの子として並べ**、閉じていれば
@@ -1203,6 +1219,7 @@ impl Gumicord {
             folder_of_own: None,
             in_folder: false,
             collapsed: false,
+            tint: None,
             members: Vec::new(),
         };
 
@@ -1231,6 +1248,7 @@ impl Gumicord {
                     folder_of_own: Some(id),
                     in_folder: false,
                     collapsed: self.live.store().is_collapsed(id),
+                    tint: row.color,
                     members: self.folder_members(row),
                 },
                 GuildEntry::Guild { row, folder } => GuildRow {
@@ -1247,6 +1265,7 @@ impl Gumicord {
                     folder_of_own: None,
                     in_folder: folder.is_some(),
                     collapsed: false,
+                    tint: None,
                     members: Vec::new(),
                 },
             })
@@ -1291,6 +1310,7 @@ impl Gumicord {
                     folder_of_own: None,
                     in_folder: true,
                     collapsed: false,
+                    tint: None,
                     members: Vec::new(),
                 })
             })
@@ -2102,6 +2122,7 @@ mod member_list_tests {
                     name: "管理者".to_owned(),
                     position: 3,
                     hoist: true,
+                    color: 0x00e0_5260,
                 }],
             }]);
         a.selected_guild = 1;
@@ -2202,6 +2223,52 @@ mod member_list_tests {
         );
 
         assert_eq!(texts(&a.member_list()), vec!["ねんねこ"]);
+    }
+
+    /// 役職の色は**名前のノードに載る**。塗る場所を決めるのはテーマである
+    #[test]
+    fn a_role_colour_rides_on_the_name() {
+        let mut a = app();
+        sync(
+            &mut a,
+            vec![json!({ "member": {
+                "user": { "id": "7", "username": "ねんねこ" },
+                "roles": ["55"],
+                "presence": { "status": "online" },
+            }})],
+        );
+
+        let list = a.member_list();
+        let name = list
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter())
+            .find(|n| n.id == NodeId::NavMemberListItemName)
+            .expect("名前がある");
+        assert_eq!(name.tint, Some(Color::from_rgb(0x00e0_5260)));
+    }
+
+    /// ⚠️ **知らない役職しか持たない人には色を付けない。**
+    /// 分からないことを既定の色で埋めない
+    #[test]
+    fn a_member_with_no_known_role_has_no_colour() {
+        let mut a = app();
+        sync(
+            &mut a,
+            vec![json!({ "member": {
+                "user": { "id": "8", "username": "すぴき" },
+                "roles": ["999999999999999999"],
+            }})],
+        );
+
+        let list = a.member_list();
+        let name = list
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter())
+            .find(|n| n.id == NodeId::NavMemberListItemName)
+            .expect("名前がある");
+        assert_eq!(name.tint, None);
     }
 
     /// ⚠️ **狭いときはメンバー一覧から畳む。** チャットより後で構わない
@@ -2327,11 +2394,13 @@ mod folder_tests {
             FolderRow {
                 id: Some(100),
                 name: None,
+                color: Some(0x007c_6cf0),
                 guilds: vec![1u64.into(), 2u64.into(), 3u64.into()],
             },
             FolderRow {
                 id: None,
                 name: None,
+                color: None,
                 guilds: vec![4u64.into()],
             },
         ]);
@@ -2426,6 +2495,7 @@ mod folder_tests {
         a.live.store_mut().set_sidebar(vec![FolderRow {
             id: Some(100),
             name: None,
+            color: None,
             guilds: (1..=7u64).map(Into::into).collect(),
         }]);
         a.live.store_mut().set_collapsed([100]);

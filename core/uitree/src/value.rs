@@ -26,6 +26,16 @@ impl Color {
     };
 
     /// 16 進表記から解析する。受け付けない書式では `None`。
+    /// `0xRRGGBB` から。**Discord が色を渡してくる形である**
+    pub const fn from_rgb(rgb: u32) -> Color {
+        Color {
+            r: ((rgb >> 16) & 0xff) as u8,
+            g: ((rgb >> 8) & 0xff) as u8,
+            b: (rgb & 0xff) as u8,
+            a: 0xff,
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Color> {
         let hex = s.strip_prefix('#')?;
         if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {

@@ -52,6 +52,13 @@ export interface UINode {
   readonly key?: string;
   /** 現在立っている状態 */
   readonly states?: readonly NodeState[];
+  /**
+   * データが持ってきた色 (`#RRGGBB`)。役職の色、サーバフォルダの色。
+   *
+   * ⚠️ **スタイルではない。** どこに塗るかを決めるのはテーマであり、
+   * `$data.tint` と書いたプロパティにだけ入る (spec/04-theme.md 3.3.1)。
+   */
+  readonly tint?: string;
   props?: Record<string, unknown>;
   children?: UINode[];
 }

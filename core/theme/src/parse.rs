@@ -44,6 +44,41 @@ pub struct Rule {
     pub select: NodeId,
     pub when: When,
     pub style: Style,
+    /// **データが持ってきた色を使うプロパティ** ([`Tinted`])
+    pub tinted: Tinted,
+}
+
+/// データが持ってきた色 (`$data.tint`) で塗るプロパティ。
+///
+/// # ⚠️ 値はテーマの中では決まらない
+///
+/// 役職の色もサーバフォルダの色も**ノードごとに違う**。テーマが書けるのは
+/// 「ここにその色を使う」という**場所の指定**だけであり、色そのものは
+/// [`gumicord_uitree::UiNode::tint`] が運んでくる。
+///
+/// ⚠️ **色が無いノードでは何も起きない。** 直前のルールが書いた色が
+/// そのまま残るので、下のように書けば「色があればそれ、無ければ既定」に
+/// なる。
+///
+/// ```json
+/// { "select": "nav.member_list.item.name", "style": { "color": "$color.text.secondary" } },
+/// { "select": "nav.member_list.item.name", "style": { "color": "$data.tint" } }
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tinted {
+    pub color: bool,
+    pub background: bool,
+    pub border_color: bool,
+}
+
+/// データが持ってきた色への参照。
+///
+/// ⚠️ **トークンではない。** `$color.*` はテーマが自分で決めた表を引くが、
+/// これは引く表を持たない。**ノードが運んでくる**
+const DATA_TINT: &str = "$data.tint";
+
+fn is_data_tint(v: &Value) -> bool {
+    v.as_str() == Some(DATA_TINT)
 }
 
 /// トークン表と `remoteAssets` — 値を読む間ずっと必要になるもの。
@@ -473,11 +508,23 @@ fn asset(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option
 /// **未知のプロパティは警告であって誤りではない。** 新しいクライアント
 /// 向けに書かれたテーマを古いクライアントで開いたとき、知らないプロパティ
 /// が出てくるのは正常な状況である ([`spec/04-theme.md`] 7.1)。
-fn style(obj: &Map<String, Value>, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Style {
+fn style(
+    obj: &Map<String, Value>,
+    env: Env<'_>,
+    path: &str,
+    diags: &mut Diagnostics,
+) -> (Style, Tinted) {
     let mut s = Style::default();
+    let mut t = Tinted::default();
     for (key, v) in obj {
         let p = format!("{path}.{key}");
         match key.as_str() {
+            // ⚠️ **色の代わりに「データの色を使う」と書ける。**
+            // 値はここでは決まらない。決まるのはノードごとである
+            "background" if is_data_tint(v) => t.background = true,
+            "color" if is_data_tint(v) => t.color = true,
+            "borderColor" if is_data_tint(v) => t.border_color = true,
+
             "background" => s.background = background(v, env, &p, diags),
             "color" => s.color = color(v, env, &p, diags),
             "font" => s.font = font(v, env, &p, diags),
@@ -502,7 +549,7 @@ fn style(obj: &Map<String, Value>, env: Env<'_>, path: &str, diags: &mut Diagnos
             ),
         }
     }
-    s
+    (s, t)
 }
 
 // ------------------------------------------------------------------ when
@@ -708,10 +755,12 @@ pub(crate) fn rules(
             diags.error(&path, Ignored::Rule, "style (オブジェクト) が必要");
             continue;
         };
-        let st = style(st, env, &format!("{path}.style"), diags);
+        let (st, tinted) = style(st, env, &format!("{path}.style"), diags);
 
-        // すべてのプロパティが無視された結果、何も残らないこともある
-        if st.is_empty() {
+        // すべてのプロパティが無視された結果、何も残らないこともある。
+        // ⚠️ `$data.tint` だけのルールは**空ではない**。値がまだ無いだけで、
+        // ノードごとに色が入る
+        if st.is_empty() && tinted == Tinted::default() {
             diags.warn(
                 &path,
                 Ignored::Rule,
@@ -724,6 +773,7 @@ pub(crate) fn rules(
             select,
             when: cond,
             style: st,
+            tinted,
         });
     }
     out

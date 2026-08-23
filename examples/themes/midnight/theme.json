@@ -99,11 +99,11 @@
 
     {
       "select": "nav.guild_list",
-      "style": { "background": "$color.bg.sunken", "padding": 8, "gap": "$space.2" }
+      "style": { "background": "$color.bg.sunken", "padding": 12, "gap": "$space.2" }
     },
     {
       "select": "nav.guild_list.item",
-      "style": { "width": 48, "height": 48, "radius": "$radius.lg", "background": "$color.bg.raised" }
+      "style": { "width": 40, "height": 40, "radius": "$radius.lg", "background": "$color.bg.raised" }
     },
     {
       "select": "nav.guild_list.item",
@@ -118,32 +118,32 @@
     {
       "select": "nav.guild_list.item",
       "when": { "platform": "mobile" },
-      "style": { "width": 40, "height": 40 }
+      "style": { "width": 36, "height": 36 }
     },
     {
       "select": "nav.guild_list.item",
       "when": { "state": "grouped" },
-      "style": { "width": 40, "height": 40 }
+      "style": { "width": 32, "height": 32 }
     },
     {
       "select": "nav.guild_list.item.icon",
-      "style": { "width": 48, "height": 48, "radius": "$radius.lg", "background": "$color.bg.raised" }
+      "style": { "width": 40, "height": 40, "radius": "$radius.lg", "background": "$color.bg.raised" }
     },
     {
       "select": "nav.guild_list.item.icon",
       "when": { "state": "grouped" },
       "style": {
-        "width": 16,
-        "height": 16,
+        "width": 14,
+        "height": 14,
         "margin": [1, 1, 1, 1],
         "radius": "$radius.sm",
-        "font": { "size": 9, "lineHeight": 16 }
+        "font": { "size": 9, "lineHeight": 14 }
       }
     },
     {
       "select": "nav.guild_list.folder",
       "style": {
-        "width": 48,
+        "width": 40,
         "radius": "$radius.lg",
         "background": "$color.bg.hover",
         "padding": [0, 0, 4, 0],
@@ -154,12 +154,12 @@
       "select": "nav.guild_list.folder",
       "when": { "state": "collapsed" },
       "style": {
-        "height": 48,
+        "height": 40,
         "radius": "$radius.md",
         "background": "$color.bg.raised",
         "borderColor": "$color.border",
         "borderWidth": 1,
-        "padding": [6, 6, 6, 6]
+        "padding": [4, 4, 4, 4]
       }
     },
     {
@@ -169,7 +169,16 @@
     },
     {
       "select": "nav.guild_list.folder.icon",
-      "style": { "color": "$color.text.secondary", "font": { "size": 26, "lineHeight": 26 } }
+      "style": { "color": "$color.text.secondary", "font": { "size": 22, "lineHeight": 22 } }
+    },
+    {
+      "select": "nav.guild_list.folder.icon",
+      "style": { "color": "$data.tint" }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "collapsed" },
+      "style": { "borderColor": "$data.tint" }
     },
     {
       "select": "nav.guild_list.item.badge",
@@ -192,7 +201,7 @@
     },
     {
       "select": "nav.guild_list.home",
-      "style": { "width": 48, "height": 48, "radius": "$radius.full", "background": "$color.brand", "color": "#ffffff" }
+      "style": { "width": 40, "height": 40, "radius": "$radius.full", "background": "$color.brand", "color": "#ffffff" }
     },
     {
       "select": "nav.channel_list.item",
@@ -337,6 +346,10 @@
     {
       "select": "nav.member_list.item.name",
       "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "nav.member_list.item.name",
+      "style": { "color": "$data.tint" }
     },
 
     {

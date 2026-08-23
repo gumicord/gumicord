@@ -18,6 +18,7 @@
 
 use crate::ids::{DataKind, NodeId};
 use crate::style::Style;
+use crate::value::Color;
 use crate::{Key, State, StateSet};
 
 /// ノードが表示する中身。
@@ -142,6 +143,22 @@ pub struct UiNode {
     pub states: StateSet,
     /// このノードが表現しているドメインオブジェクトへの参照
     pub data: Option<DataRef>,
+    /// **データが持ってきた色。** 役職の色、サーバフォルダの色。
+    ///
+    /// # ⚠️ これはスタイルではない。テーマへの材料である
+    ///
+    /// 見た目を決めるのはテーマであって、Discord のデータではない。
+    /// だが「その役職の色」は**利用者が Discord で決めたこと**であり、
+    /// テーマの好みで消してよいものでもない。
+    ///
+    /// そこで、**色はここに載せるだけ**にする。どこに塗るか — 文字色か、
+    /// 縁か、背景か、そもそも塗らないか — はテーマが `$data.tint` で
+    /// 決める ([`spec/04-theme.md`])。
+    ///
+    /// ⚠️ **識別子は載せない。** 色は誰のものかを語らないので、
+    /// テーマが特定のサーバや相手を狙い撃ちにはできない
+    /// (`when.slot` がスノーフレークを弾くのと同じ理由)。
+    pub tint: Option<Color>,
     /// 表示する中身
     pub content: Content,
     /// テーマとプラグインによって解決された最終的なスタイル。
@@ -159,6 +176,7 @@ impl UiNode {
             key: None,
             states: StateSet::EMPTY,
             data: None,
+            tint: None,
             content: Content::None,
             style: Style::default(),
             children: Vec::new(),
@@ -216,6 +234,18 @@ impl UiNode {
 
     pub fn with_states(mut self, states: StateSet) -> Self {
         self.states = states;
+        self
+    }
+
+    /// データが持ってきた色を載せる。**どこに塗るかはテーマが決める**
+    pub fn with_tint(mut self, tint: Color) -> Self {
+        self.tint = Some(tint);
+        self
+    }
+
+    /// 色があれば載せる。呼び出し側の `if` を減らすためだけのもの
+    pub fn with_tint_opt(mut self, tint: Option<Color>) -> Self {
+        self.tint = tint;
         self
     }
 

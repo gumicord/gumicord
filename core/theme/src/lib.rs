@@ -50,7 +50,7 @@ use gumicord_uitree::NodeId;
 
 pub use crate::cond::{ColorScheme, MatchContext, Platform, PlatformSel, When};
 pub use crate::diag::{Diagnostic, Diagnostics, Ignored, Severity};
-pub use crate::parse::{Manifest, Rule};
+pub use crate::parse::{Manifest, Rule, Tinted};
 pub use crate::resolve::resolve;
 pub use crate::style::Style;
 pub use crate::token::{TokenValue, Tokens};
@@ -224,14 +224,50 @@ impl Theme {
     /// **規則 K1 の実装そのものである。** 記述順に走査し、条件が成立した
     /// ルールをプロパティ単位で重ねていく。詳細度は計算しない。
     pub fn style_for(&self, node: NodeId, ctx: &MatchContext) -> Style {
+        self.style_for_tinted(node, ctx, None)
+    }
+
+    /// そのノードのスタイル。**データが持ってきた色を差し込む。**
+    ///
+    /// # ⚠️ 後から素の色を書いたルールが勝つ
+    ///
+    /// `$data.tint` は「ここにその色を使う」という印であって、値ではない。
+    /// 後のルールが同じプロパティに素の色を書いたら、**印は下りる**。
+    /// 下ろさないと、`when` で分岐して色を上書きしたつもりのルールが
+    /// 黙って効かなくなる。
+    ///
+    /// ⚠️ **色を持たないノードでは何も起きない。** 前のルールが書いた色が
+    /// そのまま残る。これが「色があればそれ、無ければ既定」の書き方に
+    /// なっている ([`Tinted`])
+    pub fn style_for_tinted(&self, node: NodeId, ctx: &MatchContext, tint: Option<Color>) -> Style {
         let mut out = Style::default();
         let Some(indices) = self.index.get(&node) else {
             return out;
         };
+
+        let mut tinted = crate::parse::Tinted::default();
         for &i in indices {
             let rule = &self.rules[i as usize];
-            if rule.when.matches(ctx) {
-                out.overlay(&rule.style);
+            if !rule.when.matches(ctx) {
+                continue;
+            }
+            tinted.color = rule.tinted.color || (tinted.color && rule.style.color.is_none());
+            tinted.background =
+                rule.tinted.background || (tinted.background && rule.style.background.is_none());
+            tinted.border_color = rule.tinted.border_color
+                || (tinted.border_color && rule.style.border_color.is_none());
+            out.overlay(&rule.style);
+        }
+
+        if let Some(t) = tint {
+            if tinted.color {
+                out.color = Some(t);
+            }
+            if tinted.border_color {
+                out.border_color = Some(t);
+            }
+            if tinted.background {
+                out.background = Some(crate::value::Background::solid(t));
             }
         }
         out

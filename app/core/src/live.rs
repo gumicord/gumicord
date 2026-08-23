@@ -509,6 +509,7 @@ impl Live {
             .map(|f| gumicord_store::FolderRow {
                 id: f.id,
                 name: f.name,
+                color: f.color,
                 guilds: f.guilds,
             })
             .collect();

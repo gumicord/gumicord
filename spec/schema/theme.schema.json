@@ -178,7 +178,7 @@
 
     "tokenRef": {
       "type": "string",
-      "description": "トークン参照",
+      "description": "トークン参照。$data.tint だけは例外で、トークン表ではなくノードが運んでくる色を指す (spec/04-theme.md 3.3)。color / borderColor / background に書ける",
       "pattern": "^\\$[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$"
     },
 

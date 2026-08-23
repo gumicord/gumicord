@@ -138,26 +138,33 @@ impl User {
 ///
 /// だから [`Member::guild_avatar`] はギルドを引数に取る。
 /// 役職 1 つ。
-///
-/// # ⚠️ 色はまだ持たない
-///
-/// Discord は役職に色を持たせ、公式クライアントは名前をその色で出す。
-/// だが**データが見た目を決める**のはこの設計にまだ場所が無い
-/// (サーバフォルダの色と同じ宿題である)。テーマが決めた色を、データが
-/// 上書きしてよいかを決めていないうちは持ち込まない。
-///
-/// ここにあるのは**並べ方と名前**だけである。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {
     pub id: RoleId,
     #[serde(default)]
     pub name: String,
-    /// 大きいほど上。**メンバー一覧の見出しの順である**
+    /// 大きいほど上。**名前の色を決めるのは一番上の色付き役職である**
     #[serde(default)]
     pub position: i64,
     /// メンバー一覧で**別の見出しとして立てるか**
     #[serde(default)]
     pub hoist: bool,
+    /// `0xRRGGBB`。⚠️ **0 は「黒」ではなく「色を付けていない」**
+    #[serde(default)]
+    pub color: u32,
+}
+
+impl Role {
+    /// 付けられている色 (`0xRRGGBB`)。**付けていなければ `None`**
+    ///
+    /// ⚠️ **0 を黒として扱わない。** Discord では 0 が「色を付けていない」
+    /// であり、黒く塗ると全員の名前が読めなくなる。
+    ///
+    /// ⚠️ **ここは色を「持っている」だけである。** どこに出すかを決めるのは
+    /// テーマである ([`gumicord_uitree::UiNode::tint`])
+    pub fn tint(&self) -> Option<u32> {
+        (self.color != 0).then_some(self.color)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

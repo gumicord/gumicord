@@ -92,6 +92,9 @@ pub struct FolderRow {
     /// 付けていなければ `None`。**画面が中身の名前を並べて出す**
     pub name: Option<String>,
     pub guilds: Vec<GuildId>,
+    /// 利用者が付けた色 (`0xRRGGBB`)。**付けていなければ `None`**
+    #[serde(default)]
+    pub color: Option<u32>,
 }
 
 /// チャンネル一覧の 1 行。**見出しか、開けるものか。**
@@ -244,6 +247,32 @@ impl Store {
             .iter()
             .find(|r| r.id == role)
             .map(|r| &*r.name)
+    }
+
+    /// その人の名前に出す色 (`0xRRGGBB`)。**無ければ `None`**。
+    ///
+    /// ⚠️ **一番上の「色を付けている」役職が勝つ。** 一番上の役職ではない。
+    /// 色を付けていない役職が上にあっても、名前の色は下の色付き役職から
+    /// 来る。Discord もそうしている。
+    ///
+    /// ⚠️ **知らない役職は飛ばす。** ギルドの中身がまだ届いていない
+    /// ときに、順を勝手に決めない
+    pub fn member_tint(&self, guild: GuildId, roles: &[RoleId]) -> Option<u32> {
+        let table = self.roles.get(&guild)?;
+        table
+            .iter()
+            .filter(|r| roles.contains(&r.id))
+            .filter_map(|r| Some((r.position, r.tint()?)))
+            .max_by_key(|(position, _)| *position)
+            .map(|(_, tint)| tint)
+    }
+
+    /// そのフォルダに利用者が付けた色。**無ければ `None`**
+    pub fn folder_tint(&self, folder: u64) -> Option<u32> {
+        self.sidebar
+            .iter()
+            .find(|f| f.id == Some(folder))
+            .and_then(|f| f.color)
     }
 
     pub fn channel(&self, id: ChannelId) -> Option<&Channel> {
@@ -821,6 +850,7 @@ mod folder_tests {
         FolderRow {
             id: Some(id),
             name: Some(format!("フォルダ{id}")),
+            color: None,
             guilds: guilds.iter().map(|g| GuildId::from(*g)).collect(),
         }
     }
@@ -830,6 +860,7 @@ mod folder_tests {
         FolderRow {
             id: None,
             name: None,
+            color: None,
             guilds: vec![GuildId::from(guild)],
         }
     }
@@ -913,5 +944,106 @@ mod folder_tests {
         again.set_sidebar(vec![folder(10, &[2]), folder(20, &[3]), bare(1)]);
         again.set_collapsed(saved);
         assert_eq!(shape(&again), shape(&s));
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+
+    fn role(id: u64, position: i64, color: u32) -> Role {
+        Role {
+            id: RoleId::from(id),
+            name: format!("役職{id}"),
+            position,
+            hoist: false,
+            color,
+        }
+    }
+
+    fn store(roles: Vec<Role>) -> Store {
+        let mut s = Store::new();
+        s.upsert_guild(Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles,
+        });
+        s
+    }
+
+    /// ⚠️ **一番上の「色を付けている」役職が勝つ。**
+    ///
+    /// 色を付けていない役職が上にあっても、名前の色は下の色付き役職から
+    /// 来る。Discord もそうしている
+    #[test]
+    fn the_highest_coloured_role_wins_not_the_highest_role() {
+        let s = store(vec![
+            role(10, 1, 0x0000_ff00),
+            // 上にあるが色を付けていない
+            role(20, 5, 0),
+        ]);
+        let mine = [RoleId::from(10u64), RoleId::from(20u64)];
+        assert_eq!(s.member_tint(1u64.into(), &mine), Some(0x0000_ff00));
+    }
+
+    /// ⚠️ **0 は黒ではない。** 黒く塗ると全員の名前が読めなくなる
+    #[test]
+    fn a_role_without_a_colour_gives_nothing() {
+        let s = store(vec![role(10, 1, 0)]);
+        assert_eq!(s.member_tint(1u64.into(), &[RoleId::from(10u64)]), None);
+    }
+
+    /// ⚠️ **知らない役職は飛ばす。** ギルドがまだ届いていないときに
+    /// 順を勝手に決めない
+    #[test]
+    fn an_unknown_role_is_skipped() {
+        let s = store(vec![role(10, 1, 0x0000_ff00)]);
+        assert_eq!(s.member_tint(1u64.into(), &[RoleId::from(99u64)]), None);
+        assert_eq!(s.member_tint(2u64.into(), &[RoleId::from(10u64)]), None);
+    }
+
+    /// ⚠️ **空の役職で上書きしない。** `GUILD_UPDATE` は名前だけを持って
+    /// くることがあり、そのたびに色と見出しが消えてしまう
+    #[test]
+    fn an_update_without_roles_keeps_the_old_ones() {
+        let mut s = store(vec![role(10, 1, 0x0000_ff00)]);
+        s.upsert_guild(Guild {
+            id: 1u64.into(),
+            name: "名前だけ変えた".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: Vec::new(),
+        });
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(10u64)]),
+            Some(0x0000_ff00)
+        );
+    }
+
+    /// フォルダの色は識別子で引ける
+    #[test]
+    fn a_folder_carries_its_colour() {
+        let mut s = Store::new();
+        s.set_sidebar(vec![
+            FolderRow {
+                id: Some(100),
+                name: None,
+                guilds: Vec::new(),
+                color: Some(0x007c_6cf0),
+            },
+            FolderRow {
+                id: Some(200),
+                name: None,
+                guilds: Vec::new(),
+                color: None,
+            },
+        ]);
+        assert_eq!(s.folder_tint(100), Some(0x007c_6cf0));
+        assert_eq!(s.folder_tint(200), None);
+        assert_eq!(s.folder_tint(999), None);
     }
 }

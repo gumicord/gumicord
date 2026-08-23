@@ -51,7 +51,9 @@ fn resolve_node(theme: &Theme, node: &mut UiNode, parent: &Style, ctx: &MatchCon
         _ => None,
     };
     let mine = ctx.with_states(node.states).with_slot(slot);
-    let mut style = theme.style_for(node.id, &mine);
+    // ⚠️ **色は渡すが、識別子は渡さない。** テーマが決めるのは
+    // 「どこに塗るか」であって、誰の色かではない
+    let mut style = theme.style_for_tinted(node.id, &mine, node.tint);
     style.inherit_from(parent);
 
     for child in &mut node.children {
@@ -183,6 +185,72 @@ mod tests {
         resolve(&t, &mut tree, &MatchContext::new(1280.0));
 
         assert_eq!(tree.children[0].style.background, None);
+    }
+
+    /// データが持ってきた色は、**テーマが場所を書いたところにだけ**入る
+    #[test]
+    fn the_theme_decides_where_the_data_colour_lands() {
+        let t = theme(&format!(
+            r##"{{ {MANIFEST}, "rules": [
+                {{ "select": "nav.member_list.item.name", "style": {{ "color": "$data.tint" }} }},
+                {{ "select": "nav.member_list.item", "style": {{ "background": "#111111" }} }}
+            ] }}"##
+        ));
+
+        let red = Color::parse("#e05260").expect("色");
+        let mut tree = UiNode::new(NodeId::NavMemberListItem).child(
+            UiNode::text(NodeId::NavMemberListItemName, "ねんねこ".to_owned()).with_tint(red),
+        );
+        resolve(&t, &mut tree, &MatchContext::new(1280.0));
+
+        assert_eq!(tree.children[0].style.color, Some(red));
+        // 色を書いていないところは何も変わらない
+        assert_eq!(tree.style.background, bg("#111111"));
+    }
+
+    /// ⚠️ **色を持たないノードでは前のルールが残る。**
+    /// これが「色があればそれ、無ければ既定」の書き方になっている
+    #[test]
+    fn without_a_colour_the_earlier_rule_stands() {
+        let t = theme(&format!(
+            r##"{{ {MANIFEST}, "rules": [
+                {{ "select": "nav.member_list.item.name", "style": {{ "color": "#a0a0b0" }} }},
+                {{ "select": "nav.member_list.item.name", "style": {{ "color": "$data.tint" }} }}
+            ] }}"##
+        ));
+
+        let mut plain = UiNode::text(NodeId::NavMemberListItemName, "ねんねこ".to_owned());
+        resolve(&t, &mut plain, &MatchContext::new(1280.0));
+        assert_eq!(plain.style.color, Color::parse("#a0a0b0"));
+
+        let red = Color::parse("#e05260").expect("色");
+        let mut tinted =
+            UiNode::text(NodeId::NavMemberListItemName, "ねんねこ".to_owned()).with_tint(red);
+        resolve(&t, &mut tinted, &MatchContext::new(1280.0));
+        assert_eq!(tinted.style.color, Some(red));
+    }
+
+    /// ⚠️ **後から素の色を書いたルールが勝つ。**
+    ///
+    /// 印が下りないと、`when` で分岐して色を上書きしたつもりのルールが
+    /// 黙って効かなくなる
+    #[test]
+    fn a_later_plain_colour_takes_the_mark_back() {
+        let t = theme(&format!(
+            r##"{{ {MANIFEST}, "rules": [
+                {{ "select": "nav.member_list.item.name", "style": {{ "color": "$data.tint" }} }},
+                {{ "select": "nav.member_list.item.name", "when": {{ "state": "selected" }},
+                   "style": {{ "color": "#ffffff" }} }}
+            ] }}"##
+        ));
+
+        let red = Color::parse("#e05260").expect("色");
+        let mut tree = UiNode::text(NodeId::NavMemberListItemName, "ねんねこ".to_owned())
+            .with_tint(red)
+            .with_state(gumicord_uitree::State::Selected);
+        resolve(&t, &mut tree, &MatchContext::new(1280.0));
+
+        assert_eq!(tree.style.color, Color::parse("#ffffff"));
     }
 
     #[test]
