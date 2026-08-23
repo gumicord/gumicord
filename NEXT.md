@@ -39,13 +39,26 @@ JS の束を追う必要は無く、`GLOBAL_ENV` の `"BUILD_NUMBER"` を読む�
 ⚠️ ただしこれは「偽の操作記録を作って流す」ことである。効き目と引き換えに
 何を送るのかは、実装する前に決めること。
 
-### 1.3 `op 8` の要求範囲を絞る
+### 1.3 要求範囲を絞る — 手を付けていない
 
-C10 でメンバー一覧のために `REQUEST_GUILD_MEMBERS` を広い範囲で投げて
-いる。**収集行為に見える挙動**である。見えているぶんだけに絞る。
+**調べたら `op 8` と `op 14` は別の話だった。**
 
-- 該当: [`core/gateway/src/gateway.rs`](core/gateway/src/gateway.rs)
-  の `MEMBER_RANGES`
+| | いまどうなっているか |
+|---|---|
+| `op 8` (`REQUEST_GUILD_MEMBERS`) | [`live.rs`](app/core/src/live.rs) の `fill_members`。**既に絞れている** — 開いているチャンネルの発言者のうち、姿を知らない人だけ |
+| `op 14` (`GUILD_SUBSCRIBE`) | [`gateway.rs`](core/gateway/src/gateway.rs) の `MEMBER_RANGES`。**こちらが問題である** |
+
+`MEMBER_RANGES` は `[[0,99],[100,199],[200,299]]` で固定してあり、
+**メンバー一覧を出していない幅の窓でも 300 人ぶん頼んでいる。**
+公式クライアントは見えている範囲を送る。
+
+⚠️ **今夜は触らなかった。** 購読の形を変えると、新着も入力中も来なく
+なりうる ([`spec/07-roadmap.md`](spec/07-roadmap.md) の「実機でしか
+見つからなかったこと」)。**本物の Discord に繋がないと確かめられない**
+ので、起きている人が居るときにやること。
+
+- 出すか出さないかは `Panes::members()` (幅 >= 4 ペイン) が既に知っている
+- 巻いた先を頼み直す仕組みが要る (4. の「300 人で止まる」と同じところ)
 
 ---
 
@@ -77,7 +90,53 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 
 ---
 
-## 4. 前から積んである宿題
+## 4. コードを英語にする — 途中である
+
+2026-08-24 に決めた規則
+([`spec/README.md`](spec/README.md#6-コードは英語仕様は日本語))。
+**識別子は全部終わった。コメントは半分残っている。**
+
+| | |
+|---|---|
+| 識別子 (試験関数名 159 個ほか) | ✅ **全部終わった。** 日本語の識別子はもう 1 つも無い |
+| `core/model` `core/rest` `core/markdown` `core/uitree` `core/plugin` | ✅ コメントも済んだ |
+| `app/core/menu.rs` `app/core/markdown.rs` | ✅ 済んだ |
+| **残り** | 下の表。**約 3,400 行** |
+
+```text
+  762  app/core/src/lib.rs          ← 一番大きい
+  312  render/render/src/text.rs
+  259  core/store/src/lib.rs
+  253  core/gateway/src/gateway.rs
+  241  app/core/src/live.rs
+  238  render/platform/src/window.rs
+  211  render/render/src/layout.rs
+  163  render/render/src/draw.rs
+  132  render/render/src/intrinsic.rs
+  125  core/gateway/src/guild_order.rs
+  116  core/store/src/db.rs
+  112  app/core/src/session.rs
+  ...  core/theme/*, render/render/{lib,motion,icon,gpu}.rs,
+       render/platform/{secret,clipboard,clock,text_input}.rs, xtask/*
+```
+
+数え直す:
+
+```text
+  grep -rc '[ぁ-んァ-ヶ一-龠]' --include=*.rs core app render xtask
+```
+
+⚠️ **残すもの**:
+
+- 画面に出る文字 (「やめる」「@不明なユーザー」「3 分前」の単位)
+- `RestError` の `Display` — あれはログイン画面に「失敗しました: …」と出る
+- `AssetRefError` の説明 — テーマを書いた人に見せる診断である
+- `core/uitree/src/ids.rs` の説明文 — `cargo xtask gen` が
+  `spec/03-uitree.md` の表に書き込む中身である
+
+---
+
+## 5. 前から積んである宿題
 
 | | |
 |---|---|
@@ -94,6 +153,8 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 
 ## 覚えておくこと
 
+- **コードは英語、仕様は日本語** (`spec/README.md` 6)。コメントは
+  「なぜ」だけを 1〜2 行。**要件番号 (`FR-024` など) をコメントに書かない**
 - **git commit で author を指定しない。** この機械の `~/.gitconfig` の
   身元を使う。セッションが渡してくるメールアドレスは GitHub 上で別人に
   紐づいており、過去に 24 件が誤って別人の名前で記録された
