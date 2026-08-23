@@ -107,7 +107,7 @@ impl Session {
                 scanned: Some(u), ..
             } => format!("{} として続けますか？ スマホで承認してください", u.username),
             Session::Exchanging => "承認されました。ログインしています…".to_owned(),
-            Session::LoggedIn(l) => format!("{} でログインしました", l.me.user.name()),
+            Session::LoggedIn(l) => format!("{} でログインしました", l.me.user.display_name()),
             Session::Failed(e) => format!("失敗しました: {e}"),
         }
     }
@@ -331,7 +331,7 @@ async fn restore(store: Option<&SecretStore>) -> Option<LoggedIn> {
 
     match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
-            tracing::info!(user = %me.user.name(), "保存されたトークンで入った");
+            tracing::info!(user = %me.user.display_name(), "保存されたトークンで入った");
             Some(LoggedIn { me, client, token })
         }
         Err(e) => {
@@ -386,7 +386,7 @@ async fn attempt(
                     .authenticate(token.clone())
                     .await
                     .map_err(|e| e.to_string())?;
-                tracing::info!(user = %me.user.name(), "ログインした");
+                tracing::info!(user = %me.user.display_name(), "ログインした");
 
                 // ⚠️ **通ることを確かめてから預ける** (`FR-003`)。
                 // 保存に失敗してもログインは成功である。次の起動で

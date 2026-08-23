@@ -470,7 +470,7 @@ mod tests {
             author: User {
                 id: UserId::from(1u64),
                 username: "ねんねこ".to_owned(),
-                display_name: None,
+                global_name: None,
                 discriminator: "0".to_owned(),
                 avatar: None,
                 bot: false,

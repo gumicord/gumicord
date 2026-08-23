@@ -205,10 +205,11 @@ CREATE TABLE IF NOT EXISTS channels (
 );
 
 CREATE TABLE IF NOT EXISTS users (
-    id           TEXT PRIMARY KEY,
-    username     TEXT NOT NULL,
-    display_name TEXT,
-    avatar       TEXT
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL,
+    global_name   TEXT,
+    discriminator TEXT NOT NULL DEFAULT '',
+    avatar        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -227,8 +228,32 @@ CREATE TABLE IF NOT EXISTS state (
 );
 "#;
 
+/// いまの表の形。**変えたら 1 増やす**。
+///
+/// # 合わなければ捨てて作り直す
+///
+/// ここはキャッシュであって記録ではない。中身は READY と REST から
+/// いくらでも作り直せるので、**列を足すたびに移行を書くより、捨てるほうが
+/// 正しい**。移行を書けば書くほど、実際には通らない経路が増えていく。
+///
+/// ⚠️ **記録を置く場所ができたら、この判断はそこには使えない。**
+/// 消えて困るものをここへ入れないこと
+const SCHEMA_VERSION: i32 = 2;
+
 fn init(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    let found: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if found != SCHEMA_VERSION {
+        tracing::info!(found, want = SCHEMA_VERSION, "キャッシュを作り直す");
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS guilds;
+             DROP TABLE IF EXISTS channels;
+             DROP TABLE IF EXISTS users;
+             DROP TABLE IF EXISTS messages;
+             DROP TABLE IF EXISTS state;",
+        )?;
+    }
+    conn.execute_batch(SCHEMA)?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
 }
 
 fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
@@ -336,7 +361,7 @@ fn read_messages(
     // 辞書順で**並べる。桁が同じなら辞書順が時刻順に一致する
     conn.prepare(
         "SELECT m.id, m.author_id, m.content, m.ts,
-                u.username, u.display_name, u.avatar
+                u.username, u.global_name, u.discriminator, u.avatar
            FROM messages m
            LEFT JOIN users u ON u.id = m.author_id
           WHERE m.channel_id = ?1
@@ -351,9 +376,9 @@ fn read_messages(
             author: User {
                 id: parse_id(author_id),
                 username: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                display_name: row.get(5)?,
-                discriminator: String::new(),
-                avatar: row.get(6)?,
+                global_name: row.get(5)?,
+                discriminator: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                avatar: row.get(7)?,
                 bot: false,
             },
             content: row.get(2)?,
@@ -470,12 +495,14 @@ fn write_messages(
 
     for m in list {
         tx.execute(
-            "INSERT OR REPLACE INTO users(id, username, display_name, avatar)
-             VALUES(?1, ?2, ?3, ?4)",
+            "INSERT OR REPLACE INTO users(id, username, global_name, discriminator, avatar)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 m.author.id.get().to_string(),
                 m.author.username,
-                m.author.display_name,
+                m.author.global_name,
+                // â ï¸ **æ¨ã¦ãªãã** æ¢å®ã®ã¢ãã¿ã¼ã®é¸ã³æ¹ãããã§å¤ãã
+                m.author.discriminator,
                 m.author.avatar,
             ],
         )?;
@@ -627,7 +654,7 @@ mod tests {
             author: User {
                 id: 7u64.into(),
                 username: "ねんねこ".to_owned(),
-                display_name: Some("ｽﾋﾟｷ".to_owned()),
+                global_name: Some("ｽﾋﾟｷ".to_owned()),
                 discriminator: "0".to_owned(),
                 avatar: None,
                 bot: false,
@@ -668,7 +695,30 @@ mod tests {
         let bodies: Vec<_> = again.messages.iter().map(|m| &*m.content).collect();
         assert_eq!(bodies, vec!["こんにちは", "またね"], "古い順になっていない");
         // 送信者も引ける
-        assert_eq!(again.messages[0].author.name(), "ｽﾋﾟｷ");
+        assert_eq!(again.messages[0].author.display_name(), "ｽﾋﾟｷ");
+    }
+
+    /// ⚠️ **4 桁も残す。**
+    ///
+    /// 既定のアバターの選び方がこれで変わるので、捨てるとキャッシュから
+    /// 出したボットの顔が、届いたばかりのボットの顔と食い違う
+    #[test]
+    fn the_old_four_digits_survive_too() {
+        let path = scratch("discriminator");
+
+        let (db, _) = Db::open(&path).expect("開けない");
+        let mut m = message(100, 10, "ぼっとです");
+        m.author.discriminator = "0007".to_owned();
+        m.author.bot = true;
+        db.save_messages(ChannelId::from(10u64), vec![m]);
+        db.save_last_channel(ChannelId::from(10u64));
+        db.flush();
+        drop(db);
+
+        let (_db, again) = Db::open(&path).expect("開き直せない");
+        let author = &again.messages[0].author;
+        assert_eq!(author.tag(), Some("0007"));
+        assert_eq!(author.default_avatar_index(), 2, "7 % 5");
     }
 
     /// **抜けたサーバは残らない。** 押しても開けない項目が居座ると困る

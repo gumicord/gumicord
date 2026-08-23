@@ -653,7 +653,7 @@ impl Connection {
                             seq: self.last_seq,
                         });
                         tracing::info!(
-                            user = %ready.user.user.name(),
+                            user = %ready.user.user.display_name(),
                             guilds = ready.guilds.len(),
                             "READY"
                         );
@@ -884,7 +884,7 @@ mod tests {
 
         assert_eq!(ready.session_id, "abc");
         assert_eq!(ready.guilds.len(), 1);
-        assert_eq!(ready.user.user.name(), "ねんねこ");
+        assert_eq!(ready.user.user.display_name(), "ねんねこ");
     }
 
     /// `resume_gateway_url` が無くても落ちない。

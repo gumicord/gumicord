@@ -37,11 +37,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
+    /// 単一の利用者名。**画面に出すのはこれではない** ([`User::display_name`])
     pub username: String,
-    /// 表示名。設定していなければ `None` で、`username` を出す
-    #[serde(default, rename = "global_name")]
-    pub display_name: Option<String>,
-    /// 旧来の 4 桁。新方式の利用者は `"0"` になる
+    /// 自分で決めた表示名。設定していなければ `None`
+    #[serde(default)]
+    pub global_name: Option<String>,
+    /// 旧来の 4 桁。
+    ///
+    /// ⚠️ **新方式へ移った利用者は `"0"` になるが、ボットは持ったままである。**
+    /// 既定のアバターの選び方が旧方式と新方式で違うので、
+    /// **捨てるとボットの顔が変わる**。だから残して保存もする
     #[serde(default)]
     pub discriminator: String,
     #[serde(default)]
@@ -51,9 +56,18 @@ pub struct User {
 }
 
 impl User {
-    /// 画面に出す名前。**`display_name` があればそちら**
-    pub fn name(&self) -> &str {
-        self.display_name.as_deref().unwrap_or(&self.username)
+    /// 画面に出す名前。**`global_name` があればそちら**
+    pub fn display_name(&self) -> &str {
+        self.global_name.as_deref().unwrap_or(&self.username)
+    }
+
+    /// 旧来の 4 桁。**新方式へ移った利用者には無い**。
+    ///
+    /// `"0"` も `"0000"` も「無い」の意味で、区別に意味はない。
+    /// ボットは移行の対象外なので、ここが `Some` なら概ねボットである
+    pub fn tag(&self) -> Option<&str> {
+        let d = self.discriminator.trim();
+        (!d.is_empty() && !d.chars().all(|c| c == '0')).then_some(d)
     }
 
     /// アバター画像の URL。設定していなければ `None`。
@@ -69,6 +83,47 @@ impl User {
             "https://cdn.discordapp.com/avatars/{}/{hash}.png?size={size}",
             self.id
         ))
+    }
+
+    /// 既定のアバターの通し番号。
+    ///
+    /// # ⚠️ 選び方が 2 通りある
+    ///
+    /// ```text
+    ///   旧方式 (4 桁を持つ)   4 桁 % 5     → 0〜4
+    ///   新方式 (4 桁が "0")   (id >> 22) % 6 → 0〜5
+    /// ```
+    ///
+    /// **旧方式は同じ 4 桁の全員が同じ顔になる。** 新方式が識別子から引く
+    /// ようになったのはそのためである。ボットは旧方式のままなので、
+    /// [`User::discriminator`] を捨てると顔が変わってしまう
+    pub fn default_avatar_index(&self) -> u64 {
+        match self.tag().and_then(|d| d.parse::<u64>().ok()) {
+            Some(d) => d % 5,
+            None => (self.id.get() >> 22) % 6,
+        }
+    }
+
+    /// 既定のアバターの URL。**必ずある**。
+    ///
+    /// ⚠️ **`size` を取らない。** 誰が使っても同じ絵なので、大きさを
+    /// 揃えておけば**利用者をまたいで 1 枚を使い回せる**
+    pub fn default_avatar_url(&self) -> String {
+        format!(
+            "https://cdn.discordapp.com/embed/avatars/{}.png",
+            self.default_avatar_index()
+        )
+    }
+
+    /// 出すべきアバターの URL。**必ずある**。
+    ///
+    /// 設定していれば本人のもの、していなければ既定のものである。
+    ///
+    /// ⚠️ **ギルドごとのアバターはまだ見ていない。** Member を持ったら
+    /// ここが最初に見る場所になる (`FR-011`)
+    pub fn display_avatar_url(&self, size: u16) -> String {
+        self.avatar_url(size)
+            .unwrap_or_else(|| self.default_avatar_url())
     }
 }
 
@@ -288,7 +343,7 @@ impl Channel {
         }
         self.recipients
             .iter()
-            .map(User::name)
+            .map(User::display_name)
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -399,11 +454,11 @@ mod tests {
     fn the_display_name_wins_over_the_username() {
         let json = r#"{"id":"1","username":"nenneko","global_name":"ねんねこ"}"#;
         let u: User = serde_json::from_str(json).unwrap();
-        assert_eq!(u.name(), "ねんねこ");
+        assert_eq!(u.display_name(), "ねんねこ");
 
         let json = r#"{"id":"1","username":"nenneko"}"#;
         let u: User = serde_json::from_str(json).unwrap();
-        assert_eq!(u.name(), "nenneko");
+        assert_eq!(u.display_name(), "nenneko");
     }
 
     /// **DM には名前が無い。** 相手の名前で作る
@@ -433,6 +488,43 @@ mod tests {
 
         u.avatar = Some("abc".into());
         assert!(u.avatar_url(64).unwrap().ends_with("abc.png?size=64"));
+    }
+
+    /// ⚠️ **4 桁を持っているかで既定のアバターの選び方が変わる。**
+    ///
+    /// ボットは移行の対象外なので 4 桁を持ったままである。捨てると
+    /// 新方式として扱われ、**顔が変わる**
+    #[test]
+    fn the_default_avatar_depends_on_the_old_four_digits() {
+        // 新方式。`"0"` は「無い」の意味である
+        let u: User =
+            serde_json::from_str(r#"{"id":"4194304","username":"x","discriminator":"0"}"#).unwrap();
+        assert_eq!(u.tag(), None);
+        assert_eq!(u.default_avatar_index(), 1, "(id >> 22) % 6");
+
+        // 旧方式。4 桁をそのまま 5 で割る
+        let u: User =
+            serde_json::from_str(r#"{"id":"4194304","username":"x","discriminator":"0007"}"#)
+                .unwrap();
+        assert_eq!(u.tag(), Some("0007"));
+        assert_eq!(u.default_avatar_index(), 2, "7 % 5");
+
+        // `"0000"` も「無い」である。`"0"` と区別しない
+        let u: User =
+            serde_json::from_str(r#"{"id":"4194304","username":"x","discriminator":"0000"}"#)
+                .unwrap();
+        assert_eq!(u.tag(), None);
+        assert_eq!(u.default_avatar_index(), 1);
+    }
+
+    /// ⚠️ **出す顔は必ずある。** 設定していない人にも Discord が配っている
+    #[test]
+    fn everyone_has_a_face() {
+        let mut u: User = serde_json::from_str(r#"{"id":"7","username":"x"}"#).unwrap();
+        assert!(u.display_avatar_url(64).contains("/embed/avatars/"));
+
+        u.avatar = Some("abc".into());
+        assert!(u.display_avatar_url(64).ends_with("abc.png?size=64"));
     }
 
     /// 返信元が入れ子で入る (`FR-028`)

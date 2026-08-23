@@ -544,7 +544,7 @@ impl Gumicord {
         // ログインできたら誰として入っているかを出す。**本物のデータが
         // 通っていることが目で分かる唯一の場所**でもある (Store は C5)
         let title = match self.login.session().logged_in() {
-            Some(l) => format!("  Gumicord — {}", l.me.user.name()),
+            Some(l) => format!("  Gumicord — {}", l.me.user.display_name()),
             None => "  Gumicord".to_owned(),
         };
 
@@ -1096,8 +1096,10 @@ impl Gumicord {
             .iter()
             .map(|m| MessageRow {
                 id: m.id.get(),
-                author: m.author.name().to_owned(),
-                avatar: m.author.avatar_url(AVATAR_PX),
+                author: m.author.display_name().to_owned(),
+                // ⚠️ **人には必ず顔がある。** 設定していない人には Discord が
+                // 既定の絵を配っていて、頭文字を出すのはこちらの勝手である
+                avatar: Some(m.author.display_avatar_url(AVATAR_PX)),
                 time: local_time(&m.timestamp),
                 body: m.content.clone(),
                 // ⚠️ 本物のメンション判定は本文の解析が要る (C7)。
