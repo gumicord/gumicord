@@ -1,46 +1,41 @@
-//! OS から時刻に関する情報を取る。
+//! Time information from the OS.
 //!
-//! いま要るのは**現地時刻とのずれ**だけである。Discord が返す時刻は
-//! すべて UTC なので、これが無いと**日本の利用者に 9 時間ずれた時刻**を
-//! 見せることになる。
+//! Discord returns everything in UTC, so without the local offset a user in
+//! Japan would see every timestamp nine hours out.
 //!
-//! # なぜ crate を足さないのか
-//!
-//! `chrono` も `time` も、この用途では OS の API を 1 本呼ぶために
-//! 依存を増やすことになる。ここは既に「OS に触るコードを閉じ込める層」
-//! なので、**本来ここに置くべきものである**。
-//!
-//! 暦の計算そのもの (閏年・月の日数) は増やさない。ずれを分で返すだけで、
-//! それをどう使うかは上の層が決める。
+//! No date crate: `chrono` and `time` would both add a dependency to make one
+//! OS call, and this is already the layer that confines OS calls. Calendar
+//! arithmetic stays out — this returns an offset in minutes and the layer
+//! above decides what to do with it.
 
-/// 現地時刻と UTC のずれ (分)。日本なら `+540`。
+/// Local time's offset from UTC in minutes; `+540` in Japan.
 ///
-/// ⚠️ **夏時間を考慮した「いまの」ずれ**である。年に 2 回変わる地域が
-/// あるので、起動時に 1 回取って使い回すのではなく、必要なときに聞く。
+/// The offset *right now*, including daylight saving. Regions that shift
+/// twice a year make a value cached at startup wrong, so this is asked each
+/// time.
 ///
-/// 取れなければ `0` — つまり UTC のまま表示する。**推測はしない。**
+/// Zero when unavailable, which displays UTC rather than a guess.
 pub fn local_utc_offset_minutes() -> i32 {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Time::GetTimeZoneInformation;
 
-        /// `GetTimeZoneInformation` の戻り値。
-        /// ⚠️ 定数は `SystemServices` にあり、機能フラグを 1 つ増やすことに
-        /// なるので、値だけをここに写している
+        // Copied rather than imported: the constants live in
+        // `SystemServices`, which would mean one more feature flag.
         const STANDARD: u32 = 1;
         const DAYLIGHT: u32 = 2;
 
-        // SAFETY: OS が埋める構造体を渡すだけ。ポインタは有効である
+        // SAFETY: hands the OS a struct to fill; the pointer is valid.
         unsafe {
             let mut info = std::mem::zeroed();
             let kind = GetTimeZoneInformation(&mut info);
 
-            // ⚠️ Windows の Bias は「現地 → UTC」の向きである。
-            // UTC = 現地 + Bias なので、**符号を反転させる**
+            // Windows' Bias runs local to UTC (UTC = local + Bias), so the
+            // sign is flipped.
             let bias = match kind {
                 STANDARD => info.Bias + info.StandardBias,
                 DAYLIGHT => info.Bias + info.DaylightBias,
-                // TIME_ZONE_ID_INVALID を含む。分からないので動かさない
+                // Includes TIME_ZONE_ID_INVALID: unknown, so do not shift.
                 _ => return 0,
             };
             -bias
@@ -48,8 +43,8 @@ pub fn local_utc_offset_minutes() -> i32 {
     }
     #[cfg(not(windows))]
     {
-        // M1.2 で各プラットフォームの実装が入る。
-        // **それまでは UTC のまま出す。ずらして誤魔化さない**
+        // Other platforms land later. Until then show UTC rather than
+        // fudging an offset.
         0
     }
 }
@@ -58,30 +53,31 @@ pub fn local_utc_offset_minutes() -> i32 {
 mod tests {
     use super::*;
 
-    /// 現実にありうる範囲に収まる。UTC-12 から UTC+14 まで
+    /// Within a real range, UTC-12 to UTC+14.
     #[test]
     fn the_offset_is_a_real_one() {
         let m = local_utc_offset_minutes();
-        assert!((-12 * 60..=14 * 60).contains(&m), "ありえないずれ: {m} 分");
-        // 15 分刻みでない時間帯は存在しない
-        assert_eq!(m % 15, 0, "15 分で割り切れないずれ: {m} 分");
+        assert!((-12 * 60..=14 * 60).contains(&m), "impossible offset: {m}");
+        // No time zone is off a 15-minute boundary.
+        assert_eq!(m % 15, 0, "offset not a multiple of 15: {m}");
     }
 }
 
-/// いま何時か。1970-01-01 00:00 UTC からの秒。
+/// Seconds since 1970-01-01 00:00 UTC.
 ///
-/// ⚠️ **フレームの頭で 1 回だけ読むこと。** 組んでいる最中に何度も読むと、
-/// 同じ画面に並んだ「3 分前」と「4 分前」が同じ時刻を指しうる。
+/// Read once at the head of a frame. Reading it repeatedly while building
+/// lets "3 minutes ago" and "4 minutes ago" on the same screen refer to the
+/// same instant.
 ///
-/// ⚠️ **利用者が時計を戻すと過去へ飛ぶ。** 時間の間隔を測るのに使っては
-/// ならない ([`std::time::Instant`] がそのためにある)。ここで要るのは
-/// 「Discord が寄越した時刻と比べる」ことだけである。
+/// Jumps backwards if the user moves the clock, so never measure durations
+/// with it — [`std::time::Instant`] exists for that. This is only for
+/// comparing against timestamps Discord sent.
 ///
-/// 1970 年より前 (時計が壊れている等) なら負の値を返す。**握り潰さない。**
+/// Negative before 1970, rather than swallowed.
 pub fn now_unix() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as i64,
-        // 1970 年より前。逆向きの差が返る
+        // Before 1970; the error carries the reversed difference.
         Err(e) => -(e.duration().as_secs() as i64),
     }
 }
@@ -90,38 +86,37 @@ pub fn now_unix() -> i64 {
 mod now_tests {
     use super::*;
 
-    /// ⚠️ **止まっていないこと。** 0 を返す実装でも「動いている」と
-    /// 見えてしまうので、現実にありうる範囲かを見る
+    /// A stub returning zero would still look like it works, so check the
+    /// value is in a plausible range.
     #[test]
     fn the_clock_is_in_this_century() {
         let now = now_unix();
-        // 2020-01-01 〜 2100-01-01
+        // 2020-01-01 to 2100-01-01
         assert!(
             (1_577_836_800..4_102_444_800).contains(&now),
-            "ありえない時刻: {now}"
+            "implausible time: {now}"
         );
     }
 }
 
-/// キャレットが点滅する間隔。**OS の設定に従う。**
+/// How fast the caret blinks, per the OS setting.
 ///
-/// ⚠️ **自前の値を決め打ちしない。** 点滅の速さは「コントロールパネル →
-/// キーボード」で変えられる設定であり、**点滅させない設定もある**
-/// (てんかんの光過敏や、単に目障りだという理由で切る人がいる)。
+/// Never hardcoded: the rate is user-configurable, and blinking can be turned
+/// off entirely — for photosensitivity, or simply because it is distracting.
 ///
-/// `None` は「点滅させない」である。**0 ではない。**
+/// `None` means "do not blink", which is not the same as zero.
 pub fn caret_blink_interval() -> Option<std::time::Duration> {
-    /// OS の設定が壊れているときに使う値。Windows の既定と同じ
+    /// Used when the OS setting is unreadable; the Windows default.
     const FALLBACK_MS: u64 = 530;
 
     #[cfg(windows)]
     {
-        // SAFETY: 引数がなく、戻り値も数値だけである
+        // SAFETY: no arguments, and the return value is a plain number.
         let ms = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
         match ms {
-            // 点滅させない設定
+            // Blinking is turned off.
             u32::MAX => None,
-            // 取れなかった
+            // Unreadable.
             0 => Some(std::time::Duration::from_millis(FALLBACK_MS)),
             ms => Some(std::time::Duration::from_millis(ms as u64)),
         }
@@ -136,13 +131,12 @@ pub fn caret_blink_interval() -> Option<std::time::Duration> {
 mod blink_tests {
     use super::*;
 
-    /// 取れた値が現実的な範囲にある。**0 は返さない** —
-    /// 0 だと 1 フレームごとに点滅して、目に見えないほど速くなる
+    /// Never zero, which would blink once per frame and be invisible.
     #[test]
     fn the_blink_interval_is_usable_or_absent() {
         if let Some(d) = caret_blink_interval() {
-            assert!(d.as_millis() >= 100, "速すぎる: {d:?}");
-            assert!(d.as_millis() <= 5_000, "遅すぎる: {d:?}");
+            assert!(d.as_millis() >= 100, "too fast: {d:?}");
+            assert!(d.as_millis() <= 5_000, "too slow: {d:?}");
         }
     }
 }
