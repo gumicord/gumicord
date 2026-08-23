@@ -144,6 +144,13 @@ pub trait Application {
     /// ものは円盤に残っているので、往復は起きない
     fn images_dropped(&mut self) {}
 
+    /// 画面に出ようとしたのに無かった絵を頼む。**描く直前に呼ばれる。**
+    ///
+    /// ⚠️ **見えているものだけが来る。** 一覧に 300 行あっても、切り取りを
+    /// 抜けて実際に描かれたところしか来ない。木を歩いて集めると、
+    /// **見えていない 285 行ぶんまで取りに行くことになる**
+    fn request_images(&mut self, _urls: &[String]) {}
+
     /// 取ってきた画像を引き取る。**描く直前に呼ばれる。**
     ///
     /// ⚠️ **レンダラは網に触らない** ([`spec/02-architecture.md`])。
@@ -500,6 +507,14 @@ impl Host {
             .is_some_and(Renderer::took_image_recycle)
         {
             self.app.images_dropped();
+        }
+        // ⚠️ **直前のフレームで足りなかったぶんを頼む。** 見えている
+        // ものだけが載っている
+        if let Some(r) = &self.renderer {
+            let want: Vec<String> = r.missing_images().to_vec();
+            if !want.is_empty() {
+                self.app.request_images(&want);
+            }
         }
         let images = self.app.take_images();
         // 上へ足したものがあれば、見ている場所を保つ。**1 フレームだけ**

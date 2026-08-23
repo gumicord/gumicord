@@ -209,8 +209,6 @@ pub struct Gumicord {
     sent: Vec<demo::Message>,
     /// 絵を取ってくるもの (R5)
     images: images::Images,
-    /// この木で要る絵の URL。**描く直前に取りに行く**
-    wanted_images: Vec<String>,
 }
 
 impl Gumicord {
@@ -261,7 +259,6 @@ impl Gumicord {
             input: TextDocument::new(),
             sent: Vec::new(),
             images: images::Images::new(),
-            wanted_images: Vec::new(),
         }
     }
 
@@ -377,10 +374,18 @@ impl Application for Gumicord {
         self.images.forget_requested();
     }
 
-    fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
-        for url in std::mem::take(&mut self.wanted_images) {
-            self.images.request(&url);
+    /// 画面に出ようとしたのに無かった絵を頼む。
+    ///
+    /// ⚠️ **木を歩いて集めない。** 見えているかどうかは配置と切り取りが
+    /// 決めることで、木を組む側は知らない。メンバー一覧は 300 行あるが
+    /// 見えているのは 15 行ほどで、**残りの顔は要らない**
+    fn request_images(&mut self, urls: &[String]) {
+        for url in urls {
+            self.images.request(url);
         }
+    }
+
+    fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
         self.images.take()
     }
 
@@ -414,6 +419,9 @@ impl Application for Gumicord {
     fn wake(&mut self) -> bool {
         let mut changed = self.login.poll();
         changed |= self.live.poll();
+        // ⚠️ **絵が届いたことも「変わった」である。** ここで数えないと
+        // 再描画が要求されず、届いた顔がいつまでも出ない
+        changed |= self.images.poll();
 
         // ログインが済んだら Gateway へ進む。**`Live::start` は 2 回目から
         // 何もしない**ので、ここで毎回呼んでも構わない
@@ -570,14 +578,6 @@ impl Application for Gumicord {
 
         // [3] UITree 構築
         let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
-
-        // 描くのに要る絵を集める。**木を組んだ直後だから分かる**
-        self.wanted_images.clear();
-        tree.walk(&mut |n, _| {
-            if let Some(url) = n.content.as_image() {
-                self.wanted_images.push(url.to_owned());
-            }
-        });
 
         // [5] テーマ解決
         match &self.theme {

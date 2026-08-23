@@ -29,7 +29,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender};
 
 use gumicord_platform::Waker;
 use gumicord_render::ImageData;
@@ -60,6 +60,12 @@ pub struct Images {
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// 復号済みを置く場所。**次の起動で網に出ない**
     dir: Option<PathBuf>,
+    /// 届いていて、まだレンダラへ渡していないもの。
+    ///
+    /// ⚠️ **溜める場所が要る。** 起こされた時点で受け取っておかないと、
+    /// 「何か届いた」を呼び出し側へ伝えられない。伝えられないと**再描画が
+    /// 起きず、届いた顔がいつまでも出ない**
+    ready: Vec<ImageData>,
 }
 
 impl Images {
@@ -74,6 +80,7 @@ impl Images {
             requested: HashSet::new(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             dir: cache_dir(),
+            ready: Vec::new(),
         }
     }
 
@@ -133,15 +140,23 @@ impl Images {
         });
     }
 
+    /// 届いたぶんを受け取る。**何か届いていたら真**。
+    ///
+    /// ⚠️ **ここで受け取っておかないと再描画が起きない。** イベント
+    /// ループは寝ており ([`NFR-005`])、起こされたときに「変わった」と
+    /// 言えなければそのまま二度寝する
+    pub fn poll(&mut self) -> bool {
+        let before = self.ready.len();
+        while let Ok(image) = self.rx.try_recv() {
+            self.ready.push(image);
+        }
+        self.ready.len() != before
+    }
+
     /// 届いた絵を引き取る。**呼んだ側がレンダラへ渡す**
     pub fn take(&mut self) -> Vec<ImageData> {
-        let mut out = Vec::new();
-        loop {
-            match self.rx.try_recv() {
-                Ok(image) => out.push(image),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return out,
-            }
-        }
+        self.poll();
+        std::mem::take(&mut self.ready)
     }
 
     /// 「もう頼んだ」印を落とす。**取り直せるようにする。**

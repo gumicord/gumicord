@@ -98,6 +98,11 @@ pub struct Renderer {
     scrollbars: Vec<ScrollBar>,
     /// 上へ足されたので、見ている場所を保ちたい領域。**1 フレームだけ効く**
     keep_place: Option<NodeId>,
+    /// 直前のフレームで、画面に出ようとしたのに無かった絵。
+    ///
+    /// ⚠️ **描いてみるまで分からない。** 見えているかどうかは配置と
+    /// 切り取りが決めることなので、木を組む側は知らない
+    missing_images: Vec<String>,
     /// キャレットをいま描くか。
     ///
     /// ⚠️ **点滅の刻みはプラットフォーム層が持つ。** 速さは OS の設定で
@@ -125,6 +130,7 @@ impl Renderer {
             overflow: std::collections::HashMap::new(),
             scrollbars: Vec::new(),
             keep_place: None,
+            missing_images: Vec::new(),
             caret_visible: true,
         })
     }
@@ -326,6 +332,8 @@ impl Renderer {
             self.caret_visible,
         );
 
+        self.missing_images.clone_from(&dl.missing_images);
+
         FrameStats {
             nodes: layout.placed.len(),
             rects: dl.rect_count(),
@@ -374,6 +382,14 @@ impl Renderer {
         if self.text.took_atlas_growth() {
             self.atlas_binds = bind_pages(&self.gpu, &self.text);
         }
+    }
+
+    /// 画面に出ようとしたのに無かった絵。**取ってくる側が頼む。**
+    ///
+    /// ⚠️ **見えているものだけである。** 一覧に 300 行あっても、
+    /// 切り取りを抜けて実際に描かれたところしか載らない
+    pub fn missing_images(&self) -> &[String] {
+        &self.missing_images
     }
 
     /// 絵を忘れたか。**1 回だけ真を返す。**

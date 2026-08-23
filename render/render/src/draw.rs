@@ -77,6 +77,12 @@ pub struct DrawList {
     pub rects: Vec<f32>,
     pub glyphs: Vec<f32>,
     pub runs: Vec<Run>,
+    /// **画面に出ようとしたのに、手元に無かった絵。**
+    ///
+    /// ⚠️ 木を歩いて集めるのとは違う。ここに載るのは**切り取りを抜けて
+    /// 実際に描かれるところまで来たもの**だけである。一覧に 300 行
+    /// あっても、見えている 15 行ぶんしか要らない
+    pub missing_images: Vec<String>,
 }
 
 impl DrawList {
@@ -749,11 +755,16 @@ fn draw_image(
     radius_px: f32,
     scissor: Option<[u32; 4]>,
 ) {
-    let Some(e) = text.image(url) else { return };
     let box_px = snap(placed.inner, scale);
     if box_px[2] <= 0.0 || box_px[3] <= 0.0 {
         return;
     }
+    // ⚠️ **ここまで来て初めて「要る」と言う。** 切り取りで消えた行も、
+    // 潰れた枠も、ここへは来ない
+    let Some(e) = text.image(url) else {
+        dl.missing_images.push(url.to_owned());
+        return;
+    };
 
     // 絵の縦横比と枠の縦横比を比べ、はみ出すほうを切る
     let (uw, uh) = (e.uv[2] - e.uv[0], e.uv[3] - e.uv[1]);
