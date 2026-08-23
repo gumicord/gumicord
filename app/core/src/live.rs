@@ -34,7 +34,7 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use gumicord_gateway::{Event, Fatal, Gateway, Ready, Subscriptions};
+use gumicord_gateway::{Event, Fatal, Gateway, Ready, Subscriptions, status::Status};
 use gumicord_model::{ChannelId, Guild, GuildId, Message, Token, UserId};
 use gumicord_platform::Waker;
 use gumicord_rest::RestClient;
@@ -141,6 +141,11 @@ pub struct Live {
     typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
     /// 自分。**自分の「入力中」を出さないために要る**
     me: Option<UserId>,
+    /// 自分のステータス。
+    ///
+    /// ⚠️ **READY の時点の値である。** `PRESENCE_UPDATE` を見ていないので、
+    /// 走っている間に携帯で変えても、繋ぎ直すまでここは変わらない (`FR-043`)
+    status: Option<Status>,
 }
 
 impl Live {
@@ -195,6 +200,7 @@ impl Live {
             store: Store::new(),
             db: None,
             link: Link::Idle,
+            status: None,
             requested: HashSet::new(),
             rejected: false,
             last_channel: None,
@@ -294,6 +300,11 @@ impl Live {
             .filter(|t| Some(t.user) != self.me)
             .map(|t| &*t.name)
             .collect()
+    }
+
+    /// 自分のステータス。**分からなければ `None`**
+    pub fn status(&self) -> Option<Status> {
+        self.status
     }
 
     /// 自分が誰かを教える。**自分の入力中を出さないために要る**
@@ -435,6 +446,9 @@ impl Live {
                 self.link = Link::Up;
                 // ⚠️ **順を先に取る。** ギルドを差し替えると `ready` が動く
                 self.me = Some(ready.user.user.id);
+                // ⚠️ **繋がっていることを根拠に「オンライン」と名乗らない。**
+                // 取り込み中にしている人に対して嘘になる
+                self.status = ready.status();
                 let order = ready.guild_order();
                 let folders = ready.guild_folders();
                 self.store.replace_guilds(ready.guilds);

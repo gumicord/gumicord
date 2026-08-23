@@ -126,7 +126,11 @@
         },
         "colorScheme": { "type": "string", "enum": ["light", "dark"] },
         "minWidth": { "type": "number", "minimum": 0 },
-        "maxWidth": { "type": "number", "minimum": 0 }
+        "maxWidth": { "type": "number", "minimum": 0 },
+        "slot": {
+          "type": "string",
+          "description": "同じ安定 ID を持つノードの、位置による区別 (spec/03-uitree.md 2.2 の key)。スノーフレークには一致しない — テーマが特定のサーバや相手だけを飾れると、テーマが利用者のデータに依存してしまう。"
+        }
       }
     },
 

@@ -669,8 +669,10 @@ impl Gumicord {
             .map(|g| g.name)
             .unwrap_or_else(|| "Gumicord".to_owned());
 
-        let mut list = UiNode::new(NodeId::NavChannelList)
-            .child(UiNode::text(NodeId::NavChannelListHeader, title));
+        // ⚠️ **見出しと自分は巻かない。** 一覧だけがスクロールする。
+        // 全部を 1 つのスクロール領域にすると、下まで巻いたときに
+        // **自分が誰かも、どのサーバを見ているかも見えなくなる**
+        let mut list = UiNode::new(NodeId::LayoutScroll);
 
         for c in self.channel_rows() {
             // カテゴリは見出しである。**押しても開かないので、当たりも作らない**
@@ -701,7 +703,56 @@ impl Gumicord {
             }
             list = list.child(item);
         }
-        list.child(scrollbar())
+
+        UiNode::new(NodeId::NavChannelList)
+            .child(UiNode::text(NodeId::NavChannelListHeader, title))
+            .child(list.child(scrollbar()))
+            .children(self.user_panel())
+    }
+
+    /// いま入っている自分。**一覧の下に居座る**。
+    ///
+    /// ```text
+    ///   ┌──────────────────────┐
+    ///   │ ◎  ｽﾋﾟｷ            │
+    ///   │ ●  オンライン        │
+    ///   └──────────────────────┘
+    /// ```
+    ///
+    /// # ⚠️ 「繋がっている」を「オンライン」と言い換えない
+    ///
+    /// 繋がっているかどうかはこちらが確実に知っているが、それは
+    /// ステータスではない。**取り込み中にしている人に「オンライン」と
+    /// 出すのは嘘である。** 読めなければ言葉も点も出さない。
+    ///
+    /// ⚠️ **ステータスを変える手立てはまだない** (`FR-044`, M2)。
+    /// 押しても何も起きないものを置くより、置かないほうがよい
+    fn user_panel(&self) -> Option<UiNode> {
+        let me = &self.login.session().logged_in()?.me.user;
+        let status = self.live.status();
+
+        let mut avatar = UiNode::image(
+            NodeId::NavUserPanelAvatar,
+            me.display_avatar().with_size(AVATAR_PX).url(),
+        );
+        if let Some(s) = status {
+            // ⚠️ **鍵で色を分ける。** 4 つしかない決まった値なので、
+            // テーマが `when.slot` で飾り分けられる
+            avatar = avatar
+                .child(UiNode::new(NodeId::NavUserPanelPresence).with_key(Key::Slot(s.as_wire())));
+        }
+
+        let mut lines =
+            UiNode::new(NodeId::LayoutColumn).child(UiNode::text(NodeId::NavUserPanelName, {
+                // ⚠️ **ここはギルドではない。** サーバごとの呼び名ではなく、
+                // 自分が決めた表示名を出す
+                me.display_name().to_owned()
+            }));
+        if let Some(s) = status {
+            lines = lines.child(UiNode::text(NodeId::NavUserPanelStatus, s.label()));
+        }
+
+        Some(UiNode::new(NodeId::NavUserPanel).child(avatar).child(lines))
     }
 
     fn chat_view(&self) -> UiNode {
@@ -1575,6 +1626,54 @@ mod typing_tests {
     fn a_crowd_is_summarised() {
         let many = ["あ", "い", "う", "え", "お", "か"];
         assert_eq!(typing_line(&many), "  あ、い ほか 4 人が入力中…");
+    }
+}
+
+#[cfg(test)]
+mod user_panel_tests {
+    use super::*;
+
+    fn names(node: &UiNode) -> Vec<NodeId> {
+        fn walk(n: &UiNode, out: &mut Vec<NodeId>) {
+            out.push(n.id);
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(node, &mut out);
+        out
+    }
+
+    /// ⚠️ **ログインしていなければ出さない。**
+    ///
+    /// 誰でもない自分を出す意味がない
+    #[test]
+    fn there_is_no_panel_before_logging_in() {
+        let a = Gumicord::demo();
+        assert!(a.user_panel().is_none());
+        assert!(!names(&a.channel_list()).contains(&NodeId::NavUserPanel));
+    }
+
+    /// ⚠️ **見出しと自分は巻かない。**
+    ///
+    /// 一覧ごと 1 つのスクロール領域にすると、下まで巻いたときに
+    /// 自分が誰かもどのサーバを見ているかも見えなくなる
+    #[test]
+    fn only_the_list_scrolls() {
+        let a = Gumicord::demo();
+        let pane = a.channel_list();
+
+        assert_eq!(pane.id, NodeId::NavChannelList);
+        assert!(
+            !gumicord_render::intrinsic(NodeId::NavChannelList).scroll,
+            "外側が巻いてしまっている"
+        );
+        assert!(
+            pane.children.iter().any(|c| c.id == NodeId::LayoutScroll),
+            "巻く領域が中に無い"
+        );
+        assert_eq!(pane.children[0].id, NodeId::NavChannelListHeader);
     }
 }
 

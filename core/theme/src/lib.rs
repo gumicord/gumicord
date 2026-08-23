@@ -276,6 +276,7 @@ mod tests {
     fn ctx() -> MatchContext {
         MatchContext {
             states: StateSet::EMPTY,
+            slot: None,
             platform: Platform::Windows,
             color_scheme: ColorScheme::Dark,
             window_width: 1280.0,

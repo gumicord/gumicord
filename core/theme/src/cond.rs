@@ -136,6 +136,12 @@ pub struct When {
     pub color_scheme: Option<ColorScheme>,
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
+    /// 同じ安定 ID を持つノードの、位置による区別 (`Key::Slot`)。
+    ///
+    /// ⚠️ **スノーフレークには効かない。** テーマが特定のサーバや相手
+    /// だけを飾れてしまうと、**テーマが利用者のデータに依存する**。
+    /// 配れるものではなくなるし、飾りたい相手が誰かも漏れる
+    pub slot: Option<String>,
 }
 
 impl When {
@@ -146,6 +152,7 @@ impl When {
             && self.color_scheme.is_none()
             && self.min_width.is_none()
             && self.max_width.is_none()
+            && self.slot.is_none()
     }
 
     pub fn matches(&self, ctx: &MatchContext) -> bool {
@@ -170,14 +177,21 @@ impl When {
         {
             return false;
         }
+        if let Some(want) = &self.slot
+            && ctx.slot != Some(want.as_str())
+        {
+            return false;
+        }
         true
     }
 }
 
-/// 照合の文脈。**ノードごとに変わるのは `states` だけ**である。
+/// 照合の文脈。**ノードごとに変わるのは `states` と `slot` だけ**である。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MatchContext {
     pub states: StateSet,
+    /// そのノードの `Key::Slot`。**スノーフレークはここへ来ない**
+    pub slot: Option<&'static str>,
     pub platform: Platform,
     pub color_scheme: ColorScheme,
     /// ウィンドウ幅 (論理 px)
@@ -189,6 +203,7 @@ impl MatchContext {
     pub fn new(window_width: f32) -> Self {
         MatchContext {
             states: StateSet::EMPTY,
+            slot: None,
             platform: Platform::current(),
             color_scheme: ColorScheme::Dark,
             window_width,
@@ -198,6 +213,11 @@ impl MatchContext {
     /// 状態だけを差し替える。ノードごとの照合で使う。
     pub fn with_states(self, states: StateSet) -> Self {
         MatchContext { states, ..self }
+    }
+
+    /// 位置による区別を差し替える。ノードごとの照合で使う。
+    pub fn with_slot(self, slot: Option<&'static str>) -> Self {
+        MatchContext { slot, ..self }
     }
 
     pub fn with_state(self, state: State) -> Self {
@@ -215,6 +235,7 @@ mod tests {
     fn ctx() -> MatchContext {
         MatchContext {
             states: StateSet::EMPTY,
+            slot: None,
             platform: Platform::Windows,
             color_scheme: ColorScheme::Dark,
             window_width: 1280.0,

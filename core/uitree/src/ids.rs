@@ -163,6 +163,11 @@ define_node_ids! {
     NavChannelListItemBadge,  "nav.channel_list.item.badge",     Channel, Core,   "未読・メンション数 (FR-042)";
     NavDmList,                "nav.dm_list",                     None,    Core,   "DM 一覧 (FR-013)";
     NavDmListItem,            "nav.dm_list.item",                Dm,      Core,   "DM 1 件 (FR-013)";
+    NavUserPanel,             "nav.user_panel",                  None,    Core,   "いま入っている自分。一覧の下に居座る";
+    NavUserPanelAvatar,       "nav.user_panel.avatar",           None,    Core,   "自分のアバター";
+    NavUserPanelPresence,     "nav.user_panel.presence",         None,    Core,   "ステータスの点 (key で online/idle/dnd/invisible を区別)";
+    NavUserPanelName,         "nav.user_panel.name",             None,    Core,   "自分の表示名";
+    NavUserPanelStatus,       "nav.user_panel.status",           None,    Core,   "ステータスの言葉 (FR-043)";
 
     // ─────────────────────────── chat.* — チャット
     ChatView,                 "chat.view",                       None,    Core,   "チャット領域全体";

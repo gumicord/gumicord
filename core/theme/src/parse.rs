@@ -534,6 +534,17 @@ fn when(obj: &Map<String, Value>, path: &str, diags: &mut Diagnostics) -> Option
             }
             "minWidth" => w.min_width = Some(non_negative(v, &p, diags)?),
             "maxWidth" => w.max_width = Some(non_negative(v, &p, diags)?),
+            "slot" => match v.as_str() {
+                Some(s) => w.slot = Some(s.to_owned()),
+                None => {
+                    diags.warn(
+                        &p,
+                        Ignored::Rule,
+                        format!("slot は文字列である。{v} を読めない。ルールごと無視した"),
+                    );
+                    return None;
+                }
+            },
             _ => {
                 diags.warn(
                     &p,

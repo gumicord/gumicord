@@ -16,7 +16,9 @@
 
 pub mod gateway;
 pub mod guild_order;
+pub mod proto;
 pub mod remote_auth;
+pub mod status;
 pub mod zstd_stream;
 
 pub use gateway::{Event, Fatal, Gateway, GatewayError, Ready, Subscriptions};

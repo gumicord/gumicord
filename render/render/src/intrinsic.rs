@@ -183,7 +183,11 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         NavGuildListFolder => Intrinsic::column().cross(Cross::Center).w(48.0),
         NavGuildListItemBadge => Intrinsic::row(),
 
-        NavChannelList | NavDmList => Intrinsic::column()
+        // ⚠️ **これ自体は巻かない。** 中の `layout.scroll` だけが巻く。
+        // 全部を 1 つの領域にすると、下まで巻いたときに**見出しも自分も
+        // 見えなくなる**
+        NavChannelList => Intrinsic::column().w(CHANNEL_LIST_W).cross(Cross::Stretch),
+        NavDmList => Intrinsic::column()
             .w(CHANNEL_LIST_W)
             .cross(Cross::Stretch)
             .scrollable(),
@@ -194,6 +198,18 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // 名前が余りを取ることで、バッジが右端へ寄る
         NavChannelListItemName => Intrinsic::row().grow(1.0).one_line(),
         NavChannelListItemBadge => Intrinsic::row(),
+
+        // ── nav.user_panel — チャンネル一覧の一番下に居座る
+        //
+        // ⚠️ **一覧と一緒にスクロールしない。** 自分が誰かは、
+        // どこまで巻いていても見えていなければならない
+        NavUserPanel => Intrinsic::row().h(52.0).cross(Cross::Center),
+        NavUserPanelAvatar => Intrinsic::stack().w(32.0).h(32.0),
+        // 名前と言葉を縦に積む。**余りを取って、右に何か置けるようにする**
+        NavUserPanelName => Intrinsic::row().grow(1.0).one_line(),
+        NavUserPanelStatus => Intrinsic::row().grow(1.0).one_line(),
+        // ⚠️ **アバターの隅に重なる。** 流れの中に置くと名前が右へずれる
+        NavUserPanelPresence => Intrinsic::stack().w(12.0).h(12.0),
 
         // ── chat.*
         ChatView => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
@@ -299,7 +315,8 @@ mod tests {
             scrolling,
             vec![
                 NodeId::NavGuildList,
-                NodeId::NavChannelList,
+                // ⚠️ **`nav.channel_list` は入らない。** 見出しと自分を
+                // 巻かないので、巻くのは中の `layout.scroll` だけである
                 NodeId::NavDmList,
                 NodeId::ChatMessageList,
                 NodeId::LayoutScroll,

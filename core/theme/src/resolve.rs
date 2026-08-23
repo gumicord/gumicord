@@ -44,7 +44,14 @@ pub fn clear(root: &mut UiNode) {
 }
 
 fn resolve_node(theme: &Theme, node: &mut UiNode, parent: &Style, ctx: &MatchContext) {
-    let mut style = theme.style_for(node.id, &ctx.with_states(node.states));
+    // ⚠️ **スノーフレークは渡さない。** テーマが特定のサーバや相手だけを
+    // 飾れてしまうと、**テーマが利用者のデータに依存する**
+    let slot = match node.key {
+        Some(gumicord_uitree::Key::Slot(s)) => Some(s),
+        _ => None,
+    };
+    let mine = ctx.with_states(node.states).with_slot(slot);
+    let mut style = theme.style_for(node.id, &mine);
     style.inherit_from(parent);
 
     for child in &mut node.children {
@@ -55,10 +62,14 @@ fn resolve_node(theme: &Theme, node: &mut UiNode, parent: &Style, ctx: &MatchCon
 
 #[cfg(test)]
 mod tests {
-    use gumicord_uitree::{NodeId, State};
+    use gumicord_uitree::{Key, NodeId, State};
 
     use super::*;
-    use crate::value::Color;
+    use crate::value::{Background, Color};
+
+    fn bg(hex: &str) -> Option<Background> {
+        Some(Background::solid(Color::parse(hex).unwrap()))
+    }
 
     fn theme(src: &str) -> Theme {
         Theme::parse(src).theme.expect("テーマが適用されるはず")
@@ -128,6 +139,50 @@ mod tests {
             tree.children[1].style.background.is_some(),
             "選択されている"
         );
+    }
+
+    /// `when.slot`: 同じ安定 ID を、位置で飾り分けられる
+    #[test]
+    fn a_slot_can_be_dressed_on_its_own() {
+        let t = theme(&format!(
+            r##"{{ {MANIFEST}, "rules": [
+                {{ "select": "nav.user_panel.presence", "style": {{ "background": "#666666" }} }},
+                {{ "select": "nav.user_panel.presence", "when": {{ "slot": "dnd" }},
+                   "style": {{ "background": "#e05260" }} }}
+            ] }}"##
+        ));
+
+        let mut tree = UiNode::new(NodeId::NavChannelList)
+            .child(UiNode::new(NodeId::NavUserPanelPresence).with_key(Key::Slot("dnd")))
+            .child(UiNode::new(NodeId::NavUserPanelPresence).with_key(Key::Slot("online")))
+            .child(UiNode::new(NodeId::NavUserPanelPresence));
+
+        resolve(&t, &mut tree, &MatchContext::new(1280.0));
+
+        assert_eq!(tree.children[0].style.background, bg("#e05260"));
+        assert_eq!(tree.children[1].style.background, bg("#666666"));
+        assert_eq!(tree.children[2].style.background, bg("#666666"), "鍵が無い");
+    }
+
+    /// ⚠️ **スノーフレークには効かない。**
+    ///
+    /// 効いてしまうと、テーマが「このサーバだけ赤くする」と書けることに
+    /// なる。**テーマが利用者のデータに依存し、配れるものでなくなる**
+    #[test]
+    fn a_snowflake_is_never_a_slot() {
+        let t = theme(&format!(
+            r##"{{ {MANIFEST}, "rules": [
+                {{ "select": "nav.guild_list.item", "when": {{ "slot": "12345" }},
+                   "style": {{ "background": "#e05260" }} }}
+            ] }}"##
+        ));
+
+        let mut tree = UiNode::new(NodeId::NavGuildList)
+            .child(UiNode::new(NodeId::NavGuildListItem).with_id_key(12345));
+
+        resolve(&t, &mut tree, &MatchContext::new(1280.0));
+
+        assert_eq!(tree.children[0].style.background, None);
     }
 
     #[test]

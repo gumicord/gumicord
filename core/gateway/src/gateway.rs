@@ -163,6 +163,14 @@ impl Ready {
         crate::guild_order::folders_from_settings_proto(proto, &self.known_guilds())
     }
 
+    /// 自分のステータス。
+    ///
+    /// ⚠️ **読めなければ `None`。** 繋がっていることを根拠に
+    /// 「オンライン」と名乗らない。取り込み中にしている人に対して嘘になる
+    pub fn status(&self) -> Option<crate::status::Status> {
+        crate::status::from_settings_proto(self.user_settings_proto.as_deref()?)
+    }
+
     fn known_guilds(&self) -> std::collections::HashSet<u64> {
         self.guilds.iter().map(|g| g.id.get()).collect()
     }

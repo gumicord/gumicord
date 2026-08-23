@@ -239,6 +239,50 @@
     },
 
     {
+      "select": "nav.user_panel",
+      "style": { "background": "$color.bg.sunken", "padding": [0, 8, 0, 8], "gap": "$space.2" }
+    },
+    {
+      "select": "nav.user_panel.avatar",
+      "style": { "radius": "$radius.full", "background": "$color.bg.raised" }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "style": {
+        "width": 12,
+        "height": 12,
+        "margin": [20, 0, 0, 20],
+        "radius": "$radius.full",
+        "background": "$color.text.muted",
+        "borderColor": "$color.bg.sunken",
+        "borderWidth": 3
+      }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "when": { "slot": "online" },
+      "style": { "background": "#3ba55d" }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "when": { "slot": "idle" },
+      "style": { "background": "#faa81a" }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "when": { "slot": "dnd" },
+      "style": { "background": "$color.danger" }
+    },
+    {
+      "select": "nav.user_panel.name",
+      "style": { "font": "$font.small", "color": "$color.text.primary" }
+    },
+    {
+      "select": "nav.user_panel.status",
+      "style": { "font": { "size": 11, "lineHeight": 14 }, "color": "$color.text.muted" }
+    },
+
+    {
       "select": "chat.view",
       "style": { "background": "$color.bg.base" }
     },

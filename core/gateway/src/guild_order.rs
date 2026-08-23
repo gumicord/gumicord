@@ -53,6 +53,8 @@ use std::collections::HashSet;
 use base64::Engine as _;
 use gumicord_model::GuildId;
 
+use crate::proto::{blocks, fixed64s, varint, wrapped_string, wrapped_varint};
+
 /// 入れ子をどこまで潜るか。**壊れた入力で無限に潜らないため**
 const MAX_DEPTH: u32 = 8;
 
@@ -160,8 +162,6 @@ pub fn from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> Vec<Guil
 const F_FOLDER_ID: u64 = 2;
 /// `GuildFolder.name` (StringValue)
 const F_FOLDER_NAME: u64 = 3;
-/// 包みの中身。`Int64Value.value` などは全部これ
-const WRAPPED_VALUE: u64 = 1;
 
 /// `PreloadedUserSettings.guild_folders`
 const F_GUILD_FOLDERS: u64 = 14;
@@ -238,123 +238,6 @@ pub fn folders_from_settings_proto(proto_base64: &str, known: &HashSet<u64>) -> 
         }
     }
     out
-}
-
-/// `google.protobuf.Int64Value` などの包みの中の数値。
-///
-/// ⚠️ **包みは「中身が 1 つのメッセージ」である。** 値そのものではない。
-/// `optional` を「未設定」と「0」で区別するために、Discord がこの形を使う
-fn wrapped_varint(body: &[u8], field: u64) -> Option<u64> {
-    let inner = blocks(body, field).into_iter().next()?;
-    varint_field(inner, WRAPPED_VALUE)
-}
-
-fn wrapped_string(body: &[u8], field: u64) -> Option<String> {
-    let inner = blocks(body, field).into_iter().next()?;
-    let raw = blocks(inner, WRAPPED_VALUE).into_iter().next()?;
-    // ⚠️ **不正な UTF-8 で落とさない。** 名前は利用者が付ける
-    Some(String::from_utf8_lossy(raw).into_owned())
-}
-
-/// その番号を持つ可変長整数のフィールド。
-fn varint_field(mut buf: &[u8], field: u64) -> Option<u64> {
-    while !buf.is_empty() {
-        let (key, rest) = varint(buf)?;
-        buf = rest;
-        let (num, wire) = (key >> 3, key & 7);
-
-        match wire {
-            0 => {
-                let (v, rest) = varint(buf)?;
-                buf = rest;
-                if num == field {
-                    return Some(v);
-                }
-            }
-            1 => {
-                if buf.len() < 8 {
-                    return None;
-                }
-                buf = &buf[8..];
-            }
-            2 => {
-                let (len, rest) = varint(buf)?;
-                let len = len as usize;
-                if rest.len() < len {
-                    return None;
-                }
-                buf = &rest[len..];
-            }
-            5 => {
-                if buf.len() < 4 {
-                    return None;
-                }
-                buf = &buf[4..];
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// その番号を持つ「長さ付きの塊」を順に返す。
-///
-/// 他の形のフィールドは読み飛ばす。**番号を知らないものには触らない**
-fn blocks(mut buf: &[u8], field: u64) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    while !buf.is_empty() {
-        let Some((key, rest)) = varint(buf) else {
-            return out;
-        };
-        buf = rest;
-        let (num, wire) = (key >> 3, key & 7);
-
-        match wire {
-            0 => match varint(buf) {
-                Some((_, rest)) => buf = rest,
-                None => return out,
-            },
-            1 => {
-                if buf.len() < 8 {
-                    return out;
-                }
-                buf = &buf[8..];
-            }
-            2 => {
-                let Some((len, rest)) = varint(buf) else {
-                    return out;
-                };
-                let len = len as usize;
-                if rest.len() < len {
-                    return out;
-                }
-                let (body, after) = rest.split_at(len);
-                buf = after;
-                if num == field {
-                    out.push(body);
-                }
-            }
-            5 => {
-                if buf.len() < 4 {
-                    return out;
-                }
-                buf = &buf[4..];
-            }
-            // 廃止された群。ここへ来たら読み違えている
-            _ => return out,
-        }
-    }
-    out
-}
-
-/// 詰めた `fixed64` の列として読む。**8 の倍数でなければ空**
-fn fixed64s(body: &[u8]) -> Vec<u64> {
-    if body.is_empty() || !body.len().is_multiple_of(8) {
-        return Vec::new();
-    }
-    body.chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().expect("8 バイトある")))
-        .collect()
 }
 
 /// 重複を落とし、**最初に出た順**を残す
@@ -465,18 +348,6 @@ fn packed(body: &[u8], known: &HashSet<u64>) -> Option<Vec<u64>> {
         values.push(v);
     }
     Some(values)
-}
-
-/// 可変長整数を 1 つ読む。読めなければ `None`
-fn varint(buf: &[u8]) -> Option<(u64, &[u8])> {
-    let mut value = 0u64;
-    for (i, byte) in buf.iter().take(10).enumerate() {
-        value |= u64::from(byte & 0x7f) << (i * 7);
-        if byte & 0x80 == 0 {
-            return Some((value, &buf[i + 1..]));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -743,6 +614,7 @@ mod documented_path_tests {
 mod folder_tests {
     use super::documented_path_tests::{block, packed_ids, put_varint};
     use super::*;
+    use crate::proto::WRAPPED_VALUE;
 
     /// 包み (`Int64Value` など) を 1 つ書く
     fn wrapped_num(field: u64, v: u64) -> Vec<u8> {
