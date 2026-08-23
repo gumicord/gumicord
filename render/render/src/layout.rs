@@ -501,6 +501,13 @@ impl<'a> Cx<'a, '_, '_> {
             }
         }
 
+        // ⚠️ **スクロールバーは中身の切り取りに従わない。**
+        //
+        // 中身は余白の内側で切るが、バーは入れ物の縁に立っている。同じ
+        // 切り取りを掛けると、**余白のぶん外にあるバーが丸ごと消える**。
+        // 実際に見えなくなった
+        let bar_clip = clip.map(|c| c.intersect(rect));
+
         let clip = if it.scroll {
             Some(clip.map_or(inner, |c| c.intersect(inner)))
         } else {
@@ -515,7 +522,7 @@ impl<'a> Cx<'a, '_, '_> {
             // 重ねて置く子は流れに入らない。カーソルも進めない
             if is_overlay(child.id) {
                 // ⚠️ `inner` ではなく `rect`。**余白の内側へ入れない**
-                self.place_scrollbar(node.id, child, rect, offset, over, clip);
+                self.place_scrollbar(node.id, child, rect, offset, over, bar_clip);
                 continue;
             }
 
@@ -1189,6 +1196,19 @@ mod scrollbar_tests {
 
         assert_eq!(bar.rect.right(), 400.0, "余白があっても外縁に付く");
         assert_eq!(bar.rect.h, 100.0, "高さも余白を引かない");
+
+        // ⚠️ **中身の切り取りを掛けると消える。** 実際に見えなくなった
+        if let Some(c) = bar.clip {
+            assert!(
+                !c.intersect(bar.rect).is_empty(),
+                "切り取られて何も描かれない: clip={c:?} bar={:?}",
+                bar.rect
+            );
+        }
+        let thumb = r.find(NodeId::LayoutScrollbarThumb).expect("摘みがある");
+        if let Some(c) = thumb.clip {
+            assert!(!c.intersect(thumb.rect).is_empty(), "摘みも消えている");
+        }
     }
 
     /// 摘みの大きさは見えている割合になり、位置はスクロール量に従う
