@@ -199,7 +199,14 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         NavChannelListItemName => Intrinsic::row().grow(1.0).one_line(),
         NavChannelListItemBadge => Intrinsic::row(),
 
-        // ── nav.user_panel — チャンネル一覧の一番下に居座る
+        // ── nav.sidebar — 左側全体
+        //
+        // ⚠️ **余りを取らない。** 中身 (サーバ一覧 + チャンネル一覧) が
+        // 幅を決める。ここが伸びるとチャットから幅を奪う
+        NavSidebar => Intrinsic::column().cross(Cross::Stretch),
+        NavSidebarLists => Intrinsic::row().grow(1.0).cross(Cross::Stretch),
+
+        // ── nav.user_panel — 一覧の一番下に居座る
         //
         // ⚠️ **一覧と一緒にスクロールしない。** 自分が誰かは、
         // どこまで巻いていても見えていなければならない

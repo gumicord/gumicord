@@ -486,8 +486,7 @@ impl Gumicord {
         // メイン画面は組み立てもしない
         let screen = if self.shows_main() {
             UiNode::new(NodeId::AppScreenMain)
-                .child_if(panes.guilds(), || self.guild_list())
-                .child_if(panes.channels(), || self.channel_list())
+                .children(self.sidebar(panes))
                 .child(self.chat_view())
         } else {
             self.login_screen()
@@ -707,7 +706,34 @@ impl Gumicord {
         UiNode::new(NodeId::NavChannelList)
             .child(UiNode::text(NodeId::NavChannelListHeader, title))
             .child(list.child(scrollbar()))
-            .children(self.user_panel())
+    }
+
+    /// 左側全体。**一覧の下に自分が居座る**。
+    ///
+    /// ```text
+    ///   ┌────┬──────────────┐
+    ///   │ ◎ │ # いっぱん    │
+    ///   │ ◎ │ # ざつだん    │
+    ///   ├────┴──────────────┤  ← 自分は**両方にまたがる**
+    ///   │ ◎ ｽﾋﾟｷ            │
+    ///   └───────────────────┘
+    /// ```
+    ///
+    /// ⚠️ **チャンネル一覧の下に置かない。** Discord の自分の欄は
+    /// サーバ一覧の分まで伸びていて、幅が違う
+    fn sidebar(&self, panes: Panes) -> Option<UiNode> {
+        if !panes.guilds() && !panes.channels() {
+            return None;
+        }
+        let lists = UiNode::new(NodeId::NavSidebarLists)
+            .child_if(panes.guilds(), || self.guild_list())
+            .child_if(panes.channels(), || self.channel_list());
+
+        Some(
+            UiNode::new(NodeId::NavSidebar)
+                .child(lists)
+                .children(self.user_panel()),
+        )
     }
 
     /// いま入っている自分。**一覧の下に居座る**。
@@ -1652,7 +1678,36 @@ mod user_panel_tests {
     fn there_is_no_panel_before_logging_in() {
         let a = Gumicord::demo();
         assert!(a.user_panel().is_none());
-        assert!(!names(&a.channel_list()).contains(&NodeId::NavUserPanel));
+        let side = a.sidebar(Panes::Three).unwrap();
+        assert!(!names(&side).contains(&NodeId::NavUserPanel));
+    }
+
+    /// ⚠️ **自分の欄はサーバ一覧の分までまたがる。**
+    ///
+    /// チャンネル一覧の中に置くと、そこだけの幅になって Discord と違う。
+    /// 実機で見比べて報告を受けた
+    #[test]
+    fn the_panel_spans_both_lists() {
+        let a = Gumicord::demo();
+        let side = a.sidebar(Panes::Three).expect("3 ペインなら出る");
+
+        assert_eq!(side.id, NodeId::NavSidebar);
+        assert_eq!(side.children[0].id, NodeId::NavSidebarLists);
+        // 一覧はまとめられ、自分はその**外**にいる
+        let inside = names(&side.children[0]);
+        assert!(inside.contains(&NodeId::NavGuildList));
+        assert!(inside.contains(&NodeId::NavChannelList));
+        assert!(!inside.contains(&NodeId::NavUserPanel));
+
+        // ⚠️ 伸びると、チャットから幅を奪う
+        assert_eq!(gumicord_render::intrinsic(NodeId::NavSidebar).grow, 0.0);
+    }
+
+    /// 一番狭いときは一覧ごと消える。**自分も一緒に消える**
+    #[test]
+    fn one_pane_has_no_sidebar_at_all() {
+        let a = Gumicord::demo();
+        assert!(a.sidebar(Panes::One).is_none());
     }
 
     /// ⚠️ **見出しと自分は巻かない。**

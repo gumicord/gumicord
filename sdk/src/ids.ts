@@ -33,6 +33,8 @@ export type NodeId =
   | "nav.channel_list.item.badge"
   | "nav.dm_list"
   | "nav.dm_list.item"
+  | "nav.sidebar"
+  | "nav.sidebar.lists"
   | "nav.user_panel"
   | "nav.user_panel.avatar"
   | "nav.user_panel.presence"

@@ -163,6 +163,8 @@ define_node_ids! {
     NavChannelListItemBadge,  "nav.channel_list.item.badge",     Channel, Core,   "未読・メンション数 (FR-042)";
     NavDmList,                "nav.dm_list",                     None,    Core,   "DM 一覧 (FR-013)";
     NavDmListItem,            "nav.dm_list.item",                Dm,      Core,   "DM 1 件 (FR-013)";
+    NavSidebar,               "nav.sidebar",                     None,    Core,   "左側全体。一覧と自分をまとめる";
+    NavSidebarLists,          "nav.sidebar.lists",               None,    Core,   "サーバ一覧とチャンネル一覧";
     NavUserPanel,             "nav.user_panel",                  None,    Core,   "いま入っている自分。一覧の下に居座る";
     NavUserPanelAvatar,       "nav.user_panel.avatar",           None,    Core,   "自分のアバター";
     NavUserPanelPresence,     "nav.user_panel.presence",         None,    Core,   "ステータスの点 (key で online/idle/dnd/invisible を区別)";

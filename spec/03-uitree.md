@@ -233,6 +233,8 @@ M1 で公開するフィールド。
 | `nav.channel_list.item.badge` | `ChannelData` | 未読・メンション数 (FR-042) |
 | `nav.dm_list` | — | DM 一覧 (FR-013) |
 | `nav.dm_list.item` | `DmData` | DM 1 件 (FR-013) |
+| `nav.sidebar` | — | 左側全体。一覧と自分をまとめる |
+| `nav.sidebar.lists` | — | サーバ一覧とチャンネル一覧 |
 | `nav.user_panel` | — | いま入っている自分。一覧の下に居座る |
 | `nav.user_panel.avatar` | — | 自分のアバター |
 | `nav.user_panel.presence` | — | ステータスの点 (key で online/idle/dnd/invisible を区別) |
@@ -298,7 +300,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 77 個** (中核 56 / プラグインも生成可 21)。
+**合計 79 個** (中核 58 / プラグインも生成可 21)。
 
 <!-- END GENERATED: node-ids -->
 

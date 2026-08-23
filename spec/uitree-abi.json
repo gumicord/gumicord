@@ -29,6 +29,8 @@
     "nav.channel_list.item.badge": "ChannelData",
     "nav.dm_list": "none",
     "nav.dm_list.item": "DmData",
+    "nav.sidebar": "none",
+    "nav.sidebar.lists": "none",
     "nav.user_panel": "none",
     "nav.user_panel.avatar": "none",
     "nav.user_panel.presence": "none",
