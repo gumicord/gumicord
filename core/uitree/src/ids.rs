@@ -206,6 +206,23 @@ define_node_ids! {
     ChatInputToolbar,         "chat.input.toolbar",              None,    Core,   "入力欄の上部";
     ChatInputActions,         "chat.input.actions",              None,    Core,   "送信・添付などのボタン群";
 
+    // ─────────────────────────── overlay.* — 流れの上に浮かせるもの
+    //
+    // ⚠️ **どれもプラグインが作れる。** ここはドメインオブジェクトに
+    // 結びついていない — 偽の `chat.message` はアクセシビリティツリーを
+    // 嘘にするが、偽のメニューは嘘にならない。そして操作を足すことこそが、
+    // プラグインが最もやりたいことである
+    OverlayLayer,             "overlay.layer",                   None,    Plugin, "浮かせるものを載せる層。開いている間だけ在る";
+    OverlayScrim,             "overlay.scrim",                   None,    Plugin, "後ろを暗くする覆い";
+    OverlayPopover,           "overlay.popover",                 None,    Plugin, "基準の点に浮かぶ箱";
+    OverlaySheet,             "overlay.sheet",                   None,    Plugin, "下から出てくる面 (携帯)";
+    OverlaySheetHandle,       "overlay.sheet.handle",            None,    Plugin, "面の上端の掴みしろ";
+    OverlayMenu,              "overlay.menu",                    None,    Plugin, "操作の並び";
+    OverlayMenuItem,          "overlay.menu.item",               None,    Plugin, "操作 1 つ";
+    OverlayMenuItemIcon,      "overlay.menu.item.icon",          None,    Plugin, "操作の絵";
+    OverlayMenuItemLabel,     "overlay.menu.item.label",         None,    Plugin, "操作の名前";
+    OverlayMenuSeparator,     "overlay.menu.separator",          None,    Plugin, "操作の区切り";
+
     // ─────────────────────────── primitive.* — プラグインが使う描画語彙
     PrimitiveText,            "primitive.text",                  None,    Plugin, "文字列";
     PrimitiveImage,           "primitive.image",                 None,    Plugin, "画像";

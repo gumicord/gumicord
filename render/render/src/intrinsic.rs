@@ -195,7 +195,10 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
     use NodeId::*;
     match id {
         // ── app.* — 画面いっぱいに広がる入れ物
-        AppRoot | AppWindow | AppScreen => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
+        // ⚠️ **根だけは重ねである。** 浮かせる層をここへ載せるためで、
+        // 窓は [タイトルバー, 画面] の縦並びなので載せられない
+        AppRoot => Intrinsic::stack().grow(1.0).cross(Cross::Stretch),
+        AppWindow | AppScreen => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
         AppScreenLoading | AppScreenLogin => Intrinsic::column().grow(1.0).cross(Cross::Center),
         AppScreenLoginTitle | AppScreenLoginHint => Intrinsic::row().cross(Cross::Center),
         // メイン画面だけが横 3 ペインである
@@ -322,6 +325,22 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         PrimitiveCodeBlock => Intrinsic::column().cross(Cross::Stretch),
         PrimitiveText | PrimitiveBadge | PrimitiveButton | PrimitiveMention | PrimitiveSpoiler
         | PrimitiveLink => Intrinsic::row().cross(Cross::Center),
+
+        // ── overlay.* — 流れの上に浮かせるもの
+        //
+        // ⚠️ **層は窓いっぱいに広がる。** 広がらないと、外を押して閉じる
+        // ための当たりが無くなり、開いたら閉じられなくなる
+        OverlayLayer | OverlayScrim => Intrinsic::stack().grow(1.0).cross(Cross::Stretch),
+        // 浮かぶ箱は**中身の大きさになる**。広がると、押して閉じるための
+        // 外側が無くなる
+        OverlayPopover | OverlayMenu => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
+        // 面は横いっぱい・縦は中身。下から出てくる
+        OverlaySheet => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
+        OverlaySheetHandle => Intrinsic::row().cross(Cross::Center),
+        OverlayMenuItem => Intrinsic::row().cross(Cross::Center),
+        OverlayMenuItemIcon => Intrinsic::row().cross(Cross::Center),
+        OverlayMenuItemLabel => Intrinsic::row().cross(Cross::Center).one_line(),
+        OverlayMenuSeparator => Intrinsic::row().h(1.0).cross(Cross::Stretch),
 
         // ── layout.* — プラグインの語彙
         //

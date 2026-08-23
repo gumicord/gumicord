@@ -537,7 +537,12 @@ impl<'a> Cx<'a, '_, '_> {
             let ci = intrinsic(child.id);
             let size = sizes[i];
 
-            let child_rect = if it.axis == Axis::Stack {
+            let child_rect = if let Some(a) = child.anchor {
+                // 浮かぶものは流れにも重ねの中心にも従わない。
+                // **基準の点から置き、はみ出すなら返す**
+                let s = Self::stack_size(child, &ci, size, inner);
+                anchored(a, s, inner, m)
+            } else if it.axis == Axis::Stack {
                 let s = Self::stack_size(child, &ci, size, inner);
                 Rect::new(
                     inner.x + m.left + (inner.w - m.horizontal() - s.w).max(0.0) * 0.5,
@@ -557,7 +562,8 @@ impl<'a> Cx<'a, '_, '_> {
                 Rect::new(x, cursor + m.top, w, size.h)
             };
 
-            if it.axis != Axis::Stack {
+            // ⚠️ 浮かぶものはカーソルを進めない。**流れの外に居る**
+            if it.axis != Axis::Stack && child.anchor.is_none() {
                 cursor += if horizontal {
                     size.w + m.horizontal() + gap
                 } else {
@@ -685,6 +691,43 @@ impl<'a> Cx<'a, '_, '_> {
             Cross::Start | Cross::Stretch => 0.0,
         }
     }
+}
+
+/// 基準の点から置く。**はみ出すなら反対側へ返す。**
+///
+/// # ⚠️ 端で押されたメニューは、はみ出したまま出してはいけない
+///
+/// 画面の右端で右クリックしたときに、点から右へ伸ばすと**メニューの半分が
+/// 画面の外**になる。そこには押せる項目が並んでいるので、「出ているのに
+/// 押せない」という壊れ方をする。
+///
+/// 順番が要る。**まず返し、それから押し込む。**
+///
+/// - 返すだけだと、入れ物より大きいメニューはどちらへ返してもはみ出す
+/// - 押し込むだけだと、右端のメニューが指の下に出て**中身が指で隠れる**
+///
+/// 返して駄目なら押し込む、の順にすると、狭いときでも必ず入れ物の中に入る。
+fn anchored(a: gumicord_uitree::Anchor, size: Size, inner: Rect, m: Edges) -> Rect {
+    let w = size.w + m.horizontal();
+    let h = size.h + m.vertical();
+
+    // 点から右下へ伸ばすのが既定。入らなければ点の反対側へ
+    let mut x = a.x;
+    if x + w > inner.right() {
+        x = a.x - w;
+    }
+    let mut y = a.y;
+    if y + h > inner.bottom() {
+        y = a.y - h;
+    }
+
+    // 返しても入らなければ、入れ物の中へ押し込む。
+    // ⚠️ **後ろの max を先に書かない。** 先に置くと、入れ物より大きいときに
+    // 下端合わせが勝って上端が切れる
+    x = x.min(inner.right() - w).max(inner.x);
+    y = y.min(inner.bottom() - h).max(inner.y);
+
+    Rect::new(x + m.left, y + m.top, size.w, size.h)
 }
 
 #[cfg(test)]
@@ -1126,6 +1169,100 @@ mod scrollbar_tests {
         let mut n = UiNode::new(id);
         f(&mut n.style);
         n
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  浮かせるもの (`FR-030`)
+
+    /// 400x300 の窓に、`w` x `h` の箱を `(ax, ay)` から浮かせる
+    fn floated(ax: f32, ay: f32, w: f32, h: f32) -> Rect {
+        let tree = UiNode::new(NodeId::AppRoot).child(
+            styled(NodeId::OverlayLayer, |_| {}).child(
+                styled(NodeId::OverlayPopover, |st| {
+                    st.width = Some(w);
+                    st.height = Some(h);
+                })
+                .with_anchor(gumicord_uitree::Anchor::at(ax, ay)),
+            ),
+        );
+        let r = layout(
+            &tree,
+            Size::new(400.0, 300.0),
+            &mut shaper(),
+            &ScrollState::default(),
+        );
+        r.find(NodeId::OverlayPopover).expect("置かれていない").rect
+    }
+
+    /// 余裕があれば、押した点から右下へ伸びる
+    #[test]
+    fn 浮かぶ箱は基準の点から右下へ伸びる() {
+        let r = floated(50.0, 60.0, 100.0, 80.0);
+        assert_eq!((r.x, r.y), (50.0, 60.0));
+        assert_eq!((r.w, r.h), (100.0, 80.0));
+    }
+
+    /// ⚠️ **端で押されたメニューは反対側へ返す。**
+    ///
+    /// 返さないと、画面の外に押せる項目が並ぶ。「出ているのに押せない」
+    /// という壊れ方をする
+    #[test]
+    fn 右下で押したら反対側へ返る() {
+        // 右端から 20px の位置に幅 100 の箱は入らない
+        let r = floated(380.0, 290.0, 100.0, 80.0);
+        assert_eq!(r.right(), 380.0, "右へ伸びたまま画面の外に出ている");
+        assert_eq!(r.bottom(), 290.0, "下へ伸びたまま画面の外に出ている");
+    }
+
+    /// 片側だけ入らないときは、その軸だけ返す
+    #[test]
+    fn 返すのは入らない軸だけ() {
+        let r = floated(380.0, 10.0, 100.0, 80.0);
+        assert_eq!(r.right(), 380.0, "横は返る");
+        assert_eq!(r.y, 10.0, "縦は返らない");
+    }
+
+    /// ⚠️ **返しても入らないものは、押し込む。**
+    ///
+    /// 返すだけだと、入れ物より大きい箱はどちらへ返してもはみ出す
+    #[test]
+    fn 返しても入らなければ枠へ押し込む() {
+        let r = floated(200.0, 150.0, 500.0, 400.0);
+        assert_eq!((r.x, r.y), (0.0, 0.0), "左上に寄せて入れる");
+    }
+
+    /// ⚠️ **浮かぶものは流れを進めない。**
+    ///
+    /// 進めると、後ろに並ぶものが浮かんだ箱のぶんだけ押し出される
+    #[test]
+    fn 浮かぶものは並びを押し出さない() {
+        let row = |float: bool| {
+            let mut n = styled(NodeId::LayoutColumn, |st| st.height = Some(300.0))
+                .child(styled(NodeId::ChatMessage, |st| st.height = Some(50.0)));
+            if float {
+                n = n.child(
+                    styled(NodeId::OverlayPopover, |st| {
+                        st.width = Some(80.0);
+                        st.height = Some(80.0);
+                    })
+                    .with_anchor(gumicord_uitree::Anchor::at(10.0, 10.0)),
+                );
+            }
+            n.child(styled(NodeId::ChatInput, |st| st.height = Some(40.0)))
+        };
+        let y = |t: &UiNode| {
+            layout(
+                t,
+                Size::new(400.0, 300.0),
+                &mut shaper(),
+                &ScrollState::default(),
+            )
+            .find(NodeId::ChatInput)
+            .expect("置かれていない")
+            .rect
+            .y
+        };
+        assert_eq!(y(&row(false)), y(&row(true)));
     }
 
     /// 高さ 100 の枠に 50px のメッセージを `n` 件と、スクロールバーを入れる

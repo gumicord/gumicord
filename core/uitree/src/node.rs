@@ -105,6 +105,32 @@ impl Line {
     }
 }
 
+/// 浮かせたものを置く基準。**論理 px、ウィンドウの左上から。**
+///
+/// # ⚠️ これはスタイルではない
+///
+/// 押された場所はテーマには書けない。かといって「右クリックしたところ」は
+/// 利用者のデータでもない。[`UiNode::tint`] と同じで、**その瞬間にしか
+/// 分からないことを運ぶ枠**である。
+///
+/// # ⚠️ 置き場所そのものではない
+///
+/// ここに入るのは基準の点だけである。実際にどこへ置くかは、
+/// **中身の大きさとウィンドウの大きさが分かってから**でないと決まらない。
+/// 右端で押されたメニューは左へ返さなければならず、それはレンダラにしか
+/// できない ([`spec/06-renderer.md`])。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Anchor {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Anchor {
+    pub const fn at(x: f32, y: f32) -> Self {
+        Anchor { x, y }
+    }
+}
+
 /// 編集中のテキストと、その上の印。位置は**バイト位置**である。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Editable {
@@ -221,6 +247,11 @@ pub struct UiNode {
     /// テーマが特定のサーバや相手を狙い撃ちにはできない
     /// (`when.slot` がスノーフレークを弾くのと同じ理由)。
     pub tint: Option<Color>,
+    /// 浮かせるときの基準の点 (`FR-030`)。
+    ///
+    /// ⚠️ **持っているのは浮かぶものだけである。** 流れの中に並ぶノードで
+    /// これを見てはいけない。見ると、親が決めた場所を子が勝手に上書きする
+    pub anchor: Option<Anchor>,
     /// 表示する中身
     pub content: Content,
     /// テーマとプラグインによって解決された最終的なスタイル。
@@ -239,6 +270,7 @@ impl UiNode {
             states: StateSet::EMPTY,
             data: None,
             tint: None,
+            anchor: None,
             content: Content::None,
             style: Style::default(),
             children: Vec::new(),
@@ -296,6 +328,16 @@ impl UiNode {
 
     pub fn with_states(mut self, states: StateSet) -> Self {
         self.states = states;
+        self
+    }
+
+    /// 浮かせる場所を指定する。**基準の点だけを渡す。**
+    ///
+    /// ⚠️ **どこへ置くかを最後に決めるのはレンダラである。** ここで渡すのは
+    /// 「押されたのはここ」までで、画面からはみ出すなら反対側へ返すのは
+    /// レンダラの仕事である。大きさを知らないうちに決められない
+    pub fn with_anchor(mut self, anchor: Anchor) -> Self {
+        self.anchor = Some(anchor);
         self
     }
 
