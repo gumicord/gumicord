@@ -157,18 +157,18 @@ impl Fit {
     }
 }
 
-/// アセットの参照先 (`EXT-017`)。
+/// Where an asset comes from.
 ///
-/// **相対パスがテーマディレクトリの外へ出られないこと**と、
-/// **外部 URL のホストが `manifest.remoteAssets` に宣言されていること**は、
-/// この型を作る時点で検査済みである ([`AssetRef::parse`])。
+/// [`AssetRef::parse`] has already checked that a relative path cannot leave
+/// the theme directory and that an external host is declared in
+/// `manifest.remoteAssets`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetRef {
-    /// theme.json からの相対パス。`..` も絶対パスも含まないことは検証済み
+    /// Relative to theme.json, with no `..` and no absolute path.
     Bundled(String),
     /// data: URI
     Data { mime: String, base64: String },
-    /// https の外部 URL。`host` は宣言済みであることを検証済み (`SEC-022`)
+    /// An https URL whose host is already known to be declared.
     Remote { url: String, host: String },
 }
 

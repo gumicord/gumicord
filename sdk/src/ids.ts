@@ -1,9 +1,9 @@
-// ⚠️ このファイルは `core/uitree/src/ids.rs` から生成されている。
-// 直接編集しても `cargo xtask gen` で上書きされる。
+// Generated from `core/uitree/src/ids.rs`.
+// Edits here are overwritten by `cargo xtask gen`.
 //
-// 仕様: spec/03-uitree.md
+// See spec/03-uitree.md.
 
-/** UITree の安定 ID。存在しない ID はビルド時に落ちる (EXT-002) */
+/** A UITree stable ID. An unknown one fails to build. */
 export type NodeId =
   | "app.root"
   | "app.window"
@@ -111,11 +111,11 @@ export type NodeId =
   ;
 
 /**
- * プラグインが**生成してよい** ID。
+ * The IDs a plugin may create.
  *
- * 中核ノードは実在するドメインオブジェクトと結びついているため、
- * プラグインが偽物を作れるとアクセシビリティツリーが嘘をつく
- * (spec/03-uitree.md 8.2)。
+ * A core node is tied to a real domain object, so a plugin able to forge
+ * one would make the accessibility tree lie.
+ * See spec/03-uitree.md 8.2.
  */
 export type CoreCreatableNodeId =
   | "overlay.layer"
@@ -158,7 +158,7 @@ export type CoreCreatableNodeId =
   | "layout.scrollbar.thumb"
   ;
 
-/** ノード種別ごとの `data` の対応 (spec/03-uitree.md 2.4) */
+/** The `data` each node kind carries. */
 export interface DataByNode {
   "nav.guild_list.item": GuildData;
   "nav.guild_list.item.icon": GuildData;

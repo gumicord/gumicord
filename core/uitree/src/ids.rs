@@ -121,7 +121,7 @@ macro_rules! define_node_ids {
 //  Add lines only; never delete or rename one.
 // ═══════════════════════════════════════════════════════════════════════
 define_node_ids! {
-    // ─────────────────────────── app.* — アプリのルートと画面
+    // ─────────────────────────── app.* — the root and its screens
     AppRoot,                  "app.root",                        None,    Core,   "ツリーの根";
     AppWindow,                "app.window",                      None,    Core,   "ウィンドウ 1 枚";
     AppScreen,                "app.screen",                      None,    Core,   "現在表示中の画面を包むコンテナ";
@@ -131,13 +131,13 @@ define_node_ids! {
     AppScreenLoginHint,       "app.screen.login.hint",           None,    Core,   "ログイン画面の説明文・状態表示";
     AppScreenMain,            "app.screen.main",                 None,    Core,   "メイン画面";
 
-    // ─────────────────────────── chrome.* — ウィンドウクローム (デスクトップのみ)
+    // ─────────────────────────── chrome.* — window chrome, desktop only
     ChromeTitlebar,           "chrome.titlebar",                 None,    Core,   "独自タイトルバー (PLT-020)";
     ChromeTitlebarTitle,      "chrome.titlebar.title",           None,    Core,   "タイトル表示";
     ChromeTitlebarControls,   "chrome.titlebar.controls",        None,    Core,   "ウィンドウ操作ボタン群";
     ChromeTitlebarControl,    "chrome.titlebar.control",         None,    Core,   "個々のボタン (key で minimize/maximize/close を区別)";
 
-    // ─────────────────────────── nav.* — ナビゲーション
+    // ─────────────────────────── nav.* — navigation
     NavGuildList,             "nav.guild_list",                  None,    Core,   "ギルド一覧 (FR-010)";
     NavGuildListHome,         "nav.guild_list.home",             None,    Core,   "DM への入口 (FR-013)";
     NavGuildListItem,         "nav.guild_list.item",             Guild,   Core,   "ギルド 1 個 (FR-010)";
@@ -169,7 +169,7 @@ define_node_ids! {
     NavMemberListItemPresence,"nav.member_list.item.presence",   Member,  Core,   "ステータスの点 (key で online/idle/dnd を区別)";
     NavMemberListItemName,    "nav.member_list.item.name",       Member,  Core,   "そのサーバでの表示名";
 
-    // ─────────────────────────── chat.* — チャット
+    // ─────────────────────────── chat.* — the conversation
     ChatView,                 "chat.view",                       None,    Core,   "チャット領域全体";
     ChatHeader,               "chat.header",                     Channel, Core,   "チャンネルヘッダ";
     ChatHeaderTitle,          "chat.header.title",               Channel, Core,   "チャンネル名";
@@ -194,12 +194,11 @@ define_node_ids! {
     ChatInputToolbar,         "chat.input.toolbar",              None,    Core,   "入力欄の上部";
     ChatInputActions,         "chat.input.actions",              None,    Core,   "送信・添付などのボタン群";
 
-    // ─────────────────────────── overlay.* — 流れの上に浮かせるもの
+    // ─────────────────────────── overlay.* — floated above the flow
     //
-    // ⚠️ **どれもプラグインが作れる。** ここはドメインオブジェクトに
-    // 結びついていない — 偽の `chat.message` はアクセシビリティツリーを
-    // 嘘にするが、偽のメニューは嘘にならない。そして操作を足すことこそが、
-    // プラグインが最もやりたいことである
+    // Plugins may create any of these: none is tied to a domain object. A
+    // forged `chat.message` would make the accessibility tree lie; a forged
+    // menu does not, and adding actions is exactly what plugins want most.
     OverlayLayer,             "overlay.layer",                   None,    Plugin, "浮かせるものを載せる層。開いている間だけ在る";
     OverlayScrim,             "overlay.scrim",                   None,    Plugin, "後ろを暗くする覆い";
     OverlayPopover,           "overlay.popover",                 None,    Plugin, "基準の点に浮かぶ箱";
@@ -218,7 +217,7 @@ define_node_ids! {
     OverlayModalAction,       "overlay.modal.action",            None,    Plugin, "窓のボタン 1 つ (key で番号を持つ)";
     OverlayModalActionLabel,  "overlay.modal.action.label",      None,    Plugin, "ボタンの文字 (slot で cancel/confirm/danger)";
 
-    // ─────────────────────────── primitive.* — プラグインが使う描画語彙
+    // ─────────────────────────── primitive.* — the drawing vocabulary plugins use
     PrimitiveText,            "primitive.text",                  None,    Plugin, "文字列";
     PrimitiveImage,           "primitive.image",                 None,    Plugin, "画像";
     PrimitiveIcon,            "primitive.icon",                  None,    Plugin, "アイコン";
@@ -234,7 +233,7 @@ define_node_ids! {
     PrimitiveSpoiler,         "primitive.spoiler",               None,    Plugin, "スポイラー (FR-021)";
     PrimitiveLink,            "primitive.link",                  None,    Plugin, "リンク (FR-021)";
 
-    // ─────────────────────────── layout.* — レイアウト
+    // ─────────────────────────── layout.* — layout
     LayoutRow,                "layout.row",                      None,    Plugin, "横並び";
     LayoutColumn,             "layout.column",                   None,    Plugin, "縦並び";
     LayoutStack,              "layout.stack",                    None,    Plugin, "重ね";
@@ -244,10 +243,10 @@ define_node_ids! {
     LayoutScrollbarThumb,     "layout.scrollbar.thumb",          None,    Plugin, "スクロールバーの摘み";
 }
 
-/// [`NodeId::from_str`] が知らない ID を渡されたときのエラー。
+/// An ID [`NodeId::from_str`] does not know.
 ///
-/// 新しいクライアント向けに書かれたテーマやプラグインを古いクライアントで
-/// 開くと発生しうる。**エラーではなく警告として扱い、残りを適用する**
+/// A theme or plugin written for a newer client produces these, so they warn
+/// and the rest still applies.
 /// ([`spec/04-theme.md`] 7.1)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownNodeId;

@@ -1,25 +1,21 @@
-//! Gumicord のタスクランナー。
+//! The task runner.
 //!
-//! `just` や `make` を使わず `cargo xtask` にしているのは、**貢献者に追加の
-//! ツール導入を要求しないため**である。cargo があれば動く。
+//! `cargo xtask` rather than `just` or `make`, so a contributor needs no tool
+//! beyond cargo.
 //!
-//! 使い方:
+//!     cargo xtask check-light  checks that need no build
+//!     cargo xtask check        every check
+//!     cargo xtask fmt          format
+//!     cargo xtask lint         clippy
+//!     cargo xtask test         tests
+//!     cargo xtask schema       JSON Schema and the sample themes
+//!     cargo xtask sdk          the SDK's type-level guarantees
+//!     cargo xtask abi          stable ID compatibility (--accept to update)
+//!     cargo xtask gen          generation (--check to verify only)
 //!
-//!     cargo xtask check-light  ビルドを伴わない検査だけ (省メモリ)
-//!     cargo xtask check        すべての検査 (ビルドを伴う)
-//!     cargo xtask fmt          整形
-//!     cargo xtask lint         clippy (--all-targets で全ターゲット)
-//!     cargo xtask test         テスト
-//!     cargo xtask schema       JSON Schema と公式サンプルの検証
-//!     cargo xtask sdk          SDK の型レベルの保証を検証
-//!     cargo xtask abi          安定 ID の後方互換性検査 (--accept で更新)
-//!     cargo xtask gen          生成 (--check で最新かだけ確認)
-//!
-//! # 資源消費について
-//!
-//! 開発機は 4 コア / 8 GB しかないことがある。ビルドを伴うタスクは
-//! `.cargo/config.toml` の `jobs = 2` で並列数を絞ってある。
-//! 仕様まわりの作業なら `check-light` で足りる。
+//! A development machine may have four cores and 8 GB, so building tasks are
+//! held to `jobs = 2` in `.cargo/config.toml`. Spec work needs only
+//! `check-light`.
 
 mod uitree;
 
@@ -45,16 +41,16 @@ fn main() -> ExitCode {
             Ok(())
         }
         other => {
-            eprintln!("不明なタスク: {other}\n");
+            eprintln!("unknown task: {other}\n");
             help();
-            Err(format!("不明なタスク: {other}"))
+            Err(format!("unknown task: {other}"))
         }
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("\n\x1b[31m失敗\x1b[0m: {e}");
+            eprintln!("\n\x1b[31mfailed\x1b[0m: {e}");
             ExitCode::FAILURE
         }
     }
@@ -62,72 +58,69 @@ fn main() -> ExitCode {
 
 fn help() {
     println!(
-        "Gumicord タスクランナー
+        "Gumicord task runner
 
-  cargo xtask check-light  ビルドを伴わない検査だけ (省メモリ)
-  cargo xtask check        すべての検査 (ビルドを伴う)
-  cargo xtask fmt          整形
-  cargo xtask lint         clippy (--all-targets で全ターゲット)
-  cargo xtask test         テスト
-  cargo xtask schema       JSON Schema と公式サンプルの検証
-  cargo xtask sdk          SDK の型レベルの保証を検証
-  cargo xtask abi          安定 ID の後方互換性検査 (EXT-003)
-                           --accept でスナップショットを更新
-  cargo xtask gen          安定 ID から仕様書と SDK 型定義を生成
-                           --check で生成物が最新かだけ確認
+  cargo xtask check-light  checks that need no build
+  cargo xtask check        every check
+  cargo xtask fmt          format
+  cargo xtask lint         clippy (--all-targets for every target)
+  cargo xtask test         tests
+  cargo xtask schema       JSON Schema and the sample themes
+  cargo xtask sdk          the SDK's type-level guarantees
+  cargo xtask abi          stable ID compatibility
+                           --accept updates the snapshot
+  cargo xtask gen          generate the spec and SDK types from the IDs
+                           --check only verifies they are current
 
-ビルドを伴うタスクは .cargo/config.toml の jobs = 2 で並列数を絞ってある。
-潤沢なメモリがあるなら CARGO_BUILD_JOBS=8 などで上書きできる。"
+Building tasks are held to jobs = 2 in .cargo/config.toml. With more memory,
+override it with CARGO_BUILD_JOBS=8 or similar."
     );
 }
 
-// ---------------------------------------------------------------- タスク
+// ---------------------------------------------------------------- Tasks
 
-/// ネットワークもビルドも伴わない検査だけを走らせる。
-///
-/// メモリの少ない機械でも安全に回せる。仕様まわりの作業ではこれで足りる。
+/// The checks that touch neither the network nor a build, so they run on a
+/// small machine. Enough for spec work.
 fn check_light(root: &Path) -> Result<(), String> {
-    // rustfmt はソースを構文解析するだけでコンパイルはしない。
-    // ここに入れておかないと、整形漏れを CI まで気づけない。
-    step("整形の確認");
+    // rustfmt parses without compiling, and leaving it out would hide
+    // formatting slips until CI.
+    step("formatting");
     run(root, "cargo", &["fmt", "--all", "--check"])?;
     step("JSON Schema");
     schema(root)?;
-    step("SDK の型レベルの保証");
+    step("SDK type-level guarantees");
     sdk(root)?;
-    step("生成物が最新か");
+    step("generated files");
     uitree::generate(root, true)?;
-    step("安定 ID の後方互換性");
+    step("stable ID compatibility");
     uitree::abi(root, false)?;
-    println!("\n\x1b[32mすべて通過 (軽量)\x1b[0m");
+    println!("\n\x1b[32mall passed (light)\x1b[0m");
     Ok(())
 }
 
 fn check(root: &Path) -> Result<(), String> {
-    step("整形の確認");
+    step("formatting");
     run(root, "cargo", &["fmt", "--all", "--check"])?;
     step("clippy");
-    // ⚠️ `--all-targets` を付けない。
-    //   テスト・ベンチ・examples を別ターゲットとしてビルドし直すため
-    //   メモリ消費がおよそ倍になる。4 コア / 8 GB の機械では実際に
-    //   OS ごと不安定になった (.cargo/config.toml の jobs の項を参照)。
-    //   CI では `cargo xtask lint --all-targets` を別途走らせる。
+    // No `--all-targets`: rebuilding tests, benches and examples roughly
+    // doubles the memory, which made a four-core 8 GB machine unstable. CI
+    // runs `cargo xtask lint --all-targets` separately.
     run(
         root,
         "cargo",
         &["clippy", "--workspace", "--", "-D", "warnings"],
     )?;
-    step("テスト");
+    step("tests");
     run(root, "cargo", &["test", "--workspace"])?;
     step("JSON Schema");
     schema(root)?;
-    step("SDK の型レベルの保証");
+    step("SDK type-level guarantees");
     sdk(root)?;
-    step("生成物が最新か");
+    step("generated files");
     uitree::generate(root, true)?;
-    step("安定 ID の後方互換性");
+    step("stable ID compatibility");
     uitree::abi(root, false)?;
-    println!("\n\x1b[32mすべて通過\x1b[0m");
+    println!("\n\x1b[32mall passed\x1b[0m");
     Ok(())
 }
 
@@ -136,7 +129,7 @@ fn fmt(root: &Path) -> Result<(), String> {
 }
 
 fn lint(root: &Path) -> Result<(), String> {
-    // --all-targets は明示されたときだけ。既定では付けない (資源消費が倍になる)
+    // Only when asked; it doubles the memory.
     let mut args = vec!["clippy", "--workspace"];
     if flag("--all-targets") {
         args.push("--all-targets");
@@ -149,40 +142,39 @@ fn test(root: &Path) -> Result<(), String> {
     run(root, "cargo", &["test", "--workspace"])
 }
 
-/// spec/schema/*.schema.json の検証と、公式サンプルがそれを通ることの確認。
+/// Validates the schemas, and the sample themes against them.
 fn schema(root: &Path) -> Result<(), String> {
     if !root.join("node_modules/ajv").exists() {
-        return Err("npm install を先に実行してください (ajv が入っていません)".into());
+        return Err("run npm install first (ajv is missing)".into());
     }
     run(root, "node", &["spec/schema/validate.mjs"])
 }
 
-/// SDK の型が拡張 ABI の約束を実際に守れているかを検証する。
+/// Checks the SDK's types actually keep the extension ABI's promises.
 ///
-/// 「存在しない安定 ID はビルドが通らない」「プラグインは中核 ID を製造できない」
-/// といった主張は、通ってはいけないコードが実際に落ちることまで確かめないと
-/// 保証にならない。
+/// Claims like "an unknown stable ID fails to build" are only guarantees once
+/// the code that must not compile is seen to fail.
 fn sdk(root: &Path) -> Result<(), String> {
     let dir = root.join("sdk");
     if !dir.join("node_modules/typescript").exists() {
-        return Err("sdk/ で npm install を先に実行してください".into());
+        return Err("run npm install in sdk/ first".into());
     }
     run(&dir, "node", &["test/run.mjs"])
 }
 
-/// コマンドラインにフラグが渡されているか
+/// Whether a flag was passed.
 fn flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
 }
 
-// ---------------------------------------------------------------- ユーティリティ
+// ---------------------------------------------------------------- Utilities
 
 fn step(name: &str) {
     println!("\n\x1b[36m▶ {name}\x1b[0m");
 }
 
 fn run(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
-    // Windows では node などが .cmd のことがあるため、失敗したら .cmd も試す。
+    // On Windows `node` and friends may be a `.cmd`, so that is tried too.
     let status = Command::new(program)
         .args(args)
         .current_dir(dir)
@@ -197,19 +189,19 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
                 Err(e)
             }
         })
-        .map_err(|e| format!("{program} を実行できません: {e}"))?;
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
 
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} {} が失敗しました", args.join(" ")))
+        Err(format!("{program} {} failed", args.join(" ")))
     }
 }
 
 fn repo_root() -> PathBuf {
-    // xtask/Cargo.toml の 1 つ上がリポジトリのルート
+    // One level above xtask/Cargo.toml is the repository root.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("xtask はリポジトリ直下にある")
+        .expect("xtask sits directly under the repository root")
         .to_path_buf()
 }
