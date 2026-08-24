@@ -632,6 +632,13 @@ impl Live {
         self.members.clear();
         self.typing.clear();
         self.last_channel = None;
+
+        // The gateway task is already gone. Without clearing this, `start`
+        // returns early after the next login and nothing ever reconnects.
+        self.started = false;
+        self.subs = None;
+        self.me = None;
+        self.link = Link::Connecting;
     }
     /// 届いた並びを Store へ入れる。
     ///
@@ -1047,6 +1054,22 @@ mod tests {
 
     fn ch() -> ChannelId {
         ChannelId::from(10u64)
+    }
+
+    /// `start` returns early once it has run, so forgetting must clear that
+    /// flag. Otherwise signing in again never reconnects the gateway and the
+    /// app sits on a cached screen receiving nothing.
+    #[test]
+    fn forgetting_everything_allows_reconnecting() {
+        let mut live = live();
+        live.started = true;
+        live.me = Some(UserId::from(1u64));
+
+        live.forget_everything();
+
+        assert!(!live.started, "a later start() would return early");
+        assert!(live.subs.is_none());
+        assert!(live.me.is_none(), "the previous account is still current");
     }
 
     fn message(id: u64, body: &str) -> Message {

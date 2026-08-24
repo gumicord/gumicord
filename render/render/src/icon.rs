@@ -55,6 +55,7 @@ pub static ICONS: &[(&str, IconDef)] = &[
     ("cut", CUT),
     ("paste", PASTE),
     ("select_all", SELECT_ALL),
+    ("logout", LOGOUT),
 ];
 
 /// 名前からアイコンを引く。返すのは**正規化された名前**とその定義。
@@ -270,6 +271,16 @@ const PASTE: IconDef = IconDef {
 };
 
 /// 全部の行に掛かる枠
+/// A door with an arrow leaving through it.
+const LOGOUT: IconDef = IconDef {
+    strokes: &[
+        &[(0.52, 0.18), (0.20, 0.18), (0.20, 0.82), (0.52, 0.82)],
+        &[(0.44, 0.50), (0.82, 0.50)],
+        &[(0.66, 0.34), (0.82, 0.50), (0.66, 0.66)],
+    ],
+    width: 1.1 / 12.0,
+};
+
 const SELECT_ALL: IconDef = IconDef {
     strokes: &[
         &[

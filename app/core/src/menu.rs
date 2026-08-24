@@ -149,6 +149,8 @@ pub enum Action {
     Edit(u64),
     /// Delete this message.
     Delete(u64),
+    /// Sign out: drop the token and wipe the local cache.
+    LogOut,
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary

@@ -533,17 +533,10 @@ impl Application for Gumicord {
                 .start(rt.handle(), l.client.clone(), waker.clone());
         }
 
-        // `FR-004`: Gateway にトークンを弾かれた。**捨ててログイン画面へ戻す**
-        if self.live.take_rejection()
-            && let (Some(rt), Some(waker)) = (&self.runtime, &self.waker)
-        {
-            tracing::warn!("トークンが無効になった。ログインし直す");
-            self.login.forget(rt.handle(), waker.clone());
-            // `SEC-021`: **キャッシュも残さない。** 残すと、次に別の人が
-            // この機械を使ったときに前の人のメッセージが読める
-            self.live.forget_everything();
-            self.images.forget_everything();
-            changed = true;
+        // The gateway rejected the token. Same path as pressing "log out".
+        if self.live.take_rejection() {
+            tracing::warn!("the token is no longer valid; signing out");
+            changed |= self.sign_out();
         }
 
         changed |= self.sync_selection();
@@ -659,6 +652,7 @@ impl Application for Gumicord {
             (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
             (NodeId::NavChannelListItem, Some(Key::Id(id))) => Some(self.channel_menu(*id)),
             (NodeId::NavGuildListItem, Some(Key::Id(id))) => Some(self.guild_menu(*id)),
+            (NodeId::NavUserPanel, _) => Some(self.user_menu()),
             _ => None,
         });
         match items {
@@ -877,6 +871,20 @@ impl Gumicord {
         vec![Item::new(Action::Copy(id.to_string()), "ID をコピー").icon("id")]
     }
 
+    /// The menu on our own panel. Only offered while actually signed in.
+    fn user_menu(&self) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item};
+        let Some(l) = self.login.session().logged_in() else {
+            return Vec::new();
+        };
+        vec![
+            Item::new(Action::Copy(l.me.user.id.to_string()), "ID をコピー").icon("id"),
+            Item::new(Action::LogOut, "ログアウト")
+                .icon("logout")
+                .danger(),
+        ]
+    }
+
     /// いま指が乗っているメニューの項目、または窓のボタン。
     fn hovered_item(&self) -> Option<usize> {
         match &self.hovered {
@@ -955,6 +963,22 @@ impl Gumicord {
                 confirm: "削除する".to_owned(),
                 danger: true,
             }),
+            // Getting back in needs the phone: password login does not exist
+            // yet, so say so before the token is gone.
+            crate::menu::Action::LogOut => Some(crate::menu::Confirm {
+                title: "ログアウトしますか".to_owned(),
+                body: "この端末に保存したログイン情報と、読み込んだ内容をすべて消します。\
+                       入り直すにはスマホの Discord で QR を読み取る必要があります。"
+                    .to_owned(),
+                preview: self
+                    .login
+                    .session()
+                    .logged_in()
+                    .map(|l| l.me.user.display_name().to_owned()),
+                action: action.clone(),
+                confirm: "ログアウトする".to_owned(),
+                danger: true,
+            }),
             _ => None,
         }
     }
@@ -1001,6 +1025,10 @@ impl Gumicord {
                 }
             }
 
+            crate::menu::Action::LogOut => {
+                self.sign_out();
+            }
+
             crate::menu::Action::Cut => {
                 if self.copy_selection() {
                     self.input.insert("");
@@ -1021,6 +1049,32 @@ impl Gumicord {
             }
             crate::menu::Action::SelectAll => self.input.select_all(),
         }
+        true
+    }
+
+    /// Signs out and returns to the login screen.
+    ///
+    /// Reached both by pressing "log out" and by the gateway rejecting the
+    /// token; the two must leave the same state behind, or one of them strands
+    /// the app on a screen it cannot get out of.
+    ///
+    /// Nothing is kept: leaving the cache behind lets the next person on this
+    /// machine read the previous one's messages.
+    fn sign_out(&mut self) -> bool {
+        let (Some(rt), Some(waker)) = (&self.runtime, &self.waker) else {
+            // No runtime means demo mode, where there is nothing to sign out of.
+            return false;
+        };
+        self.login.forget(rt.handle(), waker.clone());
+        self.live.forget_everything();
+        self.images.forget_everything();
+
+        // Anything still on screen belongs to the account that just left.
+        self.floating = None;
+        self.composing = Composing::New;
+        self.input.take();
+        self.input_focused = false;
+        self.revealed.clear();
         true
     }
 
@@ -2556,6 +2610,56 @@ mod tests {
 
         assert!(a.cancel_input(), "2 回目でフォーカスが外れていない");
         assert!(!a.input_focused);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Signing out
+
+    /// Signing out is destructive and hard to reverse without a phone, so it
+    /// goes through the same dialog as deleting.
+    #[test]
+    fn logging_out_asks_first() {
+        let mut a = app();
+        a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
+            at: (0.0, 0.0),
+            items: vec![crate::menu::Item::new(
+                crate::menu::Action::LogOut,
+                "ログアウト",
+            )],
+        }));
+        press_menu(&mut a, 0);
+        assert!(is_confirm(&a), "no confirmation appeared");
+    }
+
+    /// The dialog has to say the phone is needed, since password login does
+    /// not exist yet.
+    #[test]
+    fn the_logout_dialog_says_a_phone_is_needed() {
+        let a = app();
+        let c = a
+            .needs_confirming(
+                &crate::menu::Floating::Menu(crate::menu::Menu {
+                    at: (0.0, 0.0),
+                    items: Vec::new(),
+                }),
+                &crate::menu::Action::LogOut,
+            )
+            .expect("log out should be confirmed");
+        assert!(c.danger);
+        assert!(c.body.contains("QR"), "does not mention the QR: {}", c.body);
+    }
+
+    /// Only offered while signed in; there is nothing to sign out of otherwise.
+    #[test]
+    fn the_user_menu_is_empty_when_signed_out() {
+        assert!(app().user_menu().is_empty());
+    }
+
+    /// Demo mode has no runtime and nothing to sign out of.
+    #[test]
+    fn signing_out_without_a_runtime_does_nothing() {
+        let mut a = app();
+        assert!(!a.sign_out());
     }
 
     // ═══════════════════════════════════════════════════════════════
