@@ -8,6 +8,10 @@
 //! notification settings are not read, so muted channels still light up.
 //! Read markers are not persisted, since READY brings them every time.
 
+pub mod db;
+
+pub use db::{Db, DbError, Snapshot, default_path};
+
 use std::collections::{HashMap, HashSet};
 
 use gumicord_model::{
