@@ -1,15 +1,15 @@
-# iOS エントリポイント
+# iOS entry point
 
-**M1.2 で着手する。** 現時点では空。macOS 環境が必要。
+**Empty for now; work starts in M1.2, and needs a macOS machine.**
 
-Xcode プロジェクトのラッパを置く。**薄いラッパに留める。**
+This will hold the Xcode project wrapper, and nothing else.
 
-## 着手前に確認すること
+## Decide before starting
 
-| 項目 | 理由 |
+| | Why |
 |---|---|
-| `UITextInput` の実装 | **規模 XL かつ未検証。** ADR-0005 の見直し条件に直結する最大リスク |
-| `accesskit_ios` | 0.1.2 と若い。成熟度が読めないため早めに触る |
-| 配布経路 | App Store の審査を通る見込みは低い。サイドロードを想定 ([`spec/00-vision.md`](../../spec/00-vision.md)) |
+| Implementing `UITextInput` | Large and unverified — the biggest risk here. Try the platform's standard path before concluding a custom one is needed |
+| `accesskit_ios` | Still at 0.1.2; try it early, since its maturity is unknown |
+| Distribution | Passing App Store review is unlikely, so assume sideloading |
 
-詳細: [`spec/07-roadmap.md`](../../spec/07-roadmap.md) の 6 章
+See [`spec/07-roadmap.md`](../../spec/07-roadmap.md) (written in Japanese).

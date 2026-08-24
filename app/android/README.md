@@ -1,16 +1,16 @@
-# Android エントリポイント
+# Android entry point
 
-**M1.2 で着手する。** 現時点では空。
+**Empty for now; work starts in M1.2.**
 
-Gradle + NDK のラッパを置く。**薄いラッパに留める** — ライフサイクルと
-ネイティブハンドルの受け渡し以外のロジックは `app/core` にある。
+This will hold the Gradle + NDK wrapper, and nothing else. Everything beyond
+lifecycle and passing native handles across lives in `app/core`.
 
-## 着手前に確認すること
+## Decide before starting
 
-| 項目 | 理由 |
+| | Why |
 |---|---|
-| `android-game-activity` を使う | `accesskit` の Android 実装は **GameActivity のみ**に対応しており、NativeActivity では動かない (S2 の発見) |
-| `InputConnection` の JNI 橋渡し | **規模 XL かつ未検証。** ADR-0005 の見直し条件に直結する最大リスク |
-| GLES バックエンド | S1 の発見により、コンピュートシェーダに依存しない描画にしてある |
+| Use `android-game-activity` | `accesskit`'s Android backend supports GameActivity only; it does not work on NativeActivity |
+| JNI bridge for `InputConnection` | Large and unverified — the biggest risk here. Try the platform's standard path before concluding a custom one is needed |
+| GLES backend | Rendering avoids compute shaders, so GLES is enough |
 
-詳細: [`spec/07-roadmap.md`](../../spec/07-roadmap.md) の 6 章
+See [`spec/07-roadmap.md`](../../spec/07-roadmap.md) (written in Japanese).

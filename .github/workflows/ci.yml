@@ -1,12 +1,11 @@
 name: CI
 
-# 仕様駆動開発の要は「仕様と実装がずれた瞬間に落ちること」である。
-# 手元で回さなくても、ここが必ず落ちる。
+# Spec-driven development only works if the build fails the moment spec and
+# implementation disagree, whether or not anyone ran the checks locally.
 #
-# ■ 開発機で重いビルドを回さなくて済むようにしてある
-#   .cargo/config.toml は jobs = 2 で並列数を絞ってある (4 コア / 8 GB の
-#   開発機を守るため)。CI ランナには余裕があるので CARGO_BUILD_JOBS で上書きする。
-#   clippy --all-targets も、開発機ではなくここで走らせる。
+# The dev machine has 4 cores and 8 GB, so .cargo/config.toml caps parallelism
+# at jobs = 2. Runners have room, so CARGO_BUILD_JOBS overrides that here, and
+# the heavy checks (clippy --all-targets) run here rather than locally.
 
 on:
   push:
@@ -18,24 +17,24 @@ permissions:
   contents: read
 
 concurrency:
-  # 同じブランチに続けて push したとき、古い実行は捨てる
+  # Drop older runs when a branch is pushed to again.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # 開発機向けの jobs = 2 を打ち消す (.cargo/config.toml の意図した上書き経路)
+  # Overrides the dev machine's jobs = 2, as .cargo/config.toml intends.
   CARGO_BUILD_JOBS: 4
-  # CI ではデバッグ情報が要らない。ディスクとキャッシュを節約する
+  # No debug info needed here; saves disk and cache.
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   # ────────────────────────────────────────────────────────────
-  # 仕様まわりの検査。Rust ワークスペースをビルドしないので数十秒で終わる。
-  # PR に最初に返る信号はこれになる。
+  # Spec checks. Does not build the workspace, so it finishes in seconds and
+  # is the first signal a PR gets.
   # ────────────────────────────────────────────────────────────
   spec:
-    name: 仕様 (ABI / スキーマ / SDK)
+    name: Spec (ABI / schema / SDK)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -48,7 +47,7 @@ jobs:
             package-lock.json
             sdk/package-lock.json
 
-      - name: 依存の取得
+      - name: Install dependencies
         run: |
           npm ci
           npm ci --prefix sdk
@@ -57,19 +56,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # xtask とその依存 (serde / gumicord-uitree) しかビルドしない
+          # Only xtask and its dependencies get built.
           shared-key: xtask
 
-      # 以下をまとめて確認する:
-      #   - JSON Schema が公式サンプルを通し、異常系 31 件で確実に落ちること
-      #   - SDK の型が、通ってはいけないコード 5 件を実際に弾くこと
-      #   - ids.rs から生成した spec/03-uitree.md と sdk/src/ids.ts が最新であること
-      #   - 安定 ID が削除・改名されていないこと (EXT-003 / C1・C2)
+      # Checks together that the JSON Schema accepts the official samples and
+      # rejects every malformed one, that the SDK types reject code that must
+      # not compile, that the generated spec table and ids.ts are current, and
+      # that no stable ID was removed or renamed.
       - name: cargo xtask check-light
         run: cargo xtask check-light
 
   # ────────────────────────────────────────────────────────────
-  # Rust 本体。開発機では走らせない重い検査はすべてここに置く。
+  # The Rust workspace. Every check too heavy to run locally lives here.
   # ────────────────────────────────────────────────────────────
   rust:
     name: Rust (${{ matrix.os }})
@@ -77,7 +75,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # M1.1 の主対象は Windows。Linux は依存の移植性を早期に検出するために回す。
+        # Windows is the current target; Linux runs to catch portability
+        # problems in dependencies early.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
@@ -88,35 +87,33 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 整形
+      - name: Formatting
         run: cargo fmt --all --check
 
-      # 開発機では --all-targets を既定から外してある (メモリ消費が倍になり、
-      # 実際に OS ごと不安定になったため)。テスト・examples を含む全ターゲットの
-      # clippy はここで担保する。
-      - name: clippy (全ターゲット)
+      # --all-targets doubles memory use and destabilised the dev machine, so
+      # it is off there. Tests and examples get linted here instead.
+      - name: clippy (all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: テスト
+      - name: Tests
         run: cargo test --workspace
 
   # ────────────────────────────────────────────────────────────
-  # 動くものを毎回作って残す。
+  # Builds something runnable every time.
   #
-  # 検査が全部通っても「起動して画面が出るか」は分からない。落として
-  # 実行できるものが常にあれば、レビューでも不具合報告でも話が早い。
+  # Passing checks say nothing about whether the app starts and draws. Having
+  # a downloadable build always available shortens both reviews and bug
+  # reports.
   #
-  # ■ Windows だけなのは M1.1 のスコープがそうだから
-  #   macOS / Linux は M2 (spec/07-roadmap.md 7 章)。移植性そのものは
-  #   rust ジョブが ubuntu でビルドして担保している。
+  # Windows only, because that is the current target; the rust job builds on
+  # ubuntu, which covers portability.
   #
-  # ■ プロファイルを使い分ける
-  #   PR は速さが要るので thin LTO (release)。main への push と手動実行では
-  #   配布物と同じ fat LTO (dist) で作る。ADR-0001 に記録した
-  #   バイナリ 4.66MB / 起動 332ms は dist の値であり、比べるならこちら。
+  # PRs use thin LTO for speed; pushes to main and manual runs use the same
+  # fat LTO profile as releases, which is what the recorded binary size and
+  # startup figures were measured with.
   # ────────────────────────────────────────────────────────────
   dist:
-    name: 配布物 (Windows)
+    name: Build (Windows)
     runs-on: windows-latest
     env:
       PROFILE: ${{ github.event_name == 'pull_request' && 'release' || 'dist' }}
@@ -127,34 +124,38 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # 検査ジョブとはプロファイルが違うので成果物を共有できない
+          # A different profile, so artifacts cannot be shared with the checks.
           shared-key: dist
 
-      - name: ビルド
+      - name: Build
         shell: bash
         run: cargo build -p gumicord-desktop --profile "$PROFILE"
 
-      # テーマを同梱する。GUMICORD_THEME で差し替えて見比べられるようにする
-      # (README「現在地」参照)。
-      - name: 配布物をまとめる
+      # Ship the themes so they can be swapped with GUMICORD_THEME.
+      - name: Assemble
         shell: bash
         run: |
           mkdir -p dist
           cp "target/$PROFILE/gumicord.exe" dist/
           cp -r examples/themes dist/themes
           cp LICENSE dist/
-          # 落とした人が最初に読むもの。いまは何ができないかを先に書く
+          # The first thing anyone reads; lead with what does not work yet.
           cat > dist/README.txt <<'TXT'
-          Gumicord (開発版ビルド)
+          Gumicord (development build)
 
-            gumicord.exe    そのまま実行できます
-            themes/         テーマ。差し替えるには:
+            gumicord.exe    run it directly
+            themes/         themes; to swap one in:
                               set GUMICORD_THEME=themes\midnight\theme.json
                               gumicord.exe
 
-          ⚠️ まだ Discord には接続しません。表示されているギルド・チャンネル・
-             メッセージはすべて固定のダミーデータです。日本語入力もまだです。
-             進捗: https://github.com/gumicord/gumicord/blob/main/spec/07-roadmap.md
+          Signing in needs the Discord app on your phone to scan a QR code:
+          there is no password login yet, and no voice, no reactions, no
+          search, and no plugins. The UI is Japanese only for now.
+
+          WARNING: connecting to Discord with a third-party client breaks
+          their terms of service and can cost you your account.
+
+          Progress: https://github.com/gumicord/gumicord/blob/main/spec/07-roadmap.md
           TXT
           ls -l dist/gumicord.exe
 
@@ -165,8 +166,8 @@ jobs:
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
-  # Cargo.toml の rust-version = "1.97" が嘘でないことを確認する。
-  # 宣言しておいて検査しない値は、いずれ必ずずれる。
+  # Confirms rust-version in Cargo.toml is true. A declared value nobody
+  # checks always drifts eventually.
   # ────────────────────────────────────────────────────────────
   msrv:
     name: MSRV (1.97)

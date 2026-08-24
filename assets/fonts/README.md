@@ -1,36 +1,45 @@
-# 同梱フォント
+# Bundled fonts
 
-クライアントのバイナリに埋め込むフォント。`gumicord-render` が `include_bytes!` で読む。
+Fonts embedded in the binary; `gumicord-render` reads them with
+`include_bytes!`.
 
-**ここに置くものは再配布される。** ライセンスを必ず併置し、出処を書く。
+**Everything here is redistributed.** Always ship the licence alongside and
+record where the file came from.
 
-| ファイル | 用途 | ライセンス | 出処 |
+| File | Use | Licence | Source |
 |---|---|---|---|
-| `Inter.ttf` | 本文・UI (Latin) | SIL Open Font License 1.1 ([`Inter-OFL.txt`](Inter-OFL.txt)) | [google/fonts `ofl/inter`](https://github.com/google/fonts/tree/main/ofl/inter) — 上流は [rsms/inter](https://github.com/rsms/inter) |
+| `Inter.ttf` | Body and UI (Latin) | SIL Open Font License 1.1 ([`Inter-OFL.txt`](Inter-OFL.txt)) | [google/fonts `ofl/inter`](https://github.com/google/fonts/tree/main/ofl/inter), upstream [rsms/inter](https://github.com/rsms/inter) |
 
-## なぜ同梱するのか
+## Why bundle at all
 
-| | |
-|---|---|
-| `EXT-020` | システムフォント任せだと環境ごとに書体が変わる。全プラットフォームで同一の描画結果を主張できない |
-| `NFR-001` | システムフォントの列挙は S2 の実測で**初回 360ms**。起動パスから外すには、まず同梱フォントだけで整形を始められる必要がある |
-| 見た目 | OS の既定 sans-serif は UI 用に設計されていない |
+Leaving it to the system font means the typeface changes per machine, which
+makes identical rendering across platforms impossible to claim.
 
-## なぜ可変フォント 1 本なのか
+Enumerating system fonts was measured at 360 ms on a cold start. Getting that
+off the startup path requires being able to shape text from a bundled font
+alone.
 
-`Inter.ttf` は `opsz` と `wght` の 2 軸を持ち、Thin (100) から Black (900) までを 1 ファイルで賄う。
+The default sans-serif on each OS is also not designed for UI.
 
-cosmic-text 0.19 がラスタライズ時に `wght` 軸を設定するため、重さごとに静的インスタンスを持つ必要がない。静的に持つと `midnight` が使う 400 と 600 だけで 2 ファイル、テーマが他の重さを使い始めるたびに増える。
+## Why one variable font
 
-## CJK は同梱していない
+`Inter.ttf` carries `opsz` and `wght`, covering Thin (100) through Black (900)
+in a single file, and cosmic-text sets the `wght` axis at rasterisation time.
+Static instances would mean two files for the 400 and 600 the sample theme
+uses, and another every time a theme reaches for a different weight.
 
-日本語はいまもシステムフォントへのフォールバックで描いている。
+## No CJK yet
 
-Noto Sans JP の可変フォントは約 5.7MB で、現在のバイナリ (4.66MB) が倍以上になる。`EXT-020` の観点では同梱すべきだが、バイナリサイズとの取引であり**別に判断する**。決めたら ADR に残す。
+Japanese still falls back to a system font.
 
-## 追加するときの手順
+The variable Noto Sans JP is around 5.7 MB, which would more than double the
+current 4.66 MB binary. Bundling it is right for identical rendering, but it
+is a trade against binary size and needs a decision of its own. Record it in
+an ADR once made.
 
-1. ライセンスが再配布を許すことを確認する (OFL / Apache-2.0 など)
-2. ライセンス全文を同じディレクトリへ置く
-3. 上の表に行を足す。**出処の URL を必ず書く**
-4. `spec/06-renderer.md` 6 章に、なぜそのフォントなのかを書く
+## Adding a font
+
+1. Confirm the licence permits redistribution (OFL, Apache-2.0, …).
+2. Put the full licence text in this directory.
+3. Add a row above, **with the source URL**.
+4. Say why that font, in `spec/06-renderer.md`.
