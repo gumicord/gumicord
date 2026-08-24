@@ -9,14 +9,14 @@ The fastest and customizable discord unofficial client
 ## Features
 
 - Easy to install
-- Basically discord implements
+- Basic Implementation of Discord
 - Faster than the official client
 - Custom themes and plugins
 
 ## Installing / Uninstalling
 
 > [!CAUTION]
-> That section is currently under preparation.
+> The section is currently under preparation.
 
 ## Contributing
 

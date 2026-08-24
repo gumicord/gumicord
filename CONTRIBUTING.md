@@ -48,9 +48,7 @@ cargo build --profile dist
 > `target/` grows to several GB as well. On a machine with limited memory,
 > close other applications first.
 
-`cargo clean` removes the build artifacts. Spike artifacts can go with
-`rm -rf spike/*/target`: the code stays, and the measurements are already
-recorded in [`spec/adr/`](spec/adr/).
+`cargo clean` removes the build artifacts.
 
 ## Where the rules live
 
