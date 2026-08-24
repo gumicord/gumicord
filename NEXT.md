@@ -1,6 +1,6 @@
 # 次にやること
 
-最終更新: 2026-08-24。**終わったものはこの一覧から消すこと。**
+最終更新: 2026-08-25。**終わったものはこの一覧から消すこと。**
 
 これは仕様ではなく引き継ぎのメモである。腰を据えた計画は
 [`spec/07-roadmap.md`](spec/07-roadmap.md) にある。
@@ -90,6 +90,19 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 
 ---
 
+## 3.5 ~~ログアウトできない~~ ✅ 入れた
+
+自分の欄を副ボタンで押すと「ログアウト」が出る。削除と同じ確認の窓を通り、
+**携帯が要ることを窓に書いてある** (C4b がまだ無いので、書かないと自分の
+クライアントから締め出される)。
+
+⚠️ **不具合も一緒に直した。** `Live::started` が `forget_everything` の
+後も真のままで、**トークンが弾かれた後に入り直しても Gateway が繋がって
+いなかった**。QR を読み直してもキャッシュの画面が出るだけで、何も届かない
+状態である。意図的なログアウトも自動のものも、いまは同じ `sign_out` を通る。
+
+---
+
 ## 4. コードを英語にする — 途中である
 
 2026-08-24 に決めた規則
@@ -99,26 +112,32 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 | | |
 |---|---|
 | 識別子 (試験関数名 159 個ほか) | ✅ **全部終わった。** 日本語の識別子はもう 1 つも無い |
-| `core/model` `core/rest` `core/markdown` `core/uitree` `core/plugin` | ✅ コメントも済んだ |
-| `app/core/menu.rs` `app/core/markdown.rs` | ✅ 済んだ |
-| `render/platform/{clock,clipboard,lib}.rs` | ✅ 済んだ |
-| **残り** | 下の表。**約 3,300 行** |
+| `core/model` `core/rest` `core/markdown` `core/uitree` `core/plugin` | ✅ |
+| `core/store/lib.rs` `core/gateway/gateway.rs` | ✅ |
+| `app/core` 全部 (`lib.rs` `live.rs` `session.rs` `menu.rs` `markdown.rs`) | ✅ |
+| `render/render/{text,layout,draw,intrinsic}.rs` | ✅ |
+| `render/platform/{window,clock,clipboard,lib}.rs` | ✅ |
+| `.md` (`spec/` と `NEXT.md` 以外) と `.github/workflows/ci.yml` | ✅ 英語にした |
+| コミットメッセージ | ✅ これから英語 |
+| **残り** | 下の表。**約 1,600 行** |
 
 ```text
-  762  app/core/src/lib.rs          ← 一番大きい
-  312  render/render/src/text.rs
-  259  core/store/src/lib.rs
-  253  core/gateway/src/gateway.rs
-  241  app/core/src/live.rs
-  238  render/platform/src/window.rs
-  211  render/render/src/layout.rs
-  163  render/render/src/draw.rs
-  132  render/render/src/intrinsic.rs
   125  core/gateway/src/guild_order.rs
   116  core/store/src/db.rs
-  112  app/core/src/session.rs
-  ...  core/theme/*, render/render/{lib,motion,icon,gpu}.rs,
-       render/platform/{secret,text_input}.rs, xtask/*
+  107  render/render/src/lib.rs
+  100  render/render/src/motion.rs
+   80  core/gateway/src/member_list.rs
+   78  core/theme/src/lib.rs
+   71  app/core/src/images.rs
+   70  render/render/src/icon.rs
+   70  core/gateway/src/status.rs
+   68  core/theme/src/parse.rs
+   63  render/platform/src/secret.rs
+   61  core/gateway/src/remote_auth.rs
+   55  render/render/src/gpu.rs
+  ...  core/theme/{resolve,token,cond,diag}.rs,
+       render/platform/text_input/*, xtask/*,
+       core/gateway/{zstd_stream,proto}.rs, app/desktop/main.rs
 ```
 
 数え直す:
@@ -138,13 +157,17 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 - `core/uitree/src/ids.rs` の説明文 — `cargo xtask gen` が
   `spec/03-uitree.md` の表に書き込む中身である
 
+⚠️ **モジュールの説明を丸ごと差し替えるときは `use` を巻き込まないこと。**
+2 回やった (`core/store/src/lib.rs` は `pub mod db;` ごと消えて CI が落ちた)。
+**1 ファイル直すたびに `cargo check` を通すこと。**
+
 ---
 
 ## 5. 前から積んである宿題
 
 | | |
 |---|---|
-| **C4b** パスワード + TOTP ログイン | いま QR だけ。**携帯が無いと戻れない**。ADR-0007 の hCaptcha のホスト名がまだ未確認 |
+| **C4b** パスワード + TOTP ログイン | いま QR だけ。**携帯が無いと戻れない**。ログアウトの窓もそう断っている。ADR-0007 の hCaptcha のホスト名がまだ未確認 |
 | **R4** フォントの列挙を起動の道から外す | 初回 360ms。`NFR-001` の 500ms に対して重い |
 | **E4〜E8** プラグイン実行環境 | **何も無い。** これがプロジェクトの存在理由である |
 | **R6** 仮想化 (`NFR-007`) | 一覧を全部組んでいる |
