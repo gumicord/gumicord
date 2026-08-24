@@ -327,7 +327,7 @@ fn load_theme() -> Option<Theme> {
         Ok(path) => match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(%path, %e, "テーマを読めなかった。同梱のものを使う");
+                tracing::warn!(%path, %e, "could not read the theme; using the bundled one");
                 DEFAULT_THEME.to_owned()
             }
         },
@@ -338,7 +338,7 @@ fn load_theme() -> Option<Theme> {
     // A rejected rule does not reject the theme, but is never dropped
     // silently.
     for d in &result.diagnostics {
-        tracing::warn!("テーマ: {d}");
+        tracing::warn!("theme: {d}");
     }
     result.theme
 }
@@ -358,7 +358,7 @@ impl Application for Gumicord {
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(%e, "非同期処理を始められない");
+                tracing::error!(%e, "could not start the async runtime");
                 return;
             }
         };
@@ -373,7 +373,7 @@ impl Application for Gumicord {
     /// The atlas evicted images. They are still on disk, so this re-reads
     /// rather than refetching; avatars vanish for one frame.
     fn images_dropped(&mut self) {
-        tracing::debug!("アトラスが絵を忘れた。読み直す");
+        tracing::debug!("the atlas evicted images; re-reading them");
         self.images.forget_requested();
     }
 
@@ -883,7 +883,7 @@ impl Gumicord {
                 // Never swallowed: pasting the previous contents while
                 // believing the copy worked is the worst outcome.
                 if let Err(e) = gumicord_platform::clipboard::set_text(text) {
-                    tracing::warn!(%e, "クリップボードへ入れられなかった");
+                    tracing::warn!(%e, "could not write to the clipboard");
                 }
             }
             crate::menu::Action::MarkRead(channel) => {
@@ -936,7 +936,7 @@ impl Gumicord {
                     // Discord collapses them on paste too.
                     Ok(Some(text)) => self.input.insert(&text.replace(['\r', '\n'], " ")),
                     Ok(None) => {}
-                    Err(e) => tracing::warn!(%e, "クリップボードを読めなかった"),
+                    Err(e) => tracing::warn!(%e, "could not read the clipboard"),
                 }
             }
             crate::menu::Action::SelectAll => self.input.select_all(),
@@ -978,7 +978,7 @@ impl Gumicord {
         }
         let text = self.input.text()[sel].to_owned();
         if let Err(e) = gumicord_platform::clipboard::set_text(&text) {
-            tracing::warn!(%e, "クリップボードへ入れられなかった");
+            tracing::warn!(%e, "could not write to the clipboard");
             return false;
         }
         true
@@ -1734,13 +1734,14 @@ impl Gumicord {
         self.login.shows_main() || !self.live.is_empty()
     }
 
-    /// 選んでいるものが実在するように直し、要るものを取りに行く。
+    /// Repairs the selection so it points at something real, and fetches what
+    /// that needs.
     ///
-    /// ⚠️ **起動直後の選択は demo の ID である。** READY が来た時点で
-    /// そんなギルドは無いので、放っておくと一覧だけ出て中身が空になる。
+    /// The startup selection holds demo ids, which do not exist once READY
+    /// arrives; leaving them would show the lists with nothing in them.
     ///
-    /// 戻り値は「画面が変わったか」。取りに行っただけでは変わらない —
-    /// 届いたときに [`Live::poll`] が改めて真を返す
+    /// Returns whether the screen changed. Starting a fetch does not count;
+    /// arrival does.
     fn sync_selection(&mut self) -> bool {
         if !self.uses_live() {
             return false;
@@ -2183,11 +2184,8 @@ mod tests {
         assert!(cancel(Composing::Edit(1)));
     }
 
-    /// ⚠️ **返信と編集で、打った文字の扱いが違う。**
-    ///
-    /// 返信をやめたときに打った文字まで消すと、宛先を外しただけのつもりが
-    /// 書いたものごと消える。編集の入力欄にあるのは元の発言の中身であって、
-    /// 利用者が書いたものではない
+    /// Cancelling a reply keeps the draft; cancelling an edit does not, since
+    /// the field held the original message rather than anything typed.
     #[test]
     fn cancelling_a_reply_keeps_the_draft_but_cancelling_an_edit_clears_it() {
         let press = |c: Composing| {
@@ -2206,11 +2204,8 @@ mod tests {
         assert_eq!(press(Composing::Edit(1)), "", "編集で残った");
     }
 
-    /// ⚠️ **他のボタンで取り消してはいけない。**
-    ///
-    /// `Key::Slot(CANCEL_COMPOSING)` の定数がパターンではなく**束縛**として
-    /// 読まれると、あらゆる `primitive.button` がここへ落ちる。
-    /// 見た目は同じに動くので、押すまで気づけない
+    /// If the slot constant is read as a binding rather than a pattern, every
+    /// button falls through here. It looks identical until one is pressed.
     #[test]
     fn another_button_does_not_cancel() {
         let mut a = app();
@@ -2221,10 +2216,8 @@ mod tests {
         assert_eq!(a.composing, Composing::Reply(1), "別のボタンで取り消された");
     }
 
-    /// ⚠️ **Esc は書きかけを捨てる前に、返信・編集をやめる。**
-    ///
-    /// 一度に両方起きると、打った文字が消えたのか宛先が消えたのかが
-    /// 分からない
+    /// Escape cancels the reply or edit before discarding the draft; both at
+    /// once leaves it unclear which was lost.
     #[test]
     fn esc_は返信をやめてから閉じる() {
         let mut a = app();
@@ -2237,10 +2230,7 @@ mod tests {
         assert!(a.input_focused, "フォーカスまで外れた");
     }
 
-    /// ⚠️ **書き換えで空にするのは「消す」ではない。**
-    ///
-    /// うっかり全部消して Enter を押したときに発言が消えるのは、
-    /// 取り返しがつかない
+    /// Clearing the field and pressing enter must not destroy the message.
     #[test]
     fn submitting_an_empty_field_does_nothing() {
         let mut a = app();
@@ -2249,7 +2239,8 @@ mod tests {
         assert_eq!(a.composing, Composing::Edit(1), "編集をやめてしまった");
     }
 
-    /// 送ったら新規に戻ること。**戻らないと次の発言まで返信になる**
+    /// Sending returns to composing a new message, or the next one is a reply
+    /// too.
     #[test]
     fn submitting_returns_to_composing_a_new_message() {
         let mut a = app();
@@ -2259,14 +2250,11 @@ mod tests {
         assert_eq!(a.composing, Composing::New);
     }
 
-    /// ⚠️ **他人の発言に編集と削除を出さない。**
-    ///
-    /// サーバが 403 を返すだけである。押せる場所に出さないのが先で、
-    /// サーバの拒否はその後ろの守りである
+    /// The server would return 403 anyway, but not offering it comes first.
     #[test]
     fn someone_elses_message_offers_neither_edit_nor_delete() {
         use crate::menu::Action;
-        // demo ではログインしていないので、誰の発言も自分のものではない
+        // Demo mode is signed out, so nothing is ours.
         let a = app();
         let items = a.message_menu(1);
         assert!(
@@ -2275,12 +2263,11 @@ mod tests {
                 .any(|i| matches!(i.action, Action::Edit(_) | Action::Delete(_))),
             "他人の発言に編集か削除が出ている"
         );
-        // 返信は誰の発言にも出る
+        // Reply is offered on anyone's message.
         assert!(items.iter().any(|i| matches!(i.action, Action::Reply(_))));
     }
 
-    /// ⚠️ **入力欄を先に見る。** 発言の一覧の上に重なっているので、
-    /// 後ろに置くと入力欄の上で押しても発言のメニューが出る
+    /// The composer overlaps the message list, so it is checked first.
     #[test]
     fn the_input_field_gets_the_input_menu() {
         use crate::menu::Action;
@@ -2298,8 +2285,7 @@ mod tests {
         );
     }
 
-    /// ⚠️ **できないものを並べない。** 何も選んでいないのに「コピー」を
-    /// 出しても、押して何も起きないだけである
+    /// Only what would do something.
     #[test]
     fn cut_and_copy_are_absent_without_a_selection() {
         use crate::menu::Action;
@@ -2320,7 +2306,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  コンテクストメニュー (`FR-024`, `FR-028` の受け皿)
+    //  Context menus
 
     fn hit_of(id: NodeId, key: Option<Key>) -> Hit {
         Hit {
@@ -2354,16 +2340,13 @@ mod tests {
         );
     }
 
-    /// ⚠️ **開いている間は下へ渡さない。**
-    ///
-    /// 渡すと、メニューを閉じるつもりで押した場所のチャンネルへ移動する。
-    /// 押した場所は当たり判定としては両方に掛かっているので、こちらが
-    /// 「上が開いているなら上だけ」と決めなければ素通りする
+    /// A press hits both layers, so without a rule it passes through and
+    /// navigates to whatever the user meant to dismiss the menu over.
     #[test]
     fn nothing_underneath_is_reachable_while_the_menu_is_open() {
         let mut a = with_menu();
         let before = a.selected_channel;
-        // 下にあるチャンネルへの当たりを一緒に渡す
+        // Include a hit on the channel underneath.
         let hits = [hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))];
 
         assert!(a.pressed(&hits), "閉じるという変化はある");
@@ -2371,10 +2354,10 @@ mod tests {
         assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
     }
 
-    /// 項目を押したら、その操作が走って閉じる。
+    /// Pressing an item runs it and closes the menu.
     ///
-    /// ⚠️ **試験でクリップボードへ書かない。** 走らせた人の手元の
-    /// コピー内容が消える。ここで見たいのは「押したら閉じる」だけである
+    /// Never writes to the clipboard: that would destroy whatever the person
+    /// running the tests had copied.
     #[test]
     fn choosing_an_item_closes_the_menu() {
         let mut a = with_menu();
@@ -2390,8 +2373,7 @@ mod tests {
         assert!(a.floating.is_none());
     }
 
-    /// ⚠️ **Esc はメニューが先である。** 入力欄のフォーカスより手前に
-    /// 浮かんでいるので、そこまで届いてはいけない
+    /// The menu floats above the composer, so escape stops there.
     #[test]
     fn esc_はメニューを先に閉じる() {
         let mut a = with_menu();
@@ -2456,7 +2438,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  時間で変わる表示 (`<t:…:R>`, `NFR-005`)
+    //  Time-dependent display
 
     fn built(a: &mut Gumicord) {
         let cx = gumicord_platform::FrameCx {
@@ -2466,10 +2448,8 @@ mod tests {
         a.build(&cx);
     }
 
-    /// ⚠️ **相対表示が 1 つも無ければ寝たままでよい。**
-    ///
-    /// 起きる理由が無いのに `WaitUntil` を置くと、何も変わらないのに
-    /// 回り続ける (`NFR-005`)
+    /// With no relative timestamp there is nothing to wake for, and a
+    /// deadline would spin for no change.
     #[test]
     fn nothing_relative_means_no_wake_up() {
         let mut a = app();
@@ -2477,14 +2457,12 @@ mod tests {
         assert_eq!(a.next_frame_in(), None);
     }
 
-    /// ⚠️ **時間で変わるものがあれば、変わる頃に起き直す。**
-    ///
-    /// 出したきり寝ると、開きっぱなしの画面で「たった今」が何時間も残る
+    /// Otherwise "just now" stays on an open screen for hours.
     #[test]
     fn a_relative_timestamp_asks_for_a_later_frame() {
         let mut a = app();
-        // ⚠️ **時計を読んだ結果に合わせる。** 決め打ちの時刻を書くと、
-        // 走らせるたびに「何年前」の側へ落ちる
+        // Relative to the real clock; a fixed timestamp would drift into
+        // "years ago".
         let at = gumicord_platform::now_unix() - 90;
         a.sent.push(demo::Message {
             id: 9_999,
@@ -2503,20 +2481,20 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  削除の前に確かめる (`FR-024`)
+    //  Confirming before deleting
 
-    /// 「削除」1 項目だけのメニューを開いた状態。
+    /// A menu holding only "delete".
     ///
-    /// ⚠️ **`message_menu` を通さない。** あちらは自分の発言かどうかを
-    /// 見るので、ログインしていない demo では削除が並ばない。ここで
-    /// 見たいのは並び方ではなく、押した後に何が起きるかである
+    /// Built directly rather than through `message_menu`, which checks whether
+    /// the message is ours and so offers nothing in demo mode. What matters
+    /// here is what pressing it does.
     fn with_delete_menu() -> Gumicord {
         let mut a = app();
         a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
             at: (0.0, 0.0),
             items: vec![crate::menu::Item::new(crate::menu::Action::Delete(1), "削除").danger()],
         }));
-        // 消えたことを外から見るための印。**確かめた後にだけ消える**
+        // An observable marker that only clears once confirmed.
         a.composing = Composing::Edit(1);
         a
     }
@@ -2536,10 +2514,8 @@ mod tests {
         matches!(a.floating, Some(crate::menu::Floating::Confirm(_)))
     }
 
-    /// ⚠️ **メニューの「削除」を押しただけでは消えない。**
-    ///
-    /// メニューの中に埋もれた 1 行で、押した瞬間に消えるのは危うい。
-    /// 隣の項目と 1 行しか離れておらず、消した発言は戻せない
+    /// One row among others in a menu, one line from its neighbours, and a
+    /// deleted message cannot be recovered.
     #[test]
     fn one_press_of_delete_does_not_delete() {
         let mut a = with_delete_menu();
@@ -2548,7 +2524,7 @@ mod tests {
         assert_eq!(a.composing, Composing::Edit(1), "確かめる前に消えている");
     }
 
-    /// やめたら何も起きない。**窓も閉じる**
+    /// Cancelling does nothing and closes the dialog.
     #[test]
     fn cancelling_the_dialog_does_nothing() {
         let mut a = with_delete_menu();
@@ -2559,7 +2535,7 @@ mod tests {
         assert_eq!(a.composing, Composing::Edit(1), "やめたのに消えている");
     }
 
-    /// 確かめたら進む。**ここで初めて消える**
+    /// Confirming is what actually deletes.
     #[test]
     fn confirming_the_dialog_deletes() {
         let mut a = with_delete_menu();
@@ -2567,15 +2543,12 @@ mod tests {
 
         assert!(press_button(&mut a, crate::menu::button::CONFIRM));
         assert!(a.floating.is_none(), "窓が閉じていない");
-        // 書き換えている最中に消したら、書き換えもやめる
+        // Deleting what is being edited also cancels the edit.
         assert_eq!(a.composing, Composing::New, "消えていない");
     }
 
-    /// ⚠️ **窓の外を押しても閉じない。**
-    ///
-    /// メニューは押し間違えても閉じるだけだが、窓は「まだ決めていない」
-    /// ことを示している。外を押して消えると、決めたのか消えたのかが
-    /// 分からない
+    /// A dialog represents an unmade decision; dismissing it on an outside
+    /// press leaves the outcome ambiguous.
     #[test]
     fn clicking_outside_does_not_close_the_dialog() {
         let mut a = with_delete_menu();
@@ -2588,7 +2561,7 @@ mod tests {
         assert!(is_confirm(&a), "外を押しただけで窓が消えた");
     }
 
-    /// Esc なら閉じる。**閉じ方が 1 つも無いのは行き止まりである**
+    /// Escape closes it; no way out at all would be a dead end.
     #[test]
     fn escape_closes_the_dialog() {
         let mut a = with_delete_menu();
@@ -2599,8 +2572,7 @@ mod tests {
         assert_eq!(a.composing, Composing::Edit(1), "Esc で消えている");
     }
 
-    /// ⚠️ **窓から来たものにもう一度窓を挟まない。** 挟むと窓が出続けて
-    /// 永久に進めない
+    /// Confirming again would reopen the dialog forever.
     #[test]
     fn the_dialog_does_not_reappear() {
         let mut a = with_delete_menu();
@@ -2609,7 +2581,7 @@ mod tests {
         assert!(a.floating.is_none(), "窓がもう一度出ている");
     }
 
-    /// 窓が出ているあいだは、下のチャンネルへ届かない
+    /// Nothing underneath is reachable while it is open.
     #[test]
     fn nothing_underneath_is_reachable_while_the_dialog_is_open() {
         let mut a = with_delete_menu();
@@ -2620,8 +2592,7 @@ mod tests {
         assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
     }
 
-    /// ⚠️ **戻せない操作以外に窓を挟まない。** 何を押しても窓が出ると、
-    /// 窓そのものが読まれなくなる
+    /// Confirming everything would stop the dialog being read at all.
     #[test]
     fn a_reversible_action_gets_no_dialog() {
         let mut a = app();
@@ -2636,17 +2607,15 @@ mod tests {
         assert!(a.floating.is_none(), "既読にするだけで窓が出た");
     }
 
-    /// 窓を置いた結果の矩形。
-    ///
-    /// ⚠️ **テーマの数値を読んでも、置いた結果は分からない。**
-    /// `cd72d6f` の ✕ はこれで見つかった
+    /// The dialog's laid-out rectangles. Reading the theme's numbers does not
+    /// show where things land.
     fn placed_confirm(w: f32, h: f32) -> Vec<(NodeId, gumicord_render::Rect)> {
         let mut a = with_delete_menu();
         press_menu(&mut a, 0);
         assert!(is_confirm(&a));
 
-        // ⚠️ demo には本文が無いので、出す 1 行をここで入れる。
-        // **無いまま測ると、一番幅を食う行を測り損ねる**
+        // Demo mode has no body, and without the preview the widest row is
+        // never measured.
         if let Some(crate::menu::Floating::Confirm(c)) = &mut a.floating {
             c.preview = crate::menu::preview_line(
                 "おはようございます。今日はよろしくお願いします。長めの本文です",
@@ -2685,9 +2654,7 @@ mod tests {
             && inner.y + inner.h <= outer.y + outer.h
     }
 
-    /// ⚠️ **窓の中身が窓からはみ出さないこと。**
-    ///
-    /// はみ出したボタンは「出ているのに押せない」という壊れ方をする
+    /// A button outside the dialog is visible but unpressable.
     #[test]
     fn the_dialog_contents_stay_inside_it() {
         let placed = placed_confirm(1280.0, 800.0);
@@ -2711,8 +2678,7 @@ mod tests {
             assert!(contains(modal, *b), "ボタン {b:?} が窓 {modal:?} から出た");
         }
 
-        // ⚠️ **文字がボタンからはみ出さないこと。** はみ出すと、押せる
-        // 場所と読める場所がずれる
+        // Otherwise what can be pressed and what can be read drift apart.
         for (label, button) in all_of(&placed, NodeId::OverlayModalActionLabel)
             .iter()
             .zip(&buttons)
@@ -2724,8 +2690,7 @@ mod tests {
         }
     }
 
-    /// ⚠️ **2 つのボタンが重ならないこと。** 重なると、上のボタンしか
-    /// 押せないのに下のボタンも見えている状態になる
+    /// Overlapping leaves one visible but unreachable.
     #[test]
     fn the_two_buttons_do_not_overlap() {
         let placed = placed_confirm(1280.0, 800.0);
@@ -2738,7 +2703,7 @@ mod tests {
         );
     }
 
-    /// 窓は押した場所ではなく**画面の真ん中**に出る
+    /// Centred, not placed at the press.
     #[test]
     fn the_dialog_is_centred_on_screen() {
         let (w, h) = (1280.0, 800.0);
@@ -2749,8 +2714,7 @@ mod tests {
         assert!((cy - h / 2.0).abs() < 1.0, "縦にずれている {modal:?}");
     }
 
-    /// ⚠️ **狭い窓でも入りきること。** 携帯の幅で画面からはみ出すと、
-    /// 「やめる」に手が届かなくなる
+    /// Overflowing at phone widths puts cancel out of reach.
     #[test]
     fn it_fits_in_a_narrow_window() {
         let (w, h) = (400.0, 700.0);
@@ -2769,9 +2733,7 @@ mod tests {
         }
     }
 
-    /// ⚠️ **開いていないときは層を載せない。**
-    ///
-    /// 常に載せると、窓いっぱいの層が当たりを受け止め続けて何も押せなくなる
+    /// A permanent full-window layer would absorb every press.
     #[test]
     fn no_overlay_layer_is_built_while_nothing_is_open() {
         let has_layer = |a: &Gumicord| {
@@ -2785,7 +2747,7 @@ mod tests {
         assert!(has_layer(&with_menu()));
     }
 
-    /// 何も無いところで押したら、開いていたものを閉じるだけ
+    /// A press on nothing just closes what is open.
     #[test]
     fn right_clicking_empty_space_closes_the_menu() {
         let mut a = with_menu();
@@ -2793,8 +2755,8 @@ mod tests {
         assert!(a.floating.is_none());
     }
 
-    /// ⚠️ **端末の種類ではなく幅で決める。** 窓を狭くした机の上でも、
-    /// 指の下にメニューが出るより下から出たほうが読める
+    /// By width, not device: a narrowed desktop window reads better with a
+    /// sheet.
     #[test]
     fn a_narrow_window_presents_the_menu_as_a_sheet() {
         use crate::menu::Present;
@@ -2803,10 +2765,8 @@ mod tests {
         assert_eq!(Panes::Four.present(), Present::Popover);
     }
 
-    /// ⚠️ **コードの中の `<@1>` は呼びかけではない。**
-    ///
-    /// 素の文字列を `contains` で調べる実装だと、`` `<@1>` `` と書いた
-    /// だけで相手に通知が飛ぶ。ここは解析した結果を見ている (`FR-022`)
+    /// Matching on the raw string would notify someone for writing about a
+    /// mention inside code.
     #[test]
     fn a_mention_inside_code_is_not_a_mention() {
         let me = Some(UserId::from(1));
@@ -2819,12 +2779,11 @@ mod tests {
 <@1>
 ```"
         ));
-        // 別人は呼ばない
+        // A different person is not us.
         assert!(!call("やあ <@2>"));
     }
 
-    /// ⚠️ **役職も見る。** `@everyone` だけを見ていると、自分の役職が
-    /// 呼ばれたときに気づけない
+    /// Watching only `@everyone` misses being called by role.
     #[test]
     fn a_mention_of_our_own_role_counts() {
         let me = Some(UserId::from(1));
@@ -2837,11 +2796,11 @@ mod tests {
         assert!(!call("<@&9> 集合", None));
         assert!(call("@everyone", None));
         assert!(call("@here", None));
-        // チャンネルは呼びかけではない
+        // A channel reference is not a mention.
         assert!(!call("<#9> を見て", Some(&roles)));
     }
 
-    /// 引用と箇条書きの中の呼びかけも拾うこと
+    /// Mentions inside quotes and lists count.
     #[test]
     fn a_nested_mention_is_found() {
         let me = Some(UserId::from(1));
@@ -2850,7 +2809,7 @@ mod tests {
         assert!(call("- やあ <@1>"));
         assert!(call("# やあ <@1>"));
     }
-    /// 同梱テーマが常に読める。ここが壊れると起動して真っ黒になる
+    /// The bundled theme always parses; a broken one starts up black.
     #[test]
     fn the_bundled_theme_parses() {
         let result = Theme::parse(DEFAULT_THEME);
@@ -2859,7 +2818,7 @@ mod tests {
         assert!(result.is_applied());
     }
 
-    /// 木が組め、選択状態が反映される
+    /// The tree builds and reflects the selection.
     #[test]
     fn the_tree_reflects_the_selection() {
         let mut a = app();
@@ -2875,7 +2834,7 @@ mod tests {
         assert_eq!(selected, vec![Some(Key::Id(demo::CHANNELS[2].id))]);
     }
 
-    /// テーマ解決まで通すと、`app.window` に背景が付く
+    /// Resolving the theme gives `app.window` a background.
     #[test]
     fn theme_reaches_the_tree() {
         let mut a = app();
@@ -2890,13 +2849,13 @@ mod tests {
             window.style.background.is_some(),
             "app.window に背景が解決されていない"
         );
-        // 継承が末端まで届いている
+        // Inheritance reaches the leaves.
         let title = &window.children[0].children[0];
         assert_eq!(title.id, NodeId::ChromeTitlebarTitle);
         assert!(title.style.color.is_some(), "文字色が継承されていない");
     }
 
-    /// 押しても何も変わらないなら、再描画を要求しない
+    /// A press that changes nothing asks for no redraw.
     #[test]
     fn pressing_the_current_channel_changes_nothing() {
         let mut a = app();
@@ -2927,13 +2886,13 @@ mod responsive_tests {
         out
     }
 
-    /// 幅で段が切り替わること。境界のちょうどの値は広いほうに入る
+    /// Width picks the tier; a boundary value belongs to the wider one.
     #[test]
     fn panes_are_chosen_by_width() {
         assert_eq!(Panes::for_width(1600.0), Panes::Four);
         assert_eq!(Panes::for_width(1140.0), Panes::Four);
-        // ⚠️ **メンバー一覧が真っ先に消える。** 誰が居るかは、
-        // 何が書いてあるかより後で構わない
+        // The member list goes first: who is present matters less than what
+        // was said.
         assert_eq!(Panes::for_width(1139.0), Panes::Three);
         assert_eq!(Panes::for_width(900.0), Panes::Three);
         assert_eq!(Panes::for_width(899.0), Panes::Two);
@@ -2942,8 +2901,7 @@ mod responsive_tests {
         assert_eq!(Panes::for_width(320.0), Panes::One);
     }
 
-    /// 狭くしても**チャットは必ず残る**。
-    /// 何も出ない幅があってはいけない
+    /// Chat survives every width; no width may show nothing.
     #[test]
     fn the_chat_view_never_disappears() {
         let a = Gumicord::demo();
@@ -3001,12 +2959,8 @@ mod input_tests {
         found.expect("入力欄が見つからない")
     }
 
-    /// 本文を読める文字列に戻す。
-    ///
-    /// ⚠️ **飾りは落ちる。** 本文は `chat.message.content` の下に積まれた
-    /// 段落の並びであり、段落の中は走りの並びである (`FR-021`)。
-    /// ここが見ているのは「何が書いてあるか」だけで、どう飾られているかは
-    /// 見ていない
+    /// Flattens a body back to readable text, dropping decoration: this only
+    /// checks what was written, not how it looks.
     fn bodies(tree: &UiNode) -> Vec<String> {
         let mut out = Vec::new();
         tree.walk(&mut |n, _| {
@@ -3028,7 +2982,7 @@ mod input_tests {
         out
     }
 
-    /// フォーカスが無いと入力は届かない (`PLT-001`)
+    /// Input needs focus.
     #[test]
     fn input_only_reaches_a_focused_field() {
         let mut a = Gumicord::demo();
@@ -3038,7 +2992,7 @@ mod input_tests {
         assert!(a.focused_document().is_some());
     }
 
-    /// 変換中の範囲が UITree まで届く。**下線を描くのに要る**
+    /// The preedit range reaches the tree, which is what draws the underline.
     #[test]
     fn a_composition_reaches_the_tree() {
         let mut a = Gumicord::demo();
@@ -3058,7 +3012,7 @@ mod input_tests {
         assert_eq!(f.caret, f.text.len());
     }
 
-    /// 空なら placeholder が入り、**変換の印は出ない**
+    /// Empty shows the placeholder and no preedit marks.
     #[test]
     fn an_empty_field_shows_only_its_placeholder() {
         let mut a = Gumicord::demo();
@@ -3068,7 +3022,7 @@ mod input_tests {
         assert!(f.composing.is_none());
     }
 
-    /// FR-024: Enter で送ると一覧に増え、入力欄は空になる
+    /// Enter appends and clears the field.
     #[test]
     fn submitting_appends_the_message_and_clears_the_field() {
         let mut a = Gumicord::demo();
@@ -3085,7 +3039,7 @@ mod input_tests {
         assert!(field(&tree).text.is_empty(), "入力欄が空になっていない");
     }
 
-    /// 空白だけのものは送らない
+    /// Whitespace alone is not sent.
     #[test]
     fn whitespace_is_not_submitted() {
         let mut a = Gumicord::demo();
@@ -3094,7 +3048,7 @@ mod input_tests {
         assert!(!a.submit());
     }
 
-    /// Esc でフォーカスが外れる。**変換中の Esc は取り消しであって、
+    /// Escape removes focus. During composition it cancels instead, which is
     /// フォーカス外しではない** — その分岐はプラットフォーム層が持つ
     #[test]
     fn escape_leaves_the_field() {
@@ -3111,10 +3065,8 @@ mod login_tests {
     use super::session::{Login, LoginEvent};
     use super::*;
 
-    /// まだログインしていないアプリ。
-    ///
-    /// ⚠️ `Gumicord::new()` は `GUMICORD_SKIP_LOGIN` を読む。**開発機の
-    /// 環境変数で試験の結果が変わってはいけない**ので、ここで潰す
+    /// A signed-out app. `Gumicord::new` reads the environment, and a
+    /// developer's variables must not change test results.
     fn pending() -> Gumicord {
         Gumicord::with(Login::fresh_for_test(), Live::without_cache())
     }
@@ -3125,8 +3077,8 @@ mod login_tests {
         out
     }
 
-    /// **ログインしていなければメイン画面は組み立てもしない。**
-    /// 中身が見えているのに触れない状態が一番たちが悪い
+    /// The main screen is not even built while signed out; visible but
+    /// untouchable is the worst state.
     #[test]
     fn the_main_screen_is_not_built_before_login() {
         let a = pending();
@@ -3137,8 +3089,8 @@ mod login_tests {
         assert!(!seen.contains(&NodeId::ChatMessageList), "本文が漏れている");
     }
 
-    /// QR が来る前に QR ノードを出さない。
-    /// **読めない QR を見せるのは、何も見せないより悪い**
+    /// No QR node before there is a QR: an unscannable one is worse than
+    /// none.
     #[test]
     fn the_qr_node_appears_only_once_there_is_a_qr() {
         let mut a = pending();
@@ -3158,7 +3110,7 @@ mod login_tests {
         assert_eq!(data.as_deref(), Some("https://example/1"));
     }
 
-    /// 進み具合が必ず文字で出ている。**黙って止まって見える状態を作らない**
+    /// Progress is always stated, so nothing looks silently stuck.
     #[test]
     fn every_state_says_something() {
         let mut a = pending();
@@ -3184,7 +3136,7 @@ mod login_tests {
         }
     }
 
-    /// テーマがログイン画面まで届く。**QR の地は必ず明るい**
+    /// The theme reaches the login screen; the QR's ground stays light.
     #[test]
     fn the_theme_reaches_the_login_screen() {
         let mut a = pending();
@@ -3206,7 +3158,7 @@ mod login_tests {
         assert!(s.padding.is_some(), "静音領域ぶんの余白が無い");
     }
 
-    /// `GUMICORD_SKIP_LOGIN` 相当ならメイン画面が出る
+    /// Skipping login shows the main screen.
     #[test]
     fn skipping_shows_the_main_screen() {
         let a = Gumicord::demo();
@@ -3214,7 +3166,7 @@ mod login_tests {
         assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::AppScreenMain));
     }
 
-    /// 未ログインでも `Login::new` が勝手に走り出さない (試験が網を叩かない)
+    /// Tests never reach the network.
     #[test]
     fn nothing_starts_until_start_is_called() {
         let login = Login::fresh_for_test();
@@ -3223,11 +3175,11 @@ mod login_tests {
     }
 }
 
-/// 「入力中」の一行を組み立てる。
+/// Builds the typing line.
 ///
-/// ⚠️ **名前を全部並べない。** 賑やかなサーバでは 10 人が同時に打つことが
-/// あり、そのまま並べると一行に収まらず、他の表示を押し出す。
-/// Discord も 3 人までで打ち切る。
+/// Truncated after a few names: a busy server can have ten people typing at
+/// once, which would push everything else off the line. Discord truncates
+/// too.
 fn typing_line(names: &[&str]) -> String {
     match names {
         [] => String::new(),
@@ -3242,7 +3194,7 @@ fn typing_line(names: &[&str]) -> String {
 mod typing_tests {
     use super::*;
 
-    /// 誰も打っていなければ**何も出さない**
+    /// Nobody typing shows nothing.
     #[test]
     fn nobody_typing_says_nothing() {
         assert_eq!(typing_line(&[]), "");
@@ -3255,8 +3207,7 @@ mod typing_tests {
         assert_eq!(typing_line(&["あ", "い", "う"]), "  あ、い、う が入力中…");
     }
 
-    /// ⚠️ **賑やかなサーバでも一行に収まる。**
-    /// 全部並べると他の表示を押し出す
+    /// Fits on one line even on a busy server.
     #[test]
     fn a_crowd_is_summarised() {
         let many = ["あ", "い", "う", "え", "お", "か"];
@@ -3280,9 +3231,7 @@ mod user_panel_tests {
         out
     }
 
-    /// ⚠️ **ログインしていなければ出さない。**
-    ///
-    /// 誰でもない自分を出す意味がない
+    /// Nothing to show while signed out.
     #[test]
     fn there_is_no_panel_before_logging_in() {
         let a = Gumicord::demo();
@@ -3291,10 +3240,8 @@ mod user_panel_tests {
         assert!(!names(&side).contains(&NodeId::NavUserPanel));
     }
 
-    /// ⚠️ **自分の欄はサーバ一覧の分までまたがる。**
-    ///
-    /// チャンネル一覧の中に置くと、そこだけの幅になって Discord と違う。
-    /// 実機で見比べて報告を受けた
+    /// The user panel spans the guild list too; inside the channel list it
+    /// would only be as wide as that.
     #[test]
     fn the_panel_spans_both_lists() {
         let a = Gumicord::demo();
@@ -3302,35 +3249,32 @@ mod user_panel_tests {
 
         assert_eq!(side.id, NodeId::NavSidebar);
         assert_eq!(side.children[0].id, NodeId::NavSidebarLists);
-        // 一覧はまとめられ、自分はその**外**にいる
+        // The lists are grouped; the panel sits outside them.
         let inside = names(&side.children[0]);
         assert!(inside.contains(&NodeId::NavGuildList));
         assert!(inside.contains(&NodeId::NavChannelList));
         assert!(!inside.contains(&NodeId::NavUserPanel));
 
-        // ⚠️ 伸びると、チャットから幅を奪う
+        // Growing here would take width from chat.
         assert_eq!(gumicord_render::intrinsic(NodeId::NavSidebar).grow, 0.0);
     }
 
-    /// スクロールバーは**触っている一覧にしか出ない**。
-    ///
-    /// 出しっぱなしだと、丸が並ぶだけのサーバ一覧の右端にいつも線が入る
+    /// Only the list under the pointer gets a scrollbar.
     #[test]
     fn only_the_list_under_the_pointer_has_a_scrollbar() {
         let mut a = Gumicord::demo();
 
-        // どこにも居ないうちは、どの一覧にも出ない
+        // Nowhere means none of them.
         assert!(!names(&a.guild_list()).contains(&NodeId::LayoutScrollbar));
         assert!(!names(&a.channel_list()).contains(&NodeId::LayoutScrollbar));
 
         a.hovered_scroll = Some(NodeId::NavGuildList);
         assert!(names(&a.guild_list()).contains(&NodeId::LayoutScrollbar));
-        // 隣の一覧には出ない
+        // Not on the neighbouring list.
         assert!(!names(&a.channel_list()).contains(&NodeId::LayoutScrollbar));
     }
 
-    /// ⚠️ **一番内側の巻ける領域を採る。** チャンネル一覧の中身は
-    /// `layout.scroll` であって `nav.channel_list` ではない
+    /// The innermost scrollable wins.
     #[test]
     fn the_innermost_scroll_region_wins() {
         let mut a = Gumicord::demo();
@@ -3341,7 +3285,7 @@ mod user_panel_tests {
             clip: None,
         };
 
-        // 手前から並ぶ。項目 → 内側の巻ける領域 → 外側の入れ物
+        // Front to back: item, inner scrollable, outer container.
         a.hover_changed(&[
             hit(NodeId::NavChannelListItem),
             hit(NodeId::LayoutScroll),
@@ -3353,17 +3297,14 @@ mod user_panel_tests {
         assert_eq!(a.hovered_scroll, None);
     }
 
-    /// 一番狭いときは一覧ごと消える。**自分も一緒に消える**
+    /// At the narrowest width the lists go, and the panel with them.
     #[test]
     fn one_pane_has_no_sidebar_at_all() {
         let a = Gumicord::demo();
         assert!(a.sidebar(Panes::One).is_none());
     }
 
-    /// ⚠️ **見出しと自分は巻かない。**
-    ///
-    /// 一覧ごと 1 つのスクロール領域にすると、下まで巻いたときに
-    /// 自分が誰かもどのサーバを見ているかも見えなくなる
+    /// One scroll region would carry the header and the panel off screen.
     #[test]
     fn only_the_list_scrolls() {
         let a = Gumicord::demo();
@@ -3420,8 +3361,7 @@ mod member_tests {
 
     fn app(m: Message) -> Gumicord {
         let mut a = Gumicord::demo();
-        // ⚠️ **ギルドを 1 つ置かないと demo のままである。**
-        // 本物かどうかの分かれ目は `uses_live()` の 1 箇所しかない
+        // Without a guild this stays demo mode.
         a.live
             .store_mut()
             .replace_guilds(vec![gumicord_model::Guild {
@@ -3451,9 +3391,7 @@ mod member_tests {
         a
     }
 
-    /// ⚠️ **そのサーバでの呼び名が勝つ。**
-    ///
-    /// 全体の名前で出すと、「このサーバでは誰なのか」が分からない
+    /// The per-guild name wins.
     #[test]
     fn a_nickname_wins_over_the_global_name() {
         let a = app(message(Some("ねこ"), None));
@@ -3463,7 +3401,7 @@ mod member_tests {
         assert_eq!(a.message_rows()[0].author, "ねんねこ");
     }
 
-    /// ⚠️ **顔もサーバごとに違う。** 見ているギルドが URL に入る
+    /// Avatars are per guild too; the guild appears in the URL.
     #[test]
     fn a_guild_avatar_wins_over_the_global_one() {
         let a = app(message(None, Some("xyz")));
@@ -3473,15 +3411,14 @@ mod member_tests {
             "{url}"
         );
 
-        // 何も上書きしていなければ、本人も設定していないので既定の絵
+        // No override and no avatar means the default one.
         let a = app(message(None, None));
         let url = a.message_rows()[0].avatar.clone().unwrap();
         assert!(url.contains("/embed/avatars/"), "{url}");
     }
 
-    /// ⚠️ **本文の送信者名も役職の色で出す。**
-    ///
-    /// 一覧だけ色が付いていて本文が白いと、同じ人が別人に見える
+    /// Colouring the member list but not the author line makes one person
+    /// look like two.
     #[test]
     fn the_author_name_carries_the_role_colour() {
         let mut a = app(message(None, None));
@@ -3500,7 +3437,7 @@ mod member_tests {
             }],
         });
 
-        // その役職を持つ人の発言に差し替える
+        // Swap in a message from someone with that role.
         let mut m = message(None, None);
         m.member.as_mut().expect("居る").roles = vec![55u64.into()];
         a.live
@@ -3509,7 +3446,7 @@ mod member_tests {
 
         assert_eq!(a.message_rows()[0].tint, Some(0x00e0_5260));
 
-        // 木にも載る
+        // And it reaches the tree.
         let tree = a.chat_view();
         let mut found = None;
         tree.walk(&mut |n, _| {
@@ -3520,11 +3457,9 @@ mod member_tests {
         assert_eq!(found, Some(Color::from_rgb(0x00e0_5260)));
     }
 
-    /// ⚠️ **REST で取った発言には `member` が付いていない。**
-    ///
-    /// Discord が添えるのは Gateway の `MESSAGE_CREATE` だけである。
-    /// 発言だけを見ていると、**チャンネルを開いた直後は呼び名も顔も色も
-    /// 出ず、新しい発言が 1 つ来たときだけそこに色が付く**。実際にそうなった
+    /// REST messages carry no `member`. Reading only the message left a
+    /// freshly opened channel with no nicknames, avatars or colours until one
+    /// new message arrived and coloured just that row.
     #[test]
     fn a_message_without_a_member_falls_back_to_what_we_have_seen() {
         let mut a = app(message(None, None));
@@ -3542,7 +3477,7 @@ mod member_tests {
                 color: Some(0x00e0_5260),
             }],
         });
-        // 一覧か過去の発言で見かけた姿
+        // A member seen in the list or in earlier messages.
         a.live.store_mut().remember_member(
             1u64.into(),
             7u64.into(),
@@ -3555,7 +3490,7 @@ mod member_tests {
             },
         );
 
-        // REST から来た発言。**`member` が無い**
+        // From REST, so no `member`.
         let mut m = message(None, None);
         m.member = None;
         a.live
@@ -3567,7 +3502,7 @@ mod member_tests {
         assert_eq!(row.tint, Some(0x00e0_5260), "役職の色も出る");
     }
 
-    /// 発言に付いていれば**そちらが勝つ**。より新しいので
+    /// The message's own member wins, being newer.
     #[test]
     fn the_member_on_the_message_wins() {
         let mut a = app(message(Some("いまの呼び名"), None));
@@ -3592,7 +3527,7 @@ mod member_list_tests {
     use gumicord_gateway::member_list;
     use serde_json::json;
 
-    /// 役職 1 つを持つギルドと、その中のチャンネルを開いた状態
+    /// A guild with one role, and a channel open in it.
     fn app() -> Gumicord {
         let mut a = Gumicord::demo();
         a.live
@@ -3657,10 +3592,7 @@ mod member_list_tests {
         out
     }
 
-    /// ⚠️ **届く前から列は立てておく。**
-    ///
-    /// 届いてから生やすと、そのときチャットの幅が変わって本文が組み直される。
-    /// 読んでいる最中に画面が動くのは、空の列が一瞬見えるより悪い
+    /// Growing the column later would reflow the body under the reader.
     #[test]
     fn the_column_stands_before_anything_arrives() {
         let a = app();
@@ -3668,7 +3600,7 @@ mod member_list_tests {
         let empty = a.member_list();
         assert_eq!(empty.id, NodeId::NavMemberList);
         assert!(empty.children.is_empty(), "中身はまだ無い");
-        // 「まだ来ていない」と「誰も居ない」は別のことである
+        // "Not here yet" is not "nobody here".
         assert!(empty.states.contains(State::Loading));
 
         let tree = a.build_tree(Panes::Four);
@@ -3677,7 +3609,7 @@ mod member_list_tests {
         assert!(found, "幅があるうちは列が立っている");
     }
 
-    /// 届いたら [`State::Loading`] は下りる
+    /// Arrival clears `Loading`.
     #[test]
     fn the_loading_state_goes_away_once_people_arrive() {
         let mut a = app();
@@ -3685,7 +3617,7 @@ mod member_list_tests {
         assert!(!a.member_list().states.contains(State::Loading));
     }
 
-    /// 見出しは**名前**で出る。役職の識別子は出さない
+    /// Headings show names, never role ids.
     #[test]
     fn headings_come_out_as_names() {
         let mut a = app();
@@ -3706,8 +3638,7 @@ mod member_list_tests {
         );
     }
 
-    /// ⚠️ **知らない役職の見出しは飛ばす。**
-    /// 18 桁の数字が並んでも、利用者にできることは増えない
+    /// An unresolved role id tells the reader nothing.
     #[test]
     fn a_role_we_cannot_name_is_skipped() {
         let mut a = app();
@@ -3722,7 +3653,8 @@ mod member_list_tests {
         assert_eq!(texts(&a.member_list()), vec!["ねんねこ"]);
     }
 
-    /// 役職の色は**名前のノードに載る**。塗る場所を決めるのはテーマである
+    /// The role colour rides on the name node; the theme decides where it
+    /// lands.
     #[test]
     fn a_role_colour_rides_on_the_name() {
         let mut a = app();
@@ -3745,8 +3677,7 @@ mod member_list_tests {
         assert_eq!(name.tint, Some(Color::from_rgb(0x00e0_5260)));
     }
 
-    /// ⚠️ **知らない役職しか持たない人には色を付けない。**
-    /// 分からないことを既定の色で埋めない
+    /// Unknown roles do not get a default colour.
     #[test]
     fn a_member_with_no_known_role_has_no_colour() {
         let mut a = app();
@@ -3768,7 +3699,7 @@ mod member_list_tests {
         assert_eq!(name.tint, None);
     }
 
-    /// ⚠️ **狭いときはメンバー一覧から畳む。** チャットより後で構わない
+    /// The member list folds before chat does.
     #[test]
     fn the_column_is_the_first_thing_to_go() {
         let mut a = app();
@@ -3798,8 +3729,7 @@ mod channel_selection_tests {
             icon_hash: None,
             unavailable: false,
             channels: vec![
-                // ⚠️ **カテゴリが先に来る。** 位置が 0 なので、
-                // 素直に「最初のもの」を採るとこれが選ばれる
+                // Categories sort first, so "the first row" picks one.
                 Channel {
                     id: 10u64.into(),
                     kind: ChannelKind::GuildCategory,
@@ -3829,10 +3759,8 @@ mod channel_selection_tests {
         }
     }
 
-    /// ⚠️ **カテゴリは見出しであって、開けるものではない。**
-    ///
-    /// 既定の選択がカテゴリを拾うと、押してもいないカテゴリが開かれた
-    /// ことになる。実際にそうなった
+    /// Categories are headings; the default selection once picked one and
+    /// opened a category nobody pressed.
     #[test]
     fn a_category_is_never_selected_by_default() {
         let mut a = Gumicord::demo();
@@ -3847,7 +3775,7 @@ mod channel_selection_tests {
         assert_eq!(a.selected_channel, 11, "カテゴリを開こうとしている");
     }
 
-    /// 一覧にはカテゴリも出る。**出さないのと開けないのは別である**
+    /// Categories still appear; not openable is not the same as not shown.
     #[test]
     fn the_category_still_appears_in_the_list() {
         let mut a = Gumicord::demo();
@@ -3880,7 +3808,7 @@ mod folder_tests {
         }
     }
 
-    /// 3 つ入ったフォルダ 1 つと、その外のギルド 1 つ
+    /// One folder of three, and one guild outside it.
     fn app_with_folder() -> Gumicord {
         let mut a = Gumicord::demo();
         a.live.store_mut().replace_guilds(vec![
@@ -3906,10 +3834,8 @@ mod folder_tests {
         a
     }
 
-    /// 閉じたフォルダの面に敷き詰められた絵の枚数。
-    ///
-    /// ⚠️ **`collapsed` で数える。** 普通のサーバも同じ安定 ID の絵を
-    /// 持っているので、ID だけで数えると一覧じゅうの絵が混ざる
+    /// Tiles on a folded folder. Counted by `collapsed`, since ordinary
+    /// guilds use the same stable ID.
     fn tiles(node: &UiNode) -> usize {
         fn walk(n: &UiNode, found: &mut usize) {
             if n.id == NodeId::NavGuildListItemIcon && n.states.contains(State::Collapsed) {
@@ -3924,9 +3850,8 @@ mod folder_tests {
         found
     }
 
-    /// 左端の印は**選択中・未読・ホバーのときだけ**出る。
-    ///
-    /// ⚠️ 高さ 0 で隠すのではなく置かない。**出ている印は必ず何かを言う**
+    /// The pill appears only when selected, unread or hovered — absent rather
+    /// than zero-height, so a visible pill always means something.
     #[test]
     fn the_pill_only_appears_when_it_means_something() {
         fn pills(n: &UiNode, out: &mut Vec<gumicord_uitree::StateSet>) {
@@ -3944,19 +3869,19 @@ mod folder_tests {
         let mut found = Vec::new();
         pills(&a.guild_list(), &mut found);
 
-        // 選んでいるサーバ 1 つにしか出ない
+        // Only on the selected guild.
         assert_eq!(found.len(), 1);
         assert!(found[0].contains(State::Selected));
 
-        // どれも選んでいなければ 1 つも出ない
+        // None selected, none shown.
         a.selected_guild = 0;
         let mut none = Vec::new();
         pills(&a.guild_list(), &mut none);
         assert!(none.is_empty());
     }
 
-    /// ⚠️ **絵は入れ物の子である。** 入れ物のほうが広く、左端に印の
-    /// 通り道がある。絵をそのまま項目にすると印を置く場所が無い
+    /// The icon is a child of the container, which is wider and leaves a lane
+    /// for the pill.
     #[test]
     fn the_item_holds_the_picture_rather_than_being_it() {
         let a = app_with_folder();
@@ -3981,10 +3906,8 @@ mod folder_tests {
         );
     }
 
-    /// ⚠️ **閉じたフォルダは中身の絵を並べる。**
-    ///
-    /// 頭文字 1 つの箱では、どのフォルダを閉じているのか分からない。
-    /// 実際にそうなっていて、直せと言われた
+    /// A folded folder tiles its contents; a box with one initial does not
+    /// say which folder it is.
     #[test]
     fn a_closed_folder_shows_what_is_inside() {
         let mut a = app_with_folder();
@@ -3993,8 +3916,7 @@ mod folder_tests {
         assert_eq!(tiles(&a.guild_list()), 3);
     }
 
-    /// ⚠️ **開いているときに敷き詰めない。** 中身はフォルダの子として
-    /// 並んでいるので、同じ絵が上下に二重に出る
+    /// Tiling an open folder would show the same icons twice.
     #[test]
     fn an_open_folder_does_not_repeat_its_contents() {
         let a = app_with_folder();
@@ -4002,10 +3924,8 @@ mod folder_tests {
         assert_eq!(tiles(&a.guild_list()), 0);
     }
 
-    /// ⚠️ **開いたフォルダの中身は、フォルダの子である。**
-    ///
-    /// 兄弟として並べると背景がフォルダの分しか無くなり、どこまでが
-    /// 1 つのフォルダなのか見て分からなくなる
+    /// As siblings the background would stop covering them and the folder's
+    /// extent would be invisible.
     #[test]
     fn an_open_folder_holds_its_contents() {
         let a = app_with_folder();
@@ -4031,7 +3951,7 @@ mod folder_tests {
         assert_eq!(outside, 1, "フォルダの外のサーバだけが兄弟であるはず");
     }
 
-    /// 閉じたフォルダは中身を抱えない。**開くまで出さない**
+    /// A folded folder holds no children.
     #[test]
     fn a_closed_folder_holds_nothing() {
         let mut a = app_with_folder();
@@ -4046,7 +3966,7 @@ mod folder_tests {
         assert_eq!(items, 1);
     }
 
-    /// ⚠️ 2×2 に入りきらない分は出しても意味がない
+    /// Anything beyond the 2x2 is pointless.
     #[test]
     fn only_four_fit() {
         let mut a = Gumicord::demo();
@@ -4063,7 +3983,7 @@ mod folder_tests {
         assert_eq!(tiles(&a.guild_list()), FOLDER_TILES);
     }
 
-    /// 絵の無いサーバも 1 枚として数える。**穴が空くほうが分かりにくい**
+    /// A guild without an icon still takes a tile; a gap reads worse.
     #[test]
     fn a_guild_without_an_icon_still_takes_a_tile() {
         let mut a = app_with_folder();
@@ -4076,16 +3996,11 @@ mod folder_tests {
     }
 }
 
-/// アイコンかアバターを 1 つ作る。
+/// Builds an icon or avatar, falling back to initials.
 ///
-/// # 絵が無いときは頭文字を出す
-///
-/// ⚠️ **絵が届くまでの間も同じノードである。** 届いてから別のノードに
-/// 差し替えると、`key` が変わって差分更新がやり直しになる。
-///
-/// 絵が「まだ手元に無い」ことはレンダラしか知らないので、ここでは
-/// **URL があるかどうかだけ**で決める。届いていなければレンダラが
-/// 何も描かず、テーマの背景色がそのまま見える。
+/// The same node either way: swapping node types on arrival would change the
+/// key and restart diffing. Only the renderer knows whether an image is in
+/// hand, so this decides on the URL alone.
 fn face(id: NodeId, url: Option<&str>, name: &str) -> UiNode {
     match url {
         Some(url) => UiNode::image(id, url),
