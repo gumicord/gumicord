@@ -1,27 +1,21 @@
-//! テキストの整形とグリフアトラス。
+//! Text shaping and the glyph atlas.
 //!
 //! ```text
-//! cosmic-text で整形 (shaping / bidi / フォールバック)
+//! shape (shaping, bidi, fallback)
 //!     │
-//! swash でラスタライズ
+//! rasterise
 //!     │
-//! RGBA8 アトラス (2048²、棚詰め。**文字は上から、絵は下から**)
+//! RGBA8 atlas, shelf-packed: glyphs from the top, images from the bottom
 //!     │
-//! テクスチャ付きクアッド
+//! textured quads
 //! ```
 //!
-//! # アトラスが RGBA8 なのはカラー絵文字のため
+//! The atlas is RGBA8 for colour emoji: mask glyphs are stored as white with
+//! alpha and tinted in the shader, while colour glyphs keep their own texels.
 //!
-//! マスクグリフは `(255,255,255,alpha)` として格納し、シェーダ側で色を掛ける。
-//! カラーグリフはテクスチャの色をそのまま使う ([`spec/06-renderer.md`] 6.1)。
-//!
-//! # 整形結果はキャッシュする
-//!
-//! S2 のスパイクは毎フレーム整形し直していた。同じ文字列・同じ書体・同じ
-//! 折り返し幅なら結果は変わらないので、鍵にして持つ。
-//!
-//! 整形は**物理ピクセルで行う**。ラスタライズがそうである以上、そこで
-//! 丸めるしかない。呼び出し側へ返す寸法だけを論理ピクセルに戻す。
+//! Shaping is cached by string, font and wrap width, since the result cannot
+//! change. It happens in physical pixels, because rasterisation does; only the
+//! sizes handed back are converted to logical.
 
 use std::collections::HashMap;
 
@@ -37,39 +31,35 @@ use unicode_script::Script;
 use crate::geom::Size;
 use crate::icon;
 
-/// アトラス 1 ページの一辺 (物理 px)
+/// Edge length of one atlas page.
 pub const ATLAS_SIZE: u32 = 2048;
 
-/// クライアント同梱の本文フォント。**同梱する理由は 3 つある。**
+/// The bundled body font.
 ///
 /// | | |
 /// |---|---|
-/// | `EXT-020` | システムフォント任せだと環境ごとに書体が変わる |
-/// | `NFR-001` | いずれ起動時のシステムフォント列挙 (S2 実測 360ms) を外すため |
-/// | 見た目 | OS の既定 sans-serif は UI 用に設計されていない |
+/// Bundled so the typeface does not change per machine, so system font
+/// enumeration can eventually leave the startup path, and because the default
+/// sans-serif on each OS is not designed for UI.
 ///
-/// Inter (SIL OFL 1.1、[`assets/fonts/README.md`] に出処)。**可変フォント
-/// 1 本で Thin〜Black を賄う。** cosmic-text 0.19 が `wght` 軸に対応して
-/// いるので、静的インスタンスを重さのぶんだけ持つ必要がない。
+/// One variable font covers every weight, since the `wght` axis is set at
+/// rasterisation time.
 ///
-/// ⚠️ **CJK は同梱していない。** Noto Sans JP を足すとバイナリが倍以上に
-/// なるため、判断を分けた ([`spec/06-renderer.md`] 6.4)。日本語はいまも
-/// システムフォントへのフォールバックで描いている。
+/// No CJK is bundled: adding it would more than double the binary, so that is
+/// a separate decision. Japanese still falls back to a system font.
 const BUNDLED_SANS: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
 
-/// 同梱フォントのファミリ名。`Family::SansSerif` の解決先にする
+/// The bundled font's family name, which sans-serif resolves to.
 const BUNDLED_SANS_FAMILY: &str = "Inter";
 
-/// 日本語のフォールバック先。**優先順**に並べる。
+/// Japanese fallbacks, in order.
 ///
-/// cosmic-text の Windows 用の表は `"Yu Gothic"` の 1 つしか持たない。
-/// UI 用に調整された `Yu Gothic UI` を先に試し、古い環境のために `Meiryo` も
-/// 見る。macOS / Linux / Android の名前を続けてあるのは、**同じ順序で同じ
-/// 結果になってほしい**からである (`EXT-020`)。
+/// The library's Windows table holds one entry; the UI-tuned variant goes
+/// first and an older one follows. Names for the other platforms come after,
+/// so the same order produces the same result everywhere.
 ///
-/// ⚠️ これはあくまで「システムにあれば使う」一覧である。同じ書体が全環境に
-/// あるわけではないので、`EXT-020` を厳密に満たすには日本語フォントの同梱が
-/// 要る ([`assets/fonts/README.md`])。
+/// This only picks from what the system has. Identical rendering everywhere
+/// needs a bundled Japanese font.
 const JAPANESE_FALLBACK: &[&str] = &[
     // Windows
     "Yu Gothic UI",
@@ -83,18 +73,15 @@ const JAPANESE_FALLBACK: &[&str] = &[
     "Noto Sans JP",
 ];
 
-/// フォントのフォールバック順を決める。
+/// Decides the font fallback order.
 ///
-/// # なぜ自前で持つのか
+/// Han unification means the same code point has different shapes per
+/// language. The library matches the locale exactly against five cases, and
+/// the `ja-JP` Windows reports matches none of them, falling through to a
+/// Simplified Chinese default — Japanese text rendered with Chinese shapes.
 ///
-/// **漢字は Han 統合により、同じ符号位置でも言語によって字形が違う。**
-/// cosmic-text の判定は locale の**完全一致**で、`"ja"` / `"ko"` /
-/// `"zh-HK"` / `"zh-TW"` / それ以外 の 5 択しかない。Windows が返す
-/// `"ja-JP"` はどれにも当たらず、既定の `Microsoft YaHei UI`
-/// (簡体字中国語) に落ちる。結果、日本語の文章が中国語の書体で描かれる。
-///
-/// locale の正規化 ([`normalize_locale`]) だけでも直るが、それでも
-/// 頼れるのは `Yu Gothic` 1 つだけになる。ここで一覧ごと持ち替える。
+/// Normalising the locale alone fixes it, but leaves exactly one usable font,
+/// so the whole list is replaced here.
 #[derive(Debug)]
 struct GumicordFallback;
 
@@ -109,8 +96,8 @@ impl Fallback for GumicordFallback {
 
     fn script_fallback(&self, script: Script, locale: &str) -> &[&'static str] {
         let han_unified = matches!(script, Script::Han | Script::Hiragana | Script::Katakana);
-        // 中国語・韓国語の利用者にまで日本語の字形を出すのは誤りなので、
-        // そこはプラットフォームの判断に任せる
+        // Chinese and Korean readers should not get Japanese shapes, so
+        // those stay with the platform's choice.
         if han_unified && !locale.starts_with("zh") && !locale.starts_with("ko") {
             return JAPANESE_FALLBACK;
         }
@@ -118,14 +105,13 @@ impl Fallback for GumicordFallback {
     }
 }
 
-/// cosmic-text の Han 統合の判定に通る形へ locale を整える。
+/// Normalises a locale into the form the Han unification check expects.
 ///
-/// 判定が完全一致なので、`"ja-JP"` や `"ja_JP.UTF-8"` はそのままでは
-/// 当たらない。**地域まで見る必要があるのは中国語だけ**なので、それ以外は
-/// 主言語タグへ切り詰める。
+/// The check is exact, so `ja-JP` and `ja_JP.UTF-8` miss. Only Chinese needs
+/// the region, so everything else is truncated to the primary tag.
 fn normalize_locale(locale: &str) -> String {
     let tag = locale.replace('_', "-");
-    // "ja-JP.UTF-8" のような形も来る
+    // Forms like `ja_JP.UTF-8` also arrive.
     let tag = tag.split('.').next().unwrap_or("");
     let mut parts = tag.split('-');
     let lang = parts.next().unwrap_or("").to_ascii_lowercase();
@@ -134,7 +120,7 @@ fn normalize_locale(locale: &str) -> String {
         return lang;
     }
 
-    // 繁体か簡体かは文字体系か地域で決まる
+    // Traditional or Simplified comes from the script or the region.
     for p in parts {
         match p.to_ascii_uppercase().as_str() {
             "HANT" | "TW" => return "zh-TW".to_owned(),
@@ -145,19 +131,19 @@ fn normalize_locale(locale: &str) -> String {
     "zh-CN".to_owned()
 }
 
-/// テーマが何も言わなかったときの本文の大きさ (論理 px)
+/// Body size when the theme says nothing.
 pub const DEFAULT_FONT_SIZE: f32 = 15.0;
-/// 同上、行の高さ
+/// Line height when the theme says nothing.
 pub const DEFAULT_LINE_HEIGHT: f32 = 22.0;
 
-/// 確定した書体。[`Style::font`] の未指定を既定で埋めたもの。
+/// A resolved font, with the theme's gaps filled from the defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedFont {
     pub family: Option<String>,
-    /// 論理 px を 1/64 単位で丸めた値。浮動小数を鍵にしないため
+    /// Quantised, so a float is never a map key.
     size_q: u32,
     line_height_q: u32,
-    /// 字送りの追加分 (論理 px を量子化)。0 なら指定なし
+    /// Extra letter spacing; zero means unset.
     letter_spacing_q: u32,
     pub weight: u16,
     pub italic: bool,
@@ -184,9 +170,8 @@ impl ResolvedFont {
         ResolvedFont {
             family: f.family.clone(),
             size_q: quantize(size),
-            // 行の高さの指定がなければ、大きさに比例させる。
-            // 既定 (15 / 22) と同じ比率にしておくと、大きさだけ変えたときに
-            // 行間が詰まって見えない
+            // With no line height, scale it from the size using the default
+            // ratio, or changing only the size makes lines look cramped.
             line_height_q: quantize(
                 f.line_height
                     .unwrap_or(size * DEFAULT_LINE_HEIGHT / DEFAULT_FONT_SIZE),
@@ -206,59 +191,58 @@ impl ResolvedFont {
     }
 }
 
-/// 整形結果の鍵。
+/// The key a shaped result is cached under.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ShapeKey {
-    /// 整形する一続きの並び。飾りの無い文字列でも要素 1 つの並びである。
+    /// The runs to shape; plain text is a list of one.
     ///
-    /// ⚠️ **飾りごとに分けて整形しない。** 分けると折り返しがそれぞれ
-    /// 独立して決まり、`これは **とても長い** 文章` の行末が合わなくなる
+    /// Never shaped per decoration: each part would wrap independently and
+    /// the line breaks would stop lining up.
     runs: Vec<(String, ResolvedFont)>,
-    /// 折り返し幅 (物理 px を量子化)。`u32::MAX` は折り返さない
+    /// Wrap width; `u32::MAX` means no wrapping.
     max_w_q: u32,
-    /// DPI スケール。変わると物理ピクセルでの整形結果が変わる
+    /// The scale factor, which changes the physical-pixel result.
     scale_q: u32,
 }
 
-/// 原点 (0,0) に置いたときのグリフ 1 個。位置は**物理 px**。
+/// One glyph, positioned from the origin in physical pixels.
 #[derive(Debug, Clone, Copy)]
 pub struct PlacedGlyph {
     pub cache_key: CacheKey,
-    /// ラスタライズ用に丸めた位置
+    /// Rounded for rasterisation.
     pub x: i32,
     pub y: i32,
-    /// 元の文字列でのバイト範囲。キャレットと選択の位置決めに使う
+    /// Byte range in the source, for placing the caret and selection.
     pub start: usize,
     pub end: usize,
-    /// 丸める前の位置と送り幅。**丸めた `x` を使うと選択範囲に隙間が出る**
+    /// Unrounded position and advance; the rounded `x` leaves gaps in a
+    /// selection.
     pub left: f32,
     pub advance: f32,
-    /// この字が乗っている行
+    /// Which line it sits on.
     pub line_top: f32,
     pub line_height: f32,
-    /// 何番目の走りから来た字か。**色を変えるのに要る**
+    /// Which run it came from, which is what colours it.
     pub run: u32,
 }
 
-/// 整形済みのテキスト。
+/// Shaped text.
 #[derive(Debug, Clone)]
 pub struct Shaped {
-    /// 論理 px での大きさ
+    /// Size in logical pixels.
     pub size: Size,
-    /// 原点 (0,0) を左上としたときのグリフ列。位置は物理 px
+    /// Glyphs, positioned from the top left in physical pixels.
     pub glyphs: Vec<PlacedGlyph>,
-    /// 走りごとの矩形。下線・打ち消し・スポイラーの塗りに使う。
+    /// Rects per run, for underlines, strikethroughs and spoilers.
     ///
-    /// ⚠️ **行ごとに切れている。** 折り返した走りを 1 つの矩形で塗ると、
-    /// 行間まで塗って本文が読めなくなる ([`Shaped::range_rects`] と同じ理由)
+    /// Split per line: one rect over a wrapped run would paint the leading
+    /// too and swallow the text.
     pub runs: Vec<RunRect>,
-    /// 行の高さ (物理 px)。字が 1 つもないときのキャレットの高さに使う
+    /// Line height, which is also the caret's height in empty text.
     pub line_height: f32,
 }
 
-/// テキストの上の矩形 1 つ (物理 px、原点からの相対)。
-///
-/// キャレットも選択も下線も、結局は矩形である。
+/// A rect over text. Carets, selections and underlines are all rects.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextRect {
     pub x: f32,
@@ -267,7 +251,7 @@ pub struct TextRect {
     pub h: f32,
 }
 
-/// 走り 1 つが 1 行の中で占める矩形 (物理 px、原点からの相対)。
+/// What one run occupies on one line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunRect {
     pub run: u32,
@@ -275,12 +259,10 @@ pub struct RunRect {
 }
 
 impl Shaped {
-    /// バイト位置にキャレットを置いたときの矩形。
-    ///
-    /// **その位置から始まる字の左端**に置く。該当する字がなければ、
-    /// 直前の字の右端 (= 行末) に置く。
+    /// The caret rect at a byte offset: the left edge of the glyph starting
+    /// there, or the right edge of the previous one at end of line.
     pub fn caret(&self, at: usize, width: f32) -> TextRect {
-        // その位置から始まる字
+        // The glyph starting there.
         if let Some(g) = self.glyphs.iter().find(|g| g.start >= at) {
             return TextRect {
                 x: g.left,
@@ -289,7 +271,7 @@ impl Shaped {
                 h: g.line_height,
             };
         }
-        // 行末。最後の字の右
+        // End of line: right of the last glyph.
         match self.glyphs.last() {
             Some(g) => TextRect {
                 x: g.left + g.advance,
@@ -297,7 +279,7 @@ impl Shaped {
                 w: width,
                 h: g.line_height,
             },
-            // 何も入っていない
+            // Empty.
             None => TextRect {
                 x: 0.0,
                 y: 0.0,
@@ -307,9 +289,8 @@ impl Shaped {
         }
     }
 
-    /// バイト範囲を覆う矩形。**行ごとに 1 つずつ**返す。
-    ///
-    /// 折り返した選択範囲を 1 つの矩形で塗ると、行間まで塗ってしまう。
+    /// Rects covering a byte range, one per line: a single rect over a
+    /// wrapped selection would paint the leading too.
     pub fn range_rects(&self, range: &core::ops::Range<usize>) -> Vec<TextRect> {
         let mut out: Vec<TextRect> = Vec::new();
         if range.is_empty() {
@@ -317,11 +298,11 @@ impl Shaped {
         }
 
         for g in &self.glyphs {
-            // 範囲に少しでも掛かる字を拾う
+            // Any glyph overlapping the range.
             if g.end <= range.start || g.start >= range.end {
                 continue;
             }
-            // 同じ行の続きなら伸ばす
+            // Extend while it stays on the same line.
             match out.last_mut() {
                 Some(last) if (last.y - g.line_top).abs() < f32::EPSILON => {
                     last.w = (g.left + g.advance) - last.x;
@@ -338,31 +319,28 @@ impl Shaped {
     }
 }
 
-/// アトラスに載ったグリフ。
+/// A glyph in the atlas.
 #[derive(Debug, Clone, Copy)]
 pub struct GlyphEntry {
-    /// 何ページ目に載っているか。
-    ///
-    /// ⚠️ **ページごとにテクスチャが違う。** 描くときに束ね直す必要が
-    /// あるので、これを持たないと 1 枚目のページから読んでしまう
+    /// Which page it is on. Each page is its own texture, so without this
+    /// everything reads from the first one.
     pub page: u32,
-    /// アトラス内の UV (0..1)
+    /// UV within the atlas.
     pub uv: [f32; 4],
-    /// ペン位置からのずれ (物理 px)
+    /// Offset from the pen position.
     pub left: i32,
     pub top: i32,
     pub w: u32,
     pub h: u32,
-    /// カラー絵文字なら真。シェーダで色を掛けない
+    /// A colour glyph, which the shader must not tint.
     pub is_color: bool,
 }
 
-/// 文字列を整形するところ。**GPU を持たない。**
+/// Shapes text, without a GPU.
 ///
-/// レイアウトに要るのは「この文字列はこの幅で何ピクセルになるか」だけであり、
-/// テクスチャは要らない。ここを [`TextEngine`] から切り離してあるので、
-/// **レイアウトは GPU なしで試験できる**。`NFR-015` (全プラットフォームでの
-/// スクリーンショット比較) の足場にもなる。
+/// Layout only needs how many pixels a string takes at a given width, not a
+/// texture. Keeping this separate from the engine is what lets layout be
+/// tested without a GPU.
 pub struct Shaper {
     font_system: FontSystem,
     swash: SwashCache,
@@ -371,25 +349,23 @@ pub struct Shaper {
 }
 
 impl Shaper {
-    /// ⚠️ `FontSystem::new()` はシステムフォントを列挙する。S2 の実測で
-    /// **初回 360ms** かかった。`NFR-001` (コールドスタート 500ms) に対して
-    /// 致命的である。
+    /// Constructing the font system enumerates system fonts, measured at
+    /// 360ms on a cold start, which is most of the startup budget.
     ///
-    /// R4 の残りはここである。同梱フォントだけで整形を始め、列挙は
-    /// 背景スレッドへ回して、終わったらフォールバックの要るテキストだけを
-    /// 整形し直す ([`spec/06-renderer.md`] 6.3)。**いまは列挙を待っている。**
-    /// CJK のフォールバックがシステムフォント頼みで、待たないと日本語が
-    /// 出ないためである。
+    /// The fix is to shape from the bundled font, enumerate in the background,
+    /// and reshape only the text that needed a fallback. Until then this
+    /// waits, because CJK fallback depends on system fonts and Japanese would
+    /// not render at all.
     pub fn new(scale: f32) -> Self {
         let raw = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned());
         let locale = normalize_locale(&raw);
-        tracing::debug!(%raw, %locale, "フォントの locale");
+        tracing::debug!(%raw, %locale, "font locale");
 
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         db.load_font_data(BUNDLED_SANS.to_vec());
-        // テーマが `family` を書かなければ `Family::SansSerif` になる。
-        // その解決先を同梱フォントへ向けておくと、テーマ側は何も書かなくてよい
+        // A theme that writes no family gets sans-serif, so pointing that at
+        // the bundled font means themes need say nothing.
         db.set_sans_serif_family(BUNDLED_SANS_FAMILY);
 
         let font_system =
@@ -407,10 +383,8 @@ impl Shaper {
         self.scale
     }
 
-    /// DPI が変わったら、物理ピクセルで作った整形結果をすべて捨てる。
-    ///
-    /// 戻り値が真なら、呼び出し側はグリフアトラスも捨てる必要がある
-    /// ([`spec/06-renderer.md`] 3 章)。
+    /// Discards everything shaped in physical pixels when the DPI changes.
+    /// A true result means the caller must drop the glyph atlas too.
     pub fn set_scale(&mut self, scale: f32) -> bool {
         if (scale - self.scale).abs() < f32::EPSILON {
             return false;
@@ -433,33 +407,32 @@ impl Shaper {
     }
 
     fn ensure(&mut self, key: &ShapeKey, max_w: Option<f32>) {
-        // `entry` を使うと鍵を必ず複製することになる。
-        // 当たる回のほうが圧倒的に多いので、当たりを安く済ませる
+        // `entry` would clone the key every time; hits vastly outnumber
+        // misses, so hits stay cheap.
         if !self.shaped.contains_key(key) {
             let shaped = self.shape_uncached(&key.runs, max_w);
             self.shaped.insert(key.clone(), shaped);
         }
     }
 
-    /// 文字列を整形する。`max_w` は論理 px、`None` なら折り返さない。
+    /// Shapes a string. `None` means no wrapping.
     pub fn shape(&mut self, text: &str, font: &ResolvedFont, max_w: Option<f32>) -> &Shaped {
         let key = self.key(text, font, max_w);
         self.ensure(&key, max_w);
         &self.shaped[&key]
     }
 
-    /// 飾りの混じった文字列を**一度に**整形する (`FR-021`)。
+    /// Shapes mixed decoration in one pass.
     ///
-    /// ⚠️ **走りごとに [`Shaper::shape`] を呼んで横に並べてはいけない。**
-    /// 折り返しがそれぞれ独立して決まるので、行末が合わなくなる。
-    /// 混じったまま 1 つの整形にかけて、はじめて正しい行になる
+    /// Shaping each run separately and laying them side by side wraps each
+    /// independently, and the line breaks stop lining up.
     pub fn shape_rich(&mut self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> &Shaped {
         let key = self.key_rich(runs, max_w);
         self.ensure(&key, max_w);
         &self.shaped[&key]
     }
 
-    /// 整形して大きさだけを返す。レイアウトの計測で使う。
+    /// Shapes and returns only the size, for layout measurement.
     pub fn measure(&mut self, text: &str, font: &ResolvedFont, max_w: Option<f32>) -> Size {
         self.shape(text, font, max_w).size
     }
@@ -468,11 +441,10 @@ impl Shaper {
         self.shape_rich(runs, max_w).size
     }
 
-    /// 走りの並びを**1 つのバッファ**に流して整形する。
+    /// Shapes a list of runs through one buffer.
     ///
-    /// ⚠️ 行の高さは全体で 1 つである。走りごとに大きさを変えたいときは
-    /// ここでは足りない。M1 の Markdown では見出しだけが大きさを変え、
-    /// 見出しは別のノードなので足りている
+    /// One line height for the whole thing, so per-run sizes are not possible
+    /// here. Only headings change size today, and they are separate nodes.
     fn shape_uncached(&mut self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> Shaped {
         let scale = self.scale;
         let base = match runs.first() {
@@ -488,9 +460,8 @@ impl Shaper {
         let spans: Vec<(&str, Attrs)> = runs
             .iter()
             .enumerate()
-            // ⚠️ **番号を持たせる。** これが無いと、整形が済んだあとで
-            // 「この字はどの走りから来たか」を byte 位置で数え直すことに
-            // なる。走りが空文字列を含むと数え直しは合わない
+            // Tagged with the run index: recovering it from byte offsets
+            // afterwards breaks as soon as a run is empty.
             .map(|(i, (t, f))| (t.as_str(), attrs_of(f).metadata(i)))
             .collect();
         buf.set_rich_text(spans, &attrs_of(&base), Shaping::Advanced, None);
@@ -518,7 +489,7 @@ impl Shaper {
                     line_height: run.line_height,
                     run: which,
                 });
-                // 同じ走りが同じ行で続いている間は 1 つの矩形に伸ばす
+                // Extend one rect while the run continues on the same line.
                 match rects.last_mut() {
                     Some(last)
                         if last.run == which
@@ -540,12 +511,11 @@ impl Shaper {
         }
 
         Shaped {
-            // 物理 px で整形したので論理へ戻す。
+            // Shaped in physical pixels; convert back.
             //
-            // ⚠️ **切り上げる。** 内容ぴったりの幅になるノード (見出しなど) は、
-            // ここで返した幅がそのまま矩形の幅になり、描画時にはその幅で
-            // もう一度折り返し判定が走る。丸め誤差で 1ulp でも狭くなると、
-            // 収まっていたはずの最後の 1 文字が次の行へ落ちる
+            // Rounded up: for a content-sized node this width becomes the
+            // rect, and wrapping runs against it again at draw time. One ulp
+            // narrower drops the last character to the next line.
             size: Size::new((w / scale).ceil(), (h / scale).ceil()),
             glyphs,
             runs: rects,
@@ -554,7 +524,7 @@ impl Shaper {
     }
 }
 
-/// 書体を `cosmic-text` の言い方へ直す。
+/// Converts a font into the shaping library's terms.
 fn attrs_of(font: &ResolvedFont) -> Attrs<'_> {
     let mut attrs = Attrs::new()
         .weight(Weight(font.weight))
@@ -567,13 +537,13 @@ fn attrs_of(font: &ResolvedFont) -> Attrs<'_> {
         attrs = attrs.family(Family::Name(family));
     }
     if font.letter_spacing_q != 0 {
-        // テーマは論理 px で書く。cosmic-text は EM で受ける
+        // Themes write logical pixels; the library takes em.
         attrs = attrs.letter_spacing(dequantize(font.letter_spacing_q) / font.size());
     }
     attrs
 }
 
-/// 整形 ([`Shaper`]) に、GPU 上のグリフアトラスを足したもの。描画で使う。
+/// A shaper plus the GPU glyph atlas.
 pub struct TextEngine {
     shaper: Shaper,
     atlas: Atlas,
@@ -587,35 +557,32 @@ impl TextEngine {
         }
     }
 
-    /// 整形だけが要る呼び出し側 (レイアウト) へ渡す。
+    /// For callers that only need shaping.
     pub fn shaper(&mut self) -> &mut Shaper {
         &mut self.shaper
     }
 
-    /// ページごとのテクスチャ。**束ね直すのに要る**
+    /// One texture per page.
     pub fn atlas_views(&self) -> Vec<&wgpu::TextureView> {
         self.atlas.pages.iter().map(|p| &p.view).collect()
     }
 
-    /// ページが増えたか。**1 回だけ真を返す**
+    /// Whether a page was added; true once.
     pub fn took_atlas_growth(&mut self) -> bool {
         self.atlas.took_growth()
     }
 
-    /// DPI が変わったら、整形結果もグリフも作り直す。
+    /// Rebuilds shaping and glyphs when the DPI changes.
     pub fn set_scale(&mut self, device: &wgpu::Device, scale: f32) {
         if self.shaper.set_scale(scale) {
             self.atlas = Atlas::new(device);
         }
     }
 
-    /// 整形してアトラスへ載せ、グリフを 1 個ずつ渡す。
+    /// Shapes, uploads to the atlas, and hands over each glyph.
     ///
-    /// `f` は `(アトラス上の位置, テキスト原点からのずれ)` を受け取る。
-    /// ずれは**物理 px** である。戻り値は整形結果の大きさ (論理 px)。
-    ///
-    /// 整形結果の借用 (不変) とアトラスへの追記 (可変) が衝突するので、
-    /// `self` をフィールドごとに分解して両立させている。
+    /// Borrowing the shaped result while appending to the atlas conflicts, so
+    /// `self` is destructured field by field.
     pub fn draw_glyphs(
         &mut self,
         device: &wgpu::Device,
@@ -647,12 +614,11 @@ impl TextEngine {
         s.size
     }
 
-    /// 飾りの混じった文字を積む。
-    ///
-    /// `f` は `(アトラス上の位置, ずれ, 何番目の走りか)` を受け取る。
+    /// The same, for text with mixed decoration.
     /// **走りの番号が要る** — 走りごとに色が違うためである。
     ///
-    /// 走りごとの矩形も返す。下線・打ち消し・スポイラーはそれで塗る
+    /// Also returns per-run rects, which paint underlines, strikethroughs and
+    /// spoilers.
     pub fn draw_rich_glyphs(
         &mut self,
         device: &wgpu::Device,
@@ -680,14 +646,13 @@ impl TextEngine {
                 f(&e, g.x, g.y, g.run);
             }
         }
-        // ⚠️ 借用の都合で複製する。走りの数は本文の飾りの数であって、
-        // 字の数ではない。一続きの文で数個である
+        // Cloned for the borrow. There are as many runs as decorations, not
+        // as characters.
         s.runs.clone()
     }
 
-    /// アイコンをアトラスへ載せて位置を返す。`size_px` は物理ピクセル。
-    ///
-    /// 知らない名前には `None` を返す。**誤りではない** ([`crate::icon`])。
+    /// Uploads an icon and returns its place. An unknown name gives `None`,
+    /// which is not an error.
     pub fn icon(
         &mut self,
         device: &wgpu::Device,
@@ -699,46 +664,41 @@ impl TextEngine {
         self.atlas.icon(device, queue, name, def, size_px)
     }
 
-    /// アトラスに載っているものの数。性能の目安に使う
+    /// How much is in the atlas, as a rough performance signal.
     pub fn glyph_count(&self) -> usize {
         self.atlas.uploaded
     }
 }
 
-// ─────────────────────────────────────────────────────────────── アトラス
+// ─────────────────────────────────────────────────────────────── Atlas
 
-/// 棚詰めのグリフアトラス。
+/// A shelf-packed glyph atlas.
+/// What an atlas entry is keyed by.
 ///
-/// ⚠️ **1 ページしかない。** 溢れたらそのグリフを描かない。
-/// 複数ページ化と LRU 回収はロードマップ R3 で、まだやっていない。
-/// 2048² に 20px 級のグリフなら 1 万個ほど入るので、M1.1 の範囲では溢れない。
-/// アトラスに載るものの鍵。
-///
-/// **グリフとアイコンで texture を分けない。** 分けるとパイプラインの切り替えが
-/// 増え、描画順を保ったまま束ねられる範囲が狭くなる。どちらも
-/// 「RGBA8 のマスクをテクスチャ付きクアッドで描く」ものなので、同じ 1 枚に
-/// 詰めればよい。
+/// Glyphs and icons share a texture: separating them would add pipeline
+/// switches and shorten the batches that can preserve draw order, and both
+/// are RGBA8 masks drawn as textured quads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AtlasKey {
     Glyph(CacheKey),
-    /// アイコン名と、描く物理ピクセルの大きさ
+    /// An icon name and the size it is drawn at.
     Icon(&'static str, u32),
-    /// 取ってきた画像。**URL の指紋で引く**
+    /// A fetched image, keyed by a hash of its URL.
     Image(u64),
 }
 
-/// アトラスへ詰めるときの、絵そのもの以外の情報。
+/// Everything about an entry except its pixels.
 #[derive(Debug, Clone, Copy)]
 struct Placement {
-    /// ペン位置からのずれ (物理 px)
+    /// Offset from the pen position.
     left: i32,
     top: i32,
-    /// カラー絵文字なら真
+    /// A colour glyph.
     is_color: bool,
 }
 
 impl Placement {
-    /// アイコンは正方形で、ペン位置からのずれを持たない
+    /// Icons are square and have no pen offset.
     const ICON: Placement = Placement {
         left: 0,
         top: 0,
@@ -746,43 +706,40 @@ impl Placement {
     };
 }
 
-/// アトラスの詰め方。**大きさの桁が違うものを混ぜない。**
+/// Which side of the atlas an entry packs into.
 ///
-/// # ⚠️ 棚は一番背の高いものに合わせて厚くなる
+/// A shelf is as thick as its tallest occupant, so one avatar landing on a
+/// shelf of small glyphs wastes the rest of that row. A few of those fill the
+/// page and no glyph fits again — Japanese text came out with holes in it.
 ///
-/// 20px のグリフが並ぶ棚に 128px のアバターが 1 枚落ちると、**その棚は
-/// 128px 厚になる**。残りの 108px × 2048 は誰も使わない。それが数回
-/// 起きただけで 2048×2048 が埋まり、以降の**グリフが 1 つも入らなく
-/// なる**。実際に、日本語の本文が虫食いで出た。
-///
-/// そこで、グリフは上から下へ、絵は下から上へ詰める。互いの棚に
-/// 混ざらないので、厚みの無駄が出ない。
+/// Glyphs pack downwards from the top and images upwards from the bottom, so
+/// they never share a shelf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
-    /// 文字。小さくて数が多い
+    /// Text: small and numerous.
     Glyph,
-    /// 絵。大きくて数が少ない
+    /// Images: large and few.
     Image,
 }
 
-/// 棚の状態だけ。**GPU に触らない**ので、そのまま試験できる
+/// The shelf state alone, with no GPU, so it can be tested directly.
 #[derive(Debug, Default)]
 struct Shelves {
-    /// 上から下へ伸びる、文字の棚
+    /// Text shelves, growing downwards.
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
-    /// 下から上へ伸びる、絵の棚。`image_top` は**いまの棚の上端**
+    /// Image shelves, growing upwards.
     image_x: u32,
     image_top: u32,
     image_shelf_h: u32,
-    /// ⚠️ **側ごとに持つ。** 絵で埋まったからといって文字まで
-    /// 諦めると、本文が虫食いになる
+    /// Per side: giving up on text because images filled up would put holes
+    /// in the body.
     glyphs_full: bool,
     images_full: bool,
 }
 
-/// アトラス 1 ページ。**1 枚のテクスチャと、その詰め具合**
+/// One atlas page: a texture and how full it is.
 struct Page {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -814,28 +771,24 @@ impl Page {
     }
 }
 
-/// ページを何枚まで増やすか。
-///
-/// ⚠️ **1 枚 16MB である** (2048² × RGBA)。増やすほど常駐メモリが増える
+/// How many pages to allow. Each is 16MB, so every page is resident memory.
 /// ので、際限なくは持てない。4 枚で 64MB — 公式 Electron 版より小さい
-/// という主張を保てる上限として置いてある。
-///
-/// **足りるかどうかは実測で決める。** ここに達するのは、日本語と絵文字と
-/// 顔を大量に見た後である
+/// Reaching this takes a lot of Japanese, emoji and avatars; whether it is
+/// enough is a question for measurement.
 const MAX_PAGES: usize = 4;
 
 struct Atlas {
-    /// ⚠️ **最後のページが「いま詰めているページ」である。**
+    /// The last page is the one being packed into.
     /// 前のページに戻って隙間を探したりはしない — 探す価値のある隙間は
-    /// 棚詰めの性質上ほとんど残らない
+    /// Shelf packing leaves little behind.
     pages: Vec<Page>,
     entries: HashMap<AtlasKey, Option<GlyphEntry>>,
     uploaded: usize,
-    /// 前回作り直してから何枚入れたか。**空回りを見分けるために要る**
+    /// Entries added since the last rebuild, to detect spinning.
     images_since_recycle: usize,
-    /// 絵を作り直した。**呼び出し側が取りに来る** ([`Atlas::took_recycle`])
+    /// Images were rebuilt; the caller collects this.
     recycled: bool,
-    /// ページが増えた。**束ね直しが要る** ([`Atlas::took_growth`])
+    /// A page was added, so batches need rebinding.
     grew: bool,
 }
 
@@ -851,14 +804,13 @@ impl Atlas {
         }
     }
 
-    /// ページが増えたか。**1 回だけ真を返す**
+    /// Whether a page was added; true once.
     fn took_growth(&mut self) -> bool {
         std::mem::take(&mut self.grew)
     }
 
-    /// いま詰めているページで場所を取る。入らなければ**ページを足す**。
-    ///
-    /// ⚠️ **足せなくなったら諦める。** そのときだけ虫食いになる
+    /// Reserves space, adding a page if needed. Once no more pages can be
+    /// added it gives up, and only then do holes appear.
     fn alloc(&mut self, device: &wgpu::Device, w: u32, h: u32, side: Side) -> Option<(u32, u32)> {
         let last = self.pages.len() - 1;
         if let Some(at) = self.pages[last].shelves.alloc(w, h, side) {
@@ -867,41 +819,39 @@ impl Atlas {
         if self.pages.len() >= MAX_PAGES {
             tracing::warn!(
                 pages = MAX_PAGES,
-                "アトラスが上限まで埋まった。ここから先は描けない"
+                "the atlas is full; nothing more can be drawn"
             );
             return None;
         }
-        tracing::info!(pages = self.pages.len() + 1, "アトラスのページを足す");
+        tracing::info!(pages = self.pages.len() + 1, "adding an atlas page");
         self.pages.push(Page::new(device, self.pages.len()));
         self.grew = true;
         let last = self.pages.len() - 1;
         self.pages[last].shelves.alloc(w, h, side)
     }
 
-    /// 絵の側を丸ごと空けて、詰め直せるようにする。
+    /// Clears the image side so it can be repacked.
     ///
-    /// # ⚠️ 追い出すのではなく、忘れる
+    /// Shelf packing cannot free one entry in the middle, so everything on
+    /// that side is forgotten at once. The fetcher still holds them, and they
+    /// go back next frame; avatars vanish for one frame.
     ///
-    /// 棚詰めは途中の 1 枚を空けられない。**要らなくなった 1 枚だけを
-    /// 抜くことができない**以上、まとめて忘れるしかない。
+    /// The text side is untouched: holes in the body are far worse than a
+    /// missing avatar.
     ///
-    /// 忘れた絵は取ってきた側が持っている (円盤にも残っている) ので、
-    /// **次のフレームで入れ直される**。1 フレームだけ顔が消える。
-    ///
-    /// ⚠️ **文字の側は触らない。** 本文が虫食いになるのは、顔が 1 枚
-    /// 消えるよりずっと悪い。
-    ///
-    /// ⚠️ **入れた枚数が少ないうちは作り直さない。** 入りきらない大きさの
-    /// ものを頼まれているなら、何度作り直しても入らない。**作り直しては
-    /// 溢れ、溢れては作り直す**空回りになる
+    /// Not rebuilt while few entries have been added: something too large to
+    /// fit will not fit after a rebuild either, and it would spin.
     fn recycle_images(&mut self) -> bool {
-        /// これだけ入ってから溢れたなら、詰め直す価値がある
+        /// Overflowing after this many is worth repacking.
         const WORTH_IT: usize = 16;
 
         if self.images_since_recycle < WORTH_IT {
             return false;
         }
-        tracing::info!(images = self.images_since_recycle, "アトラスの絵を詰め直す");
+        tracing::info!(
+            images = self.images_since_recycle,
+            "repacking the atlas images"
+        );
         self.entries.retain(|k, _| !matches!(k, AtlasKey::Image(_)));
         for p in &mut self.pages {
             p.shelves.reset_images();
@@ -911,7 +861,7 @@ impl Atlas {
         true
     }
 
-    /// 絵を忘れたか。**1 回だけ真を返す**
+    /// Whether images were forgotten; true once.
     fn took_recycle(&mut self) -> bool {
         std::mem::take(&mut self.recycled)
     }
@@ -923,7 +873,7 @@ impl Shelves {
             cursor_x: 0,
             cursor_y: 0,
             shelf_h: 0,
-            // 幅いっぱいから始めることで、最初の 1 枚が棚を作る
+            // Starting full-width makes the first entry create the shelf.
             image_x: ATLAS_SIZE,
             image_top: ATLAS_SIZE,
             image_shelf_h: 0,
@@ -932,7 +882,7 @@ impl Shelves {
         }
     }
 
-    /// 絵の棚を空にする。**文字の棚は触らない**
+    /// Empties the image shelves, leaving the text ones alone.
     fn reset_images(&mut self) {
         self.image_x = ATLAS_SIZE;
         self.image_top = ATLAS_SIZE;
@@ -940,9 +890,9 @@ impl Shelves {
         self.images_full = false;
     }
 
-    /// 空き場所を 1 つ取る。**取れなければ `None`**
+    /// Reserves one slot.
     fn alloc(&mut self, w: u32, h: u32, side: Side) -> Option<(u32, u32)> {
-        /// 棚詰め。1px 空けて隣のにじみを防ぐ
+        /// A pixel of padding, so neighbours do not bleed.
         const PAD: u32 = 1;
 
         match side {
@@ -955,11 +905,11 @@ impl Shelves {
                     self.cursor_y += self.shelf_h + PAD;
                     self.shelf_h = 0;
                 }
-                // 絵の側へ食い込まない
+                // Never crosses into the image side.
                 if self.cursor_y + h + PAD > self.image_top {
                     tracing::debug!(
                         y = self.cursor_y,
-                        "このページの文字側が埋まった。次のページへ"
+                        "this page's text side is full; moving on"
                     );
                     self.glyphs_full = true;
                     return None;
@@ -973,7 +923,7 @@ impl Shelves {
                 if self.images_full {
                     return None;
                 }
-                // 横が足りない、または棚より背が高いなら棚を作り直す
+                // Too wide or too tall for this shelf; start a new one.
                 if self.image_x + w + PAD > ATLAS_SIZE || h > self.image_shelf_h {
                     let need = h + PAD;
                     if self.image_top < need {
@@ -981,11 +931,11 @@ impl Shelves {
                         return None;
                     }
                     let top = self.image_top - need;
-                    // 文字の側へ食い込まない
+                    // Never crosses into the text side.
                     if top < self.cursor_y + self.shelf_h + PAD {
                         tracing::debug!(
                             top = self.image_top,
-                            "このページの絵の側が埋まった。次のページへ"
+                            "this page's image side is full; moving on"
                         );
                         self.images_full = true;
                         return None;
@@ -1020,7 +970,7 @@ impl Atlas {
         entry
     }
 
-    /// アイコンを載せる。`size` は物理ピクセルでの一辺。
+    /// Uploads an icon.
     fn icon(
         &mut self,
         device: &wgpu::Device,
@@ -1033,7 +983,7 @@ impl Atlas {
         if let Some(e) = self.entries.get(&k) {
             return *e;
         }
-        // アイコンは正方形で、ペン位置からのずれを持たない
+        // Square, with no pen offset.
         let entry = self.insert(
             device,
             queue,
@@ -1058,7 +1008,7 @@ impl Atlas {
         let image = swash.get_image(font_system, key).as_ref()?;
         let p = image.placement;
         if p.width == 0 || p.height == 0 {
-            // 空白など。描くものはないが、位置は返す必要がある
+            // A space: nothing to draw, but the position still matters.
             return Some(GlyphEntry {
                 page: 0,
                 uv: [0.0; 4],
@@ -1075,7 +1025,7 @@ impl Atlas {
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         match image.content {
             SwashContent::Mask => {
-                // マスクは (255,255,255,a)。色はシェーダが掛ける
+                // A white mask; the shader tints it.
                 for (i, a) in image.data.iter().enumerate() {
                     let o = i * 4;
                     if o + 3 >= rgba.len() {
@@ -1109,9 +1059,7 @@ impl Atlas {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// RGBA8 を 1 枚アトラスへ詰める。**グリフも絵もここを通る。**
-    ///
-    /// `side` は詰める向きを決める ([`Side`])
+    /// Packs one RGBA8 image. Glyphs and pictures both come through here.
     fn insert(
         &mut self,
         device: &wgpu::Device,
@@ -1176,71 +1124,70 @@ impl Atlas {
 mod shelf_tests {
     use super::*;
 
-    /// ⚠️ **絵は文字の棚を厚くしない。**
-    ///
-    /// 20px の字が並ぶ棚に 128px のアバターが 1 枚落ちると、その棚は
-    /// 128px 厚になり、残りの 108px × 2048 は誰も使わない。それが何度か
-    /// 起きただけでアトラスが埋まり、**以降の字が 1 つも入らなくなる**。
-    /// 実際に、日本語の本文が虫食いで出た
+    /// An image must not thicken a text shelf: one avatar on a shelf of small
+    /// glyphs wastes the rest of the row, and a few of those filled the page
+    /// until no glyph fit. Japanese text came out with holes in it.
     #[test]
     fn a_picture_does_not_thicken_the_glyph_shelf() {
         let mut s = Shelves::new();
 
-        // 字を 1 つ置いてから、大きな絵を置く
-        s.alloc(20, 20, Side::Glyph).expect("入る");
+        // One glyph, then a large image.
+        s.alloc(20, 20, Side::Glyph).expect("should fit");
         let before = s.shelf_h;
-        s.alloc(128, 128, Side::Image).expect("入る");
+        s.alloc(128, 128, Side::Image).expect("should fit");
 
-        assert_eq!(s.shelf_h, before, "字の棚は厚くならない");
+        assert_eq!(s.shelf_h, before, "the text shelf grew thicker");
     }
 
-    /// 字は上から、絵は下から。**互いの領分へ食い込まない**
+    /// Glyphs from the top, images from the bottom, never crossing.
     #[test]
     fn glyphs_grow_down_and_pictures_grow_up() {
         let mut s = Shelves::new();
 
-        let (_, gy) = s.alloc(20, 20, Side::Glyph).expect("入る");
-        let (_, iy) = s.alloc(128, 128, Side::Image).expect("入る");
+        let (_, gy) = s.alloc(20, 20, Side::Glyph).expect("should fit");
+        let (_, iy) = s.alloc(128, 128, Side::Image).expect("should fit");
 
-        assert_eq!(gy, 0, "字は上端から");
-        assert!(iy > gy, "絵は下のほう");
+        assert_eq!(gy, 0, "glyphs should start at the top");
+        assert!(iy > gy, "images should be lower");
         assert!(iy + 128 <= ATLAS_SIZE);
     }
 
-    /// 同じ棚に並び、幅が尽きたら次の棚へ移る
+    /// They share a shelf until the width runs out.
     #[test]
     fn pictures_share_a_shelf_until_the_width_runs_out() {
         let mut s = Shelves::new();
 
-        let (_, first) = s.alloc(128, 128, Side::Image).expect("入る");
-        let (x, same) = s.alloc(128, 128, Side::Image).expect("入る");
-        assert_eq!(same, first, "同じ棚");
-        assert!(x > 0, "横に並ぶ");
+        let (_, first) = s.alloc(128, 128, Side::Image).expect("should fit");
+        let (x, same) = s.alloc(128, 128, Side::Image).expect("should fit");
+        assert_eq!(same, first, "should share a shelf");
+        assert!(x > 0, "should sit side by side");
 
-        // 幅を使い切らせる
+        // Exhaust the width.
         for _ in 0..20 {
             s.alloc(128, 128, Side::Image);
         }
-        let (_, next) = s.alloc(128, 128, Side::Image).expect("入る");
-        assert!(next < first, "次の棚は上へ");
+        let (_, next) = s.alloc(128, 128, Side::Image).expect("should fit");
+        assert!(next < first, "the next shelf should be higher");
     }
 
-    /// ⚠️ **絵で埋まっても字は入り続ける。**
-    /// 諦めると本文が虫食いになる
+    /// Glyphs still fit once images have filled up; giving up would put holes
+    /// in the body.
     #[test]
     fn a_full_picture_side_does_not_stop_the_glyphs() {
         let mut s = Shelves::new();
 
-        // 絵で埋め尽くす
+        // Fill up with images.
         while s.alloc(256, 256, Side::Image).is_some() {}
         assert!(s.images_full);
 
-        assert!(s.alloc(20, 20, Side::Glyph).is_some(), "字はまだ入る");
+        assert!(
+            s.alloc(20, 20, Side::Glyph).is_some(),
+            "glyphs should still fit"
+        );
         assert!(!s.glyphs_full);
     }
 
-    /// ⚠️ **詰め直せば、また入る。** 棚詰めは途中の 1 枚を空けられない
-    /// ので、まとめて忘れるしかない
+    /// Repacking makes room again; shelf packing cannot free one entry.
     #[test]
     fn resetting_the_picture_side_makes_room_again() {
         let mut s = Shelves::new();
@@ -1252,22 +1199,21 @@ mod shelf_tests {
         assert!(s.alloc(256, 256, Side::Image).is_some());
     }
 
-    /// ⚠️ **詰め直しても文字の側は動かない。**
-    /// 本文が虫食いになるのは、顔が 1 枚消えるよりずっと悪い
+    /// A repack leaves the text side alone.
     #[test]
     fn resetting_the_picture_side_leaves_the_glyphs_alone() {
         let mut s = Shelves::new();
-        s.alloc(20, 20, Side::Glyph).expect("入る");
+        s.alloc(20, 20, Side::Glyph).expect("should fit");
         let (before_x, before_y) = (s.cursor_x, s.cursor_y);
 
-        s.alloc(128, 128, Side::Image).expect("入る");
+        s.alloc(128, 128, Side::Image).expect("should fit");
         s.reset_images();
 
         assert_eq!((s.cursor_x, s.cursor_y), (before_x, before_y));
         assert!(!s.glyphs_full);
     }
 
-    /// ⚠️ **重ならない。** 両側から詰めても、同じ場所を 2 度渡さない
+    /// Packing from both ends never hands out the same space twice.
     #[test]
     fn the_two_sides_never_overlap() {
         let mut s = Shelves::new();
@@ -1276,7 +1222,7 @@ mod shelf_tests {
         while let Some((_, y)) = s.alloc(64, 64, Side::Glyph) {
             lowest_glyph = lowest_glyph.max(y + 64);
         }
-        // 字で埋めた後は、絵はもう入らない
+        // Once glyphs have filled it, no image fits.
         assert!(s.alloc(128, 128, Side::Image).is_none());
         assert!(lowest_glyph <= ATLAS_SIZE);
     }
@@ -1301,12 +1247,9 @@ mod tests {
         })
     }
 
-    /// ⚠️ **飾りごとに整形して横に並べてはいけない。**
-    ///
-    /// 並べると折り返しがそれぞれ独立して決まり、行末が合わなくなる。
-    /// ここでは「まとめて整形すると 2 行に折り返す幅」を与えて、
-    /// **一続きの文として折り返していること**を見ている。走りごとに
-    /// 整形していたら、どちらの走りも 1 行に収まって 1 行のままになる
+    /// Shaping per run and placing them side by side wraps each
+    /// independently. This gives a width where the combined text needs two
+    /// lines but each run alone fits on one.
     #[test]
     fn mixed_decoration_wraps_as_one_run_of_text() {
         let mut sh = Shaper::new(1.0);
@@ -1316,20 +1259,20 @@ mod tests {
         ];
 
         let one = sh.measure_rich(&runs, None);
-        // どちらの走りも単独なら収まる幅で、まとめると収まらない幅
+        // Wide enough for either run alone, not for both.
         let narrow = one.w * 0.7;
         let two = sh.measure_rich(&runs, Some(narrow));
 
         assert!(
             two.h > one.h,
-            "まとめて折り返していない。1 行 {:?} / 折り返し {:?}",
+            "not wrapped as one run: single {:?}, wrapped {:?}",
             one,
             two
         );
-        assert!(two.w <= narrow.ceil(), "折り返し幅を超えている {two:?}");
+        assert!(two.w <= narrow.ceil(), "exceeded the wrap width {two:?}");
     }
 
-    /// 走りの番号が字まで届いていること。**届かないと色が塗り分けられない**
+    /// The run index reaches the glyphs, which is what colours them.
     #[test]
     fn each_glyph_remembers_its_span() {
         let mut sh = Shaper::new(1.0);
@@ -1340,10 +1283,14 @@ mod tests {
         let shaped = sh.shape_rich(&runs, None);
 
         let which: Vec<u32> = shaped.glyphs.iter().map(|g| g.run).collect();
-        assert_eq!(which, vec![0, 0, 1, 1], "走りの番号が字に付いていない");
+        assert_eq!(
+            which,
+            vec![0, 0, 1, 1],
+            "the run index did not reach the glyphs"
+        );
     }
 
-    /// ⚠️ 折り返した走りを 1 つの矩形で塗ると、行間まで塗って読めなくなる
+    /// One rect over a wrapped run would paint the leading too.
     #[test]
     fn a_span_rect_is_split_per_line() {
         let mut sh = Shaper::new(1.0);
@@ -1353,15 +1300,14 @@ mod tests {
 
         assert!(
             shaped.runs.len() >= 2,
-            "折り返したのに矩形が 1 つしかない {:?}",
+            "only one rect for wrapped text {:?}",
             shaped.runs
         );
         let ys: Vec<f32> = shaped.runs.iter().map(|r| r.rect.y).collect();
-        assert!(ys[0] != ys[1], "行が違うのに同じ高さにある {ys:?}");
+        assert!(ys[0] != ys[1], "different lines at the same height {ys:?}");
     }
 
-    /// 走りが 1 つのときは、飾りの無い文字列と同じ結果になること。
-    /// **同じ道を通っている**ことの確認である
+    /// A single run matches plain text, confirming both take the same path.
     #[test]
     fn a_single_span_matches_plain_text() {
         let mut sh = Shaper::new(1.0);
@@ -1371,12 +1317,9 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// ⚠️ **走りの切れ目が行に影響してはいけない。**
-    ///
-    /// 同じ書体で 2 つに割った走りは、割らずに 1 つで書いたものと
-    /// **1 ピクセルも違わない**はずである。ここが違うということは、
-    /// 走りごとに独立して置いているということで、飾りを付けた途端に
-    /// 行末がずれる
+    /// Splitting a run in the same font must not change anything by a pixel;
+    /// if it does, runs are being placed independently and decoration would
+    /// shift the line breaks.
     #[test]
     fn span_boundaries_do_not_affect_line_breaking() {
         let mut sh = Shaper::new(1.0);
@@ -1391,13 +1334,13 @@ mod tests {
             assert_eq!(
                 sh.measure(whole, &f, Some(w)),
                 sh.measure_rich(&split, Some(w)),
-                "折り返し幅 {w} で結果が違う"
+                "results differ at wrap width {w}"
             );
         }
     }
 
-    /// cosmic-text の Han 統合の判定は完全一致なので、そこへ通る形に
-    /// なっていること。**ここが崩れると日本語が中国語の書体で描かれる。**
+    /// The Han unification check is exact; getting this wrong renders
+    /// Japanese with Chinese shapes.
     #[test]
     fn locale_is_normalised_for_han_unification() {
         assert_eq!(normalize_locale("ja-JP"), "ja");
@@ -1406,7 +1349,7 @@ mod tests {
         assert_eq!(normalize_locale("en-US"), "en");
         assert_eq!(normalize_locale("ko-KR"), "ko");
 
-        // 中国語だけは地域・文字体系まで見ないと繁体/簡体が決まらない
+        // Only Chinese needs the region or script to pick a variant.
         assert_eq!(normalize_locale("zh-CN"), "zh-CN");
         assert_eq!(normalize_locale("zh-TW"), "zh-TW");
         assert_eq!(normalize_locale("zh-Hant-TW"), "zh-TW");
@@ -1415,8 +1358,8 @@ mod tests {
         assert_eq!(normalize_locale("zh-MO"), "zh-HK");
     }
 
-    /// 日本語の利用者に中国語の字形を出さない。
-    /// 逆に、中国語・韓国語の利用者から字形を横取りもしない
+    /// Japanese readers do not get Chinese shapes, and Chinese and Korean
+    /// readers keep theirs.
     #[test]
     fn han_scripts_fall_back_by_locale() {
         let f = GumicordFallback;
@@ -1428,7 +1371,7 @@ mod tests {
         assert_ne!(f.script_fallback(Script::Han, "zh-TW"), JAPANESE_FALLBACK);
         assert_ne!(f.script_fallback(Script::Han, "ko"), JAPANESE_FALLBACK);
 
-        // 漢字圏以外は横取りしない
+        // Outside CJK nothing is taken over.
         assert_ne!(f.script_fallback(Script::Arabic, "ja"), JAPANESE_FALLBACK);
     }
 
@@ -1441,7 +1384,7 @@ mod tests {
         assert!(!f.italic);
     }
 
-    /// 行の高さの指定がなければ、大きさに比例させる
+    /// With no line height, it scales from the size.
     #[test]
     fn line_height_scales_with_size() {
         let f = ResolvedFont::from_font(&Font {
@@ -1449,10 +1392,10 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(f.size(), 30.0);
-        assert_eq!(f.line_height(), 44.0, "15/22 と同じ比率");
+        assert_eq!(f.line_height(), 44.0, "should keep the default ratio");
     }
 
-    /// 鍵に f32 を直接使うと NaN と -0.0 で壊れる。量子化して避けている
+    /// An `f32` key breaks on NaN and negative zero; quantising avoids it.
     #[test]
     fn fonts_with_equal_metrics_share_a_key() {
         let a = ResolvedFont::from_font(&Font {
@@ -1465,25 +1408,23 @@ mod tests {
     }
 }
 
-/// 1 行に収まるように末尾を「…」で詰めた文字列。
+/// Truncates a string to one line with an ellipsis.
 ///
-/// # なぜ折り返さずに切るのか
+/// Channel and guild names are single rows; wrapping them makes the row
+/// heights uneven and the list unreadable.
 ///
-/// チャンネル名やサーバ名は**一覧の 1 行**である。折り返すと行の高さが
-/// 揃わなくなり、一覧が読めなくなる。Discord も切って「…」を出す。
-///
-/// ⚠️ **切る位置は文字の境界である。** バイトで切ると、日本語も絵文字も
-/// 途中で割れて化ける。整形した結果の字の位置を見て決める。
+/// Cut at a character boundary, decided from the shaped positions: cutting by
+/// byte breaks multi-byte text and emoji.
 impl Shaper {
     pub fn fit_single_line(&mut self, text: &str, font: &ResolvedFont, max_w: f32) -> String {
-        /// 詰めたことを示す字。**1 文字で済ませる**
+        /// One character, marking the cut.
         const ELLIPSIS: &str = "…";
 
         if text.is_empty() || !max_w.is_finite() || max_w <= 0.0 {
             return text.to_owned();
         }
 
-        // ⚠️ 折り返さずに測る。折り返して測ると「収まっている」ことになる
+        // Measured unwrapped; wrapped, everything "fits".
         if self.measure(text, font, None).w <= max_w {
             return text.to_owned();
         }
@@ -1493,7 +1434,7 @@ impl Shaper {
             return ELLIPSIS.to_owned();
         }
 
-        // 収まる最後の字の**手前**で切る
+        // Cut before the last glyph that fits.
         let limit = room * self.scale;
         let mut cut = 0;
         for g in &self.shape(text, font, None).glyphs {
@@ -1506,8 +1447,8 @@ impl Shaper {
             return ELLIPSIS.to_owned();
         }
 
-        // ⚠️ 整形は書記素をまとめるので `end` は境界のはずだが、
-        // **信じずに確かめる**。ここで割れると画面に化けた字が出る
+        // Shaping groups graphemes, so `end` should be a boundary; checked
+        // anyway, because breaking here puts mojibake on screen.
         while cut > 0 && !text.is_char_boundary(cut) {
             cut -= 1;
         }
@@ -1523,7 +1464,7 @@ mod fit_tests {
         Shaper::new(1.0)
     }
 
-    /// 収まるものはそのまま
+    /// What fits passes through.
     #[test]
     fn text_that_fits_is_untouched() {
         let mut s = shaper();
@@ -1532,7 +1473,7 @@ mod fit_tests {
         assert_eq!(s.fit_single_line("あい", &font, wide), "あい");
     }
 
-    /// はみ出したら「…」が付き、**元より短くなる**
+    /// What does not gets an ellipsis and comes back shorter.
     #[test]
     fn overflowing_text_is_cut_with_an_ellipsis() {
         let mut s = shaper();
@@ -1541,27 +1482,30 @@ mod fit_tests {
         let narrow = s.measure(long, &font, None).w * 0.4;
 
         let cut = s.fit_single_line(long, &font, narrow);
-        assert!(cut.ends_with('…'), "「…」で終わっていない: {cut}");
+        assert!(cut.ends_with('…'), "does not end with an ellipsis: {cut}");
         assert!(cut.chars().count() < long.chars().count());
-        // ⚠️ **収まっている**こと。切ったのに溢れていては意味がない
+        // And actually fits; truncating that still overflows is pointless.
         assert!(s.measure(&cut, &font, None).w <= narrow + 0.5);
     }
 
-    /// ⚠️ **文字の途中で割らない。** バイトで切ると日本語も絵文字も化ける
+    /// Never cut mid-character.
     #[test]
     fn multibyte_text_is_never_split_mid_character() {
         let mut s = shaper();
         let font = ResolvedFont::from_style(&Style::default());
         let text = "🍣🍣🍣🍣🍣🍣🍣🍣";
 
-        // どの幅で切っても、正しい文字列であること
+        // Valid at every width.
         for n in 1..40 {
             let cut = s.fit_single_line(text, &font, n as f32 * 3.0);
-            assert!(cut.chars().all(|c| c == '🍣' || c == '…'), "化けた: {cut}");
+            assert!(
+                cut.chars().all(|c| c == '🍣' || c == '…'),
+                "mojibake: {cut}"
+            );
         }
     }
 
-    /// 幅が無いに等しくても落ちない
+    /// Survives a width of effectively zero.
     #[test]
     fn an_impossible_width_does_not_panic() {
         let mut s = shaper();
@@ -1572,24 +1516,20 @@ mod fit_tests {
     }
 }
 
-/// 取ってきた画像 1 枚。**画素はアプリが用意する。**
-///
-/// ⚠️ レンダラは網に触らない ([`spec/02-architecture.md`])。ここへ来るのは
-/// 既に取得も復号も済んだ RGBA である。
+/// One fetched image. The renderer never touches the network, so this
+/// arrives already fetched and decoded.
 #[derive(Debug, Clone)]
 pub struct ImageData {
-    /// 取り出し元。**同じ URL なら同じ絵である**
+    /// Where it came from; the same URL is the same image.
     pub url: String,
     pub width: u32,
     pub height: u32,
-    /// RGBA8。長さは `width * height * 4`
+    /// RGBA8, `width * height * 4` long.
     pub rgba: Vec<u8>,
 }
 
-/// URL の指紋。**アトラスの鍵にする。**
-///
-/// ⚠️ 文字列そのものを鍵にすると、フレームごとに複製することになる。
-/// URL は 100 文字を超えることがあり、1 フレームに何十個も引く
+/// A hash of a URL, used as the atlas key: the string itself would be cloned
+/// dozens of times per frame, and URLs run past a hundred characters.
 pub fn image_key(url: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1598,9 +1538,8 @@ pub fn image_key(url: &str) -> u64 {
 }
 
 impl TextEngine {
-    /// 取ってきた画像をアトラスへ入れる。**同じ URL は 1 度だけ入る。**
-    ///
-    /// 入らなければ (アトラスが溢れていれば) `false`。呼び出し側は
+    /// Puts a fetched image in the atlas, once per URL. False when it does
+    /// not fit, and the caller
     /// **諦めてよい** — 絵が出ないだけで、他は何も壊れない
     pub fn put_image(
         &mut self,
@@ -1627,17 +1566,17 @@ impl TextEngine {
                 Placement {
                     left: 0,
                     top: 0,
-                    // 画像は色そのものを使う。文字のように色を掛けない
+                    // Images keep their own colour; no tinting.
                     is_color: true,
                 },
                 Side::Image,
             )
         };
 
-        // 入らなければ絵の側を詰め直して、1 度だけやり直す。
+        // On failure, repack the image side and retry once.
         //
-        // ⚠️ **やり直すのは 1 度きり。** 空いた場所にも入らないなら、
-        // 入りきらない大きさのものを頼まれている
+        // Once only: something that does not fit in an empty side is simply
+        // too large.
         let mut entry = place(&mut self.atlas);
         if entry.is_none() && self.atlas.recycle_images() {
             entry = place(&mut self.atlas);
@@ -1649,16 +1588,13 @@ impl TextEngine {
         entry.is_some()
     }
 
-    /// 絵を忘れたか。**1 回だけ真を返す。**
-    ///
-    /// 真のとき、取ってきた側は**入れ直しを頼み直す**必要がある。
-    /// 頼まないと、忘れられた顔は二度と出てこない
+    /// Whether images were forgotten; true once. The fetcher must re-add
+    /// them, or they never come back.
     pub fn took_image_recycle(&mut self) -> bool {
         self.atlas.took_recycle()
     }
 
-    /// 既にアトラスに入っている画像。**無ければ `None`** で、
-    /// 呼び出し側は何も描かない
+    /// An image already in the atlas; `None` means draw nothing.
     pub fn image(&self, url: &str) -> Option<GlyphEntry> {
         self.atlas
             .entries
@@ -1667,7 +1603,7 @@ impl TextEngine {
             .flatten()
     }
 
-    /// その画像を持っているか。**取りに行くかどうかの判断に使う**
+    /// Whether the image is held, which decides whether to fetch it.
     pub fn has_image(&self, url: &str) -> bool {
         self.atlas
             .entries
