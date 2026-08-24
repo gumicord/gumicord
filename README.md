@@ -53,7 +53,7 @@ cargo build --profile dist
 > [!WARNING]
 > Since `dist` uses fat LTO, it consumes **several GB of memory** during linking, and the `target/` directory will also grow to several GB. On machines with limited memory, please close other applications before running this command.
 
-You can delete unnecessary build artifacts with `cargo clean`. You can safely delete spike artifacts with `rm -rf spike/*/target` (the code remains, and the measurement results are already recorded in [`spec/adr/`](spec/adr/)).
+You can delete unnecessary build artifacts with `cargo clean`.
 
 ## Disclaimer
 
