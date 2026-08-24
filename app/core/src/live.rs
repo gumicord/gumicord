@@ -1,36 +1,17 @@
-//! 本物の Discord のデータ。Store (C5) / Gateway (C2) / REST (C3) の結線。
+//! Real Discord data: the wiring between the store, the gateway and REST.
 //!
-//! # 3 つの出所を 1 つの状態に落とす
+//! Three sources collapse into one state. The cache is instant but stale,
+//! REST is correct but costs a round trip, and the gateway only carries what
+//! happens after connecting. Opening a channel shows the cache, replaces it
+//! when REST returns, and follows the gateway from there.
 //!
-//! ```text
-//!   キャッシュ (SQLite)  ──▶ ┐
-//!   REST (過去 50 件)    ──▶ ├─▶ Store ──▶ 画面
-//!   Gateway (これから)   ──▶ ┘
-//! ```
+//! If REST returns first, a late cache result must not overwrite it.
 //!
-//! **どれか 1 つでは成立しない。**
+//! Startup draws from cache because READY takes closer to a second, which
+//! does not fit the cold-start budget; waiting for it was never an option.
 //!
-//! - キャッシュは**すぐ出る**が古い
-//! - REST は正しいが**往復を待つ**
-//! - Gateway は繋いだ後のものしか運ばない
-//!
-//! チャンネルを開いたら、まずキャッシュを出し、REST が返ったら差し替え、
-//! そこから先は Gateway が追いかける。
-//!
-//! ⚠️ **REST が先に返ったら、後から来たキャッシュで上書きしない。**
-//! 古いもので新しいものを潰すことになる。
-//!
-//! # 起動時はキャッシュから描く (`NFR-011`, C6)
-//!
-//! S4 の実測では Gateway の READY まで 672〜1120 ms かかる。
-//! `NFR-001` (コールドスタート 500 ms) に**入らない**ので、READY を待って
-//! から描くという選択肢は最初から無い。
-//!
-//! # 主スレッドは止めない
-//!
-//! [`crate::session`] と同じ形である。仕事は [`tokio`] と書き込みスレッドの
-//! 上で進み、結果だけがチャネルで戻り、[`Waker`] が主スレッドを起こす。
-
+//! Work runs on tokio and a writer thread, and results come back over a
+//! channel that wakes the main thread.
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
@@ -40,19 +21,17 @@ use gumicord_platform::Waker;
 use gumicord_rest::RestClient;
 use gumicord_store::{Db, GuildRow, Store};
 
-/// 1 チャンネルにつき最初に取ってくる件数。
-///
-/// Discord の API の上限が 100。50 にしてあるのは、**開いた瞬間に見える分
-/// より少し多い**あたりで、往復を待たせないため
+/// Messages fetched when a channel opens. The API allows 100; 50 is a little
+/// more than fits on screen, which keeps the round trip short.
 const BACKLOG: u8 = 50;
 
-/// いま入力中の人が消えるまでの時間。
+/// How long a typing indicator lives.
 ///
-/// Discord は 10 秒で消し、まだ打っていれば `TYPING_START` を送り直す。
-/// **こちらが先に消してしまうと、打っている最中に表示が点滅する**
+/// Discord resends `TYPING_START` while someone keeps typing; expiring sooner
+/// than it does makes the indicator flicker mid-sentence.
 const TYPING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 入力中の人 1 人。
+/// One person typing.
 #[derive(Debug, Clone)]
 struct Typist {
     user: UserId,
@@ -60,23 +39,22 @@ struct Typist {
     at: std::time::Instant,
 }
 
-/// Gateway との繋がり具合。**画面に出すためのものである。**
+/// Connection state, for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Link {
-    /// まだ繋いでいない
+    /// Not connected yet.
     Idle,
     Connecting,
     Up,
-    /// 切れた。**繋ぎ直しは Gateway の中で続いている**
+    /// Dropped; the gateway is still retrying internally.
     Reconnecting(String),
-    /// 諦めた
+    /// Given up.
     Down(String),
 }
 
 impl Link {
-    /// 画面に出す一行。繋がっているときは**何も出さない**。
-    ///
-    /// 正常な状態をわざわざ知らせると、異常のときの一行が埋もれる
+    /// The line to show, and nothing while connected: announcing the normal
+    /// case buries the abnormal one.
     pub fn hint(&self) -> Option<String> {
         match self {
             Link::Up | Link::Idle => None,
@@ -87,59 +65,57 @@ impl Link {
     }
 }
 
-/// 背景から主スレッドへ流れる知らせ。
+/// What the background reports to the main thread.
 #[derive(Debug)]
 pub enum LiveEvent {
     Ready(Box<Ready>),
-    /// Gateway から届いた新着
+    /// A new message from the gateway.
     Posted(Box<Message>),
-    /// 書き換わった 1 件 (`FR-024`)
+    /// One message edited.
     Edited(Box<Message>),
-    /// 消えた 1 件 (`FR-024`)
+    /// One message deleted.
     Removed {
         channel: ChannelId,
         id: MessageId,
     },
-    /// ギルドの中身が届いた・変わった。**殻だった分がここで埋まる**
+    /// A guild's contents arrived; shells get filled in here.
     GuildChanged(Box<Guild>),
-    /// キャッシュから読めた分。**REST より先に出る**
+    /// Read from cache, ahead of REST.
     Cached {
         channel: ChannelId,
         list: Vec<Message>,
     },
-    /// REST で取ってきた過去分。**古い順に並べ替えてある**
+    /// History from REST, already reordered oldest first.
     Backlog {
         channel: ChannelId,
         list: Vec<Message>,
     },
-    /// もっと遡った分。**古い順で、いま持っているものより前に付く**。
-    ///
-    /// 空なら**そこが一番古い**。もう頼まない
+    /// An older page, prepended. Empty means the top of the channel.
     Older {
         channel: ChannelId,
         list: Vec<Message>,
     },
-    /// メンバー一覧の差分 (`FR-043`)
+    /// A member list diff.
     Members(Box<gumicord_gateway::member_list::MemberListUpdate>),
-    /// 名指しで頼んだ人の姿 (`op 8` の返事)。
+    /// Members we asked for by name.
     ///
-    /// ⚠️ **REST の発言には姿が付いていないので、ここが唯一の出所になる**
+    /// REST messages carry no member, so this is the only source for them.
     MemberChunk {
         guild: GuildId,
         members: Vec<gumicord_model::Member>,
     },
-    /// 誰かが打ち始めた
+    /// Someone started typing.
     Typing {
         channel: ChannelId,
         user: UserId,
         name: String,
     },
     Link(Link),
-    /// トークンが弾かれた (`FR-004`)。**鍵束もキャッシュも捨てる**
+    /// The token was rejected; drop the keychain entry and the cache.
     TokenRejected,
 }
 
-/// 本物のデータと、それを運ぶ背景の仕事。
+/// Real data and the background work that carries it.
 pub struct Live {
     tx: Sender<LiveEvent>,
     rx: Receiver<LiveEvent>,
@@ -149,62 +125,55 @@ pub struct Live {
     started: bool,
 
     store: Store,
-    /// ローカルキャッシュ。**開けなくてもアプリは動く**
+    /// Local cache; the app works without one.
     db: Option<Db>,
     link: Link,
-    /// 取りに行った (行っている) チャンネル。**二重に叩かないため**
+    /// Channels already requested, so nothing is fetched twice.
     requested: HashSet<ChannelId>,
-    /// いま遡っている最中のチャンネル。
+    /// Channels with a page in flight.
     ///
-    /// ⚠️ **これが無いと、上端で待っている間に何回も叩く。** スクロールは
-    /// 1 回の操作で何度も来るので、1 回目の応答を待たずに次を投げてしまう
+    /// One scroll gesture fires many events; without this, each would send
+    /// another request before the first answered.
     paging: HashSet<ChannelId>,
-    /// これ以上古いものが無いチャンネル。**先頭に着いたら二度と頼まない**
+    /// Channels with nothing older left.
     exhausted: HashSet<ChannelId>,
-    /// 上へ足したので、見ている場所を動かしてほしくない。
-    /// **1 回だけ効く** ([`Live::take_prepended`])
+    /// Something was prepended; consumed once by the renderer to hold the
+    /// scroll position.
     prepended: bool,
-    /// トークンが弾かれた。アプリが後始末をしたら下ろす
+    /// The token was rejected; cleared once the app has acted on it.
     rejected: bool,
-    /// 前回開いていたチャンネル (`NFR-011`)
+    /// The channel open last time.
     last_channel: Option<ChannelId>,
-    /// 「見ている」と Gateway へ伝える手。**これが無いと新着が来ない**
+    /// Tells the gateway what is being watched; nothing arrives without it.
     subs: Option<Subscriptions>,
-    /// いま画面に出ているチャンネル。**開いている間は読んだことにする**
+    /// The channel on screen; anything arriving there counts as read.
     watching: Option<ChannelId>,
-    /// 姿を名指しで頼んだ人。
+    /// Members already asked for.
     ///
-    /// ⚠️ **これが無いと同じ人を何度も頼む。** `op 8` も線に流す payload で
-    /// あり、出しすぎればレート制限で接続ごと切られる (`4008`)。
-    ///
-    /// ⚠️ **返ってこなかった人も入れたままにする。** 消えた人・見えない
-    /// 人は永久に返ってこないので、諦めない限り頼み続けることになる
+    /// Asking repeatedly would flood the socket and get the connection
+    /// closed. People who never come back stay recorded too: deleted or
+    /// invisible users would otherwise be requested forever.
     asked_members: HashSet<(GuildId, UserId)>,
-    /// チャンネルごとの、いま入力中の人。**残さない。消えてよいもの**
+    /// Who is typing where. Never persisted.
     typing: std::collections::HashMap<ChannelId, Vec<Typist>>,
-    /// ギルドごとのメンバー一覧 (`FR-043`)。
+    /// Member lists per guild.
     ///
-    /// ⚠️ **キャッシュに残さない。** 誰がオンラインかは開いた瞬間の話で
-    /// あって、次の起動で出してよいものではない。
-    ///
-    /// ⚠️ **本当はチャンネルごとである。** 見える人はチャンネルの権限で
-    /// 変わる。いまは 1 ギルドにつき 1 チャンネルしか購読しないので
-    /// ギルドで引いて足りる
+    /// Never cached: who is online is true at that moment, not at the next
+    /// start. Really it is per channel, since permissions decide who is
+    /// visible, but only one channel per guild is subscribed today.
     members: std::collections::HashMap<GuildId, gumicord_gateway::MemberList>,
-    /// 自分。**自分の「入力中」を出さないために要る**
+    /// Ourselves, so our own typing indicator is not shown.
     me: Option<UserId>,
-    /// 自分のステータス。
-    ///
-    /// ⚠️ **READY の時点の値である。** `PRESENCE_UPDATE` を見ていないので、
-    /// 走っている間に携帯で変えても、繋ぎ直すまでここは変わらない (`FR-043`)
+    /// Our status as of READY. `PRESENCE_UPDATE` is not handled, so changing
+    /// it on a phone does not show here until the next connection.
     status: Option<Status>,
 }
 
 impl Live {
-    /// キャッシュを開いて、**前回までの状態を読み込む**。
+    /// Opens the cache and loads the previous state.
     ///
-    /// ⚠️ ここは同期に読む。最初のフレームに要るものなので、待たないと
-    /// 「一瞬空っぽの画面」が出る。実測で数 ms しかかからない
+    /// Read synchronously: the first frame needs it, and deferring would show
+    /// an empty screen for a moment. It takes a few milliseconds.
     pub fn new() -> Self {
         let mut live = Live::without_cache();
 
@@ -213,7 +182,7 @@ impl Live {
                 tracing::debug!(
                     guilds = snapshot.guilds.len(),
                     messages = snapshot.messages.len(),
-                    "キャッシュから読み込んだ"
+                    "loaded from cache"
                 );
                 live.store.replace_guilds(snapshot.guilds);
                 if !snapshot.guild_order.is_empty() {
@@ -223,23 +192,22 @@ impl Live {
                 live.store.set_collapsed(snapshot.collapsed);
                 live.last_channel = snapshot.last_channel;
                 if let Some(ch) = snapshot.last_channel {
-                    // ⚠️ **取りに行った印は付けない。** 繋がったら REST で
-                    // 取り直したいので、古いままで固定しない
+                    // Not marked as requested: REST should still refetch once
+                    // connected.
                     live.store.set_backlog(ch, snapshot.messages);
                 }
                 live.db = Some(db);
             }
             Err(e) => {
-                // キャッシュは速くするためだけのもの。**無くても動く**
-                tracing::warn!(%e, "キャッシュを開けない。毎回取り直す");
+                // The cache only makes things faster.
+                tracing::warn!(%e, "no cache; everything will be refetched");
             }
         }
         live
     }
 
-    /// キャッシュを開かない。**demo と試験で使う。**
-    ///
-    /// ⚠️ 試験から `Live::new()` を呼ぶと、**開発機の本物のキャッシュを触る**
+    /// Without a cache, for demo mode and tests. `Live::new` would open the
+    /// developer's real cache.
     pub fn without_cache() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Live {
@@ -268,11 +236,9 @@ impl Live {
         }
     }
 
-    /// イベントループを起こす手を先に受け取る。
-    ///
-    /// ⚠️ **ログインより前にキャッシュを読むために要る。** 起動直後に開いて
-    /// いる 1 チャンネルは同期に読んであるが、繋がる前に別のチャンネルへ
-    /// 移ったときは、ここが無いとキャッシュが出てこない
+    /// Takes the waker early, so cache reads before login can still redraw.
+    /// The initial channel is read synchronously, but switching channels
+    /// before connecting needs this.
     pub fn attach_waker(&mut self, waker: Waker) {
         self.waker.get_or_insert(waker);
     }
@@ -285,19 +251,19 @@ impl Live {
         &self.store
     }
 
-    /// ⚠️ 試験から状態を組み立てるためだけにある
+    /// For building state in tests.
     #[cfg(test)]
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
     }
 
-    /// ⚠️ 試験から知らせを 1 つ流し込むためだけにある
+    /// For injecting one event in tests.
     #[cfg(test)]
     pub fn apply_for_test(&mut self, event: LiveEvent) -> bool {
         self.apply(event)
     }
 
-    /// 前回開いていたチャンネル。**そこを開いた状態で起動する**
+    /// The channel to reopen at startup.
     pub fn last_channel(&self) -> Option<ChannelId> {
         self.last_channel
     }
@@ -306,25 +272,24 @@ impl Live {
         self.store.guilds()
     }
 
-    /// キャッシュにも Gateway にも何も無いか
+    /// Whether there is nothing at all yet.
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
     }
 
-    /// 取りに行った結果として空なのか、まだ取りに行っていないのか。
+    /// Empty because it was fetched, or empty because it was not.
     ///
-    /// **この区別を画面に出せないと「読み込み中」と「発言なし」が同じに
-    /// 見える。** 利用者にはまったく違う意味である
+    /// Without the distinction, "loading" and "no messages" look the same.
     pub fn is_loading(&self, channel: ChannelId) -> bool {
         self.requested.contains(&channel) && !self.store.has_messages(channel)
     }
 
-    /// トークンが弾かれたか。**読んだら下りる** (`FR-004`)
+    /// Whether the token was rejected. Clears on read.
     pub fn take_rejection(&mut self) -> bool {
         std::mem::take(&mut self.rejected)
     }
 
-    /// Gateway に繋ぎ始める。**ログインできてから 1 回だけ呼ぶ。**
+    /// Starts the gateway. Called once per sign-in.
     pub fn start(
         &mut self,
         rt: &tokio::runtime::Handle,
@@ -348,10 +313,10 @@ impl Live {
         rt.spawn(async move { pump(gateway, tx, waker).await });
     }
 
-    /// そのチャンネルで**いま入力中の人**。
+    /// Who is typing in a channel.
     ///
-    /// ⚠️ 期限切れはここで落とす。時間で消えるものを状態として持つと、
-    /// 「消す」ための仕掛けがもう 1 つ要る
+    /// Expiry is applied on read; holding it as state would need something
+    /// else to do the expiring.
     pub fn typing_in(&self, channel: ChannelId) -> Vec<&str> {
         let now = std::time::Instant::now();
         self.typing
@@ -359,32 +324,31 @@ impl Live {
             .into_iter()
             .flatten()
             .filter(|t| now.duration_since(t.at) < TYPING_TTL)
-            // ⚠️ **自分は出さない。** 自分が打っていることは自分が一番
-            // よく知っている。Discord も出さない
+            // Never ourselves; Discord does not either.
             .filter(|t| Some(t.user) != self.me)
             .map(|t| &*t.name)
             .collect()
     }
 
-    /// 自分のステータス。**分からなければ `None`**
+    /// Our status, if known.
     pub fn status(&self) -> Option<Status> {
         self.status
     }
 
-    /// そのサーバのメンバー一覧。**まだ届いていなければ空**
+    /// A guild's member list, empty until it arrives.
     pub fn members(&self, guild: GuildId) -> Option<&gumicord_gateway::MemberList> {
         self.members.get(&guild).filter(|m| !m.is_empty())
     }
 
-    /// 自分が誰かを教える。**自分の入力中を出さないために要る**
+    /// Records who we are, so our own typing is filtered out.
     pub fn set_me(&mut self, me: UserId) {
         self.me = Some(me);
     }
 
-    /// そのチャンネルを開く。**キャッシュを先に出し、REST で追いかける。**
+    /// Opens a channel: cache first, REST behind it.
     ///
-    /// ⚠️ 取りに行ったこと自体を覚えておかないと、選び直すたびに叩いて
-    /// レート制限に当たる
+    /// Requests are remembered, or reselecting a channel would refetch each
+    /// time and hit the rate limit.
     pub fn open_channel(&mut self, guild: GuildId, channel: ChannelId) {
         if let Some(db) = &self.db {
             db.save_last_channel(channel);
@@ -392,8 +356,8 @@ impl Live {
         self.watching = Some(channel);
         self.mark_read(channel);
 
-        // ⚠️ **毎回伝える。** 見ているチャンネルが変わったことを言わないと、
-        // そのチャンネルの新着も入力中の表示も来ない
+        // Sent every time: without it neither new messages nor typing
+        // indicators arrive for the new channel.
         if let Some(subs) = &self.subs {
             subs.watch(guild, channel);
         }
@@ -402,7 +366,7 @@ impl Live {
             return;
         }
 
-        // [1] キャッシュ。**往復が無いので、繋がる前でも出る**
+        // Cache first: no round trip, so it works before connecting.
         if !self.store.has_messages(channel)
             && let (Some(db), Some(waker)) = (&self.db, &self.waker)
         {
@@ -413,7 +377,7 @@ impl Live {
             });
         }
 
-        // [2] REST。**正しいほうで差し替える**
+        // Then REST, which replaces it.
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
@@ -421,14 +385,15 @@ impl Live {
         rt.spawn(async move {
             match rest.messages(channel, BACKLOG).await {
                 Ok(mut list) => {
-                    // ⚠️ Discord は**新しい順**で返す。画面は古い順に積む
+                    // Discord returns newest first; the view stacks oldest
+                    // first.
                     list.reverse();
                     let _ = tx.send(LiveEvent::Backlog { channel, list });
                 }
                 Err(e) => {
-                    // 取れなくてもキャッシュのぶんは出ている。
-                    // **黙って「読み込み中」のまま止めない**
-                    tracing::warn!(%e, channel = %channel, "メッセージを取れなかった");
+                    // The cache is already on screen; do not leave it stuck
+                    // on "loading".
+                    tracing::warn!(%e, channel = %channel, "could not fetch messages");
                     let _ = tx.send(LiveEvent::Backlog {
                         channel,
                         list: Vec::new(),
@@ -439,16 +404,12 @@ impl Live {
         });
     }
 
-    /// もっと古いほうを取りに行く (`FR-020`)。
+    /// Fetches an older page.
     ///
-    /// ⚠️ **上端に着いたことを、来るたびに叩かない。** スクロールは 1 回の
-    /// 操作で何度も来る。1 回目の応答を待たずに次を投げると、同じ範囲を
-    /// 何度も頼んでレート制限に当たる。
-    ///
-    /// ⚠️ **一番古いところまで行ったら二度と頼まない。** 空が返るたびに
-    /// また頼むと、上端に居るあいだ叩き続けることになる。
-    ///
-    /// まだ 1 件も持っていないときは何もしない。**起点が無い**
+    /// One scroll gesture reports the top many times, so a page in flight
+    /// blocks another. Reaching the very top stops requests for good, or
+    /// sitting at the top would keep asking. Does nothing with no messages
+    /// yet: there is no anchor to page from.
     pub fn load_older(&mut self, channel: ChannelId) {
         if self.exhausted.contains(&channel) || self.paging.contains(&channel) {
             return;
@@ -464,15 +425,15 @@ impl Live {
         let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         rt.spawn(async move {
             let list = match rest.messages_before(channel, BACKLOG, before).await {
-                // ⚠️ Discord は**新しい順**で返す。画面は古い順に積む
+                // Discord returns newest first; the view stacks oldest first.
                 Ok(mut list) => {
                     list.reverse();
                     list
                 }
                 Err(e) => {
-                    // ⚠️ **空として送る。** 送らないと `paging` が下りず、
-                    // そのチャンネルは二度と遡れなくなる
-                    tracing::warn!(%e, channel = %channel, "遡れなかった");
+                    // Sent even when empty, or `paging` never clears and the
+                    // channel can never page again.
+                    tracing::warn!(%e, channel = %channel, "could not page back");
                     Vec::new()
                 }
             };
@@ -481,32 +442,26 @@ impl Live {
         });
     }
 
-    /// 上へ足したか。**1 回だけ真を返す。**
-    ///
-    /// 見ている場所を動かさないために、描く側がこれを見る
+    /// Whether something was prepended. True once, so the renderer can hold
+    /// the scroll position.
     pub fn take_prepended(&mut self) -> bool {
         std::mem::take(&mut self.prepended)
     }
 
-    /// もう遡れないか。**「読み込み中」を出しっぱなしにしないために要る**
+    /// Whether the top has been reached, so "loading" can stop.
     pub fn is_exhausted(&self, channel: ChannelId) -> bool {
         self.exhausted.contains(&channel)
     }
 
-    /// そのチャンネルに出ている人の姿を、まとめて頼む (`FR-043`)。
+    /// Asks for the members behind the messages in a channel.
     ///
-    /// # ⚠️ REST で取った発言には `member` が付いていない
+    /// Discord attaches `member` only to gateway messages, so names from REST
+    /// start uncoloured and gain their colour a moment later. The official
+    /// client behaves the same way; this is that moment.
     ///
-    /// Discord が添えるのは Gateway の `MESSAGE_CREATE` だけである。
-    /// **公式クライアントも同じで、チャンネルを開いた直後は名前が白く、
-    /// 少し遅れて色が付く。** これはその「少し遅れて」に当たる。
-    ///
-    /// ⚠️ **知らない人だけを頼む。** 既に姿を持っている人まで頼むと、
-    /// チャンネルを開くたびに何十人ぶんも線に流すことになる。
-    ///
-    /// ⚠️ **1 回 100 人まで。** 超えると Discord が弾く
+    /// Only unknown members are asked for, in batches of 100.
     fn fill_members(&mut self, channel: ChannelId) {
-        /// `op 8` の 1 回の上限
+        /// Discord's per-request limit.
         const CHUNK: usize = 100;
 
         let Some(subs) = &self.subs else { return };
@@ -528,21 +483,18 @@ impl Live {
         if want.is_empty() {
             return;
         }
-        tracing::debug!(users = want.len(), "知らない人の姿を頼む");
+        tracing::debug!(users = want.len(), "requesting unknown members");
         for part in want.chunks(CHUNK) {
             subs.request_members(guild, part.to_vec());
         }
     }
 
-    /// そこまで読んだことにする (`FR-042`)。**変わったら真**。
+    /// Marks a channel read locally, then tells the server.
     ///
-    /// # ⚠️ 画面を先に直し、サーバへは後から伝える
-    ///
-    /// 往復を待って未読の印を消すと、**開いてから消えるまでの間、既に
-    /// 読んでいるものが未読のまま光っている**ことになる。手元を先に直す。
-    ///
-    /// ⚠️ **失敗しても画面は戻さない。** 戻すと、開いたのに未読へ戻る
-    /// という一番分かりにくい動きになる。次に開いたときに送り直される
+    /// Waiting for the round trip would leave something already being read
+    /// lit as unread. A failure does not revert the view either: going back
+    /// to unread after opening is the most confusing outcome, and the next
+    /// open resends it.
     pub fn mark_read(&mut self, channel: ChannelId) -> bool {
         if !self.store.mark_read(channel) {
             return false;
@@ -556,16 +508,16 @@ impl Live {
         let rest = rest.clone();
         rt.spawn(async move {
             if let Err(e) = rest.ack_message(channel, last).await {
-                tracing::warn!(%e, channel = %channel, "既読を伝えられなかった");
+                tracing::warn!(%e, channel = %channel, "could not send the read marker");
             }
         });
         true
     }
 
-    /// 送る (`FR-024`)。`reply_to` があれば返信になる (`FR-028`)。
+    /// Sends a message, as a reply when `reply_to` is set.
     ///
-    /// ⚠️ **画面には足さない。** 送れたら Gateway が `MESSAGE_CREATE` を
-    /// 返してくるので、そこで 1 回だけ足る。ここでも足すと二重に出る
+    /// Not added to the view: the gateway echoes it back, and adding it here
+    /// too would show it twice.
     pub fn send_message(&self, channel: ChannelId, content: String, reply_to: Option<MessageId>) {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
@@ -573,17 +525,16 @@ impl Live {
         let (rest, waker) = (rest.clone(), waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.create_message(channel, &content, reply_to).await {
-                tracing::warn!(%e, channel = %channel, "送れなかった");
+                tracing::warn!(%e, channel = %channel, "could not send");
             }
             waker.wake();
         });
     }
 
-    /// 書き換える (`FR-024`)。
+    /// Edits a message.
     ///
-    /// ⚠️ **画面には反映しない。** 通ったら Gateway が `MESSAGE_UPDATE` を
-    /// 返してくる。ここで先に直すと、**失敗したときに直ったまま残る** —
-    /// 送信と違い、これは「もう直っている」と誤解させる
+    /// Not applied locally: the gateway echoes it. Applying it first would
+    /// leave a failed edit looking applied.
     pub fn edit_message(&self, channel: ChannelId, message: MessageId, content: String) {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
@@ -591,17 +542,16 @@ impl Live {
         let (rest, waker) = (rest.clone(), waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.edit_message(channel, message, &content).await {
-                tracing::warn!(%e, channel = %channel, "書き換えられなかった");
+                tracing::warn!(%e, channel = %channel, "could not edit");
             }
             waker.wake();
         });
     }
 
-    /// 消す (`FR-024`)。
+    /// Deletes a message.
     ///
-    /// ⚠️ **画面からも先に消さない。** 消せなかったときに戻すと、
-    /// 一度消えたものが再び現れることになる。どちらもぎょっとするが、
-    /// 「消えない」ほうがまだ分かりやすい
+    /// Not removed locally: a failed delete would make it reappear, which is
+    /// more alarming than it simply not going away.
     pub fn delete_message(&self, channel: ChannelId, message: MessageId) {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
@@ -609,16 +559,14 @@ impl Live {
         let (rest, waker) = (rest.clone(), waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.delete_message(channel, message).await {
-                tracing::warn!(%e, channel = %channel, "消せなかった");
+                tracing::warn!(%e, channel = %channel, "could not delete");
             }
             waker.wake();
         });
     }
 
-    /// `SEC-021`: ログアウトしたら**キャッシュも認証情報も残さない**。
-    ///
-    /// ⚠️ 残しておくと、次に別の人がその機械を使ったときに前の人の
-    /// メッセージが読める
+    /// Drops everything on sign-out. Leaving the cache behind lets the next
+    /// person on this machine read the previous one's messages.
     pub fn forget_everything(&mut self) {
         if let Some(db) = &self.db {
             db.wipe();
@@ -640,11 +588,10 @@ impl Live {
         self.me = None;
         self.link = Link::Connecting;
     }
-    /// 届いた並びを Store へ入れる。
+    /// Stores the sidebar order.
     ///
-    /// ⚠️ **フォルダだけを抜き出さない。** Discord は並び順の一覧に、
-    /// フォルダも単独のサーバも同じ列として入れてくる。フォルダだけを
-    /// 先に出して残りを末尾へ寄せると、**利用者が並べた位置が失われる**
+    /// Folders and lone guilds arrive in one list; pulling folders out and
+    /// appending the rest loses the order the user arranged.
     fn apply_sidebar(&mut self, folders: Vec<gumicord_gateway::Folder>) {
         let rows: Vec<gumicord_store::FolderRow> = folders
             .into_iter()
@@ -662,10 +609,8 @@ impl Live {
         self.store.set_sidebar(rows);
     }
 
-    /// フォルダの開閉を切り替え、**残す**。
-    ///
-    /// ⚠️ 開き直すのは利用者の仕事ではない。閉じたことを覚えていないと、
-    /// 起動するたびに畳み直すことになる
+    /// Toggles a folder and persists it, so it does not need refolding at
+    /// every start.
     pub fn toggle_folder(&mut self, id: u64) {
         self.store.toggle_folder(id);
         if let Some(db) = &self.db {
@@ -673,7 +618,7 @@ impl Live {
         }
     }
 
-    /// 溜まっている知らせを**空になるまで**取り込む。変わったら `true`。
+    /// Drains every pending event.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         loop {
@@ -688,14 +633,14 @@ impl Live {
         match event {
             LiveEvent::Ready(ready) => {
                 self.link = Link::Up;
-                // ⚠️ **順を先に取る。** ギルドを差し替えると `ready` が動く
+                // Take the order first; replacing guilds moves `ready`.
                 self.me = Some(ready.user.user.id);
-                // ⚠️ **繋がっていることを根拠に「オンライン」と名乗らない。**
-                // 取り込み中にしている人に対して嘘になる
+                // Being connected is not "online": it would lie about anyone
+                // set to do not disturb.
                 self.status = ready.status();
                 let order = ready.guild_order();
                 let folders = ready.guild_folders();
-                // ⚠️ **ギルドより先に取る。** 差し替えると `ready` が動く
+                // Before guilds; replacing them moves `ready`.
                 let marks: Vec<(ChannelId, gumicord_store::ReadMark)> = ready
                     .read_state
                     .iter()
@@ -710,7 +655,7 @@ impl Live {
                         )
                     })
                     .collect();
-                tracing::debug!(marks = marks.len(), "読んだ印を受け取った");
+                tracing::debug!(marks = marks.len(), "received read markers");
                 self.store.set_read_marks(marks);
 
                 self.store.replace_guilds(ready.guilds);
@@ -729,7 +674,7 @@ impl Live {
                 let list = self.typing.entry(channel).or_default();
                 let now = std::time::Instant::now();
                 match list.iter_mut().find(|t| t.user == user) {
-                    // 打ち続けている。**時刻だけ延ばす**
+                    // Still typing; just extend the deadline.
                     Some(t) => t.at = now,
                     None => list.push(Typist {
                         user,
@@ -746,17 +691,17 @@ impl Live {
             }
             LiveEvent::Posted(m) => {
                 let channel = m.channel_id;
-                // ⚠️ **開いていないチャンネルの分もここを通る。**
-                // 未読の印は本文を持っていなくても進む
+                // Channels that are not open pass through here too: unread
+                // state advances without holding the body.
                 let mut changed = self.store.note_arrival(&m, self.me);
-                // 見ているチャンネルなら、来た端から読んだことにする
+                // Arriving in the open channel counts as read.
                 if Some(channel) == self.watching {
                     changed |= self.mark_read(channel);
                 }
                 if !self.store.push_message(*m) {
                     return changed;
                 }
-                // 1 件ずつ書く。**閉じた後も残る**
+                // Written one at a time so it survives a close.
                 if let (Some(db), Some(last)) = (&self.db, self.store.messages(channel).last()) {
                     db.save_messages(channel, vec![last.clone()]);
                 }
@@ -764,28 +709,24 @@ impl Live {
             }
             LiveEvent::Edited(m) => {
                 let channel = m.channel_id;
-                // ⚠️ **姿を覚え直す。** 書き換えの知らせには `member` が
-                // 付いてくる。REST の発言には付いていないので、ここも
-                // 役職の色の出所である
+                // Edits carry `member`, which REST messages do not, so this
+                // is another source for role colours.
                 self.store.remember_from_message(&m);
-                // ⚠️ **円盤へ書くのは書き換わった 1 件である。** 一覧の
-                // 最後を書くと、古い発言を直したときに別のものを書く
+                // Write the edited message, not the newest one.
                 let saved = (*m).clone();
                 if !self.store.update_message(*m) {
-                    // 手元に無い発言だった。**足さない** —
-                    // 一覧の途中に飛び地ができる
+                    // Unknown message; adding it would leave a gap in the
+                    // list.
                     return false;
                 }
-                // ⚠️ **円盤も直す。** 直さないと、閉じて開いたときに
-                // 書き換える前の本文が戻ってくる
+                // Also on disk, or reopening brings the old body back.
                 if let Some(db) = &self.db {
                     db.save_messages(channel, vec![saved]);
                 }
                 true
             }
             LiveEvent::Removed { channel, id } => self.store.remove_message(channel, id),
-            // ⚠️ **REST が先に返っていたら採らない。**
-            // 古いもので新しいものを潰すことになる
+            // Ignored once REST has answered; this would be older.
             LiveEvent::Cached { channel, list } => {
                 if self.store.has_messages(channel) || list.is_empty() {
                     return false;
@@ -794,24 +735,24 @@ impl Live {
                 true
             }
             LiveEvent::Backlog { channel, list } => {
-                // 取れなかった (空) のにキャッシュがあるなら、そちらを残す。
-                // **繋がらないときに履歴が消えるのが一番困る** (`NFR-011`)
+                // Keep the cache when the fetch came back empty: losing
+                // history while offline is the worst outcome.
                 if list.is_empty() && self.store.has_messages(channel) {
                     return false;
                 }
                 if let Some(db) = &self.db {
                     db.save_messages(channel, list.clone());
                 }
-                // 履歴を丸ごと置き直したので、**遡り直せる**
+                // History was replaced, so paging can start over.
                 self.exhausted.remove(&channel);
                 self.store.set_backlog(channel, list);
-                // ⚠️ **REST の発言には姿が付いていない。** 名指しで頼む
+                // REST messages carry no member; ask for them.
                 self.fill_members(channel);
                 true
             }
             LiveEvent::Older { channel, list } => {
                 self.paging.remove(&channel);
-                // 空 = そこが一番古い。**もう頼まない**
+                // Empty means the top of the channel.
                 if list.is_empty() {
                     self.exhausted.insert(channel);
                     return false;
@@ -822,12 +763,12 @@ impl Live {
                 let added = self.store.prepend_messages(channel, list);
                 self.fill_members(channel);
                 if added == 0 {
-                    // 全部知っていた。**もう一度頼んでも同じものが来る**
+                    // All known already; asking again returns the same page.
                     self.exhausted.insert(channel);
                     return false;
                 }
-                // ⚠️ **見ている場所を動かさない。** 上へ足したぶんだけ
-                // 中身が伸びるので、そのままだと読んでいた行が下へ逃げる
+                // Hold the scroll position: prepending grows the content and
+                // would push the line being read downwards.
                 self.prepended = true;
                 true
             }
@@ -835,9 +776,8 @@ impl Live {
                 let guild = update.guild;
                 let changed = self.members.entry(guild).or_default().apply(*update);
 
-                // ⚠️ **ここで見かけた姿を覚えておく。** REST で取った発言には
-                // `member` が付いていないので、本文の呼び名も役職の色も
-                // ここが唯一の出所になることがある
+                // Remember members seen here: for REST messages this can be
+                // the only source of nicknames and role colours.
                 if changed && let Some(list) = self.members.get(&guild) {
                     let seen: Vec<(UserId, gumicord_model::Member)> = list
                         .rows()
@@ -858,7 +798,7 @@ impl Live {
             LiveEvent::MemberChunk { guild, members } => {
                 let mut changed = false;
                 for m in members {
-                    // 誰か分からない姿は覚えない
+                    // Skip entries with no user.
                     let Some(user) = m.user.as_ref().map(|u| u.id) else {
                         continue;
                     };
@@ -880,8 +820,8 @@ impl Live {
         }
     }
 
-    /// ⚠️ **書くのは正規化を解いた形である。** Store の中では
-    /// チャンネルは 1 箇所にしかないので、書き出すときに組み直す
+    /// Written denormalised: the store keeps channels in one place, so they
+    /// are reassembled on the way out.
     fn save_guilds(&self) {
         let Some(db) = &self.db else { return };
         let guilds: Vec<Guild> = self
@@ -907,7 +847,7 @@ impl Default for Live {
     }
 }
 
-/// Gateway を回し続ける。**`Fatal` が来るまで終わらない。**
+/// Pumps the gateway until it reports a fatal error.
 async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
     loop {
         let event = gateway.next().await;
@@ -918,49 +858,47 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
 
         match event {
             Event::Ready(ready) => send(LiveEvent::Ready(ready)),
-            // 取りこぼしはこの後で順に届く。**画面ですることはない**
+            // Anything missed arrives afterwards; nothing to do here.
             Event::Resumed => send(LiveEvent::Link(Link::Up)),
-            // ⚠️ **読めない 1 件で接続ごと落とさない。**
-            // Discord は予告なく形を変える
+            // One unreadable event must not take the connection down;
+            // Discord changes shapes without notice.
             Event::Dispatch { kind, data } => match kind.as_str() {
                 "MESSAGE_CREATE" => match serde_json::from_value::<Message>(data) {
                     Ok(m) => send(LiveEvent::Posted(Box::new(m))),
-                    Err(e) => tracing::warn!(%e, "MESSAGE_CREATE を読めなかった"),
+                    Err(e) => tracing::warn!(%e, "could not read MESSAGE_CREATE"),
                 },
-                // ⚠️ **本文が変わったときだけ来るのではない。** 埋め込みが
-                // 後から解決されたときにも来る。どちらも一覧を差し替える
+                // Also fires when an embed resolves later, not just on edits.
                 "MESSAGE_UPDATE" => match serde_json::from_value::<Message>(data) {
                     Ok(m) => send(LiveEvent::Edited(Box::new(m))),
-                    Err(e) => tracing::warn!(%e, "MESSAGE_UPDATE を読めなかった"),
+                    Err(e) => tracing::warn!(%e, "could not read MESSAGE_UPDATE"),
                 },
-                // ⚠️ **来るのは番号だけである。** 本文は付いてこない
+                // Only the id arrives; no body.
                 "MESSAGE_DELETE" => match deleted(&data) {
                     Some(e) => send(e),
-                    None => tracing::warn!("MESSAGE_DELETE を読めなかった"),
+                    None => tracing::warn!("could not read MESSAGE_DELETE"),
                 },
-                // READY で殻だけだったギルドが、遅れてここで埋まる。
-                // **これが来ないと落ちていたギルドは永久に出てこない**
+                // Fills in guilds that were shells in READY; without this an
+                // unavailable guild never appears.
                 "GUILD_CREATE" | "GUILD_UPDATE" => match serde_json::from_value::<Guild>(data) {
                     Ok(g) => send(LiveEvent::GuildChanged(Box::new(g))),
-                    Err(e) => tracing::warn!(%e, "{kind} を読めなかった"),
+                    Err(e) => tracing::warn!(%e, "could not read {kind}"),
                 },
-                // ⚠️ **op 14 を送っていないと来ない。** 購読の
-                // `channels` に範囲を書いているのがその頼みである
+                // Only arrives once the subscription has been sent.
                 "GUILD_MEMBER_LIST_UPDATE" => match gumicord_gateway::member_list::parse(&data) {
                     Some(u) => send(LiveEvent::Members(Box::new(u))),
-                    None => tracing::warn!("メンバー一覧を読めなかった"),
+                    None => tracing::warn!("could not read the member list"),
                 },
-                // ⚠️ **`op 8` で名指しで頼んだ返事である。**
-                // REST の発言には姿が付いていないので、ここが唯一の出所になる
+                // The answer to a by-name request; the only member source for
+                // REST messages.
                 "GUILD_MEMBERS_CHUNK" => match members_chunk(&data) {
                     Some(e) => send(e),
-                    None => tracing::warn!("メンバーの返事を読めなかった"),
+                    None => tracing::warn!("could not read the member chunk"),
                 },
                 "TYPING_START" => {
                     if let Some(e) = typing_event(&data) {
                         send(e);
-                        // ⚠️ **消えるときにも描き直しが要る。** 期限は時間で
-                        // 切れるので、放っておくと誰も起こしに来ない
+                        // The indicator expires on a timer, so schedule the
+                        // redraw that removes it.
                         let waker = waker.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(TYPING_TTL).await;
@@ -983,21 +921,13 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
     }
 }
 
-/// `TYPING_START` から「誰がどこで打っているか」を取り出す。
+/// Extracts who is typing where.
 ///
-/// ⚠️ **名前の在処が 3 通りある。**
-///
-/// ```text
-///   member.nick             サーバでの表示名。あればこれ
-///   member.user.global_name 表示名
-///   member.user.username    最後の頼み
-/// ```
-///
-/// DM には `member` が無い。名前が分からなければ**出さない** —
-/// 「誰かが入力中」とだけ出しても、利用者にできることが増えない
-/// `GUILD_MEMBERS_CHUNK` から姿を取り出す。
-///
-/// ⚠️ **読めない 1 人で全部を捨てない。** Discord は予告なく形を変える
+/// The name can be in three places: `member.nick`, `global_name`, then
+/// `username`. DMs carry no `member`; with no name nothing is shown, since
+/// "someone is typing" tells the reader nothing they can act on.
+/// Extracts members from a chunk. One unreadable entry does not discard the
+/// rest.
 fn members_chunk(data: &serde_json::Value) -> Option<LiveEvent> {
     let guild = data.get("guild_id")?.as_str()?.parse::<u64>().ok()?;
     let members: Vec<gumicord_model::Member> = data
@@ -1007,14 +937,14 @@ fn members_chunk(data: &serde_json::Value) -> Option<LiveEvent> {
         .filter_map(|m| serde_json::from_value(m.clone()).ok())
         .collect();
 
-    tracing::debug!(members = members.len(), "頼んだ人の姿が届いた");
+    tracing::debug!(members = members.len(), "requested members arrived");
     Some(LiveEvent::MemberChunk {
         guild: GuildId::from(guild),
         members,
     })
 }
 
-/// `MESSAGE_DELETE` の中身。**番号だけが来る。**
+/// A delete carries only ids.
 fn deleted(data: &serde_json::Value) -> Option<LiveEvent> {
     let channel = data.get("channel_id")?.as_str()?.parse::<u64>().ok()?;
     let id = data.get("id")?.as_str()?.parse::<u64>().ok()?;
@@ -1047,7 +977,7 @@ mod tests {
     use super::*;
     use gumicord_model::{MessageId, User, UserId};
 
-    /// ⚠️ [`Live::new`] は**実際のキャッシュを開く**。試験では使わない
+    /// `Live::new` opens the real cache, so tests must not use it.
     fn live() -> Live {
         Live::without_cache()
     }
@@ -1097,7 +1027,7 @@ mod tests {
         }
     }
 
-    /// キャッシュが先に出て、REST が来たら差し替わる
+    /// Cache first, replaced by REST.
     #[test]
     fn the_cache_shows_first_and_rest_replaces_it() {
         let mut live = live();
@@ -1120,7 +1050,7 @@ mod tests {
         assert_eq!(bodies, vec!["ふるい", "あたらしい"]);
     }
 
-    /// 遡った分は前に付き、**見ている場所を保ってほしいと 1 回だけ言う**
+    /// An older page prepends and asks once to hold the scroll position.
     #[test]
     fn an_older_page_goes_in_front_and_asks_to_hold_the_place() {
         let mut live = live();
@@ -1128,7 +1058,7 @@ mod tests {
             channel: ch(),
             list: vec![message(5, "いま")],
         });
-        assert!(!live.take_prepended(), "まだ何も足していない");
+        assert!(!live.take_prepended(), "nothing was prepended yet");
 
         assert!(live.apply(LiveEvent::Older {
             channel: ch(),
@@ -1143,14 +1073,12 @@ mod tests {
             .collect();
         assert_eq!(bodies, vec!["むかし", "すこしむかし", "いま"]);
 
-        assert!(live.take_prepended(), "場所を保ってほしい");
-        assert!(!live.take_prepended(), "**1 回だけ**");
+        assert!(live.take_prepended(), "should hold the scroll position");
+        assert!(!live.take_prepended(), "should only report once");
     }
 
-    /// ⚠️ **空が返ったら二度と頼まない。**
-    ///
-    /// 上端に居るあいだスクロールは何度も来る。空のたびにまた頼むと、
-    /// そこに居るだけで叩き続けることになる
+    /// An empty page stops further requests: sitting at the top would
+    /// otherwise keep asking.
     #[test]
     fn reaching_the_beginning_stops_the_asking() {
         let mut live = live();
@@ -1167,7 +1095,7 @@ mod tests {
         assert!(live.is_exhausted(ch()));
     }
 
-    /// 全部知っていた頁も**そこが先頭**である。もう一度頼んでも同じ
+    /// A page of already-known messages is also the top.
     #[test]
     fn a_page_we_already_had_also_stops_the_asking() {
         let mut live = live();
@@ -1181,10 +1109,10 @@ mod tests {
             list: vec![message(5, "いま")],
         }));
         assert!(live.is_exhausted(ch()));
-        assert!(!live.take_prepended(), "何も足していないので動かさない");
+        assert!(!live.take_prepended(), "nothing was prepended");
     }
 
-    /// 履歴を丸ごと取り直したら、**また遡れる**
+    /// Replacing the history re-enables paging.
     #[test]
     fn a_fresh_backlog_lets_us_page_back_again() {
         let mut live = live();
@@ -1205,8 +1133,7 @@ mod tests {
         assert!(!live.is_exhausted(ch()));
     }
 
-    /// ⚠️ **REST が先に返っていたらキャッシュで上書きしない。**
-    /// 古いもので新しいものを潰すことになる
+    /// A late cache result must not overwrite what REST already returned.
     #[test]
     fn a_late_cache_does_not_clobber_fresh_data() {
         let mut live = live();
@@ -1219,12 +1146,12 @@ mod tests {
             list: vec![message(1, "ふるい")],
         });
 
-        assert!(!changed, "古いもので描き直している");
+        assert!(!changed, "redrew with older data");
         assert_eq!(live.store().messages(ch())[0].content, "あたらしい");
     }
 
-    /// REST が失敗しても、キャッシュのぶんは消さない。
-    /// **繋がらないときに履歴が消えるのが一番困る** (`NFR-011`)
+    /// A failed fetch keeps the cache: losing history while offline is the
+    /// worst outcome.
     #[test]
     fn a_failed_fetch_keeps_the_cached_history() {
         let mut live = live();
@@ -1237,10 +1164,10 @@ mod tests {
             list: Vec::new(),
         });
 
-        assert_eq!(live.store().messages(ch()).len(), 1, "履歴が消えた");
+        assert_eq!(live.store().messages(ch()).len(), 1, "the history was lost");
     }
 
-    /// 何も変わらなければ再描画を要求しない
+    /// No change means no redraw.
     #[test]
     fn nothing_new_means_no_redraw() {
         let mut live = live();
@@ -1252,8 +1179,8 @@ mod tests {
         assert!(live.apply(LiveEvent::Posted(Box::new(message(2, "ふたつめ")))));
     }
 
-    /// 繋がっているときは何も出さない。
-    /// **正常を知らせると、異常の一行が埋もれる**
+    /// Silent while connected; announcing the normal case buries the
+    /// abnormal one.
     #[test]
     fn a_healthy_link_says_nothing() {
         assert!(Link::Up.hint().is_none());
@@ -1261,7 +1188,7 @@ mod tests {
         assert!(Link::Down("駄目".to_owned()).hint().is_some());
     }
 
-    /// トークンが弾かれたことは**一度だけ**伝わる (`FR-004`)
+    /// Rejection is reported once.
     #[test]
     fn a_rejection_is_reported_once() {
         let mut live = live();
@@ -1269,10 +1196,10 @@ mod tests {
 
         live.apply(LiveEvent::TokenRejected);
         assert!(live.take_rejection());
-        assert!(!live.take_rejection(), "二度目は下りている");
+        assert!(!live.take_rejection(), "reported twice");
     }
 
-    /// `SEC-021`: 忘れたら**何も残らない**
+    /// Forgetting leaves nothing behind.
     #[test]
     fn forgetting_leaves_nothing() {
         let mut live = live();
