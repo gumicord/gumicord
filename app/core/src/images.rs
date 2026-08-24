@@ -1,31 +1,25 @@
-//! 画像を取ってきて、復号して、レンダラへ渡す (R5)。
+//! Fetches images, decodes them, and hands them to the renderer.
 //!
-//! # なぜアプリの仕事なのか
-//!
-//! **レンダラは網にもディスクにも触らない** ([`spec/02-architecture.md`])。
-//! プラットフォームごとに違うものを、全プラットフォーム共通のレンダラに
-//! 持ち込まないためである。
+//! The renderer touches neither the network nor the disk, so that nothing
+//! platform-specific reaches the one part every platform shares.
 //!
 //! ```text
-//!   UITree            Content::Image(URL)      ← 画素は載せない
+//!   UITree            Content::Image(URL)      <- no pixels
 //!     │
-//!   ここ              取ってくる / 復号 / 保存
+//!   here              fetch / decode / cache
 //!     │
-//!   Application::take_images()                 ← 画素はここだけを通る
+//!   Application::take_images()                 <- pixels pass only here
 //!     │
-//!   レンダラ          アトラスへ詰めて描く
+//!   renderer          pack into the atlas and draw
 //! ```
 //!
-//! ⚠️ **UITree に画素を載せない。** 木は毎フレーム組み直されるので、
-//! 載せると 1 フレームごとに数 MB を複製することになる。
+//! Pixels never go on the tree: it is rebuilt every frame, which would copy
+//! megabytes each time.
 //!
-//! # PNG だけを読む
-//!
-//! CDN には `.png` で頼むので、画像の万能ライブラリは要らない。
-//! 添付ファイル (利用者が上げた任意の形式) を出すときに考え直す。
-//!
-//! ⚠️ **動くアバターも静止画として頼む。** `a_` で始まる印は GIF だが、
-//! `.png` を頼めば 1 コマ目が PNG で返る。動かす仕組みは別の話である。
+//! Only PNG is decoded, since the CDN is asked for `.png`. Attachments, which
+//! are whatever the user uploaded, will need more. Animated avatars are asked
+//! for as stills too — an `a_` prefix means GIF, but `.png` returns the first
+//! frame; animating them is a separate matter.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -35,36 +29,33 @@ use gumicord_platform::Waker;
 use gumicord_render::ImageData;
 use gumicord_rest::RestClient;
 
-/// 同時に取りに行く数。
-///
-/// ⚠️ **一覧を開いた瞬間に何十枚も要求される。** 上限が無いと、
-/// CDN にも自分の回線にも一気に負荷をかける
+/// How many fetches run at once. Opening a list asks for dozens, and without
+/// a cap they all hit the CDN and the connection together.
 const IN_FLIGHT: usize = 6;
 
-/// 1 枚の picture が使ってよい辺の長さ (物理 px)。
-///
-/// アバターは 40、サーバアイコンは 48 なので、2 倍の画面でも 96 で足りる。
-/// **アトラスは 2048² しかない**ので、大きく取ると数十枚で埋まる
+/// The largest side one image may use, in physical pixels. Avatars are 40 and
+/// guild icons 48, so 96 covers a 2x display; the atlas is only 2048 square,
+/// and larger images fill it in dozens.
 const MAX_SIDE: u32 = 128;
 
-/// 取ってきた画像を運ぶもの。
+/// A fetched image on its way to the renderer.
 pub struct Images {
     tx: Sender<ImageData>,
     rx: Receiver<ImageData>,
     rt: Option<tokio::runtime::Handle>,
     rest: Option<RestClient>,
     waker: Option<Waker>,
-    /// 取りに行った URL。**二重に叩かないため**
+    /// URLs already requested, so none is fetched twice.
     requested: HashSet<String>,
-    /// いま取りに行っている数
+    /// How many fetches are in flight.
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// 復号済みを置く場所。**次の起動で網に出ない**
+    /// Where decoded images are kept, so the next start stays offline.
     dir: Option<PathBuf>,
-    /// 届いていて、まだレンダラへ渡していないもの。
+    /// Arrived but not yet handed over.
     ///
-    /// ⚠️ **溜める場所が要る。** 起こされた時点で受け取っておかないと、
-    /// 「何か届いた」を呼び出し側へ伝えられない。伝えられないと**再描画が
-    /// 起きず、届いた顔がいつまでも出ない**
+    /// Somewhere to hold them is needed: unless they are collected when the
+    /// loop wakes, there is nothing to report as changed, no redraw happens,
+    /// and the faces never appear.
     ready: Vec<ImageData>,
 }
 
@@ -90,10 +81,10 @@ impl Images {
         self.waker = Some(waker);
     }
 
-    /// その URL の絵を要求する。**何度呼んでもよい。**
+    /// Asks for an image, as often as you like.
     ///
-    /// ⚠️ 既にレンダラが持っているかどうかはここでは分からない。
-    /// 呼び出し側が `has_image` で確かめてから呼ぶ
+    /// Whether the renderer already holds it is not known here; the caller
+    /// checks with `has_image` first.
     pub fn request(&mut self, url: &str) {
         if url.is_empty() || !self.requested.insert(url.to_owned()) {
             return;
@@ -107,7 +98,7 @@ impl Images {
         let counter = std::sync::Arc::clone(&self.in_flight);
 
         rt.spawn(async move {
-            // ⚠️ **一気に取りに行かない。** 一覧を開くと何十枚も要求される
+            // Not all at once: opening a list asks for dozens.
             while counter.load(std::sync::atomic::Ordering::Relaxed) >= IN_FLIGHT {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             }
@@ -128,8 +119,8 @@ impl Images {
             };
             counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
-            // ⚠️ 復号は**別スレッドへ逃がす**。数十枚あると主スレッドの
-            // 隣で回している非同期の仕事まで止まる
+            // Decoding goes to another thread; dozens of them would stall the
+            // async work running beside the main thread.
             if let Some(bytes) = bytes
                 && let Ok(Some(image)) =
                     tokio::task::spawn_blocking(move || decode_png(&url, &bytes)).await
@@ -140,11 +131,10 @@ impl Images {
         });
     }
 
-    /// 届いたぶんを受け取る。**何か届いていたら真**。
+    /// Collects what arrived, reporting whether anything did.
     ///
-    /// ⚠️ **ここで受け取っておかないと再描画が起きない。** イベント
-    /// ループは寝ており ([`NFR-005`])、起こされたときに「変わった」と
-    /// 言えなければそのまま二度寝する
+    /// Without this the loop, which sleeps until woken, has nothing to call a
+    /// change and goes straight back to sleep.
     pub fn poll(&mut self) -> bool {
         let before = self.ready.len();
         while let Ok(image) = self.rx.try_recv() {
@@ -153,24 +143,23 @@ impl Images {
         self.ready.len() != before
     }
 
-    /// 届いた絵を引き取る。**呼んだ側がレンダラへ渡す**
+    /// Takes the arrived images; the caller passes them to the renderer.
     pub fn take(&mut self) -> Vec<ImageData> {
         self.poll();
         std::mem::take(&mut self.ready)
     }
 
-    /// 「もう頼んだ」印を落とす。**取り直せるようにする。**
+    /// Clears the "already asked" marks so images can be requested again, as
+    /// when the atlas drops them.
     ///
-    /// アトラスが絵を忘れたときに呼ぶ。**円盤には残っている**ので、
-    /// 網へは出ずに読み直されるだけである。
-    ///
-    /// ⚠️ **消すのは印だけで、円盤のものは消さない。** 消すと本当に
-    /// 取り直しになり、忘れるたびに何十枚も網へ出ることになる
+    /// Only the marks: the cache still holds the files, so they are re-read
+    /// rather than re-fetched. Clearing those too would put dozens back on the
+    /// network every time the atlas forgets.
     pub fn forget_requested(&mut self) {
         self.requested.clear();
     }
 
-    /// `SEC-021`: ログアウトしたら**取ってきた絵も残さない**
+    /// Logging out leaves no fetched image behind.
     pub fn forget_everything(&mut self) {
         self.requested.clear();
         if let Some(dir) = &self.dir {
@@ -192,10 +181,8 @@ fn cache_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// URL からファイル名を作る。
-///
-/// ⚠️ **URL をそのままファイル名にしない。** `/` も `?` も入っているし、
-/// 長さの上限にも当たる。指紋にする
+/// Names a cache file after a URL. Not the URL itself: it holds `/` and `?`
+/// and runs into length limits, so a digest stands in.
 fn cache_name(url: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -207,25 +194,24 @@ fn read_cached(dir: Option<&std::path::Path>, url: &str) -> Option<Vec<u8>> {
     std::fs::read(dir?.join(cache_name(url))).ok()
 }
 
-/// ⚠️ **書けなくても構わない。** 次から網に出るだけである
+/// Failing to write is fine; the next start simply fetches again.
 fn write_cached(dir: Option<&std::path::Path>, url: &str, bytes: &[u8]) {
     let Some(dir) = dir else { return };
     let _ = std::fs::write(dir.join(cache_name(url)), bytes);
 }
 
-/// PNG を RGBA8 にする。**読めなければ `None`。**
-///
-/// ⚠️ 他人が作ったファイルである。**壊れていても落ちない**こと。
+/// Decodes a PNG to RGBA8. These files are someone else's, so a broken one
+/// must not panic.
 fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    // 8 ビット RGBA へ揃える。パレットも 16 ビットもここで潰れる
+    // Flattened to 8-bit RGBA; palettes and 16-bit collapse here.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
 
     let mut reader = decoder.read_info().ok()?;
     let info = reader.info();
     let (w, h) = (info.width, info.height);
 
-    // ⚠️ 大きすぎるものは読まない。**アトラスは 2048² しかない**
+    // Oversized images are refused; the atlas is only 2048 square.
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
         tracing::debug!(url, w, h, "画像の大きさが扱える範囲を超えている");
         return None;
@@ -246,7 +232,7 @@ fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         png::ColorType::Grayscale => raw.iter().flat_map(|v| [*v, *v, *v, 0xff]).collect(),
-        // `normalize_to_color8` が潰しているはずだが、信じずに諦める
+        // `normalize_to_color8` should have handled this; not assumed.
         other => {
             tracing::debug!(url, ?other, "読めない色の形");
             return None;
@@ -264,13 +250,11 @@ fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
     ))
 }
 
-/// 大きすぎる絵を**整数倍で**縮める。
+/// Shrinks an oversized image by a whole number.
 ///
-/// ⚠️ 半端な倍率で縮めると、いまの実装 (近傍から 1 点取る) では模様が出る。
-/// 整数倍に限れば、元の画素をきれいに間引くだけで済む。
-///
-/// **これは正しい縮小ではない。** 面で平均する縮小は R5 の残件として
-/// ミップマップと一緒に入れる
+/// Nearest-neighbour at a fractional ratio moires; at a whole one it is a
+/// clean decimation. This is not proper downscaling — averaging over the area
+/// comes later, with mipmaps.
 fn shrink(image: ImageData, max_side: u32) -> ImageData {
     let side = image.width.max(image.height);
     if side <= max_side {
@@ -301,7 +285,7 @@ fn shrink(image: ImageData, max_side: u32) -> ImageData {
 mod tests {
     use super::*;
 
-    /// PNG を書く。**試験のために本物の PNG を作る**
+    /// Writes a real PNG, for the tests.
     fn png_bytes(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         {
@@ -323,7 +307,7 @@ mod tests {
         assert_eq!(image.rgba, vec![255, 0, 0, 255, 0, 255, 0, 128]);
     }
 
-    /// ⚠️ **他人が作ったファイルである。壊れていても落ちない**
+    /// These files are someone else's; a broken one must not panic.
     #[test]
     fn rubbish_does_not_panic() {
         assert!(decode_png("x", &[]).is_none());
@@ -331,7 +315,7 @@ mod tests {
         assert!(decode_png("x", &[0x89, b'P', b'N', b'G', 0, 0, 0, 0]).is_none());
     }
 
-    /// 大きすぎる絵は縮む。**アトラスは 2048² しかない**
+    /// An oversized image shrinks; the atlas is only 2048 square.
     #[test]
     fn an_oversized_image_is_shrunk() {
         let big = ImageData {
@@ -348,11 +332,11 @@ mod tests {
             (small.width * small.height * 4) as usize,
             "画素の数が大きさと合わない"
         );
-        // 縦横の比が保たれている
+        // The aspect ratio survives.
         assert_eq!(small.width, small.height * 2);
     }
 
-    /// 収まっているものは触らない
+    /// One that already fits is left alone.
     #[test]
     fn a_small_image_is_left_alone() {
         let image = ImageData {
@@ -364,7 +348,7 @@ mod tests {
         assert_eq!(shrink(image, 128).width, 64);
     }
 
-    /// ⚠️ **URL をそのままファイル名にしない。** `/` も `?` も入っている
+    /// A URL is not a filename; it holds `/` and `?`.
     #[test]
     fn a_cache_name_is_a_safe_filename() {
         let name = cache_name("https://cdn.discordapp.com/avatars/1/ab.png?size=128");
@@ -372,7 +356,7 @@ mod tests {
         assert!(!name.contains('/') && !name.contains('?') && !name.contains(':'));
     }
 
-    /// 同じ URL は同じ名前、違う URL は違う名前
+    /// The same URL gives the same name, a different one a different name.
     #[test]
     fn cache_names_follow_the_url() {
         assert_eq!(cache_name("https://a/1.png"), cache_name("https://a/1.png"));

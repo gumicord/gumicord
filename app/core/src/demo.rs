@@ -1,11 +1,10 @@
-//! 仮のデータ。**Store (C5) ができたら丸ごと消える。**
+//! Placeholder data, to be deleted once the store is real.
 //!
-//! レンダラとテーマを縦に通すために、Gateway も REST もない状態で
-//! 画面へ流し込むものが要る。ここにあるのはその足場であり、
-//! **クライアントの機能ではない。**
+//! Driving the renderer and the theme end to end needs something on screen
+//! before the Gateway and REST exist. This is scaffolding, not a feature.
 //!
-//! 日本語を混ぜてあるのは意図的である。CJK のグリフが出ること、
-//! 折り返しが効くことをこの段階で見ておきたい。
+//! The Japanese is deliberate: CJK glyphs and wrapping both want watching at
+//! this stage.
 
 use std::borrow::Cow;
 
@@ -18,7 +17,7 @@ pub struct Guild {
 
 pub struct Channel {
     pub id: u64,
-    /// 種別を表すアイコンの名前 (`gumicord_render::icon`)
+    /// The icon naming the channel's kind.
     pub icon: &'static str,
     pub name: &'static str,
     pub unread: bool,
@@ -30,7 +29,7 @@ pub struct Message {
     pub author: Cow<'static, str>,
     pub time: Cow<'static, str>,
     pub body: Cow<'static, str>,
-    /// 自分宛てのメンションを含むか
+    /// Whether it mentions you.
     pub mentioned: bool,
 }
 
@@ -175,7 +174,7 @@ pub static MESSAGES: &[Message] = &[
         ),
         mentioned: false,
     },
-    // ── ここから下は連投。送信者行が繰り返されないことを見るためにある
+    // Below is a run from one author, to watch the header not repeat.
     Message {
         id: 108,
         author: Cow::Borrowed("ねんねこ"),
@@ -219,7 +218,7 @@ pub static MESSAGES: &[Message] = &[
     },
 ];
 
-/// 名前の 1 文字目。アイコン画像 (R5) ができるまでの代用
+/// The first letter of the name, standing in until avatars load.
 pub fn initial(name: &str) -> String {
     name.chars().next().map(String::from).unwrap_or_default()
 }

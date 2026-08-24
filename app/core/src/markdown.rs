@@ -453,7 +453,7 @@ mod tests {
         assert!(!spans[0].line.any());
     }
 
-    /// 太さを決めるのはテーマである
+    /// The theme decides the weight.
     #[test]
     fn the_theme_decides_how_heavy_bold_is() {
         let t = ink_with(
@@ -466,8 +466,8 @@ mod tests {
         assert_eq!(spans[0].font.as_ref().and_then(|f| f.weight), Some(900));
     }
 
-    /// ⚠️ 線を引くかどうかもテーマの判断である。
-    /// `__a__` を色で表すテーマがあってよい
+    /// Whether a line is drawn is the theme's call too; a theme may show
+    /// `__a__` as a colour.
     #[test]
     fn the_theme_decides_whether_to_underline() {
         let none = ink_with(
@@ -484,7 +484,7 @@ mod tests {
         assert!(spans_of(Some(&lined), "__a__", &NoNames)[0].line.under);
     }
 
-    /// 重なった飾りは、両方のルールが乗ること
+    /// Nested decoration carries both rules.
     #[test]
     fn stacked_decorations_both_apply() {
         let t = ink_with(
@@ -500,8 +500,8 @@ mod tests {
         assert!(spans[0].line.through);
     }
 
-    /// ⚠️ **引けなかったときに番号を出さない。**
-    /// `<@1>` は打った人が書いた文字ではないし、`@1` は嘘である
+    /// An unresolved mention never shows the number: `<@1>` is not what the
+    /// author typed, and `@1` would be a lie.
     #[test]
     fn an_unresolved_mention_shows_unknown_not_a_number() {
         let spans = spans_of(None, "<@1> <#2> <@&3>", &NoNames);
@@ -517,8 +517,8 @@ mod tests {
         assert_eq!(text, "@みどり #雑談 @管理");
     }
 
-    /// スポイラーは**場所を空けたまま**隠す。詰めて描くと、開いた瞬間に
-    /// 行の折り返しが変わって本文が飛び跳ねる
+    /// A spoiler keeps its space while hidden; collapsing it would rewrap the
+    /// line and make the text jump when it opens.
     #[test]
     fn a_spoiler_stays_hidden_until_revealed() {
         let hidden = Ink::new(None, MatchContext::new(1000.0), false, NOW);
@@ -559,9 +559,9 @@ mod tests {
     fn the_date_conversion_survives_leap_years_and_negative_days() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
-        // 2000 年は閏年 (400 で割り切れる)
+        // 2000 is a leap year.
         assert_eq!(civil_from_days(11016), (2000, 2, 29));
-        // 1900 年は閏年ではない (100 で割り切れて 400 で割り切れない)
+        // 1900 is not.
         assert_eq!(civil_from_days(-25508), (1900, 3, 1));
         assert_eq!(civil_from_days(19584), (2023, 8, 15));
     }
@@ -574,9 +574,9 @@ mod tests {
     fn the_weekday_counts_from_a_thursday() {
         assert_eq!(WEEKDAYS[weekday(0)], "木");
         assert_eq!(WEEKDAYS[weekday(1)], "金");
-        // 1969-12-31 は水曜。**負の日数でも崩れないこと**
+        // 1969-12-31 was a Wednesday; negative days must hold up too.
         assert_eq!(WEEKDAYS[weekday(-1)], "水");
-        // 2023-11-15 は水曜
+        // 2023-11-15 was a Wednesday.
         assert_eq!(WEEKDAYS[weekday(19_676)], "水");
     }
 

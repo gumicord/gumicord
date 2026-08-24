@@ -1,7 +1,7 @@
-//! デスクトップ (Windows / macOS / Linux) のエントリポイント。
+//! The desktop entry point.
 //!
-//! **薄いラッパに留める。** ライフサイクルとネイティブハンドルの受け渡し以外の
-//! ロジックを置かない。中身は [`gumicord_app`] にある。
+//! A thin wrapper: lifecycle and native handles only, with everything else in
+//! [`gumicord_app`].
 
 use gumicord_app::Gumicord;
 
@@ -14,23 +14,16 @@ fn main() {
     }
 }
 
-/// ログの出力先を決める。
+/// Sets up logging.
 ///
-/// 既定は `info` まで。`GUMICORD_LOG=debug` のように環境変数で上げられる。
+/// `info` by default, raised with `GUMICORD_LOG=debug`. That raises our own
+/// crates only: raising everything buried our lines under the dependencies —
+/// `hyper`'s connection pool alone ran to dozens of lines a second. The
+/// dependencies have their own `GUMICORD_LOG_DEPS`, defaulting to `warn`, so
+/// they are quiet but not silenced.
 ///
-/// # ⚠️ 上げるのは自分たちの分だけである
-///
-/// `GUMICORD_LOG=debug` で全部を上げると、**依存の出力に自分たちの行が
-/// 埋もれる**。実際に `hyper` の接続プールの行が毎秒何十行も流れ、
-/// 見たかった 1 行が探せなくなった。
-///
-/// 依存の分は別の環境変数 (`GUMICORD_LOG_DEPS`) で上げる。既定は `warn`
-/// — **黙らせるのではなく、異常だけを残す**。
-///
-/// `tracing-subscriber` を入れていないのは、いま要るのが「1 イベント 1 行を
-/// 標準エラーへ」だけであり、そのために 10 個ほどのクレートを増やすのが
-/// 釣り合わないためである。**構造化された絞り込みや出力先の切り替えが要る
-/// ようになったら、迷わず差し替える。**
+/// `tracing-subscriber` is not worth ten crates for one line per event on
+/// stderr. Structured filtering or another destination would change that.
 fn init_tracing() {
     let _ = tracing::subscriber::set_global_default(Logger {
         ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
@@ -49,18 +42,18 @@ fn level_from(var: &str, default: tracing::Level) -> tracing::Level {
     }
 }
 
-/// 標準エラーへ 1 行ずつ書くだけの購読者。
+/// A subscriber that writes one line per event to stderr.
 struct Logger {
-    /// `gumicord*` に掛ける上限
+    /// The limit for `gumicord*`.
     ours: tracing::Level,
-    /// それ以外 (依存) に掛ける上限
+    /// The limit for everything else.
     theirs: tracing::Level,
 }
 
 impl tracing::Subscriber for Logger {
     fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
-        // ⚠️ **自分たちかどうかは目的地の名前で決まる。** クレート名を
-        // 前方一致で見る以外に、ここから知る手がかりが無い
+        // The target name is the only thing here that tells our crates from
+        // anyone else's, so it is matched by prefix.
         let max = if meta.target().starts_with("gumicord") {
             self.ours
         } else {

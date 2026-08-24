@@ -3048,8 +3048,8 @@ mod input_tests {
         assert!(!a.submit());
     }
 
-    /// Escape removes focus. During composition it cancels instead, which is
-    /// フォーカス外しではない** — その分岐はプラットフォーム層が持つ
+    /// Escape removes focus. During composition it cancels instead, and that
+    /// branch belongs to the platform layer.
     #[test]
     fn escape_leaves_the_field() {
         let mut a = Gumicord::demo();
