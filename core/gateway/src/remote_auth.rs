@@ -1,35 +1,27 @@
-//! QR コードログイン (リモート認証) — [ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md)。
-//!
-//! **captcha を解くのではなく、captcha が出ない道を選ぶ。**
-//! パスワードも TOTP も、この経路では我々のプロセスを一切通らない。
-//!
-//! # 流れ
+//! QR code login, as chosen in ADR-0007: rather than solving a captcha, take
+//! the path that never raises one. No password and no TOTP passes through this
+//! process.
 //!
 //! ```text
-//! wss://remote-auth-gateway.discord.gg/?v=2   Origin: https://discord.com が必須
+//! wss://remote-auth-gateway.discord.gg/?v=2   Origin: https://discord.com required
 //!   │
-//!   ├─ hello                RSA-2048 の鍵ペアを作る
-//!   ├─▶ init                公開鍵 (SPKI DER) を base64 で送る
-//!   ├─ nonce_proof          暗号化された nonce が来る
-//!   ├─▶ nonce_proof         復号 → SHA-256 → base64url (詰め物なし) で返す
-//!   ├─ pending_remote_init  fingerprint が来る → QR にする
-//!   ├─ pending_ticket       スキャンされた。誰がスキャンしたかが分かる
-//!   └─ pending_login        承認された。チケットを REST で交換する
+//!   ├─ hello                generate an RSA-2048 key pair
+//!   ├─▶ init                send the public key (SPKI DER) as base64
+//!   ├─ nonce_proof          an encrypted nonce arrives
+//!   ├─▶ nonce_proof         decrypt, SHA-256, base64url unpadded
+//!   ├─ pending_remote_init  a fingerprint arrives, and becomes the QR
+//!   ├─ pending_ticket       scanned; who scanned it is now known
+//!   └─ pending_login        approved; exchange the ticket over REST
 //! ```
 //!
-//! # 鍵ペアが復号の要である
+//! The key pair is what opens everything: the nonce, the scanning user and the
+//! final token all arrive encrypted to our public key. The private key never
+//! leaves this struct, so decrypting the token happens here too, even though
+//! the caller is the one exchanging the ticket.
 //!
-//! nonce も、スキャンした利用者の情報も、最後のトークンも、**すべて我々の
-//! 公開鍵で暗号化されて届く**。秘密鍵はこの構造体の中だけにあり、外へ出ない。
-//!
-//! したがってトークンの復号もここが引き受ける ([`RemoteAuth::decrypt_token`])。
-//! チケットを REST で交換するのは呼び出し側だが、返ってきた暗号文を開けるのは
-//! ここだけである。
-//!
-//! # fingerprint は自分で検算する
-//!
-//! `fingerprint` はサーバが送ってくるが、**中身は我々の公開鍵の SHA-256** で
-//! ある。検算せずに QR にすると、別の鍵の QR を出させられる余地が残る。
+//! The fingerprint is recomputed rather than trusted. The server sends it, but
+//! it is the SHA-256 of our own public key; showing it unchecked would leave
+//! room to be handed a QR for someone else's key.
 
 use std::time::Duration;
 
@@ -47,19 +39,19 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-/// リモート認証のゲートウェイ。
+/// The remote auth gateway.
 const GATEWAY: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
 
-/// ⚠️ **`Origin` が無いと接続を拒否される。**
+/// Without an `Origin` the connection is refused.
 const ORIGIN: &str = "https://discord.com";
 
-/// QR に載せる URL の前半。`fingerprint` を後ろに付ける
+/// The QR URL, with the fingerprint appended.
 const QR_PREFIX: &str = "https://discord.com/ra/";
 
-/// 鍵の長さ。**公式クライアントと同じ 2048 ビット**
+/// The key size, as the official client uses.
 const KEY_BITS: usize = 2048;
 
-/// `hello` が来るまでの仮の心拍間隔
+/// A provisional heartbeat interval, until `hello` arrives.
 const INITIAL_HEARTBEAT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
@@ -83,9 +75,8 @@ pub enum RemoteAuthError {
     Closed,
 }
 
-/// QR をスキャンした利用者。**まだ承認はされていない。**
-///
-/// 「誰がスキャンしたか」を画面に出して、本人に確認させるための情報である。
+/// Who scanned the QR. Not yet an approval; this is shown so the person can
+/// confirm it is them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannedUser {
     pub id: UserId,
@@ -94,38 +85,38 @@ pub struct ScannedUser {
     pub avatar: Option<String>,
 }
 
-/// リモート認証の進み具合。
+/// How far remote auth has got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteAuthEvent {
-    /// QR を出せる状態になった
+    /// The QR can be shown.
     Ready {
-        /// QR に載せる URL
+        /// The URL the QR encodes.
         url: String,
         fingerprint: String,
     },
-    /// スキャンされた。**まだ承認されていない**
+    /// Scanned, but not approved.
     Scanned(ScannedUser),
-    /// 承認された。このチケットを REST で交換する
+    /// Approved; exchange this ticket over REST.
     Approved { ticket: String },
-    /// 取り消された、または期限が切れた
+    /// Cancelled, or expired.
     Cancelled,
 }
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// リモート認証の 1 回ぶんのやりとり。
+/// One run of remote auth.
 pub struct RemoteAuth {
     ws: Ws,
     key: RsaPrivateKey,
     public_der: Vec<u8>,
     heartbeat: Duration,
-    /// `init` を送ったか。`hello` を受けてから送る
+    /// Whether `init` was sent; it follows `hello`.
     initialised: bool,
 }
 
 impl core::fmt::Debug for RemoteAuth {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // ⚠️ 秘密鍵を出さない
+        // Never shows the private key.
         f.debug_struct("RemoteAuth")
             .field("initialised", &self.initialised)
             .finish()
@@ -133,17 +124,15 @@ impl core::fmt::Debug for RemoteAuth {
 }
 
 impl RemoteAuth {
-    /// 接続して鍵ペアを作る。
-    ///
-    /// **鍵生成は重い**ので別スレッドへ逃がす。メインスレッドを止めない
-    /// ([`spec/02-architecture.md`] のスレッドモデル)。
+    /// Connects and generates the key pair, off the main thread since
+    /// generation is slow.
     pub async fn connect() -> Result<Self, RemoteAuthError> {
         crate::install_crypto_provider();
 
         let mut request = GATEWAY
             .into_client_request()
             .map_err(RemoteAuthError::Connect)?;
-        // ⚠️ これが無いと拒否される
+        // Refused without this.
         request
             .headers_mut()
             .insert("Origin", ORIGIN.parse().expect("定数なので必ず通る"));
@@ -171,12 +160,12 @@ impl RemoteAuth {
         })
     }
 
-    /// 次の出来事まで進める。**心拍はこの中で打つ。**
+    /// Advances to the next event, beating the heartbeat as it goes.
     pub async fn next(&mut self) -> Result<RemoteAuthEvent, RemoteAuthError> {
         loop {
             let message = tokio::select! {
                 m = self.ws.next() => m,
-                // 心拍を切らすと切断される
+                // A missed heartbeat disconnects.
                 () = tokio::time::sleep(self.heartbeat) => {
                     self.send(&serde_json::json!({ "op": "heartbeat" })).await?;
                     continue;
@@ -186,7 +175,7 @@ impl RemoteAuth {
             let text = match message {
                 Some(Ok(Message::Text(t))) => t.to_string(),
                 Some(Ok(Message::Close(_))) | None => return Err(RemoteAuthError::Closed),
-                // ping/pong などは無視する
+                // Ping, pong and the like are ignored.
                 Some(Ok(_)) => continue,
                 Some(Err(e)) => return Err(RemoteAuthError::Connect(e)),
             };
@@ -197,7 +186,7 @@ impl RemoteAuth {
         }
     }
 
-    /// 1 通を処理する。**外へ知らせる出来事なら返す。**
+    /// Handles one message, returning an event when there is one to report.
     async fn handle(&mut self, text: &str) -> Result<Option<RemoteAuthEvent>, RemoteAuthError> {
         #[derive(Deserialize)]
         struct Envelope {
@@ -237,7 +226,7 @@ impl RemoteAuth {
                     .ok_or_else(|| RemoteAuthError::Protocol("encrypted_nonce が無い".into()))?;
                 let plain = self.decrypt_b64(&nonce)?;
 
-                // 復号した nonce の SHA-256 を base64url (詰め物なし) で返す
+                // The decrypted nonce's SHA-256, base64url and unpadded.
                 let proof = URL_SAFE_NO_PAD.encode(Sha256::digest(&plain));
                 self.send(&serde_json::json!({ "op": "nonce_proof", "proof": proof }))
                     .await?;
@@ -249,7 +238,7 @@ impl RemoteAuth {
                     .fingerprint
                     .ok_or_else(|| RemoteAuthError::Protocol("fingerprint が無い".into()))?;
 
-                // ⚠️ **検算する。** 中身は我々の公開鍵の SHA-256 のはずである
+                // Recomputed: it should be our own public key's SHA-256.
                 if fingerprint != self.expected_fingerprint() {
                     return Err(RemoteAuthError::Protocol(
                         "fingerprint が自分の公開鍵と一致しない".into(),
@@ -281,14 +270,13 @@ impl RemoteAuth {
 
             "cancel" => Ok(Some(RemoteAuthEvent::Cancelled)),
 
-            // heartbeat_ack など。知らない op で落ちない
+            // `heartbeat_ack` and the rest; an unknown op is not fatal.
             _ => Ok(None),
         }
     }
 
-    /// REST が返した `encrypted_token` を開ける。
-    ///
-    /// **秘密鍵を外へ出さないため、復号はここが引き受ける。**
+    /// Opens the `encrypted_token` REST returned. Done here so the private key
+    /// stays inside.
     pub fn decrypt_token(&self, encrypted_b64: &str) -> Result<Token, RemoteAuthError> {
         let plain = self.decrypt_b64(encrypted_b64)?;
         let token = String::from_utf8(plain)
@@ -296,7 +284,8 @@ impl RemoteAuth {
         Ok(Token::new(token))
     }
 
-    /// QR に載せるべき値。**サーバの言い値ではなく自分で計算したもの。**
+    /// What the QR should carry, computed here rather than taken from the
+    /// server.
     pub fn expected_fingerprint(&self) -> String {
         URL_SAFE_NO_PAD.encode(Sha256::digest(&self.public_der))
     }
@@ -316,10 +305,8 @@ impl RemoteAuth {
     }
 }
 
-/// 復号した利用者情報は `id:discriminator:avatar:username` である。
-///
-/// **`username` にコロンは入りうる**ので、先頭 3 つだけを区切って残りは全部
-/// 名前として扱う。
+/// The decrypted user is `id:discriminator:avatar:username`. A username may
+/// contain a colon, so only the first three are split off.
 fn parse_user(s: &str) -> Result<ScannedUser, RemoteAuthError> {
     let mut parts = s.splitn(4, ':');
     let bad = || RemoteAuthError::Protocol(format!("利用者情報の形が違う: {s}"));
@@ -350,7 +337,7 @@ mod tests {
         assert_eq!(u.username, "ねんねこ");
     }
 
-    /// **名前にコロンが入りうる。** 先頭 3 つだけを区切る
+    /// A username may contain a colon; only the first three are split off.
     #[test]
     fn a_username_may_contain_colons() {
         let u = parse_user("1:0::a:b:c").unwrap();
@@ -365,19 +352,18 @@ mod tests {
         assert!(parse_user("数字でない:0:x:y").is_err());
     }
 
-    /// QR の URL は fingerprint を後ろに付けるだけ
+    /// The QR URL is the base with the fingerprint appended.
     #[test]
     fn the_qr_url_is_the_prefix_plus_the_fingerprint() {
         assert_eq!(format!("{QR_PREFIX}abc"), "https://discord.com/ra/abc");
     }
 
-    /// **fingerprint は公開鍵の SHA-256 を base64url (詰め物なし) にしたもの。**
+    /// The fingerprint is the public key's SHA-256, base64url and unpadded.
     ///
-    /// 詰め物が付くと QR の中身が変わり、スキャンしても一致しない
+    /// Padding would change the QR and stop it matching when scanned.
     #[test]
     fn the_fingerprint_is_url_safe_and_unpadded() {
-        // 32 バイトの SHA-256 を base64 にすると 44 文字 (詰め物 1 個) になる。
-        // 詰め物なしなら 43 文字である
+        // A 32-byte digest is 44 base64 characters with padding, 43 without.
         let digest = Sha256::digest("公開鍵のつもり".as_bytes());
         let encoded = URL_SAFE_NO_PAD.encode(digest);
 

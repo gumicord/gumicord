@@ -467,7 +467,7 @@ impl Gateway {
     }
 }
 
-// ─────────────────────────────────────────────── オペコード
+// ─────────────────────────────────────────────── Opcodes
 
 const OP_DISPATCH: u8 = 0;
 const OP_HEARTBEAT: u8 = 1;
@@ -530,7 +530,7 @@ fn identify(token: &Token) -> serde_json::Value {
 /// verbatim. Split it into named constants once they are known.
 const CAPABILITIES: u32 = 161789;
 
-// ─────────────────────────────────────────────── 接続 1 本
+// ─────────────────────────────────────────────── One connection
 
 /// State for one connection; discarded entirely on reconnect.
 struct Connection {
@@ -778,7 +778,7 @@ impl Connection {
     }
 }
 
-// ─────────────────────────────────────────────── 切断の分岐
+// ─────────────────────────────────────────────── Disconnects
 
 /// The next heartbeat came due with the previous one unacknowledged.
 const CLOSE_NO_ACK: u16 = 4_900;

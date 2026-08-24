@@ -1,34 +1,25 @@
-//! Gateway の zstd-stream 解凍 ([`spec/09-discord-protocol.md`] 4 章)。
+//! zstd-stream decompression for the Gateway.
 //!
-//! # フレームごとに独立していない
-//!
-//! ⚠️ **これが zstd-stream で一番間違えやすいところである。**
-//!
-//! `compress=zstd-stream` を指定すると、ペイロードは WebSocket の**バイナリ
-//! フレーム**で届く。ここで「フレーム 1 枚 = 圧縮された JSON 1 個」だと
-//! 思うと、最初の 1 枚は解凍できて、2 枚目から必ず壊れる。
-//!
-//! 実際には**接続の頭から終わりまでが 1 本の連続したストリーム**である。
-//! 辞書はフレームを跨いで育ち続けるので、状態を持ったデコーダを接続の
-//! 生存期間中ずっと保持しなければならない。**繋ぎ直したら作り直す。**
+//! Frames are not independent, and this is the easiest thing to get wrong.
+//! With `compress=zstd-stream` the payload arrives in binary WebSocket frames,
+//! and reading each as one compressed JSON works for the first and breaks on
+//! every one after: the whole connection is a single stream whose dictionary
+//! keeps growing across frames, so the decoder must live as long as the
+//! connection and be rebuilt on reconnect.
 //!
 //! ```text
-//!   WS フレーム: [ ─── ][ ─ ][ ───── ][ ── ]
-//!   zstd:        └────────── 1 本のストリーム ──────────┘
-//!   JSON:        { … }  { …    …  }   { … }{ … }
-//!                  ↑ 境界は一致しない ↑
+//!   WS frames: [ ─── ][ ─ ][ ───── ][ ── ]
+//!   zstd:      └────────── one stream ──────────┘
+//!   JSON:      { … }  { …    …  }   { … }{ … }
+//!                ↑ the boundaries do not line up ↑
 //! ```
 //!
-//! したがって:
-//!
-//! - 1 枚のフレームで 1 個の JSON が完結するとは限らない (空が返る)
-//! - 1 枚のフレームに複数の JSON が入っていることもある
-//!
-//! 呼び出し側は**返ってきたバイト列をそのまま JSON の並びとして読む**。
+//! So one frame may complete no JSON (an empty result) or several, and the
+//! caller reads whatever comes back as a sequence of them.
 
 use std::io::Write;
 
-/// 接続 1 本ぶんの解凍器。**繋ぎ直したら捨てて作り直すこと。**
+/// One connection's decoder. Rebuild it on reconnect.
 pub struct ZstdStream {
     decoder: zstd::stream::write::Decoder<'static, Vec<u8>>,
 }
@@ -46,10 +37,10 @@ impl ZstdStream {
         })
     }
 
-    /// フレームを 1 枚流し込み、**そこまでに完結した平文**を取り出す。
+    /// Feeds one frame in and takes out whatever completed.
     ///
-    /// 空が返るのは誤りではない。**そのフレームだけでは 1 個ぶんに
-    /// 届かなかった**というだけで、次のフレームで出てくる。
+    /// Empty is not an error: that frame did not finish a message, and the
+    /// next one will.
     pub fn push(&mut self, chunk: &[u8]) -> std::io::Result<Vec<u8>> {
         self.decoder.write_all(chunk)?;
         self.decoder.flush()?;
@@ -61,8 +52,7 @@ impl ZstdStream {
 mod tests {
     use super::*;
 
-    /// 1 本のストリームを**途中で切って**流し込んでも、
-    /// 繋げれば元に戻る。ここが zstd-stream の肝である
+    /// A stream split anywhere still reassembles; this is the whole point.
     #[test]
     fn a_stream_split_across_frames_still_decodes() {
         let plain = br#"{"op":10,"d":{"heartbeat_interval":41250}}{"op":11}"#;
@@ -72,7 +62,7 @@ mod tests {
         encoder.write_all(plain).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        // **1 バイトずつ**流す。最悪の切れ方でも壊れないこと
+        // One byte at a time: the worst possible split must still work.
         let mut stream = ZstdStream::new().unwrap();
         let mut out = Vec::new();
         for byte in &compressed {
@@ -82,7 +72,7 @@ mod tests {
         assert_eq!(out, plain);
     }
 
-    /// フレームの途中では空が返る。**誤りではない**
+    /// Mid-frame gives an empty result, which is not an error.
     #[test]
     fn an_incomplete_frame_yields_nothing_rather_than_an_error() {
         let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 0).unwrap();
@@ -90,12 +80,12 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let mut stream = ZstdStream::new().unwrap();
-        // zstd の枠の頭だけでは中身が出てこない
+        // A zstd frame header alone yields nothing.
         let first = stream.push(&compressed[..4]).expect("誤りにはならない");
         assert!(first.is_empty());
     }
 
-    /// 繋ぎ直したら作り直す。**古い解凍器に新しいストリームを流すと壊れる**
+    /// Rebuild on reconnect; a new stream through an old decoder breaks.
     #[test]
     fn a_fresh_stream_is_needed_for_a_fresh_connection() {
         let make = |body: &[u8]| {
@@ -107,7 +97,7 @@ mod tests {
         let mut stream = ZstdStream::new().unwrap();
         assert_eq!(stream.push(&make(b"first")).unwrap(), b"first");
 
-        // 作り直せば次のストリームも読める
+        // Rebuilt, it reads the next stream.
         let mut stream = ZstdStream::new().unwrap();
         assert_eq!(stream.push(&make(b"second")).unwrap(), b"second");
     }

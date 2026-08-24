@@ -1,34 +1,30 @@
-//! protobuf の線の形式だけを読む道具。
+//! Reads protobuf's wire format, and nothing above it.
 //!
-//! # ⚠️ 定義を持っていない
-//!
-//! Discord は `user_settings_proto` の定義を公開していない。`prost` などで
-//! 生成した型に読ませることができないので、**線の上の形だけを頼りに拾う**。
+//! Discord does not publish the `user_settings_proto` definition, so there are
+//! no generated types to decode into and only the wire shape to go on.
 //!
 //! ```text
-//!   key = (フィールド番号 << 3) | 形
+//!   key = (field number << 3) | wire type
 //!
-//!   形 0  可変長整数
-//!   形 1  固定 64 ビット
-//!   形 2  長さ付きの塊 (文字列・入れ子・詰めた数値)
-//!   形 5  固定 32 ビット
+//!   0  varint
+//!   1  fixed 64-bit
+//!   2  length-delimited (strings, nested messages, packed numbers)
+//!   5  fixed 32-bit
 //! ```
 //!
-//! ここにあるのは**どの設定にも依らない**読み方だけである。
-//! 「どの番号に何が入っているか」は、それを使う側 (
-//! [`crate::guild_order`] や [`crate::status`]) が持つ。
+//! Which field number holds what belongs to the callers ([`crate::guild_order`]
+//! and [`crate::status`]); only the setting-independent reading is here.
 //!
-//! ⚠️ **壊れた入力で落ちない。** 途中で読めなくなったら、そこまでで
-//! 返す。設定は他人 (Discord) が作ったものであって、こちらの前提が
-//! 通じる保証はない。
+//! Malformed input never panics: whatever was read so far is returned. These
+//! bytes are someone else's, and our assumptions need not hold.
 
-/// 包みの中身。`Int64Value.value` などは全部これ
+/// The field inside a wrapper, as in `Int64Value.value`.
 pub const WRAPPED_VALUE: u64 = 1;
 
-/// `google.protobuf.Int64Value` などの包みの中の数値。
+/// The number inside a wrapper such as `google.protobuf.Int64Value`.
 ///
-/// ⚠️ **包みは「中身が 1 つのメッセージ」である。** 値そのものではない。
-/// `optional` を「未設定」と「0」で区別するために、Discord がこの形を使う
+/// A wrapper is a message holding one field, not the value itself; Discord
+/// uses it to tell "unset" from "zero".
 pub fn wrapped_varint(body: &[u8], field: u64) -> Option<u64> {
     let inner = blocks(body, field).into_iter().next()?;
     varint_field(inner, WRAPPED_VALUE)
@@ -37,11 +33,11 @@ pub fn wrapped_varint(body: &[u8], field: u64) -> Option<u64> {
 pub fn wrapped_string(body: &[u8], field: u64) -> Option<String> {
     let inner = blocks(body, field).into_iter().next()?;
     let raw = blocks(inner, WRAPPED_VALUE).into_iter().next()?;
-    // ⚠️ **不正な UTF-8 で落とさない。** 名前は利用者が付ける
+    // Never fails on bad UTF-8: users choose these names.
     Some(String::from_utf8_lossy(raw).into_owned())
 }
 
-/// その番号を持つ可変長整数のフィールド。
+/// The varint field with this number.
 pub fn varint_field(mut buf: &[u8], field: u64) -> Option<u64> {
     while !buf.is_empty() {
         let (key, rest) = varint(buf)?;
@@ -82,9 +78,8 @@ pub fn varint_field(mut buf: &[u8], field: u64) -> Option<u64> {
     None
 }
 
-/// その番号を持つ「長さ付きの塊」を順に返す。
-///
-/// 他の形のフィールドは読み飛ばす。**番号を知らないものには触らない**
+/// Every length-delimited field with this number, in order. Other wire types
+/// are skipped, and unknown numbers left alone.
 pub fn blocks(mut buf: &[u8], field: u64) -> Vec<&[u8]> {
     let mut out = Vec::new();
     while !buf.is_empty() {
@@ -125,7 +120,7 @@ pub fn blocks(mut buf: &[u8], field: u64) -> Vec<&[u8]> {
                 }
                 buf = &buf[4..];
             }
-            // 廃止された群。ここへ来たら読み違えている
+            // Removed group types; reaching one means a misread.
             _ => return out,
         }
     }
@@ -141,7 +136,7 @@ pub fn fixed64s(body: &[u8]) -> Vec<u64> {
     chunks.iter().copied().map(u64::from_le_bytes).collect()
 }
 
-/// 可変長整数を 1 つ読む。読めなければ `None`
+/// Reads one varint.
 pub fn varint(buf: &[u8]) -> Option<(u64, &[u8])> {
     let mut value = 0u64;
     for (i, byte) in buf.iter().take(10).enumerate() {

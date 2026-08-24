@@ -1,13 +1,13 @@
-//! 本物の Discord に繋いで、QR を出せるところまで進むか確かめる。
+//! Connects to the real Discord and checks it gets as far as a showable QR.
 //!
-//! **既定では走らない。** 網に出る試験を CI と開発機の `cargo test` に
-//! 混ぜると、Discord が落ちているだけで赤くなる。
+//! Ignored by default: a test that goes out to the network would turn CI and a
+//! plain `cargo test` red whenever Discord is down.
 //!
 //! ```text
 //! cargo test -p gumicord-gateway --test remote_auth_live -- --ignored --nocapture
 //! ```
 //!
-//! ここまで通れば、残るのは「読み取って承認する」人間の側だけである。
+//! Past this point only the human scanning and approving remains.
 
 use gumicord_gateway::{RemoteAuth, RemoteAuthEvent};
 
@@ -23,8 +23,8 @@ async fn we_can_get_as_far_as_showing_a_qr() {
 
     match event {
         RemoteAuthEvent::Ready { url, fingerprint } => {
-            // ⚠️ 指紋は我々の公開鍵の SHA-256 である。サーバの言い値を
-            // そのまま QR にしない
+            // The fingerprint is our own public key's SHA-256; the server's
+            // word for it never reaches the QR.
             assert_eq!(
                 fingerprint,
                 auth.expected_fingerprint(),
