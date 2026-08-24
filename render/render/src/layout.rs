@@ -1,27 +1,23 @@
-//! レイアウト。**制約を親から子へ、確定した大きさを子から親へ返す**
-//! ([`spec/06-renderer.md`] 8 章)。
+//! Layout: constraints go down, resolved sizes come back up.
 //!
-//! Flexbox もグリッドも持たない。並べ方は [`Axis`] の 3 種類と、スクロール
-//! するかどうかだけである。
+//! No flexbox and no grid — only three axes and whether something scrolls.
 //!
-//! # 主軸の配り方
+//! Main-axis space is handed out in two passes:
 //!
 //! ```text
-//! 1. 余りを取らない子を先に測る          ← 実寸が決まる
-//! 2. 残りを、余りを取る子で grow 比に応じて分ける
+//! 1. measure the children that take no slack
+//! 2. divide the remainder among those that do, by their grow
 //! ```
 //!
-//! この順序が要る。`chat.message` は「アイコン (40px) + 本文 (残り全部)」で
-//! あり、本文の折り返し幅は**アイコンの幅を引いたあと**でなければ決まらない。
-//! 全員に同じ制約を配ると本文が横にはみ出す。
+//! The order matters: a message is an avatar plus a body that takes the rest,
+//! and the body's wrap width is only known once the avatar's width is
+//! subtracted. Giving everyone the same constraint overflows the body.
 //!
-//! # 計測は覚えておく
+//! Measurements are cached by (node, constraint): a parent touches each child
+//! twice, once to measure and once to place, which is exponential in the
+//! tree's depth otherwise.
 //!
-//! 親は子を「測る」ときと「置く」ときの 2 回触る。素直に書くと木の深さぶん
-//! 指数的に増えるので、(ノード, 制約) を鍵に覚えておく。
-//!
-//! 単位は**論理ピクセル**である。物理ピクセルへの変換は [`crate::draw`] が
-//! 一度だけ行う。
+//! Everything here is in logical pixels; the conversion happens once, later.
 
 use std::collections::HashMap;
 
@@ -32,34 +28,27 @@ use crate::geom::{EdgesExt, Rect, Size};
 use crate::intrinsic::{Axis, Cross, Intrinsic, intrinsic, is_overlay};
 use crate::text::{ResolvedFont, Shaper};
 
-/// スクロール位置。安定 ID ごとに、先頭からの距離 (論理 px) を持つ。
+/// Scroll offsets, keyed by stable ID.
 ///
-/// ⚠️ **同じ安定 ID のスクロール領域が複数あると共有される。** M1.1 では
-/// 一覧が画面に 1 つずつしかないので足りる。タブや分割ビューを入れるときに
-/// `key` まで含めた鍵へ広げる。
+/// Two scroll regions sharing an ID share a position. Only one of each is on
+/// screen today; tabs or split views would need the key in there too.
 pub type ScrollState = HashMap<NodeId, f32>;
 
-/// 摘みがこれより小さくなると掴めない (論理 px)
+/// Below this the thumb cannot be grabbed.
 const MIN_THUMB: f32 = 24.0;
 
-/// 一番下に貼り付ける。メッセージ一覧の初期値に使う
+/// Pinned to the bottom; the message list starts here.
 pub const SCROLL_TO_END: f32 = f32::MAX;
 
-/// スクロール位置を覚えるときの値。
+/// A remembered scroll position.
 ///
-/// # ⚠️ 一番下は「数」ではなく「意図」で持つ
+/// The bottom is stored as an intent, not a number: a pixel offset would drift
+/// upwards as new messages grow the content, which for someone waiting at the
+/// bottom means the new row never appears. Storing a sentinel and clamping at
+/// the end lands on the new bottom instead.
 ///
-/// 位置を px で覚えると、新しいメッセージが来て中身が伸びたぶんだけ
-/// **見ている場所が上へずれる**。一番下で待っている人にとって、それは
-/// 「新しい行が来たのに見えない」ということである。
-///
-/// そこで、一番下に着いたときだけ [`SCROLL_TO_END`] を覚える。
-/// [`layout`] は最後に `clamp` するので、中身が伸びれば伸びた先の
-/// 一番下になる。
-///
-/// **末尾に貼り付く一覧だけの話である。** サーバ一覧の一番下まで
-/// 巻いた人は「一番下に居たい」のではなく、そこにあるサーバを見て
-/// いるので、増えたときに勝手に動いてはいけない。
+/// Only for lists that pin to the end. Someone scrolled to the bottom of the
+/// guild list is looking at a guild, not at the bottom, and must not move.
 pub fn remember(id: NodeId, at: f32, max: f32) -> f32 {
     if intrinsic(id).anchor_end && at >= max {
         SCROLL_TO_END
@@ -68,46 +57,45 @@ pub fn remember(id: NodeId, at: f32, max: f32) -> f32 {
     }
 }
 
-/// 配置が決まったノード 1 個。
+/// One placed node.
 #[derive(Debug, Clone)]
 pub struct Placed<'a> {
     pub node: &'a UiNode,
-    /// 論理 px。ウィンドウ左上が原点
+    /// Logical px from the window's top left.
     pub rect: Rect,
-    /// この矩形の外は描かない。`None` なら切り取らない
+    /// Nothing outside this is drawn.
     pub clip: Option<Rect>,
-    /// 内容の描画領域 (余白を引いたあと)。テキストの折り返し幅でもある
+    /// The content box, which is also the text wrap width.
     pub inner: Rect,
 }
 
-/// 置かれたスクロールバー 1 本。**掴んで動かすために要る。**
+/// One placed scrollbar.
 ///
-/// 当たり判定だけでは足りない。摘みをどこまで動かせるかは
-/// 「溝の高さ − 摘みの高さ」で決まり、それはレイアウトしか知らない。
+/// Hit testing is not enough: how far the thumb can travel is the track minus
+/// the thumb, which only layout knows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollBar {
-    /// このスクロールバーが動かすスクロール領域
+    /// The region this drives.
     pub owner: NodeId,
-    /// 溝。摘みが動ける範囲 (余白を引いたあと)
+    /// The track the thumb moves in.
     pub track: Rect,
     pub thumb: Rect,
 }
 
-/// 1 フレームぶんの配置結果。**描画順 (深さ優先・前順) に並ぶ。**
+/// One frame's layout, in draw order.
 #[derive(Debug, Default)]
 pub struct LayoutResult<'a> {
     pub placed: Vec<Placed<'a>>,
-    /// スクロール領域ごとの、はみ出した量 (論理 px)。
-    /// スクロールの上限を決めるのに使う
+    /// Overflow per scroll region, which bounds scrolling.
     pub overflow: HashMap<NodeId, f32>,
     pub scrollbars: Vec<ScrollBar>,
 }
 
 impl<'a> LayoutResult<'a> {
-    /// 点を含む、もっとも手前のノード。
+    /// The frontmost node containing a point.
     ///
-    /// 描画順の**逆**に走査する。後に描かれたものが上に見えている以上、
-    /// 当たり判定もそちらが勝つ。
+    /// Walked in reverse draw order: whatever was drawn last is on top, so it
+    /// wins the hit too.
     pub fn hit(&self, x: f32, y: f32) -> Option<&Placed<'a>> {
         self.placed
             .iter()
@@ -115,10 +103,8 @@ impl<'a> LayoutResult<'a> {
             .find(|p| p.rect.contains(x, y) && p.clip.is_none_or(|c| c.contains(x, y)))
     }
 
-    /// 点を含むノードを、手前から順に。
-    ///
-    /// ホバー状態は「その項目とその祖先」に立てたいことが多いので、
-    /// 1 個だけでは足りない。
+    /// Every node containing a point, front to back. Hover usually applies to
+    /// an item and its ancestors, so one is not enough.
     pub fn hits(&self, x: f32, y: f32) -> impl Iterator<Item = &Placed<'a>> {
         self.placed
             .iter()
@@ -126,13 +112,13 @@ impl<'a> LayoutResult<'a> {
             .filter(move |p| p.rect.contains(x, y) && p.clip.is_none_or(|c| c.contains(x, y)))
     }
 
-    /// その安定 ID のノードの配置。スクロール量の上限を求めるのに使う
+    /// Where a stable ID landed, used to bound scrolling.
     pub fn find(&self, id: NodeId) -> Option<&Placed<'a>> {
         self.placed.iter().find(|p| p.node.id == id)
     }
 }
 
-/// 木を配置する。
+/// Lays out the tree.
 pub fn layout<'a>(
     root: &'a UiNode,
     viewport: Size,
@@ -158,15 +144,15 @@ pub fn layout<'a>(
 struct Cx<'a, 't, 's> {
     text: &'t mut Shaper,
     scroll: &'s ScrollState,
-    /// (ノードの番地, 制約) → 大きさ
+    /// (node address, constraint) -> size
     cache: HashMap<(usize, u32, u32), Size>,
     out: Vec<Placed<'a>>,
-    /// スクロール領域ごとの、はみ出した量
+    /// Overflow per scroll region.
     overflow: HashMap<NodeId, f32>,
     scrollbars: Vec<ScrollBar>,
 }
 
-/// 制約を鍵にするための量子化。`f32` をそのまま鍵にできないため
+/// Quantised so a constraint can be a map key; `f32` cannot.
 fn q(v: f32) -> u32 {
     if !v.is_finite() {
         return u32::MAX;
@@ -174,7 +160,7 @@ fn q(v: f32) -> u32 {
     (v.max(0.0) * 16.0).round() as u32
 }
 
-/// その軸で明示された大きさ (テーマ > 既定)。
+/// The explicit size on an axis; the theme beats the default.
 fn explicit(node: &UiNode, it: &Intrinsic, axis_is_horizontal: bool) -> Option<f32> {
     if axis_is_horizontal {
         node.style.width.or(it.width)
@@ -201,7 +187,7 @@ fn clamp_size(node: &UiNode, mut w: f32, mut h: f32) -> Size {
 }
 
 impl<'a> Cx<'a, '_, '_> {
-    // ───────────────────────────────────────────────── 計測
+    // ───────────────────────────────────────────────── Measuring
 
     fn measure(&mut self, node: &UiNode, avail: Size) -> Size {
         let key = (std::ptr::from_ref(node) as usize, q(avail.w), q(avail.h));
@@ -234,19 +220,17 @@ impl<'a> Cx<'a, '_, '_> {
         )
     }
 
-    /// 内容 (テキスト・アイコン・子) の大きさ。余白を含まない。
+    /// The content's size, excluding padding.
     fn measure_content(&mut self, node: &UiNode, it: &Intrinsic, inner: Size) -> Size {
         match &node.content {
-            // 編集中のテキストも、大きさの上ではただの文字列である。
-            // キャレットや選択の印は既にある行の上に描かれるだけで、
-            // 入れ物を広げない
+            // Editable text measures as plain text: the caret and selection
+            // draw over existing lines and do not grow the box.
             Content::Text(_) | Content::Editable(_) => {
                 let s = node.content.as_text().unwrap_or_default();
                 let font = ResolvedFont::from_style(&node.style);
 
-                // ⚠️ **1 行のものは折り返して測らない。** 折り返して測ると
-                // 「2 行に収まっている」ことになり、行の高さが 2 倍になる。
-                // 実際にチャンネル名が 2 行で出た
+                // Single-line text is not measured wrapped, or it reports two
+                // lines and doubles the row height. Channel names did this.
                 if intrinsic(node.id).single_line {
                     let mut size = self.text.measure(s, &font, None);
                     if inner.w.is_finite() {
@@ -255,27 +239,25 @@ impl<'a> Cx<'a, '_, '_> {
                     return size;
                 }
 
-                // 折り返し幅が無限なら折り返さない
+                // An infinite wrap width means no wrapping.
                 let max_w = inner.w.is_finite().then_some(inner.w);
                 self.text.measure(s, &font, max_w)
             }
-            // 飾りの混じった文字。**混じったまま一度に測る** —
-            // 走りごとに測って足し合わせると、折り返しが入った途端に合わない
+            // Measured as one mixed run: summing per-span measurements stops
+            // matching the moment a wrap appears.
             Content::Rich(spans) => {
                 let runs = crate::draw::rich_runs(spans, &node.style);
                 let max_w = inner.w.is_finite().then_some(inner.w);
                 self.text.measure_rich(&runs, max_w)
             }
-            // アイコンは正方形で、文字と同じ大きさにする。
-            // 行の中に混ぜたときに揃うのが自然なため
+            // Square, and the size of the text, so it lines up inline.
             Content::Icon(_) => {
                 let s = ResolvedFont::from_style(&node.style).size();
                 Size::new(s, s)
             }
-            // 画像は入れ物いっぱいに広がる。**内容から大きさは決まらない**
+            // Images fill their container; the content implies no size.
             Content::Image(_) => Size::ZERO,
-            // QR は正方形で、**入れ物いっぱいに広がる**。
-            // 内容から大きさは決まらないので、与えられた分を使う
+            // Square and container-filling; the content implies no size.
             Content::Qr(_) => {
                 let s = inner.w.min(inner.h);
                 if s.is_finite() {
@@ -289,9 +271,7 @@ impl<'a> Cx<'a, '_, '_> {
         }
     }
 
-    /// 子の大きさを主軸の規則に従って決める。
-    ///
-    /// 戻り値は (子ごとの大きさ, 内容全体の大きさ)。
+    /// Sizes children along the main axis, returning each size and the total.
     fn size_children(&mut self, node: &UiNode, it: &Intrinsic, inner: Size) -> (Vec<Size>, Size) {
         let n = node.children.len();
         let gap = node.style.gap.unwrap_or(0.0);
@@ -338,19 +318,16 @@ impl<'a> Cx<'a, '_, '_> {
             })
             .sum();
 
-        // 重ねて置く子 (スクロールバー) は主軸を消費しない。
-        // 隙間の数にも数えない
+        // Overlaid children consume no main axis, and no gap either.
         let overlay: Vec<bool> = node.children.iter().map(|c| is_overlay(c.id)).collect();
         let in_flow = overlay.iter().filter(|o| !**o).count();
 
         let gaps = gap * (in_flow.saturating_sub(1)) as f32;
         let mut remaining = main_avail - gaps - margin_main;
 
-        // 主軸の大きさが明示されている子は**余りを取らない**。
-        //
-        // `grow` はレンダラが持つ既定にすぎず、テーマが書いた `width` /
-        // `height` はそれより強い。ここを逆にすると、テーマで幅を指定した
-        // ノードが黙って引き伸ばされる。
+        // An explicit main-axis size wins over `grow`, which is only the
+        // renderer's default. The other way round silently stretches anything
+        // a theme gave a width.
         let grows: Vec<f32> = node
             .children
             .iter()
@@ -364,7 +341,7 @@ impl<'a> Cx<'a, '_, '_> {
             })
             .collect();
 
-        // [1] 余りを取らない子を先に測る
+        // Measure the children that take no slack.
 
         for (i, c) in node.children.iter().enumerate() {
             if overlay[i] || (grows[i] > 0.0 && remaining.is_finite()) {
@@ -381,9 +358,8 @@ impl<'a> Cx<'a, '_, '_> {
             remaining -= if horizontal { s.w } else { s.h };
         }
 
-        // [2] 残りを grow 比で分ける。
-        //     制約が無限 (スクロール領域の主軸) のときは分けようがないので、
-        //     内容の大きさのまま置く
+        // Divide the remainder by grow. An infinite constraint, as on a
+        // scroll region's main axis, leaves nothing to divide.
         let total_grow: f32 = grows.iter().sum();
         if total_grow > 0.0 && remaining.is_finite() {
             let pool = remaining.max(0.0);
@@ -399,7 +375,7 @@ impl<'a> Cx<'a, '_, '_> {
                     Size::new((cross_avail - m.horizontal()).max(0.0), main)
                 };
                 let mut s = self.measure(c, avail);
-                // 主軸は配ったぶんに固定する。測った値ではない
+                // Pinned to what was handed out, not what was measured.
                 if horizontal {
                     s.w = main;
                 } else {
@@ -421,8 +397,8 @@ impl<'a> Cx<'a, '_, '_> {
             } else {
                 main_total += s.h;
             }
-            // 交差軸を決めない子は数に入れない。**主軸には要る** ―
-            // 積まれている以上、場所は取っている
+            // Children that do not set the cross axis are excluded from it,
+            // but still occupy the main axis.
             if intrinsic(node.children[i].id).follows_cross {
                 continue;
             }
@@ -441,7 +417,7 @@ impl<'a> Cx<'a, '_, '_> {
         (sizes, content)
     }
 
-    // ───────────────────────────────────────────────── 配置
+    // ───────────────────────────────────────────────── Placing
 
     fn place(&mut self, node: &'a UiNode, rect: Rect, clip: Option<Rect>) {
         let it = intrinsic(node.id);
@@ -455,13 +431,13 @@ impl<'a> Cx<'a, '_, '_> {
             inner,
         });
 
-        // 自分で何かを描くノードは葉として扱う。
-        // 子を持たせた場合は無視する (Markdown の子ノードは M1.1 の範囲外)
+        // A node that draws something is a leaf; any children are ignored.
         if node.content.is_leaf() || node.children.is_empty() {
             return;
         }
 
-        // スクロールする領域では、主軸の制約を外して内容の実寸を得る
+        // A scroll region drops the main-axis constraint to get the real
+        // content size.
         let avail = if it.scroll {
             match it.axis {
                 Axis::Row => Size::new(f32::INFINITY, inner.h),
@@ -490,14 +466,10 @@ impl<'a> Cx<'a, '_, '_> {
                 .clamp(0.0, over);
         }
 
-        // ⚠️ **足りないぶんは下へ寄せる。**
-        //
-        // 末尾に貼り付く一覧は「一番新しいものが下にある」ものである。
-        // 中身が枠に満たないときにそれを上へ置くと、**発言が 1 件しか
-        // 無いチャンネルだけ天井に貼り付いて見える**。実際にそうなった。
-        //
-        // はみ出していないので巻く話ではない。位置を負へずらすことで、
-        // 置き始めを下げている
+        // Under-full content in an end-anchored list is pushed down: placing
+        // it at the top made a channel with one message stick to the ceiling.
+        // Nothing overflows, so this is not scrolling — the start position is
+        // simply moved down.
         if it.anchor_end {
             let short = match it.axis {
                 Axis::Row => inner.w - content.w,
@@ -508,11 +480,9 @@ impl<'a> Cx<'a, '_, '_> {
             }
         }
 
-        // ⚠️ **スクロールバーは中身の切り取りに従わない。**
-        //
-        // 中身は余白の内側で切るが、バーは入れ物の縁に立っている。同じ
-        // 切り取りを掛けると、**余白のぶん外にあるバーが丸ごと消える**。
-        // 実際に見えなくなった
+        // A scrollbar does not take the content's clip: the content clips
+        // inside the padding, while the bar stands at the container's edge,
+        // and the same clip removes it entirely.
         let bar_clip = clip.map(|c| c.intersect(rect));
 
         let clip = if it.scroll {
@@ -526,9 +496,9 @@ impl<'a> Cx<'a, '_, '_> {
         let mut cursor = if horizontal { inner.x } else { inner.y } - offset;
 
         for (i, child) in node.children.iter().enumerate() {
-            // 重ねて置く子は流れに入らない。カーソルも進めない
+            // Overlaid children stay out of the flow.
             if is_overlay(child.id) {
-                // ⚠️ `inner` ではなく `rect`。**余白の内側へ入れない**
+                // The outer rect, so it is not pulled inside the padding.
                 self.place_scrollbar(node.id, child, rect, offset, over, bar_clip);
                 continue;
             }
@@ -538,8 +508,8 @@ impl<'a> Cx<'a, '_, '_> {
             let size = sizes[i];
 
             let child_rect = if let Some(a) = child.anchor {
-                // 浮かぶものは流れにも重ねの中心にも従わない。
-                // **基準の点から置き、はみ出すなら返す**
+                // Anchored children follow neither the flow nor the stack's
+                // centring; they start at the point and flip on overflow.
                 let s = Self::stack_size(child, &ci, size, inner);
                 anchored(a, s, inner, m)
             } else if it.axis == Axis::Stack {
@@ -562,7 +532,7 @@ impl<'a> Cx<'a, '_, '_> {
                 Rect::new(x, cursor + m.top, w, size.h)
             };
 
-            // ⚠️ 浮かぶものはカーソルを進めない。**流れの外に居る**
+            // Anchored children do not advance the cursor.
             if it.axis != Axis::Stack && child.anchor.is_none() {
                 cursor += if horizontal {
                     size.w + m.horizontal() + gap
@@ -575,21 +545,16 @@ impl<'a> Cx<'a, '_, '_> {
         }
     }
 
-    /// スクロールバーを一覧の縁へ重ねて置く。
+    /// Places a scrollbar at the list's edge.
     ///
-    /// 摘みの大きさと位置は**はみ出し量から決まる**ので、テーマには書けない。
-    /// テーマが決めるのは幅・余白・色である。
+    /// The thumb's size and position follow from the overflow, so a theme
+    /// cannot express them; it decides the width, padding and colour.
     ///
-    /// # ⚠️ 余白の内側ではなく、外縁に置く
+    /// The track is the rect *before* padding: taking it after moves the bar
+    /// inside and puts it on top of the content, which it did.
     ///
-    /// `track` に渡すのは余白を引く**前**の矩形である。引いた後に置くと、
-    /// 余白の分だけ内側へ入り込み、**中身の上に乗る**。サーバ一覧では
-    /// 48px の丸の上に線が重なった。
-    ///
-    /// スクロールバーは中身ではなく入れ物の縁に属している。
-    ///
-    /// **スクロールできるものが何もなければ、何も置かない。** 動かない
-    /// スクロールバーは嘘をつく。
+    /// Nothing is placed when there is nothing to scroll; an immobile
+    /// scrollbar lies.
     fn place_scrollbar(
         &mut self,
         owner: NodeId,
@@ -623,8 +588,8 @@ impl<'a> Cx<'a, '_, '_> {
             return;
         };
 
-        // 見えている割合がそのまま摘みの割合になる。
-        // ただし掴めなくなるほど小さくはしない
+        // The visible fraction is the thumb's fraction, floored so it stays
+        // grabbable.
         let visible = track.h;
         let content = visible + over;
         let h = (inner.h * (visible / content)).max(MIN_THUMB).min(inner.h);
@@ -638,8 +603,7 @@ impl<'a> Cx<'a, '_, '_> {
             inner: rect.deflate(thumb.style.padding.unwrap_or_default()),
         });
 
-        // 掴んで動かすのに要る寸法を残す。当たり判定だけでは
-        // 「どこまで動かせるか」が分からない
+        // Kept for dragging: hit testing does not say how far it can travel.
         self.scrollbars.push(ScrollBar {
             owner,
             track: inner,
@@ -647,7 +611,7 @@ impl<'a> Cx<'a, '_, '_> {
         });
     }
 
-    /// 重ねの子の大きさ。指定があればそれ、なければ親いっぱい。
+    /// A stacked child's size: explicit if given, otherwise the parent's.
     fn stack_size(child: &UiNode, ci: &Intrinsic, measured: Size, inner: Rect) -> Size {
         Size::new(
             if ci.hugs_content || explicit(child, ci, true).is_some() {
@@ -663,11 +627,8 @@ impl<'a> Cx<'a, '_, '_> {
         )
     }
 
-    /// 交差軸での子の大きさ。
-    ///
-    /// **明示された大きさは伸ばさない。** `chat.message` は
-    /// `cross: Start` だが、仮に `Stretch` にしても 40px のアイコンが
-    /// 縦に伸びてはならない。
+    /// A child's cross-axis size. An explicit size is never stretched: an
+    /// avatar must not grow vertically even under `Stretch`.
     fn cross_size(
         child: &UiNode,
         ci: &Intrinsic,
@@ -693,25 +654,18 @@ impl<'a> Cx<'a, '_, '_> {
     }
 }
 
-/// 基準の点から置く。**はみ出すなら反対側へ返す。**
+/// Places from an anchor point, flipping on overflow.
 ///
-/// # ⚠️ 端で押されたメニューは、はみ出したまま出してはいけない
+/// A menu opened at the right edge would otherwise hang half off screen, with
+/// its items visible but unreachable.
 ///
-/// 画面の右端で右クリックしたときに、点から右へ伸ばすと**メニューの半分が
-/// 画面の外**になる。そこには押せる項目が並んでいるので、「出ているのに
-/// 押せない」という壊れ方をする。
-///
-/// 順番が要る。**まず返し、それから押し込む。**
-///
-/// - 返すだけだと、入れ物より大きいメニューはどちらへ返してもはみ出す
-/// - 押し込むだけだと、右端のメニューが指の下に出て**中身が指で隠れる**
-///
-/// 返して駄目なら押し込む、の順にすると、狭いときでも必ず入れ物の中に入る。
+/// Flip first, then clamp. Flipping alone fails for a menu larger than the
+/// container, and clamping alone puts a right-edge menu under the finger.
 fn anchored(a: gumicord_uitree::Anchor, size: Size, inner: Rect, m: Edges) -> Rect {
     let w = size.w + m.horizontal();
     let h = size.h + m.vertical();
 
-    // 点から右下へ伸ばすのが既定。入らなければ点の反対側へ
+    // Down and right by default; the other side if it does not fit.
     let mut x = a.x;
     if x + w > inner.right() {
         x = a.x - w;
@@ -721,9 +675,8 @@ fn anchored(a: gumicord_uitree::Anchor, size: Size, inner: Rect, m: Edges) -> Re
         y = a.y - h;
     }
 
-    // 返しても入らなければ、入れ物の中へ押し込む。
-    // ⚠️ **後ろの max を先に書かない。** 先に置くと、入れ物より大きいときに
-    // 下端合わせが勝って上端が切れる
+    // Then clamp. The `max` must come last, or something larger than the
+    // container aligns to the bottom and loses its top.
     x = x.min(inner.right() - w).max(inner.x);
     y = y.min(inner.bottom() - h).max(inner.y);
 
@@ -737,7 +690,7 @@ mod tests {
 
     use super::*;
 
-    /// レイアウトは GPU を必要としない。[`Shaper`] を直接作れる
+    /// Layout needs no GPU, so a shaper can be built directly.
     fn shaper() -> Shaper {
         Shaper::new(1.0)
     }
@@ -754,7 +707,7 @@ mod tests {
             .rect
     }
 
-    /// 余りを取るノードが主軸を埋め、取らないノードは実寸のままである
+    /// Growing nodes fill the main axis; the rest keep their real size.
     #[test]
     fn grow_children_share_the_remainder() {
         let tree = UiNode::new(NodeId::AppScreenMain)
@@ -771,15 +724,15 @@ mod tests {
 
         assert_eq!(rect_of(&r, NodeId::NavGuildList).w, 64.0);
         assert_eq!(rect_of(&r, NodeId::NavChannelList).w, 240.0);
-        // chat.view だけが grow を持つので、残り全部を取る
+        // Only the chat view grows, so it takes the rest.
         assert_eq!(rect_of(&r, NodeId::ChatView).w, 1000.0 - 64.0 - 240.0);
         assert_eq!(rect_of(&r, NodeId::ChatView).x, 304.0);
     }
 
-    /// 主軸でも、テーマが書いた寸法は既定の `grow` より強い
+    /// A theme's size beats the default `grow`, on the main axis too.
     #[test]
     fn an_explicit_main_size_beats_the_default_grow() {
-        // chat.view は既定で grow=1 だが、幅を書けばそちらが勝つ
+        // The chat view grows by default; a written width wins.
         let tree = UiNode::new(NodeId::AppScreenMain)
             .child(styled(NodeId::ChatView, |s| s.width = Some(300.0)))
             .child(UiNode::new(NodeId::NavChannelList));
@@ -793,8 +746,8 @@ mod tests {
         assert_eq!(rect_of(&r, NodeId::ChatView).w, 300.0);
     }
 
-    /// 交差軸が Stretch なら、明示のない子は親いっぱいに広がる。
-    /// **明示された大きさは伸ばさない**
+    /// Under `Stretch` an unsized child fills the cross axis; an explicit
+    /// size is never stretched.
     #[test]
     fn stretch_does_not_override_an_explicit_size() {
         let tree = UiNode::new(NodeId::AppScreenMain)
@@ -823,10 +776,9 @@ mod tests {
         );
     }
 
-    /// 自分の欄は左側の幅を**決めない**。一覧が決めた幅をもらうだけである。
-    ///
-    /// これを外すと、帯が入れ物いっぱいに広がろうとした分だけ左側が広がり、
-    /// `chat.view` に配る余りが無くなって**チャットが消える**。実際に消えた
+    /// The user panel takes the sidebar's width rather than setting it.
+    /// Without that it widens the sidebar until chat has no slack left and
+    /// disappears, which it did.
     #[test]
     fn the_user_panel_takes_the_width_it_is_given() {
         let lists = UiNode::new(NodeId::NavSidebarLists)
@@ -849,7 +801,11 @@ mod tests {
             &ScrollState::new(),
         );
 
-        assert_eq!(rect_of(&r, NodeId::NavSidebar).w, 304.0, "一覧が幅を決める");
+        assert_eq!(
+            rect_of(&r, NodeId::NavSidebar).w,
+            304.0,
+            "the lists decide the width"
+        );
         assert_eq!(
             rect_of(&r, NodeId::NavUserPanel).w,
             304.0,
@@ -862,10 +818,10 @@ mod tests {
         );
     }
 
-    /// 余白と隙間が主軸から引かれる。
+    /// Padding and gaps come out of the main axis.
     ///
-    /// **根ノードは自分の寸法指定にかかわらずビューポート全体をもらう**ので、
-    /// 幅を効かせたい一覧は親の下に置く必要がある。
+    /// The root always gets the whole viewport regardless of its own size, so
+    /// anything whose width should apply needs a parent.
     #[test]
     fn padding_and_gap_come_out_of_the_main_axis() {
         let tree = UiNode::new(NodeId::AppScreenMain).child(
@@ -899,13 +855,14 @@ mod tests {
             .collect();
 
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].y, 10.0, "上の余白ぶん下がる");
-        assert_eq!(items[1].y, 10.0 + 30.0 + 6.0, "隙間ぶん空く");
+        assert_eq!(items[0].y, 10.0, "offset by the top padding");
+        assert_eq!(items[1].y, 10.0 + 30.0 + 6.0, "separated by the gap");
         assert_eq!(items[0].x, 10.0);
-        assert_eq!(items[0].w, 180.0, "交差軸は余白を引いた幅いっぱい");
+        assert_eq!(items[0].w, 180.0, "fills the cross axis inside the padding");
     }
 
-    /// スクロール領域は主軸の制約を外して測るので、子は縮まずにはみ出す
+    /// A scroll region measures without a main-axis constraint, so children
+    /// overflow rather than shrink.
     #[test]
     fn a_scroll_region_reports_its_overflow() {
         let mut list = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0));
@@ -922,11 +879,10 @@ mod tests {
             &ScrollState::new(),
         );
 
-        // 10 件 × 50px = 500px が 100px の枠に入る → 400px はみ出す
+        // 500px of content in a 100px box overflows by 400.
         assert_eq!(r.overflow.get(&NodeId::ChatMessageList), Some(&400.0));
 
-        // anchor_end なので、指定がなければ末尾に貼り付く。
-        // 最後のメッセージの下端が枠の下端に合う
+        // End-anchored, so it pins to the bottom with no explicit position.
         let last = r
             .placed
             .iter()
@@ -935,7 +891,7 @@ mod tests {
         assert_eq!(last.rect.bottom(), 100.0);
     }
 
-    /// メッセージ一覧を建てる。`n` 件 × 50px
+    /// Builds a message list of `n` rows.
     fn messages(n: u64) -> UiNode {
         let mut list = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0));
         for i in 0..n {
@@ -945,14 +901,12 @@ mod tests {
         UiNode::new(NodeId::ChatView).child(list)
     }
 
-    /// ⚠️ **一番下で待っていたら、新しい行が来てもそこに居続ける。**
-    ///
-    /// 位置を px で覚えると、増えたぶんだけ見ている場所が上へずれ、
-    /// **来たはずの行が見えない**
+    /// Waiting at the bottom stays at the bottom. A pixel offset would drift
+    /// upwards as content grows, hiding the row that just arrived.
     #[test]
     fn a_list_pinned_to_the_bottom_follows_new_rows() {
         let mut scroll = ScrollState::new();
-        // 一番下まで巻いた、という意図を覚えている
+        // The intent, not the offset.
         scroll.insert(NodeId::ChatMessageList, SCROLL_TO_END);
 
         for n in [10, 11, 20] {
@@ -962,15 +916,13 @@ mod tests {
                 .placed
                 .iter()
                 .rfind(|p| p.node.id == NodeId::ChatMessage)
-                .expect("メッセージがある");
-            assert_eq!(last.rect.bottom(), 100.0, "{n} 件でも一番下に居る");
+                .expect("a message");
+            assert_eq!(last.rect.bottom(), 100.0, "not at the bottom with {n} rows");
         }
     }
 
-    /// ⚠️ **中身が枠に満たなくても下に寄る。**
-    ///
-    /// 一番新しいものが下にある一覧で、1 件しか無いときだけ天井に
-    /// 貼り付いて見えた
+    /// Under-full content still sits at the bottom; a single message used to
+    /// stick to the ceiling.
     #[test]
     fn a_short_list_still_sits_at_the_bottom() {
         let tree = messages(1);
@@ -985,16 +937,18 @@ mod tests {
             .placed
             .iter()
             .find(|p| p.node.id == NodeId::ChatMessage)
-            .expect("1 件ある");
-        assert_eq!(only.rect.bottom(), 100.0, "下端に着いている");
-        assert_eq!(only.rect.y, 50.0, "50px の行が 100px の枠の下半分にいる");
+            .expect("one row");
+        assert_eq!(only.rect.bottom(), 100.0, "not at the bottom");
+        assert_eq!(
+            only.rect.y, 50.0,
+            "a 50px row should sit in the lower half of a 100px box"
+        );
 
-        // はみ出してはいないので、巻けるものは何も無い
+        // Nothing overflows, so there is nothing to scroll.
         assert_eq!(r.overflow.get(&NodeId::ChatMessageList), Some(&0.0));
     }
 
-    /// ⚠️ **末尾に貼り付かない一覧は上のままである。**
-    /// サーバ一覧が 1 つだけのときに下へ落ちてはいけない
+    /// A list that does not pin to the end stays at the top.
     #[test]
     fn a_list_that_does_not_anchor_stays_at_the_top() {
         let mut list = styled(NodeId::NavGuildList, |s| s.height = Some(100.0));
@@ -1014,11 +968,11 @@ mod tests {
             .placed
             .iter()
             .find(|p| p.node.id == NodeId::NavGuildListItem)
-            .expect("1 つある");
+            .expect("one item");
         assert_eq!(only.rect.y, 0.0);
     }
 
-    /// 途中で止めていたら、そこに残る。**勝手に追いかけない**
+    /// Stopped partway, it stays there.
     #[test]
     fn a_list_stopped_midway_stays_where_it_was() {
         let mut scroll = ScrollState::new();
@@ -1030,14 +984,12 @@ mod tests {
             .placed
             .iter()
             .find(|p| p.node.id == NodeId::ChatMessage)
-            .expect("メッセージがある");
-        assert_eq!(first.rect.y, -100.0, "100px 巻いた場所のまま");
+            .expect("a message");
+        assert_eq!(first.rect.y, -100.0, "should stay 100px down");
     }
 
-    /// ⚠️ **末尾に貼り付かない一覧では、一番下でも意図にしない。**
-    ///
-    /// サーバ一覧の一番下まで巻いた人は「一番下に居たい」のではなく、
-    /// そこにあるサーバを見ている。増えたときに動いてはいけない
+    /// The bottom of a non-pinning list is not an intent: someone there is
+    /// looking at what is there, not at the bottom.
     #[test]
     fn only_lists_that_anchor_to_the_end_stick_there() {
         assert_eq!(
@@ -1048,7 +1000,8 @@ mod tests {
         assert_eq!(remember(NodeId::NavGuildList, 400.0, 400.0), 400.0);
     }
 
-    /// スクロールした子には切り取りが付く。枠の外に出た項目は当たらない
+    /// Scrolled children are clipped, and what leaves the box stops being
+    /// hit.
     #[test]
     fn scrolled_children_are_clipped() {
         let mut list = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0));
@@ -1069,13 +1022,13 @@ mod tests {
             .iter()
             .find(|p| p.node.id == NodeId::ChatMessage)
             .unwrap();
-        assert!(first.rect.y < 0.0, "先頭は枠の上へ追い出されている");
+        assert!(first.rect.y < 0.0, "the first row should be above the box");
         assert_eq!(first.clip, Some(Rect::new(0.0, 0.0, 400.0, 100.0)));
-        // 追い出された先頭は当たらない
+        // The row scrolled out no longer hits.
         assert!(r.hit(200.0, first.rect.y + 1.0).is_none());
     }
 
-    /// 主軸の 2 段階配分。アイコンの幅を引いたあとで本文の幅が決まる
+    /// Two-pass main-axis sizing: the body's width follows the avatar's.
     #[test]
     fn the_remainder_is_computed_after_fixed_children() {
         let tree = styled(NodeId::ChatMessage, |s| s.gap = Some(8.0))
@@ -1089,15 +1042,15 @@ mod tests {
             &ScrollState::new(),
         );
 
-        // アバターは既定で 40x40
+        // The avatar defaults to 40 square.
         assert_eq!(rect_of(&r, NodeId::ChatMessageAvatar).w, 40.0);
-        // 本文側は 500 - 40 - 8
+        // The body gets what is left after the avatar and the gap.
         let col = rect_of(&r, NodeId::LayoutColumn);
         assert_eq!(col.w, 452.0);
         assert_eq!(col.x, 48.0);
     }
 
-    /// 描画順は深さ優先・前順である。半透明の合成順がこれに依存する
+    /// Draw order is depth-first pre-order, which alpha blending depends on.
     #[test]
     fn placement_order_is_depth_first_pre_order() {
         let tree = UiNode::new(NodeId::AppWindow)
@@ -1124,18 +1077,17 @@ mod tests {
         );
     }
 
-    /// テキストは折り返して高さが伸びる。
-    /// 同じ文字列でも折り返し幅が狭ければ高くなる。
+    /// Text wraps, so a narrower wrap width means more height.
     ///
-    /// ⚠️ **ASCII だけで書いてある。** CI の Linux ランナに日本語フォントが
-    /// あるとは限らない。日本語の整形結果まで固定したくなったら、同梱フォント
-    /// (R4) を入れてからにする。
+    /// ASCII only: the CI runner may have no Japanese font. Pinning Japanese
+    /// shaping needs the bundled font first.
     #[test]
     fn narrow_text_wraps_and_grows_taller() {
         let mut s = shaper();
         let font = ResolvedFont::from_style(&Style::default());
         if s.measure("MMMMMMMM", &font, None).w == 0.0 {
-            // 使えるフォントが 1 つもない。整形が成立しないので何も言えない
+            // No usable font at all; shaping cannot happen, so assert
+            // nothing.
             eprintln!("フォントが見つからないため、この試験は飛ばす");
             return;
         }
@@ -1151,7 +1103,10 @@ mod tests {
 
         let wide = make(1000.0);
         let narrow = make(200.0);
-        assert!(narrow > wide, "狭いほうが高くなるはず ({narrow} <= {wide})");
+        assert!(
+            narrow > wide,
+            "narrower should be taller ({narrow} <= {wide})"
+        );
     }
 }
 
@@ -1172,9 +1127,9 @@ mod scrollbar_tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  浮かせるもの
+    //  Floating surfaces
 
-    /// 400x300 の窓に、`w` x `h` の箱を `(ax, ay)` から浮かせる
+    /// Floats a `w` by `h` box at `(ax, ay)` in a 400 by 300 window.
     fn floated(ax: f32, ay: f32, w: f32, h: f32) -> Rect {
         let tree = UiNode::new(NodeId::AppRoot).child(
             styled(NodeId::OverlayLayer, |_| {}).child(
@@ -1191,10 +1146,10 @@ mod scrollbar_tests {
             &mut shaper(),
             &ScrollState::default(),
         );
-        r.find(NodeId::OverlayPopover).expect("置かれていない").rect
+        r.find(NodeId::OverlayPopover).expect("not placed").rect
     }
 
-    /// 余裕があれば、押した点から右下へ伸びる
+    /// With room, it grows down and right from the press.
     #[test]
     fn a_floating_box_grows_down_and_right_from_its_anchor() {
         let r = floated(50.0, 60.0, 100.0, 80.0);
@@ -1202,38 +1157,35 @@ mod scrollbar_tests {
         assert_eq!((r.w, r.h), (100.0, 80.0));
     }
 
-    /// ⚠️ **端で押されたメニューは反対側へ返す。**
-    ///
-    /// 返さないと、画面の外に押せる項目が並ぶ。「出ているのに押せない」
-    /// という壊れ方をする
+    /// A menu at the edge flips, or its items sit off screen: visible but
+    /// unreachable.
     #[test]
     fn it_flips_when_pressed_near_the_bottom_right() {
-        // 右端から 20px の位置に幅 100 の箱は入らない
+        // A 100-wide box does not fit 20px from the right edge.
         let r = floated(380.0, 290.0, 100.0, 80.0);
-        assert_eq!(r.right(), 380.0, "右へ伸びたまま画面の外に出ている");
-        assert_eq!(r.bottom(), 290.0, "下へ伸びたまま画面の外に出ている");
+        assert_eq!(r.right(), 380.0, "grew right and off screen");
+        assert_eq!(r.bottom(), 290.0, "grew down and off screen");
     }
 
-    /// 片側だけ入らないときは、その軸だけ返す
+    /// Only the axis that overflows flips.
     #[test]
     fn only_the_axis_that_overflows_flips() {
         let r = floated(380.0, 10.0, 100.0, 80.0);
-        assert_eq!(r.right(), 380.0, "横は返る");
-        assert_eq!(r.y, 10.0, "縦は返らない");
+        assert_eq!(r.right(), 380.0, "should flip horizontally");
+        assert_eq!(r.y, 10.0, "should not flip vertically");
     }
 
-    /// ⚠️ **返しても入らないものは、押し込む。**
-    ///
-    /// 返すだけだと、入れ物より大きい箱はどちらへ返してもはみ出す
+    /// What still does not fit after flipping is clamped: a box larger than
+    /// its container overflows either way.
     #[test]
     fn it_is_pushed_inside_when_flipping_is_not_enough() {
         let r = floated(200.0, 150.0, 500.0, 400.0);
-        assert_eq!((r.x, r.y), (0.0, 0.0), "左上に寄せて入れる");
+        assert_eq!((r.x, r.y), (0.0, 0.0), "should clamp to the top left");
     }
 
-    /// ⚠️ **浮かぶものは流れを進めない。**
+    /// An anchored child does not advance the flow.
     ///
-    /// 進めると、後ろに並ぶものが浮かんだ箱のぶんだけ押し出される
+    /// Advancing it would push everything after it by the box's size.
     #[test]
     fn a_floating_child_does_not_advance_the_flow() {
         let row = |float: bool| {
@@ -1258,14 +1210,14 @@ mod scrollbar_tests {
                 &ScrollState::default(),
             )
             .find(NodeId::ChatInput)
-            .expect("置かれていない")
+            .expect("not placed")
             .rect
             .y
         };
         assert_eq!(y(&row(false)), y(&row(true)));
     }
 
-    /// 高さ 100 の枠に 50px のメッセージを `n` 件と、スクロールバーを入れる
+    /// `n` rows of 50px plus a scrollbar, in a 100px box.
     fn list(n: u64, scroll: Option<f32>) -> (UiNode, ScrollState) {
         let mut list = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0));
         for i in 0..n {
@@ -1288,7 +1240,7 @@ mod scrollbar_tests {
         layout(tree, Size::new(400.0, 100.0), &mut shaper(), state)
     }
 
-    /// スクロールバーは流れに入らない。**入れても一覧の高さが変わらない**
+    /// A scrollbar stays out of the flow and does not change the height.
     #[test]
     fn a_scrollbar_does_not_consume_the_main_axis() {
         let (with_bar, state) = list(10, None);
@@ -1297,17 +1249,17 @@ mod scrollbar_tests {
             .get(&NodeId::ChatMessageList)
             .unwrap();
 
-        // 10 件 × 50px = 500px が 100px の枠に入る → 400px はみ出す。
-        // スクロールバーがここに 1 件ぶん足されていたら 400 にならない
+        // 500px of content in a 100px box overflows by 400; a scrollbar in
+        // the flow would change that.
         assert_eq!(over_with, 400.0);
     }
 
-    /// 縁に置かれ、中身と一緒にスクロールしない
+    /// Placed at the edge, and does not scroll with the content.
     #[test]
     fn the_scrollbar_sits_on_the_trailing_edge() {
         let (tree, state) = list(10, None);
         let r = place(&tree, &state);
-        let bar = r.find(NodeId::LayoutScrollbar).expect("置かれていない");
+        let bar = r.find(NodeId::LayoutScrollbar).expect("not placed");
 
         assert_eq!(bar.rect.w, 10.0);
         assert_eq!(bar.rect.right(), 400.0, "右端に付く");
@@ -1315,9 +1267,8 @@ mod scrollbar_tests {
         assert_eq!(bar.rect.h, 100.0, "枠いっぱいの高さ");
     }
 
-    /// ⚠️ **重ねの中でも、印は中身の大きさで置かれる。**
-    ///
-    /// 広げると 56×48 の赤い丸がサーバの絵を覆う。実際にそうなった
+    /// A badge stays content-sized even when stacked; filling turned it into
+    /// a red circle covering the icon.
     #[test]
     fn a_badge_does_not_fill_the_stack_it_sits_on() {
         let item = styled(NodeId::NavGuildListItem, |s| {
@@ -1345,10 +1296,8 @@ mod scrollbar_tests {
         assert!(badge.h < 48.0, "印は 1 行ぶんだけ: {}", badge.h);
     }
 
-    /// ⚠️ **余白の内側へ入らない。**
-    ///
-    /// 余白を引いた後に置くと、その分だけ内側へ入り込んで**中身の上に
-    /// 乗る**。サーバ一覧で 48px の丸の上に線が重なった
+    /// Not pulled inside the padding, which would put it on top of the
+    /// content.
     #[test]
     fn the_scrollbar_ignores_the_padding() {
         let mut list = styled(NodeId::ChatMessageList, |s| {
@@ -1366,12 +1315,12 @@ mod scrollbar_tests {
         let tree = UiNode::new(NodeId::ChatView).child(list);
 
         let r = place(&tree, &ScrollState::new());
-        let bar = r.find(NodeId::LayoutScrollbar).expect("置かれていない");
+        let bar = r.find(NodeId::LayoutScrollbar).expect("not placed");
 
         assert_eq!(bar.rect.right(), 400.0, "余白があっても外縁に付く");
         assert_eq!(bar.rect.h, 100.0, "高さも余白を引かない");
 
-        // ⚠️ **中身の切り取りを掛けると消える。** 実際に見えなくなった
+        // The content's clip would remove it entirely.
         if let Some(c) = bar.clip {
             assert!(
                 !c.intersect(bar.rect).is_empty(),
@@ -1385,18 +1334,19 @@ mod scrollbar_tests {
         }
     }
 
-    /// 摘みの大きさは見えている割合になり、位置はスクロール量に従う
+    /// The thumb's size is the visible fraction; its position follows the
+    /// offset.
     #[test]
     fn the_thumb_reflects_how_far_we_are() {
-        // 先頭
+        // At the start.
         let (tree, state) = list(10, Some(0.0));
         let r = place(&tree, &state);
         let top = r.find(NodeId::LayoutScrollbarThumb).unwrap().rect;
-        // 500px 中 100px が見えている → 摘みは 1/5
+        // 100 of 500 visible, so the thumb is a fifth.
         assert_eq!(top.h, 20.0_f32.max(MIN_THUMB));
         assert_eq!(top.y, 0.0);
 
-        // 末尾
+        // At the end.
         let (tree, state) = list(10, Some(f32::MAX));
         let r = place(&tree, &state);
         let bottom = r.find(NodeId::LayoutScrollbarThumb).unwrap().rect;
@@ -1404,7 +1354,7 @@ mod scrollbar_tests {
         assert_eq!(bottom.h, top.h, "大きさは変わらない");
     }
 
-    /// **スクロールできないなら置かない。** 動かないスクロールバーは嘘をつく
+    /// Nothing to scroll means no scrollbar; an immobile one lies.
     #[test]
     fn no_scrollbar_when_nothing_overflows() {
         let (tree, state) = list(1, None);
