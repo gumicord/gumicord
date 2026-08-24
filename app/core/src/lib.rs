@@ -1138,9 +1138,9 @@ impl Gumicord {
     /// One folder. Open, it wraps its contents.
     ///
     /// ```text
-    ///   閉じている        開いている
-    ///   ┌───────┐      ┌───────┐  ← 背景は 1 枚で
-    ///   │ ▢ ▢ │      │   ▱   │     後ろを通る
+    ///   folded          open
+    ///   ┌───────┐      ┌───────┐   one background
+    ///   │ ▢ ▢ │      │   ▱   │   behind both
     ///   │ ▢ ▢ │      │  ▢   │
     ///   └───────┘      │  ▢   │
     ///                     └───────┘
@@ -1149,15 +1149,12 @@ impl Gumicord {
     /// Folded, it tiles the icons inside, so what was folded away is visible
     /// without unfolding.
     ///
-    /// ⚠️ **開いているときに敷き詰めない。** 中身はすぐ下に並んでいるので、
-    /// 同じ絵が上下に二重に出ることになる。
-    ///
-    /// ⚠️ **中身を兄弟として並べない。** 背景がフォルダの分しか無くなり、
-    /// どこまでが 1 つのフォルダなのか見て分からなくなる
+    /// No tiles while open, or the same icons appear twice. Contents stay
+    /// children, or the background stops covering them and the folder's extent
+    /// becomes invisible.
     fn folder_face(&self, row: &GuildRow) -> UiNode {
         let id = row.folder_of_own.unwrap_or(row.id);
-        // ⚠️ **色を載せるだけ。** どこに塗るか — 縁か、背景か、目印の色か —
-        // はテーマが `$data.tint` で決める
+        // Only carried; where it lands is the theme's call.
         let tint = row.tint.map(Color::from_rgb);
         let node = UiNode::new(NodeId::NavGuildListFolder)
             .with_id_key(id)
@@ -1174,8 +1171,7 @@ impl Gumicord {
                 .children(row.members.iter().map(|m| self.guild_item(m)));
         }
 
-        // ⚠️ 行と列で組む。**格子を並べる仕組みは持っていない**
-        // (`spec/03-uitree.md` 3.6 — row / column / stack / scroll しかない)
+        // Rows and columns; there is no grid primitive.
         let mut grid = UiNode::new(NodeId::LayoutColumn);
         for pair in row.members.chunks(2).take(FOLDER_TILES / 2) {
             let mut line = UiNode::new(NodeId::LayoutRow);
@@ -1183,16 +1179,12 @@ impl Gumicord {
                 line = line.child(
                     face(NodeId::NavGuildListItemIcon, m.icon.as_deref(), &m.name)
                         .with_id_key(m.id)
-                        // ⚠️ **`grouped` ではなく `collapsed` である。**
+                        // `collapsed`, not `grouped`.
                         //
-                        // `grouped` は「フォルダの中にいるサーバ」であり、
-                        // それは開いているときの普通の大きさで出る。ここは
-                        // **閉じたフォルダの面に敷き詰めた 1 枚**で、意味も
-                        // 大きさも別物である。同じ状態に相乗りさせると、
-                        // 片方を直したときにもう片方が壊れる。
-                        //
-                        // ⚠️ 小ささはテーマが決める。ここで寸法を焼き付けると
-                        // テーマから揃えられなくなる (`chat.message` と同じ)
+                        // `grouped` means a guild inside an open folder,
+                        // drawn at normal size; this is a tile on a folded
+                        // one. Sharing a state would break one while fixing
+                        // the other. The size is the theme's.
                         .with_state(State::Collapsed),
                 );
             }
@@ -1209,13 +1201,12 @@ impl Gumicord {
             .map(|g| g.name)
             .unwrap_or_else(|| "Gumicord".to_owned());
 
-        // ⚠️ **見出しと自分は巻かない。** 一覧だけがスクロールする。
-        // 全部を 1 つのスクロール領域にすると、下まで巻いたときに
-        // **自分が誰かも、どのサーバを見ているかも見えなくなる**
+        // Only the list scrolls: one scroll region would carry the header and
+        // the user panel off screen.
         let mut list = UiNode::new(NodeId::LayoutScroll);
 
         for c in self.channel_rows() {
-            // カテゴリは見出しである。**押しても開かないので、当たりも作らない**
+            // Categories are headings; nothing opens, so no hit target.
             if c.category {
                 list = list
                     .child(UiNode::text(NodeId::NavChannelListCategory, c.name).with_id_key(c.id));
@@ -1249,19 +1240,18 @@ impl Gumicord {
             .child(list.children(self.scrollbar(NodeId::LayoutScroll)))
     }
 
-    /// 左側全体。**一覧の下に自分が居座る**。
+    /// The whole left side, with the user panel pinned below the lists.
     ///
     /// ```text
     ///   ┌────┬──────────────┐
-    ///   │ ◎ │ # いっぱん    │
-    ///   │ ◎ │ # ざつだん    │
-    ///   ├────┴──────────────┤  ← 自分は**両方にまたがる**
-    ///   │ ◎ ｽﾋﾟｷ            │
+    ///   │ ◎ │ # general     │
+    ///   │ ◎ │ # chat        │
+    ///   ├────┴──────────────┤  the panel spans both
+    ///   │ ◎ name            │
     ///   └───────────────────┘
     /// ```
     ///
-    /// ⚠️ **チャンネル一覧の下に置かない。** Discord の自分の欄は
-    /// サーバ一覧の分まで伸びていて、幅が違う
+    /// Not under the channel list alone: it spans the guild list too.
     fn sidebar(&self, panes: Panes) -> Option<UiNode> {
         if !panes.guilds() && !panes.channels() {
             return None;
@@ -1277,23 +1267,19 @@ impl Gumicord {
         )
     }
 
-    /// いま入っている自分。**一覧の下に居座る**。
+    /// Who is signed in.
     ///
     /// ```text
     ///   ┌──────────────────────┐
-    ///   │ ◎  ｽﾋﾟｷ            │
-    ///   │ ●  オンライン        │
+    ///   │ ◎  name             │
+    ///   │ ●  online           │
     ///   └──────────────────────┘
     /// ```
     ///
-    /// # ⚠️ 「繋がっている」を「オンライン」と言い換えない
-    ///
-    /// 繋がっているかどうかはこちらが確実に知っているが、それは
-    /// ステータスではない。**取り込み中にしている人に「オンライン」と
-    /// 出すのは嘘である。** 読めなければ言葉も点も出さない。
-    ///
-    /// ⚠️ **ステータスを変える手立てはまだない** (`FR-044`, M2)。
-    /// 押しても何も起きないものを置くより、置かないほうがよい
+    /// Being connected is not a status: showing "online" to someone set to do
+    /// not disturb would be a lie, so an unknown status shows neither a word
+    /// nor a dot. There is no way to change it yet, and a control that does
+    /// nothing is worse than none.
     fn user_panel(&self) -> Option<UiNode> {
         let me = &self.login.session().logged_in()?.me.user;
         let status = self.live.status();
@@ -1305,16 +1291,14 @@ impl Gumicord {
                 .url(),
         );
         if let Some(s) = status {
-            // ⚠️ **鍵で色を分ける。** 4 つしかない決まった値なので、
-            // テーマが `when.slot` で飾り分けられる
+            // Keyed by slot: a fixed set, so themes can style each one.
             avatar = avatar
                 .child(UiNode::new(NodeId::NavUserPanelPresence).with_key(Key::Slot(s.as_wire())));
         }
 
         let mut lines =
             UiNode::new(NodeId::LayoutColumn).child(UiNode::text(NodeId::NavUserPanelName, {
-                // ⚠️ **ここはギルドではない。** サーバごとの呼び名ではなく、
-                // 自分が決めた表示名を出す
+                // Not guild-scoped: this is the global display name.
                 me.display_name().to_owned()
             }));
         if let Some(s) = status {
@@ -1324,37 +1308,27 @@ impl Gumicord {
         Some(UiNode::new(NodeId::NavUserPanel).child(avatar).child(lines))
     }
 
-    /// メンバー一覧 (`FR-043`)。**右端に立つ**。
+    /// The member list, at the right edge.
     ///
     /// ```text
     ///   ┌──────────────────┐
-    ///   │ 管理者 — 2        │  ← 見出し
-    ///   │ ◎ ねんねこ        │
-    ///   │ ◎ すぴき          │
-    ///   │ オンライン — 5    │
+    ///   │ Admins — 2        │  heading
+    ///   │ ◎ someone         │
+    ///   │ ◎ someone else    │
+    ///   │ Online — 5        │
     ///   └──────────────────┘
     /// ```
     ///
-    /// # ⚠️ 届く前から**列は立てておく**
+    /// The column exists before the data arrives: growing it later would
+    /// change the chat width and reflow the body under the reader, which is
+    /// worse than an empty column for a moment. `Loading` distinguishes "not
+    /// here yet" from "nobody here".
     ///
-    /// 届いてから列を生やすと、そのとき**チャットの幅が変わって本文が
-    /// 組み直される**。読んでいる最中に画面が動くのは、空の列が一瞬
-    /// 見えるより悪い。
+    /// Headings show names, never ids: an 18-digit number tells the reader
+    /// nothing, so a role whose name is unknown is skipped.
     ///
-    /// 中身が無い間は [`State::Loading`] を立てる。**「まだ来ていない」と
-    /// 「誰も居ない」は別のこと**であり、テーマがそこを描き分けられる
-    /// ようにしておく。
-    ///
-    /// # ⚠️ 見出しは名前にする。識別子を出さない
-    ///
-    /// Discord が寄越すのは `"online"` `"offline"` か**役職の識別子**で
-    /// ある。18 桁の数字が並んでも利用者にできることは増えないので、
-    /// 名前が分からない役職の見出しは**飛ばす**。
-    ///
-    /// # ⚠️ 100 人目までしか出ない
-    ///
-    /// `op 14` で頼んでいるのが 0〜99 番目だからである。巻いた先を
-    /// 頼み直す仕組みはまだない ([`gumicord_gateway::member_list`])。
+    /// Stops at 100 people, which is what the subscription asks for; paging
+    /// further is not implemented.
     fn member_list(&self) -> UiNode {
         use gumicord_gateway::MemberRow;
 
@@ -1381,8 +1355,8 @@ impl Gumicord {
                     };
                     let id = user.id.get();
 
-                    // ⚠️ **そのサーバでの呼び名と顔が勝つ。** 全体の名前で
-                    // 出すと「このサーバでは誰なのか」が分からなくなる
+                    // Per-guild name and avatar win; the global ones leave the
+                    // reader unable to tell who this is here.
                     let avatar = UiNode::image(
                         NodeId::NavMemberListItemAvatar,
                         m.member
@@ -1391,16 +1365,16 @@ impl Gumicord {
                             .url(),
                     )
                     .with_data(id)
-                    // ⚠️ **鍵で色を分ける。** 決まった値しか来ないので、
-                    // テーマが `when.slot` で飾り分けられる
+                    // Keyed by slot: a fixed set, so themes can style each
+                    // one.
                     .child(
                         UiNode::new(NodeId::NavMemberListItemPresence)
                             .with_key(Key::Slot(m.status.as_wire()))
                             .with_data(id),
                     );
 
-                    // ⚠️ **一番上の「色を付けている」役職が勝つ。**
-                    // 色を載せるだけで、塗る場所はテーマが決める
+                    // The topmost coloured role wins; where it lands is the
+                    // theme's call.
                     let tint = self
                         .live
                         .store()
@@ -1429,20 +1403,19 @@ impl Gumicord {
             }
         }
 
-        // 名前の分かる見出しも人も無かった。**まだ出せるものが無い**
+        // Nothing nameable yet.
         if out.children.is_empty() {
             return out.with_state(State::Loading);
         }
         out.children(self.scrollbar(NodeId::NavMemberList))
     }
 
-    /// メンバー一覧の見出しの名前。**分からなければ `None`**
+    /// A heading's name, if it can be resolved.
     fn group_name(&self, guild: GuildId, id: &str) -> Option<Cow<'_, str>> {
         match id {
             "online" => Some(Cow::Borrowed("オンライン")),
             "offline" => Some(Cow::Borrowed("オフライン")),
-            // ⚠️ **役職の名前を知らないなら出さない。** 識別子のままでは
-            // 見出しとして読めない
+            // An unresolved role id does not read as a heading.
             other => {
                 let role = other.parse::<u64>().ok()?;
                 self.live
@@ -1471,8 +1444,8 @@ impl Gumicord {
             .child(UiNode::text(NodeId::ChatHeaderTitle, &name).with_data(id))
             .child(UiNode::text(NodeId::ChatHeaderTopic, topic.unwrap_or_default()).with_data(id));
 
-        // 直前と同じ送信者なら送信者行を繰り返さない。
-        // **字下げの量はテーマが決める** (`when.state: "grouped"` の padding)
+        // The same author in a row skips the header line; the indent is the
+        // theme's.
         let rows = self.message_rows();
         let mut messages = UiNode::new(NodeId::ChatMessageList);
         let mut prev: Option<&str> = None;
@@ -1491,9 +1464,8 @@ impl Gumicord {
             ))
             .child(
                 UiNode::new(NodeId::ChatInput)
-                    // ⚠️ **いま何をしているかが画面に出ていなければならない。**
-                    // 編集しているつもりで新規発言を送る、返信のつもりで
-                    // 独り言を言う、はどちらも取り消せない
+                    // What the composer is doing has to be visible: sending a
+                    // new message while meaning to edit cannot be undone.
                     .child_if(self.composing != Composing::New, || self.composing_bar())
                     .child(
                         UiNode::editable(
@@ -1515,17 +1487,12 @@ impl Gumicord {
             )
     }
 
-    /// 返信・編集をやめる。**変わったら真。**
+    /// Cancels a reply or an edit.
     ///
-    /// # ⚠️ 返信と編集で、打った文字の扱いが違う
-    ///
-    /// 返信をやめたときに打った文字まで消すと、**宛先を外しただけの
-    /// つもりが書いたものごと消える**。返信をやめても、それは
-    /// そのまま送れる文である。
-    ///
-    /// 編集はその逆で、入力欄にあるのは**元の発言の中身**であって
-    /// 利用者が書いたものではない。やめたら消す。残すと、次の発言が
-    /// 書き換えようとしていた本文から始まる
+    /// The draft survives cancelling a reply, which only removed a recipient
+    /// from text that is still sendable. It does not survive cancelling an
+    /// edit, where the field holds the original message rather than anything
+    /// the user wrote.
     fn stop_composing(&mut self) -> bool {
         match self.composing {
             Composing::New => false,
@@ -1541,10 +1508,8 @@ impl Gumicord {
         }
     }
 
-    /// 入力欄の上に出す 1 行。**返信・編集の宛先を出す。**
-    ///
-    /// ⚠️ 相手の名前まで出す。「返信中」だけだと、一覧を巻いたあとに
-    /// 誰への返信だったかが分からなくなる
+    /// The line above the composer, naming who is being replied to. "Replying"
+    /// alone stops meaning anything once the list has scrolled.
     fn composing_bar(&self) -> UiNode {
         let (verb, slot) = match self.composing {
             Composing::Reply(_) => ("返信", "reply"),
@@ -1559,18 +1524,18 @@ impl Gumicord {
 
         let text = match (&self.composing, who) {
             (Composing::Reply(_), Some(a)) => format!("{a} に{verb}中"),
-            // ⚠️ 巻いて見えなくなった相手は引けない。**それでも状態は出す**
+            // A scrolled-away target cannot be resolved; still show the state.
             (Composing::Reply(_), None) => format!("{verb}中"),
             _ => format!("{verb}中"),
         };
         UiNode::new(NodeId::ChatInputToolbar)
             .with_key(Key::Slot(slot))
             .child(UiNode::text(NodeId::PrimitiveText, text).with_key(Key::Slot(slot)))
-            // ⚠️ **右端へ寄せるのに空きを挟む。** クライアントが余白の
-            // 幅を書くと、テーマがバーの余白を変えたときに揃わなくなる
+            // A spacer rather than a written margin, which would stop
+            // matching once the theme changes the bar's padding.
             .child(UiNode::new(NodeId::LayoutSpacer))
-            // ⚠️ **やめる道を画面に出す。** Esc でもやめられるが、
-            // それを知らない人には**抜け出せない状態**に見える
+            // Escape works too, but without a visible way out this looks like
+            // a state with no exit.
             .child(
                 UiNode::new(NodeId::PrimitiveButton)
                     .with_key(Key::Slot(CANCEL_COMPOSING))
@@ -1585,10 +1550,8 @@ impl Gumicord {
             )
     }
 
-    /// 一覧の下に出す 1 行。
-    ///
-    /// ⚠️ **繋がっている間は接続のことを言わない。** 正常をわざわざ知らせると、
-    /// 異常のときの一行が埋もれる
+    /// The line below the list. Silent while connected; announcing the normal
+    /// case buries the abnormal one.
     fn status_line(&self) -> String {
         if let Some(hint) = self.live.link().hint() {
             return format!("  {hint}");
@@ -1603,11 +1566,8 @@ impl Gumicord {
         "  みどり が入力中…".to_owned()
     }
 
-    /// メッセージ 1 件。
-    ///
-    /// `grouped` なら送信者アイコンと送信者行を出さない。**字下げはテーマが
-    /// `when.state: "grouped"` の `padding` で決める。** クライアントが
-    /// 空白のノードを挟むと、字下げの量が焼き付いてテーマから揃えられない。
+    /// One message. `grouped` drops the avatar and author line; the indent is
+    /// the theme's, since a spacer node would bake it in.
     fn message(&self, m: &MessageRow, grouped: bool) -> UiNode {
         let body = UiNode::new(NodeId::LayoutColumn)
             .child_if(!grouped, || {
@@ -1634,15 +1594,15 @@ impl Gumicord {
             .child_if(!grouped, || {
                 face(NodeId::ChatMessageAvatar, m.avatar.as_deref(), &m.author).with_data(m.id)
             })
-            // 送信者行と本文を縦に積む。`layout.column` はこのためにある
+            // Author line and body stacked.
             .child(body)
     }
 
-    /// 本文 (`FR-021`)。
+    /// The body.
     ///
-    /// ⚠️ **毎フレーム解析している。** 本文 1 件は数百文字で、解析は
-    /// 文字数に比例するだけなので、いまは測っても出てこない。出てきたら
-    /// メッセージ ID で覚える — が、覚える前に**測ること**
+    /// Parsed every frame. Bodies are a few hundred characters and parsing is
+    /// linear, so it does not show up in measurements yet. Cache by message id
+    /// when it does — but measure first.
     fn content_of(&self, m: &MessageRow) -> UiNode {
         let ink = crate::markdown::Ink::new(
             self.theme.as_ref(),
@@ -1658,16 +1618,15 @@ impl Gumicord {
             .with_data(m.id)
             .children(ink.blocks(&m.blocks, &names));
 
-        // 時間で変わる表示があれば、一番早く変わるものを覚えておく
+        // Record whichever time-dependent part changes soonest.
         if let Some(secs) = ink.holds_for() {
             self.hold(secs);
         }
         node
     }
 
-    /// 「あと何秒そのままでよいか」を溜める。**一番短いものが残る。**
-    ///
-    /// ⚠️ `&self` のまま組むので [`Cell`](std::cell::Cell) で持つ
+    /// Accumulates validity; the shortest wins. A `Cell` because building
+    /// takes `&self`.
     fn hold(&self, secs: i64) {
         let next = match self.holds.get() {
             Some(cur) => cur.min(secs),
@@ -1677,7 +1636,7 @@ impl Gumicord {
     }
 }
 
-/// 番号から名前を引く。**知らないものは知らないと言う。**
+/// Resolves ids to names, and says so when it cannot.
 struct StoreNames<'a> {
     store: &'a gumicord_store::Store,
     guild: GuildId,
@@ -1687,8 +1646,8 @@ impl crate::markdown::Names for StoreNames<'_> {
     fn user(&self, id: u64) -> Option<String> {
         self.store
             .member(self.guild, UserId::from(id))
-            // ⚠️ **そのサーバでの呼び名が勝つ。** 呼びかけの相手が
-            // 「このサーバでは誰なのか」で出ないと、誰のことか分からない
+            // The per-guild name wins, or the reader cannot tell who was
+            // mentioned.
             .and_then(|m| {
                 m.nick
                     .clone()
@@ -1710,31 +1669,28 @@ impl crate::markdown::Names for StoreNames<'_> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  画面に出す行
+//  Display rows
 //
-//  ⚠️ **demo と本物をここへ寄せる。** 木を組み立てるところが「どちらの
-//  データか」を気にし始めると、分岐が画面のあちこちに散る。
+//  Demo and live data meet here, so the tree builder never has to ask which
+//  one it is holding.
 // ═══════════════════════════════════════════════════════════════════════
 
 struct GuildRow {
     id: u64,
     name: String,
-    /// アイコンの URL。**無ければ頭文字を出す**
+    /// Icon URL; the initials stand in when absent.
     icon: Option<String>,
     unread: bool,
     mentions: u32,
-    /// フォルダの見出しなら、そのフォルダの識別子
+    /// The folder id, when this row is a folder header.
     folder_of_own: Option<u64>,
-    /// フォルダの中にいるか。**字下げはテーマが決める**
+    /// Whether it sits inside a folder; the indent is the theme's.
     in_folder: bool,
-    /// 閉じているフォルダか
+    /// Whether the folder is folded.
     collapsed: bool,
-    /// 利用者が付けたフォルダの色。**塗る場所はテーマが決める**
+    /// The folder's colour; where it lands is the theme's call.
     tint: Option<u32>,
-    /// フォルダの中身。
-    ///
-    /// 開いていれば**フォルダの子として並べ**、閉じていれば
-    /// 先頭の何枚かを敷き詰める
+    /// What the folder holds: children when open, tiles when folded.
     members: Vec<GuildRow>,
 }
 
@@ -1745,39 +1701,35 @@ struct ChannelRow {
     topic: Option<String>,
     unread: bool,
     mentions: u32,
-    /// カテゴリの見出し。**押しても開かない**
+    /// A category heading; nothing opens.
     category: bool,
 }
 
 struct MessageRow {
     id: u64,
     author: String,
-    /// アバターの URL。**無ければ頭文字を出す**
+    /// Avatar URL; the initials stand in when absent.
     avatar: Option<String>,
-    /// 役職の色。**塗る場所はテーマが決める**
+    /// The role colour; where it lands is the theme's call.
     tint: Option<u32>,
     time: String,
-    /// 解析済みの本文。
-    ///
-    /// ⚠️ **素の文字列を持たない。** 両方持つと、片方だけ見て描く場所が
-    /// 出てくる。本文が飾りを失っていることに気づけるのは、読む人だけである
+    /// The parsed body. The raw string is deliberately absent: holding both
+    /// invites drawing from the wrong one, and only the reader would notice.
     blocks: Vec<gumicord_markdown::Block>,
     mentioned: bool,
 }
 
 impl Gumicord {
-    /// 本物のデータを出す状態か。**demo との分かれ目はここだけである。**
+    /// Whether real data is being shown. The only place demo and live differ.
     ///
-    /// ⚠️ **ログインを待たない。** キャッシュに中身があるなら、それは
-    /// 前回このアカウントで入れていたということである。ログアウトすると
-    /// キャッシュごと消える (`SEC-021`) ので、残っていること自体が根拠になる。
-    ///
-    /// 待つと、S4 実測で 672〜1120 ms のあいだ空の画面を見せることになる
+    /// Does not wait for login: a non-empty cache means a previous session on
+    /// this account, since signing out deletes it. Waiting would mean about a
+    /// second of empty screen.
     fn uses_live(&self) -> bool {
         self.login.session().logged_in().is_some() || !self.live.is_empty()
     }
 
-    /// メイン画面を出してよいか。**ログイン画面との分かれ目**
+    /// Whether the main screen may be shown.
     fn shows_main(&self) -> bool {
         self.login.shows_main() || !self.live.is_empty()
     }
@@ -1798,7 +1750,7 @@ impl Gumicord {
         let guilds = self.guild_rows();
         if !guilds.iter().any(|g| g.id == self.selected_guild) {
             let Some(first) = guilds.first() else {
-                // READY がまだ来ていない。**何も選ばない**
+                // READY has not arrived; select nothing.
                 return false;
             };
             self.selected_guild = first.id;
@@ -1815,7 +1767,7 @@ impl Gumicord {
         }
 
         if self.selected_channel != 0 {
-            // 2 回目からは何もしない
+            // A no-op after the first call.
             self.live.open_channel(
                 GuildId::from(self.selected_guild),
                 ChannelId::from(self.selected_channel),
@@ -1845,25 +1797,26 @@ impl Gumicord {
                 .collect();
         }
 
-        // ⚠️ 落ちているギルドも、フォルダの入れ子も [`Store`] が済ませている。
-        // ここには**出せるものが出す順に**来る
+        // The store has already handled unavailable guilds and folder
+        // nesting; this receives what to show, in order.
         self.live
             .store()
             .guild_entries()
             .into_iter()
             .map(|e| match e {
                 GuildEntry::Folder { id, row } => {
-                    // ⚠️ **フォルダも中身を畳む。** 閉じているときに中の
-                    // 未読が見えなくなると、閉じた瞬間に気付けなくなる
+                    // Folders roll up their contents, or folding one hides
+                    // the unread inside it.
                     let (unread, mentions) = row.guilds.iter().fold((false, 0), |acc, g| {
                         let (u, m) = self.live.store().guild_unread(*g);
                         (acc.0 || u, acc.1 + m)
                     });
                     GuildRow {
                         id,
-                        // 名前が無いフォルダもある。**中身の名前で代わりにする**
+                        // Unnamed folders borrow their contents' names.
                         name: row.name.clone().unwrap_or_else(|| self.folder_label(row)),
-                        // ⚠️ **フォルダ自体に絵は無い。** 代わりに中身を敷き詰める
+                        // Folders have no icon; the contents are tiled
+                        // instead.
                         icon: None,
                         unread,
                         mentions,
@@ -1875,7 +1828,7 @@ impl Gumicord {
                     }
                 }
                 GuildEntry::Guild { row, folder } => {
-                    // 中のチャンネルを畳んだもの (`FR-042`)
+                    // Rolled up from the channels inside.
                     let (unread, mentions) = self.live.store().guild_unread(row.id);
                     GuildRow {
                         id: row.id.get(),
@@ -1898,9 +1851,8 @@ impl Gumicord {
             .collect()
     }
 
-    /// 名前を付けていないフォルダの見出し。
-    ///
-    /// Discord は中身のサーバ名を並べて出す。**空欄を出すよりよい**
+    /// The heading for an unnamed folder: the guild names inside, as Discord
+    /// does, rather than a blank.
     fn folder_label(&self, folder: &gumicord_store::FolderRow) -> String {
         folder
             .guilds
@@ -1911,10 +1863,8 @@ impl Gumicord {
             .join("、")
     }
 
-    /// フォルダの中に入っているサーバ。
-    ///
-    /// ⚠️ **ここでは絞らない。** 開いているときは全部並べる。敷き詰めに
-    /// 使うのは先頭の [`FOLDER_TILES`] 枚だけだが、それは組む側が決める
+    /// The guilds inside a folder, unfiltered: an open folder shows them all,
+    /// and the caller decides how many to tile.
     fn folder_members(&self, folder: &gumicord_store::FolderRow) -> Vec<GuildRow> {
         folder
             .guilds
@@ -1924,8 +1874,8 @@ impl Gumicord {
                 Some(GuildRow {
                     id: id.get(),
                     name: g.name.clone(),
-                    // ⚠️ 敷き詰める絵は 16px ほどだが、**頼む大きさは変えない。**
-                    // 大きい方をすでに取ってあるなら使い回せる
+                    // Tiles are small, but the request size is unchanged so a
+                    // larger copy already fetched can be reused.
                     icon: self
                         .live
                         .store()
@@ -1943,11 +1893,9 @@ impl Gumicord {
             .collect()
     }
 
-    /// 一覧のうち、**開けるものだけ**。
-    ///
-    /// ⚠️ **カテゴリは見出しであって、開けるものではない。** 選択の既定を
-    /// 決めるときにここを間違えると、**押してもいないカテゴリが勝手に
-    /// 開かれる。** 実際にそうなった
+    /// Only the rows that can be opened. Categories are headings; treating
+    /// one as openable made the default selection open a category nobody
+    /// pressed.
     fn openable_rows(&self) -> Vec<ChannelRow> {
         self.channel_rows()
             .into_iter()
@@ -1973,8 +1921,8 @@ impl Gumicord {
                 .collect();
         }
 
-        // ⚠️ 絞り込みも並べ替えもカテゴリの入れ子も [`Store`] が済ませている。
-        // **画面が毎フレーム並べ替えると、フレームごとに順が揺れうる**
+        // Filtering, ordering and nesting are the store's; reordering per
+        // frame could make the order flicker.
         self.live
             .store()
             .entries_of(GuildId::from(self.selected_guild))
@@ -1993,7 +1941,7 @@ impl Gumicord {
                     name: c.display_name(),
                     icon: c.kind.icon(),
                     topic: c.topic.clone(),
-                    // read-state はまだ無い。**無いものを在るように見せない**
+                    // No read state yet; do not fake one.
                     unread: self.live.store().is_unread(c.id),
                     mentions: self.live.store().mentions(c.id),
                     category: false,
@@ -2020,19 +1968,18 @@ impl Gumicord {
         }
 
         let me = self.login.session().logged_in().map(|l| l.me.user.id);
-        // ⚠️ **どのギルドを見ているかは、発言ではなくこちらが知っている。**
-        // REST で取ったメッセージに `guild_id` は入っていない
+        // Which guild is open is known here, not from the message: REST
+        // messages carry no `guild_id`.
         let guild = GuildId::from(self.selected_guild);
         self.live
             .store()
             .messages(ChannelId::from(self.selected_channel))
             .iter()
             .map(|m| {
-                // ⚠️ **REST で取った発言には `member` が付いていない。**
+                // REST messages carry no `member`.
                 //
-                // Discord が添えるのは Gateway の `MESSAGE_CREATE` /
-                // `MESSAGE_UPDATE` だけである。付いていなければ、見かけて
-                // 覚えたほうから引く ([`gumicord_store::Store::member`])
+                // Discord attaches it to gateway events only, so fall back to
+                // whatever was seen and remembered.
                 let member = m
                     .member
                     .as_ref()
@@ -2041,14 +1988,13 @@ impl Gumicord {
                 let blocks = gumicord_markdown::parse(&m.content);
                 MessageRow {
                     id: m.id.get(),
-                    // ⚠️ **そのサーバでの呼び名が勝つ。** 全体の名前で出すと、
-                    // 「このサーバでは誰なのか」が分からなくなる
+                    // The per-guild name wins.
                     author: match member {
                         Some(x) => x.display_name(&m.author).to_owned(),
                         None => m.author.display_name().to_owned(),
                     },
-                    // ⚠️ **人には必ず顔がある。** 設定していない人には Discord
-                    // が既定の絵を配っていて、頭文字を出すのはこちらの勝手である
+                    // Everyone has an avatar: Discord hands out a default, so
+                    // showing initials instead would be our invention.
                     avatar: Some(
                         match member {
                             Some(x) => x.display_avatar(guild, &m.author),
@@ -2057,8 +2003,8 @@ impl Gumicord {
                         .with_size(self.asset_px(MESSAGE_AVATAR_PX))
                         .url(),
                     ),
-                    // ⚠️ **一番上の「色を付けている」役職が勝つ。**
-                    // 色を載せるだけで、塗る場所はテーマが決める
+                    // The topmost coloured role wins; where it lands is the
+                    // theme's call.
                     tint: member.and_then(|x| self.live.store().member_tint(guild, &x.roles)),
                     time: local_time(&m.timestamp),
                     mentioned: m
@@ -2073,15 +2019,11 @@ impl Gumicord {
     }
 }
 
-/// 本文が自分を呼んでいるか (`FR-022`)。
+/// Whether a body mentions us.
 ///
-/// # ⚠️ コードの中の `<@1>` は呼びかけではない
-///
-/// 素の文字列を `contains` で調べると、`` `<@1>` `` と書いただけで
-/// 相手に通知が飛ぶ。解析した結果を見ること。
-///
-/// ⚠️ **役職も見る。** `@everyone` だけを見ていると、自分の役職が
-/// 呼ばれたときに気づけない
+/// Reads the parse, not the raw string: a `<@1>` inside code is not a
+/// mention, and matching on text would notify someone for writing about one.
+/// Roles count too, or being called by role goes unnoticed.
 fn calls_me(
     blocks: &[gumicord_markdown::Block],
     me: Option<UserId>,
@@ -2104,7 +2046,7 @@ fn calls_me(
                     _ => false,
                 })
             }),
-            // ⚠️ **コードの中は呼びかけではない**
+            // Not inside code.
             Block::Code { .. } => false,
         })
     }
@@ -2117,17 +2059,15 @@ fn calls_me(
     })
 }
 
-/// 名前の頭 1 文字。アイコンが無いときの代わりに出す
+/// The first character of a name, shown when there is no icon.
 fn initial(name: &str) -> String {
     name.chars().next().map(String::from).unwrap_or_default()
 }
 
-/// ISO 8601 の時刻を現地時刻の `HH:MM` にする。
+/// Formats an ISO 8601 timestamp as local `HH:MM`.
 ///
-/// ⚠️ **Discord が返すのは UTC である。** ずらさずに出すと、日本の利用者に
-/// 9 時間ずれた時刻を見せることになる。
-///
-/// 読めない形が来たら**そのまま返す**。嘘の時刻を作るよりはましである。
+/// Discord returns UTC; showing it unshifted is hours out for most readers.
+/// An unparseable value is returned as-is rather than invented.
 fn local_time(iso: &str) -> String {
     // "2026-08-22T12:34:56.789000+00:00"
     let Some((_, time)) = iso.split_once('T') else {
@@ -2142,16 +2082,14 @@ fn local_time(iso: &str) -> String {
     };
 
     let total = h * 60 + m + gumicord_platform::local_utc_offset_minutes();
-    // 日を跨いだぶんを畳む。**負の余りにならないよう rem_euclid を使う**
+    // `rem_euclid` so a day boundary does not produce a negative remainder.
     let total = total.rem_euclid(24 * 60);
     format!("{:02}:{:02}", total / 60, total % 60)
 }
 
-/// スクロールバー。**摘みの大きさと位置はレンダラが決める。**
-///
-/// はみ出し量はレイアウトしないと分からないので、テーマにもクライアントにも
-/// 書けない。ここが渡すのは「この一覧にはスクロールバーがある」ことだけで、
-/// 幅・余白・色はテーマが決める。
+/// A scrollbar. The thumb's size and position come from the renderer, since
+/// the overflow is only known after layout. This says only that the list has
+/// one; the theme decides how it looks.
 fn scrollbar_node() -> UiNode {
     UiNode::new(NodeId::LayoutScrollbar).child(UiNode::new(NodeId::LayoutScrollbarThumb))
 }
@@ -2165,12 +2103,10 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  返信と編集 (`FR-024`, `FR-028`)
+    //  Replying and editing
 
-    /// ⚠️ **いま何をしているかが画面に出ていなければならない。**
-    ///
-    /// 編集しているつもりで新規発言を送る、返信のつもりで独り言を言う、
-    /// はどちらも取り消せない
+    /// Sending a new message while meaning to edit cannot be undone, so the
+    /// mode has to be visible.
     #[test]
     fn replying_and_editing_are_visible_on_screen() {
         let bar = |c: Composing| {
@@ -2189,16 +2125,10 @@ mod tests {
         assert_eq!(bar(Composing::Edit(1)), Some(Key::Slot("edit")));
     }
 
-    /// ⚠️ **絵が箱からはみ出していないこと。**
-    ///
-    /// # これは実際に起きた
-    ///
-    /// `primitive.button` には `padding: [6,12,6,12]` を付ける一般の
-    /// ルールが**後ろに**あり、`when.slot` を付けたこちらのルールより
-    /// 後のものが勝つ。20x20 の箱に左右 12px の余白が入って、
-    /// **✕ が箱の外へ 12px ずれ、余白ぶんの暗い箱だけがその左に残った。**
-    ///
-    /// ⚠️ **テーマの数値を見ても分からない。** 置いた結果の矩形で見ること
+    /// This happened: a later `primitive.button` rule added horizontal
+    /// padding, which pushed the icon outside its 20-square box and left an
+    /// empty dark box beside it. Reading the theme's numbers does not catch
+    /// it; the laid-out rectangles do.
     #[test]
     fn the_cancel_icon_stays_inside_its_box() {
         let mut a = app();
@@ -2234,10 +2164,8 @@ mod tests {
         );
     }
 
-    /// ⚠️ **やめる道が画面に出ていること。**
-    ///
-    /// Esc でもやめられるが、それを知らない人には**抜け出せない状態**に
-    /// 見える
+    /// Escape works too, but without a visible way out this looks like a
+    /// state with no exit.
     #[test]
     fn a_cancel_button_appears_while_replying() {
         let cancel = |c: Composing| {
