@@ -15,7 +15,7 @@ members = [
     "app/desktop",
     "xtask",
 ]
-# スパイクは捨てる前提のコードなので、ワークスペースには含めない。
+# Spikes are throwaway code, so they stay out of the workspace.
 exclude = ["spike"]
 
 [workspace.package]
@@ -26,10 +26,10 @@ license = "MIT"
 repository = "https://github.com/gumicord/gumicord"
 authors = ["ねんねこ"]
 
-# 依存のバージョンはここで一元管理する。
-# バージョンはスパイク S1〜S4 で実際にビルド・動作確認したものを採用している。
+# Dependency versions live here. Each is one the S1-S4 spikes actually
+# built and ran with.
 [workspace.dependencies]
-# 内部クレート
+# Internal crates
 gumicord-markdown = { path = "core/markdown" }
 gumicord-model = { path = "core/model" }
 gumicord-gateway = { path = "core/gateway" }
@@ -42,11 +42,11 @@ gumicord-render = { path = "render/render" }
 gumicord-platform = { path = "render/platform" }
 gumicord-app = { path = "app/core" }
 
-# 描画 (S1 / S2 で検証済み)
+# Drawing
 wgpu = "30"
 winit = "0.30"
 cosmic-text = "0.19"
-# フォントのフォールバックを自前で持つために要る (Han 統合への対処)
+# Needed to do font fallback ourselves, around Han unification.
 unicode-script = "0.5"
 unicode-segmentation = "1"
 sys-locale = "0.3"
@@ -55,97 +55,97 @@ accesskit_winit = "0.33"
 bytemuck = "1"
 pollster = "1"
 
-# プラグイン (S3 で検証済み)
+# Plugins
 rquickjs = "0.12"
 
-# 通信 (S4 で検証済み)
+# Networking
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
-# ⚠️ 暗号の実装を**明示的に選ぶ**。rustls は自分の機能から自動で選ぶが、
-# 「ちょうど 1 つ有効」でないと選べずに実行時 panic になる。どの機能が
-# 立つかは依存の合流次第で変わるので、他人任せにしない
+# The crypto provider is chosen explicitly. rustls picks one from its own
+# features, but only when exactly one is enabled, and panics at runtime
+# otherwise. Which features end up on depends on how dependencies merge.
 rustls = "0.23"
 futures-util = "0.3"
 zstd = "0.13"
 
-# Windows の API を直接叩く。いまは DPAPI (P4) だけ
+# Windows APIs directly; only DPAPI for now.
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Ole"] }
 
-# QR ログイン (ADR-0007)。RSA-2048 OAEP-SHA256 の復号に要る
-# ⚠️ sha2 と rand_core は rsa の再エクスポートを使う。別に足すと版がずれる
+# QR login, for RSA-2048 OAEP-SHA256 decryption.
+# sha2 and rand_core come from rsa's re-exports; adding them separately would
+# drift in version.
 rsa = { version = "0.9", features = ["sha2"] }
 base64 = "0.22"
 
-# QR ログイン (ADR-0007) の QR を描くため。**符号化だけで、描くのは自前**
+# QR login: encoding only. The drawing is ours.
 qrcode = { version = "0.14", default-features = false }
 
-# 画像 (R5)。**PNG だけを読む。**
-# CDN には .png で頼むので、画像の万能ライブラリは要らない。
-# 添付ファイル (利用者が上げた任意の形式) を出すときに考え直す
+# Images. PNG only: the CDN is asked for .png, so a general image library
+# is not needed. Attachments, which are whatever the user uploaded, will
+# need another look.
 png = "0.18"
 
-# 永続化
+# Persistence
 rusqlite = { version = "0.38", features = ["bundled", "backup"] }
 
-# 共通
+# Shared
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 
-# ■ ビルドの資源消費について
+# What a build costs.
 #
-#   開発機の実測 (2026-08-14): 4 論理コア / 物理メモリ 7.9 GB。
-#   当初 release に lto="fat" + codegen-units=1 を既定で入れたところ、
-#   ディスクとメモリを圧迫してシステム全体を不安定にした。
-#   (Volsnap がシャドウコピーを削除、ページファイルのピークが 3.5 GB)
+# Measured on the development machine (2026-08-14): four logical cores,
+# 7.9 GB. Making lto="fat" with codegen-units=1 the release default
+# crowded the disk and memory enough to destabilise the whole system:
+# Volsnap deleted the shadow copies, and the page file peaked at 3.5 GB.
 #
-#   **計測のための設定を、日常のビルドの既定にしてはならない。**
-#   日常は release (thin LTO) を使い、配布物と性能計測のときだけ dist を使う。
+# A setting for measurement must not become the everyday default. Every
+# day is release (thin LTO); dist is for distribution and measurement.
 
 [profile.release]
 opt-level = 3
-# thin LTO は fat の大半の効果を、ごく一部のメモリと時間で得られる。
+# Thin LTO gets most of what fat does, for a fraction of the memory.
 lto = "thin"
 codegen-units = 16
 strip = true
 
-# 配布物と性能計測のためのプロファイル。
-# ADR-0001 に記録した実測値 (バイナリ 4.66MB / 起動 332ms) はこの設定によるもの。
+# For distribution and performance measurement. The numbers recorded in
+# ADR-0001 (4.66MB binary, 332ms start) come from this.
 #
 #   cargo build --profile dist
 #
-# ⚠️ リンク時に数 GB のメモリを使う。メモリの少ない機械では他を閉じてから。
+# Linking takes several GB. Close other things on a small machine.
 [profile.dist]
 inherits = "release"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 
-# ■ ディスク消費について
+# What the disk costs.
 #
-#   開発機の実測 (2026-08-22): target/ が 19.8 GB まで育ち、
-#   **C ドライブの空きが 3.7 GB まで落ちた。** 内訳:
+# Measured on the development machine (2026-08-22): target/ grew to
+# 19.8 GB and left 3.7 GB free on C:.
 #
-#     target/debug/incremental   8.2 GB   ← 中間キャッシュ。消してよい
-#     target/debug/deps         残り      ← 大半がデバッグ情報
+#     target/debug/incremental   8.2 GB   <- intermediate, safe to delete
+#     target/debug/deps         the rest  <- mostly debug info
 #
-#   incremental は消せば済むが、また育つ。デバッグ情報のほうを絞る。
+# Deleting incremental works, but it grows back, so the debug info is narrowed instead.
 
 [profile.dev]
 opt-level = 1
-# 行番号だけ残す。**backtrace に file:line は出る。**
-# 失うのは変数の中身を見ながらの逐次実行で、それが要るときだけ戻せばよい
+# Line numbers only, so backtraces still carry file:line.
+# What is lost is stepping with variable values, which can be put back.
 debug = "line-tables-only"
 
-# 依存クレートは dev ビルドでも最適化する。
-# 最適化なしの wgpu / cosmic-text は描画が実用にならないため。
-# opt-level=3 ではなく 2 にしているのは、ビルド時の資源消費を抑えるため。
-# 描画性能の差はこの用途では体感できない。
+# Dependencies are optimised even in dev: unoptimised wgpu and
+# cosmic-text are too slow to draw with. Level 2 rather than 3 keeps the
+# build cheaper, and the difference is not noticeable here.
 [profile.dev.package."*"]
 opt-level = 2
-# ⚠️ **依存のデバッグ情報は持たない。** wgpu や cosmic-text の中へ
-# 踏み込むことはまずなく、ここが target/ の大きさの大半を占めていた。
-# 関数名は記号表に残るので、backtrace が読めなくなるわけではない
+# No debug info for dependencies: stepping into wgpu or cosmic-text
+# almost never happens, and this was most of target/. Function names stay
+# in the symbol table, so backtraces remain readable.
 debug = false

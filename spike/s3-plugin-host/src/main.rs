@@ -1,18 +1,13 @@
-//! スパイク S3: QuickJS プラグインホストの検証
+//! Spike S3: a QuickJS plugin host.
 //!
-//! 検証する仮説 (spec/08-spike-plan.md):
-//!   rquickjs を全プラットフォーム向けにビルドでき、TypeScript から生成した JS を
-//!   実行して UITree を変形できる。プラグインを隔離してもコストが許容範囲に収まる。
+//! The hypothesis: rquickjs builds for every platform, JS generated from
+//! TypeScript can transform a UITree, and isolating a plugin costs little
+//! enough.
 //!
-//! 検証項目:
-//!   3-1 rquickjs のビルド
-//!   3-2 TypeScript → esbuild → qjsc のパイプライン
-//!   3-3 ホストが注入した関数のみ到達可能 (SEC-010, SEC-015)
-//!   3-4 UITree の往復コスト (EXT-032)
-//!   3-5 暴走プラグインの強制停止 (EXT-051)
-//!   3-6 例外の隔離 (EXT-050)
-//!   3-7 再読み込みで状態が漏れない (EXT-037)
-//!   3-8 プラグインごとの CPU 時間とメモリ計測 (EXT-053)
+//! Covers the rquickjs build, the TypeScript to esbuild to qjsc pipeline,
+//! reaching only what the host injected, the UITree round trip, killing a
+//! runaway plugin, isolating an exception, reloading without leaking state,
+//! and per-plugin CPU and memory.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -24,7 +19,7 @@ use rquickjs::{
     Runtime, Value,
 };
 
-// ============================================================ UITree (Rust 側)
+// ============================================================ UITree, in Rust
 
 #[derive(Clone, Debug)]
 struct UiNode {
@@ -44,8 +39,8 @@ impl UiNode {
     }
 }
 
-/// Discord のメッセージ一覧に相当する UITree を組み立てる。
-/// 1 メッセージあたり 8 ノード程度。
+/// Builds a UITree the size of a Discord message list, around eight nodes
+/// per message.
 fn build_tree(messages: usize) -> UiNode {
     let msgs = (0..messages)
         .map(|_| {
@@ -70,7 +65,7 @@ fn build_tree(messages: usize) -> UiNode {
     UiNode::node("chat.message_list", msgs)
 }
 
-/// Rust の UiNode → QuickJS のオブジェクト
+/// A Rust UiNode to a QuickJS object.
 fn to_js<'js>(ctx: &Ctx<'js>, node: &UiNode) -> rquickjs::Result<Object<'js>> {
     let obj = Object::new(ctx.clone())?;
     obj.set("id", node.id.as_str())?;
@@ -84,7 +79,7 @@ fn to_js<'js>(ctx: &Ctx<'js>, node: &UiNode) -> rquickjs::Result<Object<'js>> {
     Ok(obj)
 }
 
-/// QuickJS のオブジェクト → Rust の UiNode
+/// A QuickJS object to a Rust UiNode.
 fn from_js(obj: &Object<'_>) -> rquickjs::Result<UiNode> {
     let id: String = obj.get("id").unwrap_or_default();
     let mut children = Vec::new();
@@ -99,29 +94,29 @@ fn from_js(obj: &Object<'_>) -> rquickjs::Result<UiNode> {
     Ok(UiNode { id, children })
 }
 
-// ============================================================ ホスト
+// ============================================================ The host
 
-/// プラグイン 1 個分の隔離された実行環境。
-/// EXT-050: 1 つが壊れても他に波及しないよう、Runtime ごと分ける。
+/// One plugin, isolated. Each gets its own Runtime, so one breaking does
+/// not reach the others.
 struct PluginHost {
     runtime: Runtime,
     context: Context,
-    /// SEC-014: プラグインごとに分離されたストレージ
+    /// Storage, separate per plugin.
     storage: Rc<RefCell<HashMap<String, String>>>,
-    /// EXT-051: 強制停止のための期限
+    /// The deadline a runaway plugin is killed at.
     deadline: Rc<RefCell<Option<Instant>>>,
 }
 
 impl PluginHost {
     fn new(name: &str) -> rquickjs::Result<Self> {
         let runtime = Runtime::new()?;
-        // EXT-053 / SEC: プラグイン 1 個あたりのメモリ上限
+        // The memory limit for one plugin.
         runtime.set_memory_limit(32 * 1024 * 1024);
         runtime.set_max_stack_size(512 * 1024);
 
         let deadline: Rc<RefCell<Option<Instant>>> = Rc::new(RefCell::new(None));
         {
-            // EXT-051: 実行時間フックで暴走プラグインを止める
+            // The interrupt hook that stops a runaway plugin.
             let d = deadline.clone();
             runtime.set_interrupt_handler(Some(Box::new(move || {
                 match *d.borrow() {
@@ -134,8 +129,8 @@ impl PluginHost {
         let context = Context::full(&runtime)?;
         let storage: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
 
-        // SEC-010 / SEC-015: ホストが注入したものだけがプラグインから到達可能。
-        // ここに置かなかった機能は、プラグインには存在しない。
+        // Only what the host injects is reachable. Anything not put here does
+        // not exist as far as a plugin is concerned.
         let name_owned = name.to_string();
         let st_get = storage.clone();
         let st_set = storage.clone();
@@ -166,7 +161,7 @@ impl PluginHost {
         Ok(Self { runtime, context, storage, deadline })
     }
 
-    /// 実行時間の上限を設定して処理を走らせる (EXT-051)
+    /// Runs with a time limit.
     fn with_timeout<R>(&self, limit: Duration, f: impl FnOnce(&Context) -> R) -> R {
         *self.deadline.borrow_mut() = Some(Instant::now() + limit);
         let r = f(&self.context);
@@ -179,10 +174,10 @@ impl PluginHost {
     }
 }
 
-// ============================================================ 計測ユーティリティ
+// ============================================================ Measurement
 
 fn bench<R>(label: &str, iters: u32, mut f: impl FnMut() -> R) -> Duration {
-    // ウォームアップ
+    // Warm-up.
     for _ in 0..(iters / 10).max(1) {
         f();
     }
@@ -213,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[MEASURE] bundle_esm_bytes  = {}", esm.len());
     println!("[MEASURE] bundle_min_bytes  = {}", min.len());
 
-    // ---------------------------------------------------------------- 3-3 サンドボックス
+    // ---------------------------------------------------------------- Sandbox
     section("3-3 サンドボックス (SEC-010 / SEC-015)");
     let host = PluginHost::new("sandbox-probe")?;
     host.context.with(|ctx| -> Result<(), Box<dyn std::error::Error>> {
@@ -230,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })?;
 
-    // ---------------------------------------------------------------- 3-4 UITree 往復
+    // ---------------------------------------------------------------- Round trip
     section("3-4 UITree の往復コスト (EXT-032)");
     let host = PluginHost::new("uitree")?;
     host.context.with(|ctx| -> Result<(), Box<dyn std::error::Error>> {
@@ -242,21 +237,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tree = build_tree(messages);
             let n = tree.count();
 
-            // 診断: 最初の1回でエラー内容を出す
+            // Print the error the first time round.
             {
                 let js = to_js(&ctx, &tree).unwrap();
                 let r: rquickjs::Result<Object> = apply.call((js, empty_ctx.clone()));
                 if let Err(e) = r.catch(&ctx) { println!("[DIAG] apply 失敗: {e}"); }
             }
 
-            // (a) ネイティブオブジェクトで丸ごと渡す
+            // (a) The whole tree as native objects.
             bench(&format!("全体をネイティブ変換 ({n} ノード)"), 200, || {
                 let js = to_js(&ctx, &tree).unwrap();
                 let out: Object = apply.call((js, empty_ctx.clone())).unwrap();
                 from_js(&out).unwrap()
             });
 
-            // (b) JSON 文字列で渡す (比較用)
+            // (b) As a JSON string, for comparison.
             let json = tree_to_json(&tree);
             let parse: Function = ctx.eval("(s) => JSON.stringify(__gumicord_apply(JSON.parse(s), {}))")?;
             bench(&format!("全体を JSON 経由 ({n} ノード)"), 200, || {
@@ -264,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        // (c) 差分: 変更のあった 1 メッセージ (8 ノード) だけ渡す
+        // (c) A diff: only the one changed message, eight nodes.
         let one = build_tree(1);
         bench(
             &format!("差分のみ ({} ノード) ★実装で採る方式", one.count()),
@@ -279,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })?;
 
-    // ---------------------------------------------------------------- 3-5 強制停止
+    // ---------------------------------------------------------------- Killing
     section("3-5 暴走プラグインの強制停止 (EXT-051)");
     let host = PluginHost::new("runaway")?;
     let t = Instant::now();
@@ -302,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if stopped { "成功" } else { "★失敗★" }
     );
 
-    // ---------------------------------------------------------------- 3-6 例外隔離
+    // ---------------------------------------------------------------- Exceptions
     section("3-6 例外の隔離 (EXT-050)");
     let host = PluginHost::new("thrower")?;
     host.context.with(|ctx| {
@@ -316,12 +311,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     println!("[MEASURE] ホストは継続している = 成功");
 
-    // ---------------------------------------------------------------- 3-7 再読込
+    // ---------------------------------------------------------------- Reloading
     section("3-7 再読み込みで状態が漏れない (EXT-037)");
     {
         let host = PluginHost::new("reload")?;
         for i in 1..=3 {
-            // 同じ Context に読み直す = 状態が残る (誤り)
+            // Reloading into the same Context keeps the state, which is wrong.
             host.context.with(|ctx| {
                 let _ = ctx.eval::<(), _>(iife);
             });
@@ -343,7 +338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ---------------------------------------------------------------- 3-8 メモリ
+    // ---------------------------------------------------------------- Memory
     section("3-8 プラグインごとのメモリ (EXT-053)");
     {
         let base = PluginHost::new("empty")?;
@@ -358,7 +353,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[MEASURE] プラグイン読込後       = {:>9} バイト ({:.2} MB)", loaded_mem, loaded_mem as f64 / 1048576.0);
         println!("[MEASURE] プラグイン 1 個の増分   = {:>9} バイト ({:.1} KB)", loaded_mem - base_mem, (loaded_mem - base_mem) as f64 / 1024.0);
 
-        // 10 個並べたときの合計
+        // The total across ten of them.
         let t = Instant::now();
         let hosts: Vec<PluginHost> = (0..10)
             .map(|i| {
@@ -378,7 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // ---------------------------------------------------------------- 3-2 バイトコード
+    // ---------------------------------------------------------------- Bytecode
     section("3-2 バイトコード化 (qjsc 相当)");
     {
         let host = PluginHost::new("bytecode")?;
@@ -396,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(bc)
         })?;
 
-        // ソースから読む場合とバイトコードから読む場合の比較
+        // Loading from source against loading from bytecode.
         let src_time = bench("ソース(IIFE)から読み込み", 200, || {
             let h = PluginHost::new("x").unwrap();
             h.context.with(|ctx| {
@@ -420,7 +415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 比較用: UiNode を JSON 文字列にする
+/// For comparison: a UiNode as a JSON string.
 fn tree_to_json(node: &UiNode) -> String {
     let mut s = String::with_capacity(1024);
     fn go(n: &UiNode, out: &mut String) {

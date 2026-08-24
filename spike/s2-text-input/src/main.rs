@@ -1,22 +1,17 @@
-//! スパイク S2: テキスト描画 + 日本語 IME + アクセシビリティ
+//! Spike S2: text drawing, a Japanese IME, and accessibility.
 //!
-//! 検証する仮説 (spec/08-spike-plan.md):
-//!   自前レンダラのテキスト入力欄で、日本語をインライン変換で入力できる。
-//!   かつ、OS のスクリーンリーダーが UI を読み上げられる。
+//! The hypothesis: a text field in our own renderer can take Japanese by
+//! inline conversion, and a screen reader can read the UI.
 //!
-//! これが成立しなければ Gumicord はチャットクライアントとして成立しない。
-//! ADR-0001 の見直し条件に直結する、最高リスクのスパイク。
+//! Without this Gumicord is not a chat client at all, which makes it the
+//! highest-risk spike and ties straight into ADR-0001.
 //!
-//! 検証項目:
-//!   2-1 テキスト入力欄 (キャレット・選択範囲・折り返し)
-//!   2-2 未確定文字列 (preedit) を下線付きで表示
-//!   2-3 変換候補ウィンドウがキャレット直下に出る
-//!   2-4 変換確定・取り消し・部分変換
-//!   2-5 日本語 / 中国語 / 韓国語
-//!   2-6 accesskit でスクリーンリーダーが読み上げる
-//!   2-8 絵文字 (ZWJ) と結合文字の表示
+//! Covers the field itself (caret, selection, wrapping), the underlined
+//! preedit, the candidate window under the caret, committing and
+//! cancelling, Japanese/Chinese/Korean, accesskit, and ZWJ emoji.
 //!
-//! 画面を直接見られない環境でも判定できるよう、IME イベントはすべて標準出力に記録する。
+//! Every IME event is logged to stdout, so this can be judged without
+//! looking at the screen.
 
 mod text;
 
@@ -48,8 +43,8 @@ const ROOT_ID: NodeId = NodeId(0);
 const INPUT_ID: NodeId = NodeId(1);
 const LOG_ID: NodeId = NodeId(2);
 
-/// PLT-002 / PLT-004 の描画確認用サンプル。
-/// 整形 (shaping)・フォントフォールバック・双方向・結合文字・ZWJ を一度に踏む。
+/// A sample that exercises shaping, font fallback, bidi, combining marks
+/// and ZWJ at once.
 const SAMPLES: &[(&str, &str)] = &[
     ("日本語", "こんにちは、世界。ひらがな・カタカナ・漢字"),
     ("中文", "你好，世界。简体字と繁體字"),
@@ -60,26 +55,26 @@ const SAMPLES: &[(&str, &str)] = &[
     ("Latin", "The quick brown fox — ligatures: ffi fl"),
 ];
 
-// ============================================================ エディタ
+// ============================================================ Editor
 
-/// 最小限のテキスト入力状態。
-/// preedit (未確定文字列) を確定テキストとは別に持つのが IME 対応の要点。
+/// The least text state that works. Keeping the preedit apart from the
+/// committed text is the whole point of IME support.
 #[derive(Default)]
 struct Editor {
-    /// 確定済みテキスト
+    /// The committed text.
     text: String,
-    /// text 内のバイトオフセット
+    /// A byte offset into `text`.
     cursor: usize,
-    /// IME の未確定文字列。cursor の位置に挿入されて表示される
+    /// The IME's preedit, shown inserted at the cursor.
     preedit: String,
-    /// preedit 内のキャレット範囲 (バイト)。部分変換で使う
+    /// The caret range within the preedit, used by partial conversion.
     preedit_cursor: Option<(usize, usize)>,
-    /// 送信済みメッセージ
+    /// Sent messages.
     sent: Vec<String>,
 }
 
 impl Editor {
-    /// 画面に表示される文字列 = 確定テキストの cursor 位置に preedit を挿入したもの
+    /// What is on screen: the text with the preedit inserted at the cursor.
     fn display(&self) -> String {
         let mut s = String::with_capacity(self.text.len() + self.preedit.len());
         s.push_str(&self.text[..self.cursor]);
@@ -88,7 +83,7 @@ impl Editor {
         s
     }
 
-    /// display() 内でのキャレットのバイト位置
+    /// The caret's byte position within display().
     fn caret_byte(&self) -> usize {
         match self.preedit_cursor {
             Some((start, _)) => self.cursor + start,
@@ -96,7 +91,7 @@ impl Editor {
         }
     }
 
-    /// display() 内での preedit の範囲
+    /// The preedit's range within display().
     fn preedit_range(&self) -> Option<(usize, usize)> {
         if self.preedit.is_empty() {
             None
@@ -193,14 +188,14 @@ struct App {
     atlas: Option<GlyphAtlas>,
     buffer: Option<Buffer>,
     editor: Editor,
-    /// IME イベントのログ。検証の証跡として画面にも出す
+    /// The IME event log, shown on screen as evidence.
     ime_log: Vec<String>,
     scale: f32,
     rects: Vec<f32>,
     glyphs: Vec<f32>,
     first_frame: bool,
     t0: Instant,
-    /// set_ime_cursor_area を毎フレーム呼ばないための前回値
+    /// The last value, so set_ime_cursor_area is not called every frame.
     last_ime_area: Option<(f64, f64)>,
     proxy: winit::event_loop::EventLoopProxy<AccessKitEvent>,
 }
@@ -246,7 +241,7 @@ impl App {
     fn init_gpu(&mut self, window: Arc<Window>) {
         let t = Instant::now();
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        // S1 の発見: この検証機の Vulkan ICD はプロセスごと落ちる
+        // What S1 found: this machine's Vulkan ICD takes the process down.
         #[cfg(target_os = "windows")]
         if std::env::var("WGPU_BACKEND").is_err() {
             desc.backends = wgpu::Backends::GL | wgpu::Backends::DX12;
@@ -472,7 +467,7 @@ impl App {
         });
     }
 
-    // ---------------------------------------------------------------- 描画
+    // ---------------------------------------------------------------- Drawing
 
     fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4], r: f32) {
         if self.rects.len() / FLOATS_PER_RECT >= MAX_RECTS {
@@ -482,7 +477,7 @@ impl App {
             .extend_from_slice(&[x, y, w, h, c[0], c[1], c[2], c[3], r, 0.0, 0.0, 0.0]);
     }
 
-    /// テキストを整形してグリフインスタンスを積む。戻り値は描画高さ。
+    /// Shapes the text and pushes glyph instances, returning the height drawn.
     fn draw_text(&mut self, s: &str, x: f32, y: f32, max_w: f32, color: [f32; 4]) -> f32 {
         let scale = self.scale;
         let mut buf = Buffer::new(
@@ -546,7 +541,7 @@ impl App {
         height
     }
 
-    /// display 文字列中のバイト位置 → キャレットの x 座標 (物理px, 入力欄内の相対)
+    /// A byte position in the display string to a caret x, relative to the field.
     fn caret_x(&mut self, display: &str, byte: usize, max_w: f32) -> f32 {
         let scale = self.scale;
         let mut buf = Buffer::new(
@@ -589,7 +584,7 @@ impl App {
 
         self.push_rect(0.0, 0.0, pw, ph, [0.10, 0.10, 0.14, 1.0], 0.0);
 
-        // ---- 左: 多言語サンプル (PLT-002 / PLT-004) ----
+        // ---- Left: the multilingual sample ----
         let col_w = (pw * 0.5 - pad * 1.5).max(200.0);
         let mut y = pad;
         self.draw_text("── 整形の確認 ──", pad, y, col_w, [0.55, 0.60, 0.85, 1.0]);
@@ -601,7 +596,7 @@ impl App {
             y += h.max(LINE_HEIGHT * s) + 8.0 * s;
         }
 
-        // ---- 右: IME イベントログ (2-2 〜 2-4 の証跡) ----
+        // ---- Right: the IME event log ----
         let rx = pw * 0.5 + pad * 0.5;
         let mut ry = pad;
         self.draw_text("── IME イベント ──", rx, ry, col_w, [0.55, 0.60, 0.85, 1.0]);
@@ -612,7 +607,7 @@ impl App {
             ry += LINE_HEIGHT * s;
         }
 
-        // ---- 送信済みメッセージ ----
+        // ---- Sent messages ----
         let sent = self.editor.sent.clone();
         let mut my = ph - ih - pad * 2.0;
         for m in sent.iter().rev().take(6) {
@@ -620,7 +615,7 @@ impl App {
             self.draw_text(&format!("▸ {m}"), pad, my, pw - pad * 2.0, [0.85, 0.88, 0.95, 1.0]);
         }
 
-        // ---- 入力欄 (2-1) ----
+        // ---- The input field ----
         let iy = ph - ih - pad;
         let iw = pw - pad * 2.0;
         self.push_rect(pad, iy, iw, ih, [0.15, 0.15, 0.20, 1.0], 10.0 * s);
@@ -642,12 +637,12 @@ impl App {
             self.draw_text(&display, tx, ty, inner_w, [0.95, 0.95, 1.0, 1.0]);
         }
 
-        // ---- preedit の下線 (2-2) ----
+        // ---- The preedit underline ----
         if let Some((ps, pe)) = self.editor.preedit_range() {
             let x0 = self.caret_x(&display, ps, inner_w);
             let x1 = self.caret_x(&display, pe, inner_w);
             let uy = ty + LINE_HEIGHT * s - 2.0 * s;
-            // 未確定全体: 細い下線
+            // The whole preedit: a thin line.
             self.push_rect(
                 tx + x0,
                 uy,
@@ -656,7 +651,7 @@ impl App {
                 [0.60, 0.65, 0.95, 1.0],
                 0.0,
             );
-            // 部分変換の対象範囲: 太い下線 (2-4)
+            // The part being converted: a thick line.
             if let Some((cs, ce)) = self.editor.preedit_cursor {
                 if ce > cs {
                     let a = self.caret_x(&display, self.editor.cursor + cs, inner_w);
@@ -673,7 +668,7 @@ impl App {
             }
         }
 
-        // ---- キャレット ----
+        // ---- Caret ----
         let cb = self.editor.caret_byte();
         let cx = self.caret_x(&display, cb, inner_w);
         let blink = (self.t0.elapsed().as_secs_f32() * 1.5).sin() > -0.3;
@@ -688,27 +683,25 @@ impl App {
             );
         }
 
-        // ---- 2-3: 変換候補ウィンドウの位置を IME に伝える ----
+        // ---- Telling the IME where to put the candidate window ----
         //
-        // ■ 検証中の仮説
-        //   当初は毎フレーム呼んでいたが、変換候補ウィンドウが入力欄に出なかった。
-        //   (a) 60Hz で呼びすぎて IME が追従できない
-        //   (b) Windows 10 の Microsoft IME は TSF ベースで、winit が使う IMM32 の
-        //       ImmSetCandidateWindow を候補位置に反映しない
-        //   → まず (a) を潰すため、位置が実際に変わったときだけ呼ぶ。
+        // The hypothesis under test.
+        // This was called every frame at first, and no candidate window appeared
+        // over the field. Either (a) 60Hz is too often for the IME to follow, or
+        // (b) Windows 10's Microsoft IME is TSF-based and ignores the IMM32
+        // ImmSetCandidateWindow winit uses.
+        // To rule (a) out, it is called only when the position actually moves.
+        // Calling too often is ruled out, and so is winit suppressing it (it
+        // drops only ISC_SHOWUICOMPOSITIONWINDOW). So is never opening the
+        // candidate list: on real hardware, repeated space cycles こんにちは →
+        // 今日は → コンニチハ and still no window appears.
+        //
+        // What is left: calling set_ime_cursor_area is itself hiding the window.
+        // winit sets CANDIDATEFORM with dwStyle=CFS_EXCLUDE, which tells the IME
+        // to avoid the rectangle given.
+        // GUMICORD_NO_IME_POS=1 skips the call entirely, for comparison.
         let px = (tx + cx) as f64;
         let py = iy as f64;
-        //
-        //   H1 (呼びすぎ) は否定済み。H3 (winit が抑制している) も否定済み
-        //   (winit が落とすのは ISC_SHOWUICOMPOSITIONWINDOW のみ)。
-        //   H4 (候補リストを開く操作をしていない) も、ユーザーの実機確認で否定された
-        //   (スペース連打で こんにちは → 今日は → コンニチハ と巡回しているのに
-        //    候補ウィンドウは出ない)。
-        //
-        //   残る疑い: set_ime_cursor_area を呼ぶこと自体が候補ウィンドウを消している。
-        //   winit は CANDIDATEFORM を dwStyle=CFS_EXCLUDE で設定するため、
-        //   指定した矩形を避けるよう IME に指示している。
-        //   GUMICORD_NO_IME_POS=1 で一切呼ばずに比較する。
         let suppress = std::env::var("GUMICORD_NO_IME_POS").is_ok();
         let changed = !suppress
             && match self.last_ime_area {
@@ -822,7 +815,7 @@ impl App {
         root.set_label("Gumicord スパイク S2");
         root.set_children(vec![INPUT_ID, LOG_ID]);
 
-        // PLT-003: 入力欄をテキスト入力として公開する
+        // Exposes the field as text input.
         let mut input = Node::new(Role::TextInput);
         input.set_label("メッセージ入力");
         input.set_value(self.editor.display());
@@ -853,8 +846,8 @@ impl ApplicationHandler<AccessKitEvent> for App {
         if self.window.is_some() {
             return;
         }
-        // accesskit のアダプタは「ウィンドウが初めて表示される前」に作る必要がある。
-        // したがって不可視で作り、アダプタ生成後に可視化する。
+        // The accesskit adapter must exist before the window is first shown, so
+        // the window is created hidden and shown afterwards.
         let attrs = Window::default_attributes()
             .with_title("Gumicord スパイク S2 — IME とアクセシビリティ")
             .with_inner_size(winit::dpi::LogicalSize::new(1000.0, 560.0))
@@ -865,7 +858,7 @@ impl ApplicationHandler<AccessKitEvent> for App {
         let adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         self.adapter = Some(adapter);
 
-        // PLT-001: IME を有効にする。これを呼ばないと Ime イベントが一切来ない
+        // Enables the IME. Without this no Ime event ever arrives.
         window.set_ime_allowed(true);
         println!("[window]  set_ime_allowed(true)  scale_factor={}", self.scale);
 
@@ -920,7 +913,7 @@ impl ApplicationHandler<AccessKitEvent> for App {
             }
 
             // ========================================================
-            // PLT-001: IME のインライン変換。S2 の中心。
+            // Inline conversion: the centre of S2.
             // ========================================================
             WindowEvent::Ime(ime) => {
                 match ime {
@@ -928,13 +921,13 @@ impl ApplicationHandler<AccessKitEvent> for App {
                         self.log_ime("Enabled".into());
                     }
                     Ime::Preedit(text, cursor) => {
-                        // 未確定文字列。変換中はここが毎回更新される
+                        // The preedit, replaced on every keystroke while converting.
                         self.log_ime(format!("Preedit {text:?} cursor={cursor:?}"));
                         self.editor.preedit = text;
                         self.editor.preedit_cursor = cursor;
                     }
                     Ime::Commit(text) => {
-                        // 変換確定
+                        // Committed.
                         self.log_ime(format!("Commit {text:?}"));
                         self.editor.preedit.clear();
                         self.editor.preedit_cursor = None;
@@ -956,7 +949,7 @@ impl ApplicationHandler<AccessKitEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                // 変換中のキー入力は IME が握っている。横取りしない
+                // While converting, the IME owns the keys. They are not intercepted.
                 let composing = !self.editor.preedit.is_empty();
 
                 match &event.logical_key {
@@ -970,9 +963,9 @@ impl ApplicationHandler<AccessKitEvent> for App {
                     }
                     Key::Named(NamedKey::Enter) if !composing => self.editor.submit(),
                     Key::Character(c) if !composing => {
-                        // Ctrl+Q で終了
+                        // Ctrl+Q quits.
                         if c == "q" || c == "Q" {
-                            // 修飾キーの判定は省略。Ctrl 押下中のみ text が None になる
+                            // Modifiers are not tracked; text is None only while Ctrl is held.
                             if event.text.is_none() {
                                 self.report();
                                 event_loop.exit();
@@ -998,7 +991,7 @@ impl ApplicationHandler<AccessKitEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 self.render();
-                // キャレット点滅のため継続描画する。実装では点滅タイマーのみ再描画する
+                // Drawn continuously so the caret blinks; the real client would use a timer.
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }

@@ -1,13 +1,12 @@
-//! スパイク S1: ウィンドウ + カスタムタイトルバー + 性能実測
+//! Spike S1: a window, a custom title bar, and measurements.
 //!
-//! 検証する仮説 (spec/08-spike-plan.md):
-//!   winit + wgpu で、OS 標準のタイトルバーを排した独自ウィンドウを作り、
-//!   公式 Discord より小さいメモリと速い起動を達成できる。
+//! The hypothesis: winit and wgpu can give a window without the OS title
+//! bar, in less memory and starting faster than the official client.
 //!
-//! 検証項目: 1-1 描画 / 1-2 独自タイトルバー / 1-3 ウィンドウ操作の等価性
-//!           1-4 非アクティブ時の描画停止 / 1-5 DPI 追従 / 1-6 描画方式の評価
+//! Covers drawing, the custom title bar, parity with the OS window
+//! controls, not drawing while inactive, DPI changes, and the draw method.
 //!
-//! このコードは捨てる前提。成果物は測定値であってコードではない。
+//! Throwaway code: the result is the numbers, not this.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -18,21 +17,21 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{ResizeDirection, Window, WindowId};
 
-/// プロセス起動時刻。main の最初の行で確定させる。
+/// When the process started, taken on the first line of main.
 static T0: OnceLock<Instant> = OnceLock::new();
 
 fn t0() -> Instant {
     *T0.get().expect("T0 は main で初期化される")
 }
 
-/// 独自タイトルバーの高さ (論理ピクセル)。PLT-020
+/// The title bar height, in logical pixels.
 const TITLEBAR_H: f64 = 32.0;
-/// ウィンドウ端のリサイズ判定幅 (論理ピクセル)。PLT-021
+/// How wide the resize edge is, in logical pixels.
 const RESIZE_BORDER: f64 = 6.0;
-/// ウィンドウ操作ボタン 1 個の幅 (論理ピクセル)
+/// The width of one window button, in logical pixels.
 const BUTTON_W: f64 = 46.0;
 
-/// 1 インスタンスあたりの f32 個数: rect(4) + color(4) + radius(1) + pad(3)
+/// Floats per instance: rect(4) + color(4) + radius(1) + pad(3).
 const FLOATS_PER_INSTANCE: usize = 12;
 const MAX_INSTANCES: usize = 262_144;
 
@@ -65,19 +64,19 @@ struct App {
     first_frame_done: bool,
     frame_times: Vec<f32>,
     last_frame: Option<Instant>,
-    /// NFR-005: 非アクティブ時は描画しない
+    /// Nothing is drawn while inactive.
     focused: bool,
     cursor: PhysicalPosition<f64>,
     hover: HitZone,
     maximized: bool,
     scale: f64,
-    /// 描画するインスタンスの一時バッファ
+    /// Scratch space for the instances being drawn.
     instances: Vec<f32>,
-    /// GUMICORD_BENCH_SECS 秒で自動終了する。無人で計測するため。
+    /// Quits after GUMICORD_BENCH_SECS, so a run needs nobody watching.
     bench_secs: Option<f32>,
     bench_start: Option<Instant>,
     should_exit: bool,
-    /// スクロールを模擬してフレームごとに内容を動かす (NFR-003 の検証)
+    /// Moves the content each frame, standing in for scrolling.
     scroll: f32,
 }
 
@@ -104,22 +103,21 @@ impl App {
         }
     }
 
-    // ---------------------------------------------------------------- GPU 初期化
+    // ---------------------------------------------------------------- GPU setup
 
     fn init_gpu(&mut self, window: Arc<Window>) {
         let t_gpu = Instant::now();
 
-        // WGPU_BACKEND 環境変数でバックエンドを切り替えて比較できるようにする
+        // WGPU_BACKEND selects a backend, so they can be compared.
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
 
-        // ■ S1 の発見 (2026-08-14)
-        // この検証機 (Intel HD Graphics 520) では、Vulkan ICD がインスタンス生成中に
-        // セグメンテーション違反を起こし、プロセスごと落ちる。
-        // wgpu の既定バックエンド探索は Vulkan を先に触るため、既定のままだと起動できない。
-        //
-        // 「対応していないバックエンドは request_adapter が None を返してくれる」という
-        // 前提は成り立たない。壊れたドライバはプロセスを道連れにする。
-        // → 製品では探索対象を OS ごとに明示的に絞る必要がある。
+        // What S1 found (2026-08-14):
+        // on this machine (Intel HD Graphics 520) the Vulkan ICD segfaults while
+        // the instance is being created and takes the process with it. wgpu tries
+        // Vulkan first, so the default search cannot even start.
+        // An unsupported backend does not merely make request_adapter return None:
+        // a broken driver takes the process down. The product must narrow the
+        // search per OS.
         #[cfg(target_os = "windows")]
         if std::env::var("WGPU_BACKEND").is_err() {
             desc.backends = wgpu::Backends::DX12 | wgpu::Backends::GL;
@@ -152,7 +150,7 @@ impl App {
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .expect("surface が adapter に対応していない");
-        // 色の扱いを固定する。EXT-020 (全 PF で同一の描画結果) の前提。
+        // Colour handling is pinned, so every platform draws the same result.
         let caps = surface.get_capabilities(&adapter);
         config.format = caps
             .formats
@@ -160,11 +158,11 @@ impl App {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(config.format);
-        // Fifo = VSync。NFR-003 / NFR-004 の追従性はここに依存する。
+        // Fifo = VSync, which is what the responsiveness targets rest on.
         config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&device, &config);
 
-        // --- パイプライン ---
+        // --- Pipeline ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rounded-rect"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -284,9 +282,9 @@ impl App {
         });
     }
 
-    // ---------------------------------------------------------------- ヒットテスト
+    // ---------------------------------------------------------------- Hit testing
 
-    /// PLT-021: OS 標準タイトルバーと等価な操作を成立させるための領域判定。
+    /// The regions that make the custom title bar behave like the OS one.
     fn hit_test(&self, x: f64, y: f64) -> HitZone {
         let Some(gpu) = &self.gpu else {
             return HitZone::Client;
@@ -295,7 +293,7 @@ impl App {
         let h = gpu.config.height as f64 / self.scale;
         let (lx, ly) = (x / self.scale, y / self.scale);
 
-        // 最大化中はリサイズ判定を行わない (OS 標準と同じ挙動)
+        // No resize edge while maximised, as the OS does.
         if !self.maximized {
             let left = lx < RESIZE_BORDER;
             let right = lx > w - RESIZE_BORDER;
@@ -318,7 +316,7 @@ impl App {
         }
 
         if ly < TITLEBAR_H {
-            // 右端から 閉じる / 最大化 / 最小化 の順
+            // From the right: close, maximise, minimise.
             if lx > w - BUTTON_W {
                 return HitZone::Close;
             }
@@ -350,7 +348,7 @@ impl App {
         w.set_cursor(icon);
     }
 
-    // ---------------------------------------------------------------- 描画
+    // ---------------------------------------------------------------- Drawing
 
     fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4], r: f32) {
         if self.instances.len() / FLOATS_PER_INSTANCE >= MAX_INSTANCES {
@@ -368,13 +366,13 @@ impl App {
         let tb = TITLEBAR_H as f32 * s;
         let btn = BUTTON_W as f32 * s;
 
-        // --- 背景 ---
+        // --- Background ---
         self.push_rect(0.0, 0.0, pw, ph, [0.10, 0.10, 0.14, 1.0], 0.0);
 
-        // --- 独自タイトルバー (PLT-020) ---
+        // --- The custom title bar ---
         self.push_rect(0.0, 0.0, pw, tb, [0.07, 0.07, 0.10, 1.0], 0.0);
 
-        // ウィンドウ操作ボタンのホバー表示
+        // Hover on the window buttons.
         let hover_btn = |z: HitZone, cur: HitZone| if z == cur { 1.0f32 } else { 0.0 };
         let h = self.hover;
         let close_a = hover_btn(HitZone::Close, h);
@@ -390,12 +388,12 @@ impl App {
             self.push_rect(pw - btn * 3.0, 0.0, btn, tb, [1.0, 1.0, 1.0, 0.10], 0.0);
         }
 
-        // ボタンのグリフを矩形で代用 (テキスト描画は S2 の範囲)
+        // The glyphs stand in as rectangles; text is S2.
         let g = [0.85, 0.85, 0.90, 1.0];
         let cy = tb * 0.5;
-        // 最小化: 横線
+        // Minimise: a line.
         self.push_rect(pw - btn * 2.5 - 5.0 * s, cy, 10.0 * s, 1.0 * s, g, 0.0);
-        // 最大化: 枠
+        // Maximise: a frame.
         self.push_rect(pw - btn * 1.5 - 5.0 * s, cy - 5.0 * s, 10.0 * s, 10.0 * s, g, 1.0 * s);
         self.push_rect(
             pw - btn * 1.5 - 4.0 * s,
@@ -409,11 +407,11 @@ impl App {
             },
             0.0,
         );
-        // 閉じる: ×の代わりに小さい四角
+        // Close: a small square instead of a cross.
         self.push_rect(pw - btn * 0.5 - 5.0 * s, cy - 5.0 * s, 10.0 * s, 10.0 * s, g, 5.0 * s);
 
-        // --- クライアント領域: Discord 風の 3 ペインを角丸矩形で敷き詰める ---
-        // 1-6 の評価用。実際の UI と同程度のインスタンス数を出して負荷を見る。
+        // --- The client area: three panes of rounded rectangles ---
+        // For the draw-method evaluation: as many instances as a real UI needs.
         let pad = 8.0 * s;
         let guild_w = 72.0 * s;
         let chan_w = 240.0 * s;
@@ -456,8 +454,8 @@ impl App {
         let mx = cx + chan_w + pad;
         let mw = pw - mx - pad;
         self.push_rect(mx, y0, mw, body_h, [0.09, 0.09, 0.13, 1.0], 12.0 * s);
-        // メッセージ行: アバター + 名前 + 本文 2 行 + リアクションチップ。
-        // NFR-003 の検証のためスクロールで内容を動かす。
+        // A message row: avatar, name, two lines of body, a reaction chip.
+        // The content moves with the scroll, to measure how it keeps up.
         let row_h = 72.0 * s;
         let off = self.scroll % row_h;
         let mut y = y0 + pad - off;
@@ -506,7 +504,7 @@ impl App {
                     [1.0, 1.0, 1.0, 0.14],
                     3.0 * s,
                 );
-                // リアクションチップ
+                // Reaction chip.
                 for k in 0..(i % 4) {
                     self.push_rect(
                         tx + k as f32 * 48.0 * s,
@@ -522,8 +520,8 @@ impl App {
             i += 1;
         }
 
-        // 1-6: 自前バッチャの限界を測る。GUMICORD_STRESS で追加の角丸矩形を敷き詰める。
-        // 実際の UI が必要とするインスタンス数に対してどれだけ余裕があるかを見る。
+        // Where the batcher gives out. GUMICORD_STRESS adds rounded rectangles
+        // to see how much headroom a real UI leaves.
         if let Ok(n) = std::env::var("GUMICORD_STRESS") {
             let n: usize = n.parse().unwrap_or(0);
             let cols = 64usize;
@@ -550,7 +548,7 @@ impl App {
             }
         }
 
-        // 入力欄
+        // The input field.
         let ih = 44.0 * s;
         self.push_rect(
             mx + 12.0 * s,
@@ -563,7 +561,7 @@ impl App {
     }
 
     fn render(&mut self) {
-        // NFR-003: スクロール中の追従性を測るため毎フレーム内容を動かす
+        // The content moves every frame, to measure scrolling.
         self.scroll += 2.0;
         self.build_scene();
 
@@ -630,7 +628,7 @@ impl App {
         gpu.queue.submit(Some(encoder.finish()));
         gpu.queue.present(frame);
 
-        // --- 計測 ---
+        // --- Measurements ---
         let now = Instant::now();
         if !self.first_frame_done {
             self.first_frame_done = true;
@@ -700,8 +698,8 @@ impl ApplicationHandler for App {
         }
         let t_win = Instant::now();
 
-        // PLT-020: OS 標準のタイトルバーを使わない。
-        // 失われるドラッグ移動・リサイズ・最大化は window_event 側で補う (PLT-021)。
+        // No OS title bar. The dragging, resizing and maximising that costs is
+        // put back in window_event.
         let attrs = Window::default_attributes()
             .with_title("Gumicord スパイク S1")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
@@ -738,7 +736,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
 
-            // PLT-009: DPI 変更・ディスプレイ間移動への追従
+            // Following a DPI change, and a move between displays.
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 println!("[MEASURE] scale_factor_changed = {scale_factor}");
                 self.scale = scale_factor;
@@ -748,7 +746,7 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // NFR-005: 非アクティブ時は描画を止める
+            // Drawing stops while inactive.
             WindowEvent::Focused(f) => {
                 self.focused = f;
                 println!("[event]   focused = {f}  (描画{})", if f { "再開" } else { "停止" });
@@ -775,13 +773,13 @@ impl ApplicationHandler for App {
             } => {
                 let Some(w) = self.window.clone() else { return };
                 match self.hover {
-                    // PLT-021: ドラッグ移動
+                    // Drag to move.
                     HitZone::Titlebar => {
                         if let Err(e) = w.drag_window() {
                             eprintln!("[MEASURE] drag_window 失敗: {e}");
                         }
                     }
-                    // PLT-021: 端のドラッグでリサイズ
+                    // Drag an edge to resize.
                     HitZone::Resize(dir) => {
                         if let Err(e) = w.drag_resize_window(dir) {
                             eprintln!("[MEASURE] drag_resize_window 失敗: {e}");
@@ -800,7 +798,7 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // PLT-021: タイトルバーのダブルクリックで最大化トグル
+            // Double-click the title bar to toggle maximised.
             WindowEvent::DoubleTapGesture { .. } => {}
 
             WindowEvent::RedrawRequested => {
@@ -810,7 +808,7 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
-                // ベンチ中は非アクティブでも描画を続ける (無人計測のため)
+                // A benchmark keeps drawing while inactive, since nobody is watching.
                 if self.focused || self.bench_secs.is_some() {
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -827,7 +825,7 @@ fn main() {
     let _ = T0.set(Instant::now());
 
     let event_loop = EventLoop::new().expect("イベントループの作成に失敗");
-    // フレーム時間を測るため連続描画する。実際のクライアントでは Wait にする。
+    // Drawn continuously to measure frame time; the real client waits.
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = App::new();

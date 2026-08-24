@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-# 外部ツールの導入を要求しないことが xtask の目的である。
-# ワークスペース内のクレートへの依存はこれに反しない。
-# 安定 ID を Rust ソースからパースするより、定義元をそのまま使うほうが確実。
+# Requiring no external tool is xtask's whole purpose; depending on a
+# crate inside the workspace does not break that, and using the
+# definition directly beats parsing the stable IDs out of the source.
 [dependencies]
 gumicord-uitree.workspace = true

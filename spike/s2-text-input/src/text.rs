@@ -1,10 +1,10 @@
-//! グリフアトラスとテキスト整形。
+//! The glyph atlas and text shaping.
 //!
-//! cosmic-text で整形 (shaping) とレイアウトを行い、ラスタライズ済みグリフを
-//! GPU 上のアトラステクスチャに詰めて、テクスチャ付きクアッドとして描く。
+//! cosmic-text shapes and lays out; the rasterised glyphs go into an atlas
+//! texture on the GPU and are drawn as textured quads.
 //!
-//! カラー絵文字 (PLT-004) を扱うため、アトラスは RGBA8 とする。
-//! マスクグリフは (255,255,255,alpha) として格納し、シェーダ側で色を掛ける。
+//! The atlas is RGBA8 so colour emoji fit. Mask glyphs are stored as
+//! (255,255,255,alpha) and the shader applies the colour.
 
 use std::collections::HashMap;
 
@@ -14,14 +14,14 @@ pub const ATLAS_SIZE: u32 = 2048;
 
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphEntry {
-    /// アトラス内の UV (0..1)
+    /// UV within the atlas.
     pub uv: [f32; 4],
-    /// ペン位置からのオフセット (物理ピクセル)
+    /// Offset from the pen position, in physical pixels.
     pub left: i32,
     pub top: i32,
     pub w: u32,
     pub h: u32,
-    /// カラー絵文字なら true。シェーダで色を掛けない
+    /// True for a colour emoji, which the shader leaves alone.
     pub is_color: bool,
 }
 
@@ -29,7 +29,7 @@ pub struct GlyphAtlas {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     entries: HashMap<CacheKey, Option<GlyphEntry>>,
-    // 棚 (shelf) 詰め
+    // Shelf packing.
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
@@ -92,7 +92,7 @@ impl GlyphAtlas {
         let image = cache.get_image(font_system, key).as_ref()?;
         let p = image.placement;
         if p.width == 0 || p.height == 0 {
-            // 空白など。描画不要だが位置情報は返す
+            // Whitespace and the like: nothing to draw, but the metrics still count.
             return Some(GlyphEntry {
                 uv: [0.0; 4],
                 left: p.left,
@@ -109,7 +109,7 @@ impl GlyphAtlas {
         let (w, h) = (p.width, p.height);
         let is_color = matches!(image.content, SwashContent::Color);
 
-        // RGBA8 へ正規化する
+        // Normalised to RGBA8.
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         match image.content {
             SwashContent::Mask => {
@@ -130,7 +130,7 @@ impl GlyphAtlas {
             }
         }
 
-        // 棚詰め。1px の余白を空けて隣接グリフのにじみを防ぐ
+        // Shelf packing, with 1px of padding so neighbours do not bleed.
         const PAD: u32 = 1;
         if self.cursor_x + w + PAD > ATLAS_SIZE {
             self.cursor_x = 0;
@@ -138,7 +138,7 @@ impl GlyphAtlas {
             self.shelf_h = 0;
         }
         if self.cursor_y + h + PAD > ATLAS_SIZE {
-            // スパイクではアトラス溢れを扱わない。実装では複数ページか LRU 退避が要る。
+            // The spike ignores a full atlas; the real one needs pages or an LRU.
             eprintln!("[atlas] 溢れました。実装では複数ページ化が必要です");
             self.full = true;
             return None;

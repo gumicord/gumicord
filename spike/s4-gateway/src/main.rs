@@ -1,28 +1,20 @@
-//! スパイク S4: Discord Gateway 接続と REST の検証
+//! Spike S4: the Discord Gateway and REST.
 //!
-//! 検証する仮説 (spec/08-spike-plan.md):
-//!   Gateway に接続してメッセージを受信し、REST でメッセージを送信できる。
-//!   レート制限を事前に抑制できる。
+//! The hypothesis: the Gateway can be connected to and its messages read,
+//! REST can send one, and rate limits can be held off before they bite.
 //!
-//! 検証項目:
-//!   4-1 identify → ready                    (NFR-020)
-//!   4-2 zstd-stream 圧縮でイベント受信        (NFR-023)
-//!   4-3 ハートビートと再接続 (resume)         (NFR-010)
-//!   4-4 MESSAGE_CREATE の受信                (FR-020)
-//!   4-5 REST でメッセージ送信                 (FR-024)
-//!   4-6 レート制限ヘッダの解釈と事前抑制        (NFR-021)
-//!   4-7 429 からの指数バックオフ              (NFR-022)
+//! Covers zstd-stream events, heartbeats and resume, MESSAGE_CREATE,
+//! sending over REST, reading the rate limit headers and throttling ahead
+//! of them, and backing off from a 429.
 //!
-//! ■ トークンの扱い (SEC-001)
-//!   トークンは環境変数または .env からのみ読む。
-//!   ログ・エラー・パニックメッセージに出力しない。.env は .gitignore 済み。
+//! The token comes only from the environment or .env, never reaches a log,
+//! an error or a panic message, and .env is gitignored.
 //!
-//! ■ Bot トークンを推奨する理由
-//!   Gateway のハンドシェイク・ハートビート・再接続・圧縮・レート制限の機構は
-//!   ユーザーアカウントと完全に同一である。したがって 4-1〜4-7 は Bot で検証でき、
-//!   その場合アカウント停止のリスクがない。
-//!   ユーザーアカウント固有なのは identify ペイロードの形だけであり、
-//!   それは実測しなくても仕様化できる。
+//! A bot token is preferred because the handshake, heartbeat, resume,
+//! compression and rate limiting are identical to a user account, so all
+//! of this can be verified without risking one being locked. Only the
+//! shape of the identify payload is user-specific, and that can be
+//! specified without measuring it.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -34,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 const GATEWAY_VERSION: u8 = 10;
 const API_BASE: &str = "https://discord.com/api/v10";
 
-// ============================================================ トークン
+// ============================================================ The token
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum TokenKind {
@@ -45,14 +37,14 @@ enum TokenKind {
 struct Config {
     token: String,
     kind: TokenKind,
-    /// 4-5 のメッセージ送信先。未設定なら送信を飛ばす
+    /// Where 4-5 sends. Sending is skipped when unset.
     channel_id: Option<String>,
     zstd: bool,
 }
 
 impl Config {
     fn load() -> Result<Self, String> {
-        // .env を読む (依存を増やさないため自前で最小実装)
+        // Reads .env, minimally, rather than adding a dependency.
         if let Ok(text) = std::fs::read_to_string(".env") {
             for line in text.lines() {
                 let line = line.trim();
@@ -87,7 +79,7 @@ impl Config {
         })
     }
 
-    /// SEC-001: Authorization ヘッダの値。ログに出さない
+    /// The Authorization header value. Never logged.
     fn auth_header(&self) -> String {
         match self.kind {
             TokenKind::Bot => format!("Bot {}", self.token),
@@ -96,17 +88,18 @@ impl Config {
     }
 }
 
-/// SEC-001 の検証: トークンが誤ってログに出ていないか自己点検する
+/// Checks the token has not leaked into a log.
 fn assert_no_token(haystack: &str, token: &str) {
     if token.len() >= 8 && haystack.contains(token) {
         panic!("★SEC-001 違反★ 出力にトークンが含まれている");
     }
 }
 
-// ============================================================ レート制限
+// ============================================================ Rate limits
 
-/// NFR-021: レート制限ヘッダを解釈し、事前にリクエストを抑制する。
-/// Discord はバケット単位で制限をかけるため、バケットごとに残量と回復時刻を持つ。
+/// One bucket: what Discord limits, individually.
+///
+/// The headers are read and requests held back before they are refused.
 #[derive(Debug, Clone)]
 struct Bucket {
     remaining: u32,
@@ -116,14 +109,14 @@ struct Bucket {
 
 #[derive(Default)]
 struct RateLimiter {
-    /// ルート → バケット ID
+    /// Route to bucket ID.
     routes: HashMap<String, String>,
-    /// バケット ID → 状態
+    /// Bucket ID to state.
     buckets: HashMap<String, Bucket>,
 }
 
 impl RateLimiter {
-    /// リクエスト前に呼ぶ。必要なら待つ (事前抑制)。待ったら true を返す。
+    /// Called before a request, waiting if it must. True when it waited.
     async fn acquire(&mut self, route: &str) -> bool {
         let Some(bucket_id) = self.routes.get(route) else {
             return false; // 未知のルートは 1 回目なので通す
@@ -146,7 +139,7 @@ impl RateLimiter {
         false
     }
 
-    /// レスポンスヘッダから状態を更新する
+    /// Updates the state from the response headers.
     fn update(&mut self, route: &str, headers: &reqwest::header::HeaderMap) {
         let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
 
@@ -181,8 +174,8 @@ impl RateLimiter {
 
 // ============================================================ Gateway
 
-/// 4-2: zstd-stream は WebSocket フレームを跨いで 1 本のストリームとして届く。
-/// フレームごとに独立した解凍はできず、状態を保持したデコーダが必要になる。
+/// zstd-stream arrives as one stream spanning WebSocket frames, so a frame
+/// cannot be decompressed alone and the decoder must keep its state.
 struct ZstdStream {
     decoder: zstd::stream::write::Decoder<'static, Vec<u8>>,
 }
@@ -205,8 +198,8 @@ impl ZstdStream {
 
 fn identify_payload(cfg: &Config, intents: u64) -> Value {
     match cfg.kind {
-        // NFR-020: 公式クライアントと同等のプロパティで接続する。
-        // 隠すためではなく、サーバーに嘘の情報を渡さないため。
+        // Connects with the same properties as the official client: not to hide,
+        // but so the server is not told something false.
         TokenKind::Bot => json!({
             "op": 2,
             "d": {
@@ -244,7 +237,7 @@ fn identify_payload(cfg: &Config, intents: u64) -> Value {
 }
 
 
-// ============================================================ Gateway 観測
+// ============================================================ Watching
 
 #[derive(Default)]
 struct GatewayResult {
@@ -261,9 +254,9 @@ struct GatewayResult {
     sent_ok: Option<String>,
 }
 
-/// GUILDS | GUILD_MESSAGES  (いずれも非特権)
+/// GUILDS | GUILD_MESSAGES, neither privileged.
 const INTENTS_BASIC: u64 = (1 << 0) | (1 << 9);
-/// 上記 + MESSAGE_CONTENT (特権。Developer Portal での許可が必要)
+/// The above plus MESSAGE_CONTENT, which the Developer Portal must allow.
 const INTENTS_PRIVILEGED: u64 = INTENTS_BASIC | (1 << 15);
 
 async fn observe_gateway(
@@ -297,7 +290,7 @@ async fn observe_gateway(
         tokio::select! {
             _ = tick.tick() => {
                 if Instant::now() > deadline { break; }
-                // 4-3: ハートビート
+                // Heartbeats.
                 if identified && Instant::now() >= next_heartbeat {
                     ws.send(Message::Text(json!({"op":1,"d":r.last_seq}).to_string().into())).await?;
                     r.heartbeats_sent += 1;
@@ -312,7 +305,7 @@ async fn observe_gateway(
                 let text: String = match msg {
                     Message::Text(t) => t.to_string(),
                     Message::Binary(b) => {
-                        // 4-2: zstd-stream はフレームを跨ぐ 1 本のストリーム
+                        // zstd-stream is one stream across frames.
                         match &mut zstd_stream {
                             Some(z) => {
                                 let out = z.push(&b)?;
@@ -349,7 +342,7 @@ async fn observe_gateway(
                         }
                         ws.send(Message::Text(identify_payload(cfg, intents).to_string().into())).await?;
                         identified = true;
-                        // 最初のハートビートには jitter を入れる (公式クライアントと同じ挙動)
+                        // The first heartbeat is jittered, as the official client does.
                         next_heartbeat = Instant::now() + heartbeat_interval.mul_f64(0.5);
                         println!("[gateway] op=2 Identify 送信 (intents={intents:#x})");
                     }
@@ -375,7 +368,7 @@ async fn observe_gateway(
                                 assert_no_token(&payload.to_string(), &cfg.token);
                                 println!("[MEASURE] SEC-001 自己点検: READY ペイロードにトークンなし");
 
-                                // 4-5: REST でメッセージ送信
+                                // Sending over REST.
                                 if let Some(ch) = &cfg.channel_id {
                                     let route = "POST /channels/:id/messages";
                                     limiter.acquire(route).await;
@@ -419,7 +412,7 @@ async fn observe_gateway(
     Ok(r)
 }
 
-/// 4-3: resume を試す
+/// Trying a resume.
 async fn try_resume(cfg: &Config, r: &GatewayResult) -> Result<bool, Box<dyn std::error::Error>> {
     let (Some(sid), Some(base), Some(seq)) = (&r.session_id, &r.resume_url, r.last_seq) else {
         println!("[skip]    session_id / resume_gateway_url が得られなかったため飛ばします");
@@ -455,15 +448,15 @@ async fn try_resume(cfg: &Config, r: &GatewayResult) -> Result<bool, Box<dyn std
     Ok(false)
 }
 
-// ============================================================ 4-7 レート制限
+// ============================================================ Rate limits
 
-/// 4-7: レート制限に到達させ、事前抑制 (NFR-021) と
-/// 指数バックオフからの復帰 (NFR-022) を検証する。
+/// Reaches the rate limit, to check both the throttling and the recovery
+/// from an exponential backoff.
 ///
-/// `POST /channels/:id/messages` は実測で 5 回 / 1.00 秒。
-/// 上限を少し超える回数だけ送れば、429 を起こさずに事前抑制が働くはずである。
-/// **429 が 1 度も起きないことが NFR-021 の合格条件**であり、
-/// もし起きた場合はバックオフで復帰できることを確認する。
+/// POST /channels/:id/messages measures at five per second, so sending a
+/// little over that should throttle without ever producing a 429.
+/// Never seeing a 429 is the pass condition; if one does arrive, the
+/// backoff must recover from it.
 async fn test_rate_limit(
     cfg: &Config,
     http: &reqwest::Client,
@@ -487,7 +480,7 @@ async fn test_rate_limit(
             preempted += 1;
         }
 
-        // NFR-022: 429 を受けたら指数バックオフで再試行する
+        // A 429 is retried with an exponential backoff.
         let mut attempt = 0u32;
         loop {
             let t = Instant::now();
@@ -509,7 +502,7 @@ async fn test_rate_limit(
                     .get("x-ratelimit-scope")
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("?");
-                // サーバーが指定した retry_after を下限に、試行回数で指数的に伸ばす
+                // The server's retry_after is the floor, grown exponentially per attempt.
                 let backoff = Duration::from_secs_f64(retry_after * 2f64.powi(attempt as i32));
                 max_backoff = max_backoff.max(backoff);
                 println!(
@@ -556,15 +549,15 @@ async fn test_rate_limit(
     Ok(())
 }
 
-/// 4-7 の補完: 事前抑制ロジックそのものをローカルで検証する。
+/// Verifies the throttling itself, locally.
 ///
-/// 実サーバー相手のテストでは、往復遅延 (321〜833ms) が自然な間隔になるため、
-/// 逐次リクエストではバケットの上限に届きにくい。実際 7 通送っても
-/// 残量が 0 になったのは最後の 1 通の後で、事前抑制は一度も発動しなかった。
+/// Against the real server the round trip (321-833ms) spaces requests out
+/// enough that sequential ones rarely reach the limit: seven messages left
+/// the bucket empty only after the last, and it never throttled.
 ///
-/// 「抑制が発動しなかった」ことは「抑制が動く」ことの証明にはならないので、
-/// 合成したバケット状態に対して acquire() が実際に待つかを直接確かめる。
-/// ネットワークもチャンネルへの投稿も伴わない。
+/// Not throttling proves nothing about throttling, so acquire() is checked
+/// directly against a synthesised bucket. No network, and nothing posted
+/// to a channel.
 async fn verify_limiter_locally() {
     println!("──────── 4-7 補完: 事前抑制ロジックのローカル検証 ────────");
 
@@ -572,7 +565,7 @@ async fn verify_limiter_locally() {
     let route = "POST /test";
     let bucket = "synthetic".to_string();
 
-    // 残量 0、0.5 秒後に回復するバケットを合成する
+    // A bucket with nothing left, recovering in half a second.
     limiter.routes.insert(route.to_string(), bucket.clone());
     limiter.buckets.insert(
         bucket.clone(),
@@ -592,7 +585,7 @@ async fn verify_limiter_locally() {
     );
     let ok_blocked = waited && elapsed >= Duration::from_millis(450);
 
-    // 残量ありのバケットでは待たないこと
+    // A bucket with room does not wait.
     limiter.buckets.insert(
         bucket.clone(),
         Bucket {
@@ -610,7 +603,7 @@ async fn verify_limiter_locally() {
     );
     let ok_passthrough = !waited2 && elapsed2 < Duration::from_millis(50);
 
-    // 回復時刻を過ぎたバケットでは待たないこと
+    // Nor does one past its reset.
     limiter.buckets.insert(
         bucket,
         Bucket {
@@ -640,7 +633,7 @@ async fn verify_limiter_locally() {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("======== S4: Discord Gateway ========");
 
-    // ネットワーク不要の検証は先に済ませる
+    // The checks that need no network come first.
     verify_limiter_locally().await;
     println!();
 
@@ -701,8 +694,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limiter.update(route, rr.headers());
     }
 
-    // ---------------------------------------------------------------- 診断
-    // READY のギルド数が 0 だった原因を推測せず直接確かめる。
+    // ---------------------------------------------------------------- Diagnosis
+    // Why READY carried no guilds, asked rather than guessed.
     println!();
     println!("──────── 診断: 参加ギルドとチャンネルの到達性 ────────");
     let gr = http.get(format!("{API_BASE}/users/@me/guilds"))
@@ -752,9 +745,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut result = observe_gateway(&cfg, INTENTS_PRIVILEGED, &http, &mut limiter, 45).await?;
     let mut used_intents = INTENTS_PRIVILEGED;
 
-    // 4014 = Disallowed intent(s)。Developer Portal で特権インテントが未許可。
-    // MESSAGE_CONTENT を外せば MESSAGE_CREATE 自体は届く (本文が空になるだけ) ので、
-    // 検証を止めずに続行する。
+    // 4014 = disallowed intents: the Developer Portal has not granted the
+    // privileged ones. Dropping MESSAGE_CONTENT still delivers MESSAGE_CREATE
+    // with an empty body, so this carries on rather than stopping.
     if result.close_code == Some(4014) {
         println!();
         println!("[info]    4014 Disallowed intent(s) — 特権インテントが未許可です。");
@@ -781,7 +774,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         test_rate_limit(&cfg, &http, &mut limiter, count).await?;
     }
 
-    // ---------------------------------------------------------------- まとめ
+    // ---------------------------------------------------------------- Summary
     println!();
     println!("======== S4 測定結果 ========");
     println!("[MEASURE] intents            = {used_intents:#x}{}",

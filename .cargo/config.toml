@@ -1,24 +1,23 @@
-# cargo xtask でタスクランナーを呼べるようにする。
-# just や make を導入しなくても cargo だけで完結させるため。
+# Lets `cargo xtask` run the task runner, so cargo alone is enough and
+# neither just nor make is needed.
 [alias]
 xtask = "run --package xtask --"
 
 [build]
-# ■ 並列数を絞る理由 (2026-08-14 に実際に起きたこと)
+# Why the job count is held down (what happened on 2026-08-14).
 #
-#   開発機は 4 論理コア / 物理メモリ 7.9 GB。
-#   既定の並列数 (= コア数) で wgpu / rusqlite / aws-lc-sys などを
-#   一斉にビルドしたところ、メモリとディスクを使い切って
-#   **OS 全体が不安定になった**。
+# The development machine has four logical cores and 7.9 GB. Building
+# wgpu, rusqlite, aws-lc-sys and the rest at the default job count
+# exhausted memory and disk and destabilised the whole OS:
 #
-#     - rustc が STATUS_STACK_BUFFER_OVERRUN (0xc0000409) で落ちる
+#     - rustc died with STATUS_STACK_BUFFER_OVERRUN (0xc0000409)
 #     - os error 1453 (ERROR_NO_SYSTEM_RESOURCES)
-#     - Volsnap がシャドウコピーを削除
-#     - 無関係なアプリ (Chrome) まで巻き添えでクラッシュ
+#     - Volsnap deleted the shadow copies
+#     - unrelated applications (Chrome) crashed with it
 #
-#   rustc は 1 プロセスあたり 1〜2 GB 使うことがある。
-#   コア数ぶん並べてよいのはメモリに余裕がある機械だけである。
+# One rustc can take 1-2 GB. Only a machine with memory to spare should
+# run one per core.
 #
-#   潤沢なメモリのある機械では、環境変数で上書きできる:
+# With more memory, override it:
 #     CARGO_BUILD_JOBS=8 cargo build
 jobs = 2

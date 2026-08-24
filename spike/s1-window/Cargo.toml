@@ -9,8 +9,8 @@ pollster = "1"
 wgpu = "30"
 winit = "0.30"
 
-# S1 の計測は release で行う。バイナリサイズと起動時間の比較のため
-# 実際の配布ビルドに近い設定にする。
+# S1 measures in release, close to a distribution build, so binary size
+# and start-up time compare.
 [profile.release]
 opt-level = 3
 lto = "fat"
