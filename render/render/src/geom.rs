@@ -1,9 +1,7 @@
-//! 幾何の基本型。**すべて論理ピクセル**である。
-//!
-//! 物理ピクセルへの変換はレイアウトの最後に一度だけ行う
-//! ([`spec/06-renderer.md`] 3 章)。この型を物理ピクセルで使わない。
+//! Geometry, always in logical pixels. The conversion to physical pixels
+//! happens once, at the end of layout; these types never hold them.
 
-/// 大きさ (論理 px)
+/// A size.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Size {
     pub w: f32,
@@ -17,7 +15,8 @@ impl Size {
         Size { w, h }
     }
 
-    /// 負にならないように丸める。制約から余白を引くと簡単に負になる。
+    /// Clamps to zero; subtracting padding from a constraint easily goes
+    /// negative.
     pub fn non_negative(self) -> Self {
         Size {
             w: self.w.max(0.0),
@@ -26,7 +25,7 @@ impl Size {
     }
 }
 
-/// 矩形 (論理 px)。左上原点。
+/// A rectangle, from its top left.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub x: f32,
@@ -75,7 +74,7 @@ impl Rect {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
 
-    /// 四辺を内側へ縮める。
+    /// Shrinks each side inwards.
     pub fn deflate(self, e: Edges) -> Rect {
         Rect {
             x: self.x + e.left,
@@ -85,12 +84,12 @@ impl Rect {
         }
     }
 
-    /// 全周を同じ量だけ内側へ縮める。枠線の内側を求めるのに使う。
+    /// Shrinks every side by the same amount, giving the inside of a border.
     pub fn inset(self, v: f32) -> Rect {
         self.deflate(Edges::all(v))
     }
 
-    /// 交差。重なりがなければ幅か高さが 0 になる。
+    /// The intersection; no overlap leaves a zero width or height.
     pub fn intersect(self, other: Rect) -> Rect {
         let x = self.x.max(other.x);
         let y = self.y.max(other.y);
@@ -111,7 +110,7 @@ impl Rect {
 
 pub use gumicord_uitree::value::Edges;
 
-/// 余白の合計。主軸・交差軸それぞれで引く量を求めるのに使う。
+/// The total padding, to subtract along each axis.
 pub trait EdgesExt {
     fn horizontal(&self) -> f32;
     fn vertical(&self) -> f32;

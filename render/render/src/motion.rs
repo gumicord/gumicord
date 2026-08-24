@@ -447,14 +447,14 @@ mod tests {
         m.apply(&mut node(12.0, Some(100.0)), now);
         assert_eq!(m.tracks.len(), 1);
 
-        // 別のノードだけの木
+        // A tree holding only the other node.
         let mut other = UiNode::new(NodeId::ChatView);
         other.style.transition = Some(100.0);
         m.apply(&mut other, now);
         assert_eq!(m.tracks.len(), 1, "前のは捨てられている");
     }
 
-    /// 出だしが速く、着地が静か
+    /// Quick to leave, quiet to land.
     #[test]
     fn the_curve_starts_fast_and_lands_quietly() {
         assert_eq!(ease_out(0.0), 0.0);

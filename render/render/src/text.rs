@@ -614,11 +614,9 @@ impl TextEngine {
         s.size
     }
 
-    /// The same, for text with mixed decoration.
-    /// **走りの番号が要る** — 走りごとに色が違うためである。
-    ///
-    /// Also returns per-run rects, which paint underlines, strikethroughs and
-    /// spoilers.
+    /// The same, for text with mixed decoration. Also returns per-run rects,
+    /// which paint underlines, strikethroughs and spoilers, and the run index,
+    /// since each run has its own colour.
     pub fn draw_rich_glyphs(
         &mut self,
         device: &wgpu::Device,
@@ -771,16 +769,14 @@ impl Page {
     }
 }
 
-/// How many pages to allow. Each is 16MB, so every page is resident memory.
-/// ので、際限なくは持てない。4 枚で 64MB — 公式 Electron 版より小さい
-/// Reaching this takes a lot of Japanese, emoji and avatars; whether it is
-/// enough is a question for measurement.
+/// How many pages to allow. Each is 16MB of resident memory, so four come to
+/// 64MB — still under the official Electron client. Reaching this takes a lot
+/// of Japanese, emoji and avatars; whether it is enough is for measurement.
 const MAX_PAGES: usize = 4;
 
 struct Atlas {
-    /// The last page is the one being packed into.
-    /// 前のページに戻って隙間を探したりはしない — 探す価値のある隙間は
-    /// Shelf packing leaves little behind.
+    /// The last page is the one being packed into. Earlier pages are never
+    /// revisited; shelf packing leaves little worth going back for.
     pages: Vec<Page>,
     entries: HashMap<AtlasKey, Option<GlyphEntry>>,
     uploaded: usize,
@@ -1538,9 +1534,9 @@ pub fn image_key(url: &str) -> u64 {
 }
 
 impl TextEngine {
-    /// Puts a fetched image in the atlas, once per URL. False when it does
-    /// not fit, and the caller
-    /// **諦めてよい** — 絵が出ないだけで、他は何も壊れない
+    /// Puts a fetched image in the atlas, once per URL. False when it does not
+    /// fit, which the caller may simply drop: the image is missing and nothing
+    /// else breaks.
     pub fn put_image(
         &mut self,
         device: &wgpu::Device,

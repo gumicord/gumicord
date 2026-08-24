@@ -1,21 +1,17 @@
-//! wgpu の初期化と描画の送出。
+//! wgpu setup and submission.
 //!
-//! # バックエンドの探索対象は OS ごとに明示的に絞る
+//! Which backends are searched is narrowed per OS on purpose. An unsupported
+//! backend does not merely make `request_adapter` return `None`: on the S1 test
+//! machine an Intel Vulkan ICD segfaulted while the instance was being created
+//! and took the process with it. Windows tries GL first on measurement — the
+//! same scene resident in 18.1 MB against DX12's 285.7 MB.
 //!
-//! 「対応していないバックエンドは `request_adapter` が `None` を返す」という
-//! 前提は**成り立たない**。S1 の検証機では Intel の Vulkan ICD がインスタンス
-//! 生成中にセグメンテーション違反を起こし、プロセスごと落ちた。
-//!
-//! Windows で GL を先に試すのは S1 の実測による。同一シーンで常駐メモリが
-//! DX12 の 285.7 MB に対し GL は 18.1 MB — **16 倍**の差がある
-//! ([`spec/06-renderer.md`] 10 章)。
-//!
-//! ⚠️ 起動時プローブ (別プロセスでの初期化試行) はロードマップ R7 で、
-//! まだない。壊れたドライバはいまはクライアント本体を道連れにする。
+//! Probing in a separate process at startup is still to come, so a broken
+//! driver still takes the client down with it.
 
 use crate::draw::{DrawList, FLOATS_PER_GLYPH, FLOATS_PER_RECT, RunKind};
 
-/// GPU の準備に失敗した理由。
+/// Why the GPU could not be set up.
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
     #[error("サーフェスを作れない: {0}")]
@@ -28,18 +24,18 @@ pub enum GpuError {
     Incompatible,
 }
 
-/// 1 フレームを表示できたか。
+/// Whether a frame reached the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presented {
-    /// 表示した
+    /// It did.
     Yes,
-    /// 描く必要がなかった (最小化・隠れている)。**再試行しない**
+    /// Nothing to draw, minimised or hidden. Not worth retrying.
     Skipped,
-    /// 表示できなかった。**もう一度描き直しを要求する必要がある**
+    /// It did not. The caller must ask for another redraw.
     Failed,
 }
 
-/// 最初に確保するインスタンス数。足りなくなったら倍にして作り直す
+/// The initial instance capacity; doubled and rebuilt when it runs out.
 const INITIAL_RECTS: usize = 4096;
 const INITIAL_GLYPHS: usize = 16384;
 
@@ -73,8 +69,8 @@ impl Gpu {
         height: u32,
     ) -> Result<Self, GpuError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        // ⚠️ 探索対象を絞るのは**インスタンスを作る前**でなければならない。
-        // 壊れたドライバはアダプタの列挙ではなくインスタンス生成で落ちる
+        // Narrowed before the instance exists: a broken driver crashes while
+        // one is being created, not while adapters are enumerated.
         if std::env::var("WGPU_BACKEND").is_err() {
             desc.backends = CANDIDATES
                 .iter()
@@ -92,8 +88,8 @@ impl Gpu {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("gumicord"),
                 required_features: wgpu::Features::empty(),
-                // downlevel_defaults にしておくと GLES 3.0 級でも通る。
-                // モバイル (M1.2) で困らないための保険でもある
+                // Downlevel defaults still work on GLES 3.0 class hardware,
+                // which mobile will need.
                 required_limits:
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
                 ..Default::default()
@@ -103,7 +99,7 @@ impl Gpu {
             .get_default_config(&adapter, width.max(1), height.max(1))
             .ok_or(GpuError::Incompatible)?;
 
-        // 色の扱いを固定する。EXT-020 の前提 (spec/06-renderer.md 4 章)
+        // Pinned, so every platform draws the same result.
         let caps = surface.get_capabilities(&adapter);
         config.format = caps
             .formats
@@ -171,8 +167,8 @@ impl Gpu {
             ],
         });
 
-        // グリフは物理ピクセルでラスタライズしてあるので拡大縮小しない。
-        // それでも Linear にするのは、位置の端数でにじませたほうが素直なため
+        // Glyphs are rasterised at physical pixel size and never scaled;
+        // linear only so a fractional position blurs rather than snaps.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -202,7 +198,7 @@ impl Gpu {
                         offset: 16,
                         shader_location: 1,
                     },
-                    // 角の半径と枠線の太さ
+                    // Corner radius and border width.
                     wgpu::VertexAttribute {
                         format: wgpu::VertexFormat::Float32x2,
                         offset: 32,
@@ -244,7 +240,7 @@ impl Gpu {
                         offset: 48,
                         shader_location: 3,
                     },
-                    // 角の半径 (物理 px)。**丸いアバターのために要る**
+                    // Corner radius in physical pixels; round avatars need it.
                     wgpu::VertexAttribute {
                         format: wgpu::VertexFormat::Float32,
                         offset: 52,
@@ -302,7 +298,7 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// グリフアトラスを参照する束。アトラスを作り直したら呼び直す。
+    /// The bind group for the glyph atlas; recreate it when the atlas grows.
     pub fn atlas_bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atlas"),
@@ -320,12 +316,11 @@ impl Gpu {
         })
     }
 
-    /// 描き先のテクスチャを取る。
+    /// Acquires the texture to draw into.
     ///
-    /// ⚠️ **リサイズの直後は `Outdated` がほぼ必ず返る。** そこで諦めて
-    /// 帰ると、`ControlFlow::Wait` では次の入力まで窓が空白のままになる
-    /// (実際に「窓の大きさを変えると真っ黒になったまま戻らない」が起きた)。
-    /// 再構成したその場でもう一度だけ試す。
+    /// A resize almost always yields `Outdated` first. Giving up there leaves
+    /// the window blank until the next input under `ControlFlow::Wait`, so it
+    /// reconfigures and tries once more.
     fn acquire(&mut self) -> Result<wgpu::SurfaceTexture, Presented> {
         for attempt in 0..2 {
             match self.surface.get_current_texture() {
@@ -337,8 +332,8 @@ impl Gpu {
                         tracing::debug!("再構成してもサーフェスを取れなかった");
                     }
                 }
-                // 最小化・隠れている。**描き直しを要求してはならない。**
-                // 要求すると隠れている間じゅう回り続ける (NFR-005)
+                // Minimised or hidden. Asking for a redraw here would spin for
+                // as long as it stays hidden.
                 wgpu::CurrentSurfaceTexture::Occluded => return Err(Presented::Skipped),
                 other => {
                     tracing::warn!(?other, "サーフェスを取得できなかった");
@@ -349,16 +344,16 @@ impl Gpu {
         Err(Presented::Failed)
     }
 
-    /// 描画コマンドを送り、表示する。**表示できたかを返す。**
+    /// Submits and presents, reporting whether the frame reached the screen.
     ///
-    /// `clear` はどの色で塗りつぶすか。テーマの `app.window` の背景色を渡す。
+    /// `clear` is the fill colour, taken from the theme's `app.window`.
     ///
-    /// **偽を返したら、呼び出し側はもう一度描き直しを要求する必要がある。**
-    /// `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が来るまで
-    /// 窓が空白のままになる。
+    /// A `Failed` needs another redraw request: under `ControlFlow::Wait`,
+    /// giving up leaves the window blank until the next input.
+    ///
+    /// One bind group per atlas page, since a bind group names a single
+    /// texture.
     #[must_use]
-    /// ⚠️ `atlas_binds` はページごとに 1 つ。**束ねは 1 枚のテクスチャしか
-    /// 指せない**ので、ページが違えば描く束も分かれる
     pub fn submit(
         &mut self,
         dl: &DrawList,
@@ -433,7 +428,7 @@ impl Gpu {
                 if let Some(s) = run.scissor
                     && (s[2] == 0 || s[3] == 0)
                 {
-                    // 潰れた切り取り。描くものはない
+                    // A collapsed clip has nothing inside it.
                     continue;
                 }
 
@@ -447,8 +442,8 @@ impl Gpu {
                         RunKind::Glyph => {
                             pass.set_pipeline(&self.text_pipeline);
                             pass.set_bind_group(0, &self.globals_bind, &[]);
-                            // ⚠️ ページが無ければ描かない。**1 枚目で
-                            // 代用すると、別の字が出る**
+                            // A missing page is skipped; page zero would draw
+                            // the wrong characters.
                             let Some(bind) = atlas_binds.get(run.page as usize) else {
                                 continue;
                             };
@@ -496,10 +491,7 @@ impl Gpu {
     }
 }
 
-/// 探索するバックエンドを**優先順に**並べたもの。
-///
-/// [`spec/06-renderer.md`] 10.1 の表そのままである。
-/// Windows で Vulkan を探索しないのは S1 の発見による。
+/// The backends to try, in order. Windows omits Vulkan after the S1 crash.
 #[cfg(target_os = "windows")]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::DX12];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -514,10 +506,10 @@ const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::VULK
 )))]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::VULKAN, wgpu::Backends::GL];
 
-/// [`CANDIDATES`] の順にアダプタを選ぶ。
+/// Picks an adapter in candidate order.
 ///
-/// `request_adapter` に任せるとどれが選ばれるかは wgpu の都合で決まる。
-/// Windows で GL が DX12 より 16 倍軽い以上、そこは任せられない。
+/// Left to `request_adapter`, the choice is wgpu's; with GL sixteen times
+/// lighter than DX12 on Windows, it is not a choice to delegate.
 fn pick_adapter(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'_>,
@@ -536,8 +528,7 @@ fn pick_adapter(
             return Some(a.clone());
         }
     }
-    // 絞り込みで取れなければ、何でもよいから探す。
-    // WGPU_BACKEND で明示的に指定された場合もここに来る
+    // Failing that, anything will do. An explicit `WGPU_BACKEND` lands here.
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: Some(surface),
@@ -588,19 +579,19 @@ fn make_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                // ストレートアルファ。EXT-024 (半透明合成の保証)
+                // Straight alpha, so translucency composites predictably.
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
         primitive: wgpu::PrimitiveState {
-            // 頂点バッファを持たず、vertex_index から 4 頂点を作る
+            // No vertex buffer; four vertices come from the vertex index.
             topology: wgpu::PrimitiveTopology::TriangleStrip,
             ..Default::default()
         },
-        // 深度を使わない。描画順がそのまま重なり順 (EXT-024)
+        // No depth: submission order is stacking order.
         depth_stencil: None,
-        // MSAA を使わない。fwidth による解析的 AA で足り、DPI に自動追従する
+        // No MSAA: analytic AA from `fwidth` suffices and follows the DPI.
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,

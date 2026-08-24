@@ -1,47 +1,32 @@
-//! アイコン。**フォントのグリフではなくテクスチャとして持つ。**
+//! Icons, drawn as textures rather than font glyphs.
 //!
-//! # なぜフォントを使わないのか
+//! Spelling the title bar buttons as `−` `□` `✕` leaves their weight and size
+//! to the typeface and off the pixel grid; three of them failing to line up is
+//! correct as text and wrong as icons. Segoe Fluent Icons would look like this
+//! only on Windows, where every platform is meant to draw the same result.
 //!
-//! タイトルバーの最小化・最大化・閉じるを `−` `□` `✕` の文字で描くと、
-//! 太さも大きさも書体任せになり、ピクセルグリッドにも乗らない。3 つ並べた
-//! ときに揃わないのは、字としては正しくてもアイコンとしては誤りである。
-//!
-//! Windows には Segoe Fluent Icons があるが、それを使うと Windows でしか
-//! 同じ見た目にならず `EXT-020` (全プラットフォームで同一の描画結果) と
-//! 正面から衝突する。
-//!
-//! [`spec/06-renderer.md`] 2.1 の「汎用のパスやベジェ曲線は持たない。必要に
-//! なったらアイコンをテクスチャとして持つ」がそのままここの方針である。
-//!
-//! # 折れ線を CPU でラスタライズする
-//!
-//! アイコンは単位正方形 (0.0〜1.0) 上の**折れ線**として定義する。描画に要る
-//! 物理ピクセルの大きさが決まった時点でラスタライズし、グリフと同じアトラスへ
-//! 載せる。
-//!
-//! SVG を読まないのは、パーサとパス塗りつぶしを持ち込む必要があるからである。
-//! いま要るのは線分の集まりだけで、それは点と線分の距離で書ける。
-//!
-//! **結果は環境に依存しない。** 同じ大きさなら全プラットフォームで 1 ビットも
-//! 違わない (`EXT-020`)。
+//! Each icon is a set of polylines on the unit square, rasterised once its
+//! pixel size is known and packed into the glyph atlas. SVG would bring a
+//! parser and a path filler; line segments need only a point-to-segment
+//! distance, and give the same bits everywhere.
 
-/// 単位正方形の上に置かれた折れ線の集まり。
+/// Polylines on the unit square.
 #[derive(Debug, Clone, Copy)]
 pub struct IconDef {
-    /// 折れ線。各要素が 1 本の連続した線
+    /// Each element is one continuous line.
     strokes: &'static [&'static [(f32, f32)]],
-    /// 線の太さ (単位正方形に対する比)
+    /// Stroke width, relative to the unit square.
     width: f32,
 }
 
-/// 名前とアイコンの対応。**これが公開しているアイコンの一覧である。**
+/// The icons this exposes, by name.
 pub static ICONS: &[(&str, IconDef)] = &[
     ("window.minimize", WINDOW_MINIMIZE),
     ("window.maximize", WINDOW_MAXIMIZE),
     ("window.restore", WINDOW_RESTORE),
     ("window.close", WINDOW_CLOSE),
-    // ⚠️ 同じ絵だが、名前が違えば意味が違う。タイトルバーの外で
-    // `window.close` と書くと「窓を閉じる」に読める
+    // The same drawing, but `window.close` outside the title bar would read as
+    // closing the window.
     ("close", WINDOW_CLOSE),
     ("channel.text", CHANNEL_TEXT),
     ("channel.voice", CHANNEL_VOICE),
@@ -58,14 +43,11 @@ pub static ICONS: &[(&str, IconDef)] = &[
     ("logout", LOGOUT),
 ];
 
-/// 名前からアイコンを引く。返すのは**正規化された名前**とその定義。
+/// Looks an icon up, returning the interned name alongside it so the atlas can
+/// key on a `&'static str` rather than the caller's per-frame `String`.
 ///
-/// 名前を返すのは、アトラスの鍵に `&'static str` を使いたいからである。
-/// 呼び出し側が持っているのは毎フレーム作られる `String` なので、そのまま
-/// 鍵にすると割り当てが増える。
-///
-/// **知らない名前は誤りではない。** 新しいクライアント向けに書かれた
-/// プラグインを古いクライアントで動かすと起こりうる。描かずに進む。
+/// An unknown name is not an error: a plugin written for a newer client can ask
+/// for one. Nothing is drawn.
 pub fn lookup(name: &str) -> Option<(&'static str, &'static IconDef)> {
     ICONS
         .iter()
@@ -73,11 +55,11 @@ pub fn lookup(name: &str) -> Option<(&'static str, &'static IconDef)> {
         .map(|(n, def)| (*n, def))
 }
 
-// ─────────────────────────────────────────────────────────── 定義
+// ─────────────────────────────────────────────────────────── Definitions
 //
-// ⚠️ 「あったほうが便利かもしれない」で足さない。使う場所ができてから足す。
+// Added when something uses them, not when they might be handy.
 
-/// 線の標準の太さ。12px のアイコンでちょうど 1px になる
+/// The usual width: exactly 1px on a 12px icon.
 const W: f32 = 1.0 / 12.0;
 
 const WINDOW_MINIMIZE: IconDef = IconDef {
@@ -96,7 +78,7 @@ const WINDOW_MAXIMIZE: IconDef = IconDef {
     width: W,
 };
 
-/// 最大化されているときの「元に戻す」。四角が 2 枚重なった形
+/// Restore from maximised: two overlapping squares.
 const WINDOW_RESTORE: IconDef = IconDef {
     strokes: &[
         &[
@@ -122,7 +104,7 @@ const WINDOW_CLOSE: IconDef = IconDef {
     width: W,
 };
 
-/// `#`。縦棒はわずかに傾ける。まっすぐだと記号ではなく格子に見える
+/// A `#`. The uprights lean slightly; upright they read as a grid.
 const CHANNEL_TEXT: IconDef = IconDef {
     strokes: &[
         &[(0.42, 0.08), (0.30, 0.92)],
@@ -133,7 +115,7 @@ const CHANNEL_TEXT: IconDef = IconDef {
     width: 1.2 / 12.0,
 };
 
-/// スピーカー。四角と、右へ広がる 2 本の弧の代わりの斜線
+/// A speaker: a box, and two slashes standing in for sound waves.
 const CHANNEL_VOICE: IconDef = IconDef {
     strokes: &[
         &[
@@ -151,12 +133,8 @@ const CHANNEL_VOICE: IconDef = IconDef {
     width: 1.2 / 12.0,
 };
 
-/// 書類挟み。**開いたフォルダの見出しに使う**。
-///
-/// 中身を 2×2 で敷き詰めた閉じた姿と並ぶので、**閉じた姿と間違えようが
-/// ない形**でなければならない。つまみを左上に出して輪郭だけで描く
-/// 重なった 2 枚の紙。**後ろの紙は角だけを出す** — 全部描くと、
-/// 小さくしたときに線が潰れて 1 枚の四角に見える
+/// Two sheets of paper. Only a corner of the back one shows; drawn in full it
+/// collapses into a single square at small sizes.
 const COPY: IconDef = IconDef {
     strokes: &[
         &[
@@ -171,14 +149,14 @@ const COPY: IconDef = IconDef {
     width: 1.2 / 12.0,
 };
 
-/// 済んだ印
+/// A tick.
 const CHECK: IconDef = IconDef {
     strokes: &[&[(0.20, 0.52), (0.42, 0.74), (0.80, 0.28)]],
     width: 1.4 / 12.0,
 };
 
-/// 角丸の枠に線 2 本。**番号そのものは描かない** — 桁数で形が変わると、
-/// 並んだときに揃わない
+/// A rounded frame with two lines. No digits: a shape that changes with the
+/// number of them will not line up beside its neighbours.
 const ID: IconDef = IconDef {
     strokes: &[
         &[
@@ -194,7 +172,7 @@ const ID: IconDef = IconDef {
     width: 1.2 / 12.0,
 };
 
-/// 左へ曲がる矢印。**返信は「戻す」向き**である
+/// An arrow turning left; a reply goes back.
 const REPLY: IconDef = IconDef {
     strokes: &[
         &[(0.38, 0.26), (0.16, 0.46), (0.38, 0.66)],
@@ -203,8 +181,7 @@ const REPLY: IconDef = IconDef {
     width: 1.2 / 12.0,
 };
 
-/// 斜めの筆。**先を尖らせない** — 小さくすると尖りは潰れて、
-/// ただ線が太く見えるだけになる
+/// A slanted pen, with a blunt tip: a point just thickens the line when small.
 const EDIT: IconDef = IconDef {
     strokes: &[
         &[
@@ -220,7 +197,7 @@ const EDIT: IconDef = IconDef {
     width: 1.1 / 12.0,
 };
 
-/// 蓋と胴。**中の縦線は描かない** — 小さくすると潰れて黒い塊になる
+/// A lid and a body. No lines inside; they merge into a blob when small.
 const TRASH: IconDef = IconDef {
     strokes: &[
         &[(0.16, 0.30), (0.84, 0.30)],
@@ -230,7 +207,7 @@ const TRASH: IconDef = IconDef {
     width: 1.1 / 12.0,
 };
 
-/// 鋏
+/// Scissors.
 const CUT: IconDef = IconDef {
     strokes: &[
         &[(0.24, 0.16), (0.66, 0.66)],
@@ -253,7 +230,7 @@ const CUT: IconDef = IconDef {
     width: 1.0 / 12.0,
 };
 
-/// クリップボードと紙
+/// A clipboard and a sheet.
 const PASTE: IconDef = IconDef {
     strokes: &[
         &[(0.24, 0.24), (0.24, 0.84), (0.76, 0.84), (0.76, 0.24)],
@@ -270,7 +247,7 @@ const PASTE: IconDef = IconDef {
     width: 1.1 / 12.0,
 };
 
-/// 全部の行に掛かる枠
+/// A frame around every line.
 /// A door with an arrow leaving through it.
 const LOGOUT: IconDef = IconDef {
     strokes: &[
@@ -297,6 +274,9 @@ const SELECT_ALL: IconDef = IconDef {
     width: 1.1 / 12.0,
 };
 
+/// A folder, used as an open folder's heading. It sits beside the closed form,
+/// which is a 2x2 of its contents, so it must not be mistakable for it: outline
+/// only, with the tab at the top left.
 const FOLDER: IconDef = IconDef {
     strokes: &[&[
         (0.14, 0.76),
@@ -310,23 +290,22 @@ const FOLDER: IconDef = IconDef {
     width: 1.2 / 12.0,
 };
 
-// ─────────────────────────────────────────────────────── ラスタライズ
+// ─────────────────────────────────────────────────────── Rasterising
 
 impl IconDef {
-    /// 一辺 `size` ピクセルの RGBA8 マスクを作る。
+    /// Rasterises a `size` square RGBA8 mask.
     ///
-    /// グリフと同じ扱いにするため `(255, 255, 255, alpha)` で返す。色は
-    /// シェーダが掛ける ([`spec/06-renderer.md`] 6.1)。
+    /// White with an alpha, like a glyph, so the shader applies the colour.
     pub fn rasterize(&self, size: u32) -> Vec<u8> {
         let n = size.max(1);
         let mut out = vec![0u8; (n * n * 4) as usize];
-        // 単位正方形での距離をピクセルへ直すための倍率
+        // Scales a unit-square distance into pixels.
         let s = n as f32;
         let half = self.width * s * 0.5;
 
         for y in 0..n {
             for x in 0..n {
-                // ピクセルの中心で測る
+                // Measured at the pixel centre.
                 let px = (x as f32 + 0.5) / s;
                 let py = (y as f32 + 0.5) / s;
 
@@ -337,8 +316,8 @@ impl IconDef {
                     }
                 }
 
-                // 距離をピクセルに直し、1px の傾斜でアンチエイリアスする。
-                // fwidth が使えない CPU 側では、これが素直で環境にも依存しない
+                // A 1px ramp antialiases the edge. Without `fwidth` on the CPU
+                // side this is both the plain way and a portable one.
                 let alpha = (half - d * s + 0.5).clamp(0.0, 1.0);
                 if alpha <= 0.0 {
                     continue;
@@ -354,7 +333,7 @@ impl IconDef {
     }
 }
 
-/// 点と線分の距離。折れ線の継ぎ目と端は丸くなる。
+/// Point-to-segment distance, which rounds joins and ends.
 fn distance_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     let (ax, ay) = a;
     let (bx, by) = b;
@@ -362,7 +341,7 @@ fn distance_to_segment(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
     let (wx, wy) = (px - ax, py - ay);
 
     let len2 = vx * vx + vy * vy;
-    // 長さ 0 の線分は点として扱う
+    // A zero-length segment is a point.
     let t = if len2 <= f32::EPSILON {
         0.0
     } else {
@@ -384,8 +363,7 @@ mod tests {
         assert!(lookup("まだ存在しないアイコン").is_none());
     }
 
-    /// すべての制御点が単位正方形に収まっていること。
-    /// はみ出すと切れたアイコンになる
+    /// Every point stays inside the unit square; outside it the icon is clipped.
     #[test]
     fn control_points_stay_inside_the_unit_square() {
         for (name, def) in ICONS {
@@ -400,7 +378,7 @@ mod tests {
         }
     }
 
-    /// 一覧に重複がないこと。あると先に書いたほうしか引けない
+    /// No duplicate names; only the first would ever be found.
     #[test]
     fn names_are_unique() {
         let mut seen = std::collections::HashSet::new();
@@ -411,28 +389,28 @@ mod tests {
 
     #[test]
     fn distance_to_a_segment_is_measured_from_the_nearest_point() {
-        // 線分の真横
+        // Beside the segment.
         let d = distance_to_segment(0.5, 0.0, (0.0, 0.0), (1.0, 0.0));
         assert!(d.abs() < 1e-6);
-        // 線分の外側は端点からの距離になる (端が丸い)
+        // Past the end, the distance is to the endpoint, so ends are round.
         let d = distance_to_segment(2.0, 0.0, (0.0, 0.0), (1.0, 0.0));
         assert!((d - 1.0).abs() < 1e-6);
     }
 
-    /// 描いたものが実際に不透明な画素を持つこと。
-    /// 太さや座標を間違えると真っ白なまま気づけない
+    /// Every icon actually marks pixels; a bad width or coordinate would leave
+    /// a blank that nothing else catches.
     #[test]
     fn rasterising_produces_visible_pixels() {
         for (name, def) in ICONS {
             let px = def.rasterize(16);
             let opaque = px.chunks(4).filter(|p| p[3] > 128).count();
             assert!(opaque > 4, "{name}: 濃い画素が {opaque} 個しかない");
-            // 全部塗りつぶしてしまっていないこと
+            // And does not fill the whole square.
             assert!(opaque < 16 * 16 / 2, "{name}: 塗りすぎ ({opaque})");
         }
     }
 
-    /// 同じ大きさなら毎回同じ結果になること (`EXT-020` の前提)
+    /// The same size gives the same bits every time.
     #[test]
     fn rasterising_is_deterministic() {
         let (_, def) = lookup("window.close").unwrap();
