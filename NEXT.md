@@ -103,63 +103,59 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 
 ---
 
-## 4. コードを英語にする — 途中である
+## 4. ~~コードを英語にする~~ ✅ 終わった
 
 2026-08-24 に決めた規則
 ([`spec/README.md`](spec/README.md#6-コードは英語仕様は日本語))。
-**識別子は全部終わった。コメントは半分残っている。**
+**識別子もコメントも全部終わった。**
 
 | | |
 |---|---|
-| 識別子 (試験関数名 159 個ほか) | ✅ **全部終わった。** 日本語の識別子はもう 1 つも無い |
-| `core/model` `core/rest` `core/markdown` `core/uitree` `core/plugin` | ✅ |
-| `core/store/lib.rs` `core/gateway/gateway.rs` | ✅ |
-| `app/core` 全部 (`lib.rs` `live.rs` `session.rs` `menu.rs` `markdown.rs`) | ✅ |
-| `render/render/{text,layout,draw,intrinsic}.rs` | ✅ |
-| `render/platform/{window,clock,clipboard,lib}.rs` | ✅ |
-| `.md` (`spec/` と `NEXT.md` 以外) と `.github/workflows/ci.yml` | ✅ 英語にした |
+| 識別子 (試験関数名 159 個ほか) | ✅ 日本語の識別子はもう 1 つも無い |
+| `core/*` 全部 (`model` `rest` `markdown` `uitree` `plugin` `store` `gateway` `theme`) | ✅ |
+| `app/core` `app/desktop` 全部 | ✅ |
+| `render/render` `render/platform` 全部 | ✅ |
+| `xtask/*` — コメントも画面に出る文字も | ✅ |
+| `sdk/src/*.ts` `sdk/test/*` `spec/schema/validate.mjs` | ✅ |
+| `spike/s1`〜`s4` (ワークスペース外の捨てコード) | ✅ |
+| `Cargo.toml` `.cargo/config.toml` の注釈 | ✅ |
+| `.md` (`spec/` と `NEXT.md` 以外) と `.github/workflows/ci.yml` | ✅ |
 | コミットメッセージ | ✅ これから英語 |
-| **残り** | 下の表。**約 1,600 行** |
 
-```text
-  125  core/gateway/src/guild_order.rs
-  116  core/store/src/db.rs
-  107  render/render/src/lib.rs
-  100  render/render/src/motion.rs
-   80  core/gateway/src/member_list.rs
-   78  core/theme/src/lib.rs
-   71  app/core/src/images.rs
-   70  render/render/src/icon.rs
-   70  core/gateway/src/status.rs
-   68  core/theme/src/parse.rs
-   63  render/platform/src/secret.rs
-   61  core/gateway/src/remote_auth.rs
-   55  render/render/src/gpu.rs
-  ...  core/theme/{resolve,token,cond,diag}.rs,
-       render/platform/text_input/*, xtask/*,
-       core/gateway/{zstd_stream,proto}.rs, app/desktop/main.rs
-```
-
-数え直す:
-
-```text
-  grep -rn '^\s*//' --include=*.rs core app render xtask | grep -c '[ぁ-んァ-ヶ一-龠]'
-```
-
-⚠️ **`grep` の文字クラスは `—` (em dash) も拾う。** 英語に直した後の
-ファイルにも数行残るので、数えるときは目で見ること。
-
-⚠️ **残すもの**:
+**日本語のまま残したもの** (意図的である):
 
 - 画面に出る文字 (「やめる」「@不明なユーザー」「3 分前」の単位)
-- `RestError` の `Display` — あれはログイン画面に「失敗しました: …」と出る
+- `#[error(...)]` の文言 — `RestError` はログイン画面に、`GpuError` と
+  `SecretError` は起動できなかったときに、そのまま利用者へ出る
 - `AssetRefError` の説明 — テーマを書いた人に見せる診断である
 - `core/uitree/src/ids.rs` の説明文 — `cargo xtask gen` が
   `spec/03-uitree.md` の表に書き込む中身である
+- `xtask/src/uitree.rs` が Markdown を組み立てる文字列 — 同上
+- `spike/s2` の IME の例 (こんにちは → 今日は → コンニチハ) — 挙動そのもの
+- `Cargo.toml` の `authors`
+
+数え直す (コメント行だけを見る):
+
+```text
+  node -e 'const fs=require("fs"),re=/[぀-ヿ一-鿿]/,cp=require("child_process");
+  for(const f of cp.execSync("git ls-files",{encoding:"utf8"}).trim().split("\n")
+      .filter(f=>/\.(rs|ts|mjs|js|toml|yml)$/.test(f)))
+    fs.readFileSync(f,"utf8").split(/\r?\n/).forEach((l,i)=>{
+      if(/^\s*(\/\/|\*|#)/.test(l)&&re.test(l))console.log(f+":"+(i+1)+": "+l.trim())})'
+```
+
+⚠️ **`grep` の文字クラスは使わないこと。** `[ぁ-んァ-ヶ一-龠]` は `—`
+(em dash) も拾うし、Git Bash の `grep -P` は `\x{3040}` を受け取らない。
 
 ⚠️ **モジュールの説明を丸ごと差し替えるときは `use` を巻き込まないこと。**
 2 回やった (`core/store/src/lib.rs` は `pub mod db;` ごと消えて CI が落ちた)。
 **1 ファイル直すたびに `cargo check` を通すこと。**
+
+⚠️ 差し替えの途中で壊れたものが 3 つあった。同じことをするときは見ること。
+
+- `render/render/src/icon.rs` — `FOLDER` の説明が `COPY` に付いていた
+- `render/render/src/gpu.rs` — `#[must_use]` が doc コメントの途中に挟まっていた
+- `app/core/src/lib.rs` — 英語と日本語が 1 行の中で混ざっていた
 
 ---
 

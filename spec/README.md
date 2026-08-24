@@ -68,11 +68,21 @@ ADR は原則として書き換えない。決定を覆すときは新しい ADR
 | 識別子 (型・関数・変数・定数・モジュール) | **英語のみ。** Rust の命名規則に従う (`snake_case` / `CamelCase` / `SCREAMING_SNAKE_CASE`) |
 | コメント | **英語のみ。最小限。** |
 | `tracing` のログ | **英語** |
-| CI の設定 (`.github/`) | **英語** |
+| `cargo xtask` と `sdk/test` が画面に出す文字 | **英語**。開発者しか見ない |
+| CI の設定 (`.github/`) と `Cargo.toml` `.cargo/config.toml` の注釈 | **英語** |
+| `sdk/` の TypeScript (プラグイン作者が読む) | **英語** |
 | `README.md` など `spec/` の外の `.md` | **英語**。外から読まれる |
 | コミットメッセージ | **英語** |
 | 利用者に見える文字列 | **いまは日本語**。下の「i18n」を見よ |
 | 仕様書 (`spec/`) と ADR と [`NEXT.md`](../NEXT.md) | **日本語** |
+
+**日本語のまま残すもの** — どれも「利用者に見える文字列」である:
+
+- `#[error(...)]` の文言。`RestError` はログイン画面に、`GpuError` と
+  `SecretError` は起動できなかったときに、そのまま出る
+- `AssetRefError` の説明。テーマを書いた人に見せる診断である
+- `core/uitree/src/ids.rs` の説明文と、それを `spec/03-uitree.md` の表へ
+  書き込む `xtask/src/uitree.rs` の組み立て文字列
 
 #### コメントは「なぜ」だけを書く
 
