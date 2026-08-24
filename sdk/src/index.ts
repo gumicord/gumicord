@@ -1,11 +1,10 @@
 /**
- * `@gumicord/sdk` — Gumicord プラグイン SDK。
+ * `@gumicord/sdk` — the Gumicord plugin SDK.
  *
- * プラグインが触れるのはこのモジュールだけである。ホストが注入する生の
- * オブジェクトは公開しない。この間接層があることで、ホスト API を変えても
- * SDK 側で吸収できる。
- *
- * 仕様: `spec/05-plugin-api.md`
+ * This module is all a plugin touches; the raw object the host injects is
+ * never exposed. The indirection lets the host API change without the
+ * plugins changing with it.
+ * See `spec/05-plugin-api.md`.
  */
 
 export type {
@@ -28,11 +27,11 @@ import type { CreatableNodeId, NewUINode, NodeId, PatchFn, UINode } from "./uitr
 import { registerPatch } from "./runtime.js";
 
 /**
- * ホストが注入する唯一のオブジェクト。
+ * The only object the host injects.
  *
- * ⚠️ **プラグインからは見せない。** ここに無いものはプラグインから到達
- * できない。ケイパビリティは権限チェックのコードではなく「注入しないこと」で
- * 実装されている (`SEC-010`, `SEC-015`)。
+ * Never shown to a plugin. What is not here cannot be reached: a
+ * capability is implemented by not injecting it, not by a permission
+ * check.
  */
 declare const __gumicord_host: {
   log(level: string, msg: string): void;
@@ -44,70 +43,70 @@ declare const __gumicord_host: {
 
 export const ui = {
   /**
-   * 安定 ID に対してノード変換を登録する (`EXT-032`)。
+   * Registers a node transform against a stable ID.
    *
-   * 適用の意味論 (`spec/05-plugin-api.md` 2 章):
-   * - 走査は**ボトムアップ**。子が先、自分が後
-   * - 照合は**パッチ適用前の**安定 ID に対して行う
-   * - **パッチの出力に再帰しない。** 出力は最終形として扱う
-   * - 同一ノードへの複数パッチは**登録順**に連鎖する
+   * How it applies:
+   * - traversal is bottom-up, children before their parent
+   * - matching uses the stable ID as it was before any patch
+   * - a patch's output is not recursed into; it is final
+   * - several patches on one node chain in registration order
    *
-   * したがって自分のパッチは、そのノード 1 つにつき**ちょうど 1 回**呼ばれる。
+   * So a patch runs exactly once per node.
    *
-   * ⚠️ 存在しないノード (モバイルにおける `chrome.*` など) に登録しても
-   * エラーにはならず、単に呼ばれない。事前に分岐したいときは {@link exists}。
+   * Registering against a node that does not exist here (`chrome.*` on
+   * mobile) is not an error; it simply never runs. To branch beforehand,
+   * use {@link exists}.
+   * Virtualisation means offscreen nodes are never visited (rule V1), so
+   * nothing can walk every message. Use Gateway event middleware instead.
    *
-   * ⚠️ 仮想化により、**画面外のノードには呼ばれない** (規則 V1)。全メッセージを
-   * 走査するような処理は書けない。代わりに Gateway イベントのミドルウェアを使う。
+   * `fn` must be pure (rule P7): how many times it runs for one message is
+   * not defined, since it runs again each time the node leaves the screen
+   * and comes back, and a side effect would not add up.
    *
-   * ⚠️ **`fn` は純粋関数でなければならない (規則 P7)。**
-   * 同じメッセージに対して何度呼ばれるかは決まっていない。画面外へ出て戻る
-   * たびに呼び直されるため、副作用を書くと数が合わなくなる。
-   *
-   * `ctx.data` の型は `id` から決まる。`chat.message.header.author` に
-   * 登録すれば `ctx.data.author.bot` が型安全に読める。
+   * `ctx.data` is typed from `id`, so registering against
+   * `chat.message.header.author` types `ctx.data.author.bot`.
    */
   patch<Id extends NodeId>(id: Id, fn: PatchFn<Id>): void {
     registerPatch(id, fn as PatchFn);
   },
 
   /**
-   * そのノードが現在の環境に存在しうるかを返す。
+   * Whether the node can exist in this environment.
    *
-   * `chrome.*` はモバイルに存在しない。存在しない ID にパッチを登録しても
-   * エラーにはならず単に呼ばれないが、事前に分岐したいときに使う。
+   * `chrome.*` does not exist on mobile. Patching a missing ID is harmless,
+   * so this is only for branching beforehand.
    */
   exists(id: NodeId): boolean {
     return __gumicord_host.node_exists(id);
   },
 
   /**
-   * ノードを別のノードの子として包む。
+   * Wraps a node as the child of another.
    *
-   * ⚠️ `wrapper` に中核 ID (`chat.*` など) は使えない。
-   * プラグインは受け取ったノードを変形するのであって、中核ノードを製造しない
+   * `wrapper` cannot be a core ID such as `chat.*`: a plugin transforms the
+   * nodes it is given, it does not manufacture core ones.
    * (`spec/03-uitree.md` 8.2)。
    */
   wrap(node: UINode, wrapper: Omit<NewUINode, "children">): UINode {
     return { ...wrapper, children: [node] };
   },
 
-  /** ノードの直後に兄弟を足す */
+  /** Adds a sibling after the node. */
   after(node: UINode, sibling: UINode): UINode {
     return { id: "layout.row", children: [node, sibling] };
   },
 
-  /** ノードの直前に兄弟を足す */
+  /** Adds a sibling before the node. */
   before(node: UINode, sibling: UINode): UINode {
     return { id: "layout.row", children: [sibling, node] };
   },
 
-  /** ノードを縦に並べる */
+  /** Stacks nodes vertically. */
   stack(nodes: UINode[]): UINode {
     return { id: "layout.column", children: nodes };
   },
 
-  /** 任意の生成可能ノードを作る。プラグイン固有の ID を使うときに */
+  /** Creates any creatable node, for a plugin's own IDs. */
   node(id: CreatableNodeId, props?: Record<string, unknown>, children?: UINode[]): NewUINode {
     const n: NewUINode = { id };
     if (props) n.props = props;
@@ -139,9 +138,9 @@ export const log = {
 };
 
 /**
- * プラグインごとに分離された永続ストレージ (`EXT-036`, `SEC-014`)。
+ * Persistent storage, separate per plugin.
  *
- * ホスト側にあるため、プラグインの再読み込み (`Context` の再生成) を跨いで残る。
+ * It lives in the host, so it survives a plugin reload.
  */
 export const storage = {
   get: (key: string): string | null => __gumicord_host.storage_get(key),

@@ -1,7 +1,7 @@
 {
   "name": "@gumicord/sdk",
   "version": "0.0.0",
-  "description": "Gumicord プラグイン SDK",
+  "description": "Gumicord plugin SDK",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

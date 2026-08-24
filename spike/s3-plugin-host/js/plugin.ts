@@ -1,5 +1,5 @@
-// スパイク S3: サンプルプラグイン。
-// BetterDiscord / Vencord の作者がそのまま書ける形になっているかを見る。
+// Spike S3: a sample plugin, written the way a
+// BetterDiscord or Vencord author would, to see whether that works.
 
 import { ui, log, storage, type UINode } from "./sdk";
 
@@ -7,7 +7,7 @@ log.info("plugin loaded");
 
 let patched = 0;
 
-// 送信者名の後ろに BOT バッジを足す
+// A BOT badge after the author name.
 ui.patch("chat.message.header.author", (node, ctx) => {
   patched++;
   const author = ctx.data?.author as { bot?: boolean } | undefined;
@@ -15,22 +15,22 @@ ui.patch("chat.message.header.author", (node, ctx) => {
   return ui.after(node, ui.badge({ text: "BOT", tone: "accent" }));
 });
 
-// メッセージ本文を包んで翻訳ボタンを付ける
+// Wraps the body and adds a translate button.
 ui.patch("chat.message.content", (node) => {
   patched++;
   return ui.wrap(node, { id: "layout.column", props: { gap: 4 } });
 });
 
-// 起動回数を永続ストレージに記録する (EXT-036)
+// Counts starts in persistent storage.
 const n = Number(storage.get("launches") ?? "0") + 1;
 storage.set("launches", String(n));
 log.info(`launch #${n}`);
 
-// ホストが統計を取れるようにする
+// Lets the host collect statistics.
 (globalThis as any).__plugin_stats = () => ({ patched });
 
-// --- サンドボックス検証用 (SEC-015) ---
-// これらが到達可能ならサンドボックスが破れている
+// --- For the sandbox check ---
+// Reaching any of these means the sandbox leaks.
 (globalThis as any).__probe_globals = (): string[] => {
   const dangerous = [
     "require",
@@ -52,16 +52,16 @@ log.info(`launch #${n}`);
 (globalThis as any).__all_globals = (): string[] =>
   Object.getOwnPropertyNames(globalThis).sort();
 
-// --- 暴走プラグインの検証用 (EXT-051) ---
+// --- For the runaway-plugin check ---
 (globalThis as any).__infinite_loop = () => {
   let x = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) x++;
 };
 
-// --- 例外隔離の検証用 (EXT-050) ---
+// --- For the exception-isolation check ---
 (globalThis as any).__throw = () => {
-  throw new Error("プラグインが投げた例外");
+  throw new Error("thrown by the plugin");
 };
 
 export type { UINode };

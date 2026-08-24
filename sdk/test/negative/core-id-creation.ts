@@ -1,3 +1,3 @@
-// プラグインが中核 ID を製造してはいけない (spec/03-uitree.md 8.2)
+// A plugin must not manufacture a core ID.
 import { ui } from "../../src/index.js";
 ui.patch("chat.message.content", (node) => ui.wrap(node, { id: "chat.message" }));

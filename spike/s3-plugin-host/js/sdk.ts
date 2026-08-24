@@ -1,10 +1,10 @@
-// スパイク S3: @gumicord/sdk の最小形。
+// Spike S3: the smallest @gumicord/sdk.
 //
-// ホスト (Rust) が注入するのは `__gumicord_host` ただ 1 つ。
-// SDK はその薄いラッパであり、プラグイン作者はホストの生 API を直接触らない。
-// この間接層があることで、ホスト API を変えても SDK 側で吸収できる。
+// The Rust host injects only `__gumicord_host`. The SDK is a thin wrapper
+// over it, so a plugin author never touches the host's raw API and the
+// host API can change without the plugins changing with it.
 
-/** ホストが注入する唯一のオブジェクト。プラグインからは見せない。 */
+/** The only object the host injects. Never shown to a plugin. */
 declare const __gumicord_host: {
   log(level: string, msg: string): void;
   storage_get(key: string): string | null;
@@ -14,9 +14,9 @@ declare const __gumicord_host: {
 // ---------------------------------------------------------------- UITree
 
 /**
- * UITree のノード。
- * `id` は spec/03-uitree.md が定める安定 ID。実装では文字列リテラル型にして
- * 存在しない ID をビルド時に落とす (EXT-002)。
+ * A UITree node.
+ * `id` is a stable ID from spec/03-uitree.md. The real one uses string
+ * literal types, so an unknown ID fails to build.
  */
 export interface UINode {
   id: string;
@@ -27,37 +27,37 @@ export interface UINode {
 export type PatchFn = (node: UINode, ctx: PatchContext) => UINode;
 
 export interface PatchContext {
-  /** そのノードが表現しているドメインオブジェクト */
+  /** The domain object this node stands for. */
   data?: Record<string, unknown>;
 }
 
-// ---------------------------------------------------------------- ランタイム
+// ---------------------------------------------------------------- Runtime
 
 /**
- * 登録されたパッチ。ホストはこの Map を直接は触らず、`__apply` 経由で呼ぶ。
- * ホスト側から巨大な UITree を毎回渡すのを避けるため、走査は JS 側で行う。
+ * The registered patches. The host reaches them through `__apply`, not
+ * this map, and the walking happens here so a whole UITree need not cross
  */
 const patches = new Map<string, PatchFn[]>();
 
 export const ui = {
-  /** 安定 ID に対してノード変換を登録する (EXT-032) */
+  /** Registers a node transform against a stable ID. */
   patch(id: string, fn: PatchFn): void {
     const list = patches.get(id);
     if (list) list.push(fn);
     else patches.set(id, [fn]);
   },
 
-  /** ノードを別のノードで包む */
+  /** Wraps a node in another. */
   wrap(node: UINode, wrapper: UINode): UINode {
     return { ...wrapper, children: [node] };
   },
 
-  /** ノードの直後に兄弟を足す (親が受け取る想定の簡易版) */
+  /** Adds a sibling after the node; simplified, assuming the parent takes it. */
   after(node: UINode, sibling: UINode): UINode {
     return { id: "layout.row", children: [node, sibling] };
   },
 
-  /** 単純なテキストノード */
+  /** A plain text node. */
   text(value: string): UINode {
     return { id: "primitive.text", props: { value } };
   },
@@ -77,44 +77,44 @@ export const storage = {
   set: (key: string, value: string) => __gumicord_host.storage_set(key, value),
 };
 
-// ---------------------------------------------------------------- ホスト接点
+// ---------------------------------------------------------------- The host
 
 /**
- * ホストが呼ぶ入口。部分木を受け取り、登録済みパッチを適用して返す。
+ * What the host calls: takes a subtree, applies the patches, returns it.
  *
- * ADR-0002 の帰結: UITree 全体を毎フレーム受け渡すと Rust ↔ QuickJS の
- * 値変換で破綻する。実装では変更のあった部分木のみを渡す。
- * S3 ではその前提が正しいかを実測する。
+ * Per ADR-0002, passing a whole UITree each frame breaks down on the
+ * Rust/QuickJS conversion, so only the changed subtree is passed. S3
+ * measures whether that holds.
  */
 function applyPatches(node: UINode, ctx: PatchContext): UINode {
-  // ■ S3 の発見 (2026-08-14)
+  // What S3 found (2026-08-14):
   //
-  //   当初は「自分にパッチ → 結果の子へ再帰」の順で書いていたが、これは無限再帰する。
-  //   ui.wrap は元ノードを子として持つ新ノードを返すため、その子が同じ安定 ID で
-  //   再びマッチし、また包まれる、を繰り返すからである。
+  //   patching a node and then recursing into the result recurses forever.
+  //   ui.wrap returns a new node holding the original as a child, so that
+  //   child matches the same stable ID and gets wrapped again.
   //
-  //   正しい意味論は「子を先に処理 → 最後に自分へパッチ → 結果には再帰しない」。
-  //   すなわち走査はボトムアップで、パッチの出力は最終形として扱う。
-  //   これは spec/05-plugin-api.md で明文化する必要がある。
+  //   The right order is children first, then the node, and never into the
+  //   result: bottom-up, with a patch's output treated as final.
+  //   spec/05-plugin-api.md needs to say so.
 
-  // 1. 子を先に処理する
+  // 1. Children first.
   const current: UINode =
     node.children && node.children.length > 0
       ? { ...node, children: node.children.map((c) => applyPatches(c, ctx)) }
       : node;
 
-  // 2. 自分にパッチを当てる。照合は「元の」安定 ID で行う
+  // 2. Then the node, matched on the original stable ID.
   const list = patches.get(node.id);
   if (!list) return current;
 
-  // 3. 複数のパッチは登録順に適用し、後のパッチは前のパッチの出力を受け取る。
-  //    パッチの出力に対して再帰はしない。
+  // 3. Patches apply in registration order, each seeing the last output,
+  //    and never recursing into it.
   let out = current;
   for (const fn of list) out = fn(out, ctx);
   return out;
 }
 
-// ホストから到達させるための唯一の出口
+// The one way in from the host.
 (globalThis as any).__gumicord_apply = (node: UINode, ctx: PatchContext) =>
   applyPatches(node, ctx ?? {});
 (globalThis as any).__gumicord_patch_count = () =>

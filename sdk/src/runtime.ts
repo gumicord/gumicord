@@ -1,12 +1,12 @@
 /**
- * プラグイン側のランタイム。ホストとの接点。
+ * The plugin-side runtime, and where the host meets it.
  *
- * プラグイン作者はこのファイルを直接使わない。`index.ts` の `ui.patch` が
- * ここに登録し、ホストが `__gumicord_apply` を呼ぶ。
+ * A plugin author never uses this directly: `ui.patch` in `index.ts`
+ * registers here, and the host calls `__gumicord_apply`.
  *
- * ⚠️ **走査を JS 側で行うのは意図的である。** ホストが 1 ノードずつ問い合わせると
- * Rust ↔ QuickJS の往復が跳ね上がる。S3 の実測では 1601 ノードの往復が 5.242 ms
- * だった。部分木ごと渡して JS 側で歩くことで、往復を 1 回に抑える。
+ * Walking the tree in JS is deliberate. Asking the host node by node
+ * multiplies the Rust/QuickJS round trips; S3 measured 1601 nodes at
+ * 5.242 ms. Passing a whole subtree and walking it here costs one.
  */
 
 import type { NodeId, PatchContext, PatchFn, UINode } from "./uitree.js";
@@ -20,41 +20,41 @@ export function registerPatch(id: NodeId, fn: PatchFn): void {
 }
 
 /**
- * 部分木にパッチを適用する。
+ * Applies the patches to a subtree.
  *
- * ⚠️ **この関数の順序は拡張 ABI の一部である** (`spec/05-plugin-api.md` 2 章)。
- * 変更すると既存プラグインの挙動が変わる。
+ * This function's order is part of the extension ABI; changing it changes
+ * how existing plugins behave.
  *
- * 規則:
- * - **P1** 走査はボトムアップ。子を先に処理し、自分を後に処理する
- * - **P2** 照合はパッチ適用前の安定 ID に対して行う
- * - **P3** パッチの出力に再帰しない。出力は最終形として扱う
- * - **P4** 複数パッチは登録順に適用し、後のパッチは前のパッチの出力を受け取る
+ * The rules:
+ * - **P1** traversal is bottom-up: children first, then the parent
+ * - **P2** matching uses the stable ID as it was before any patch
+ * - **P3** a patch's output is not recursed into; it is final
+ * - **P4** patches apply in registration order, each seeing the last
  *
- * P1 と P3 がないと**無限再帰する**。`ui.wrap` は元ノードを子として持つ
- * 新ノードを返すため、素朴に「自分にパッチ → 結果の子へ再帰」と書くと
- * その子が同じ安定 ID で再びマッチし、また包まれる、を繰り返す。
- * S3 で実際に踏んだ。
+ * Without P1 and P3 this recurses forever: `ui.wrap` returns a new node
+ * holding the original as a child, so patching a node and then recursing
+ * into the result matches that child on the same stable ID and wraps it
+ * again. S3 hit exactly that.
  */
 function applyPatches(node: UINode, ctx: PatchContext): UINode {
-  // P1: 子を先に処理する
+  // P1: children first.
   const current: UINode =
     node.children && node.children.length > 0
       ? { ...node, children: node.children.map((c) => applyPatches(c, ctx)) }
       : node;
 
-  // P2: 照合は「元の」安定 ID で行う
+  // P2: matched on the original stable ID.
   const list = patches.get(node.id);
   if (!list) return current;
 
-  // P3, P4: 登録順に適用し、出力には再帰しない
+  // P3, P4: applied in order, without recursing into the output.
   let out = current;
   for (const fn of list) {
     try {
       out = fn(out, ctx);
     } catch (e) {
-      // 1 つのパッチの失敗で部分木ごと壊さない。
-      // ホスト側でもプラグイン単位の隔離を行う (EXT-050)。
+      // One failing patch must not break the whole subtree. The host
+      // isolates per plugin as well.
       hostLog("error", `patch on ${node.id} threw: ${String(e)}`);
       return current;
     }
@@ -67,11 +67,11 @@ function hostLog(level: string, msg: string): void {
   try {
     __gumicord_host.log(level, msg);
   } catch {
-    /* ホストが未注入の場合 (テスト時など) は黙って捨てる */
+    /* Silently dropped when the host has injected nothing, as in tests. */
   }
 }
 
-// ホストから到達させるための唯一の出口
+// The one way in from the host.
 (globalThis as Record<string, unknown>)["__gumicord_apply"] = (
   node: UINode,
   ctx: PatchContext,

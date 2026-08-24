@@ -1,13 +1,13 @@
 /**
- * `data` で公開されるドメインオブジェクトの型。
+ * The domain objects exposed as `data`.
  *
- * ⚠️ **これも拡張 ABI である。** 追加は破壊的変更ではないが、削除と改名は
- * 破壊的変更になる (`spec/03-uitree.md` 2.4)。
+ * These are part of the extension ABI too: adding is not breaking, but
+ * removing and renaming are.
  *
- * Discord API の生のペイロードは**公開しない**。公開するとそれ自体が ABI に
- * なり、Discord 側の変更に追随できなくなる。
+ * Discord's raw payloads are never exposed. Exposing one would make it
+ * part of the ABI and tie us to Discord's changes.
  *
- * どのノードがどの型を持つかは `ids.ts` の `DataByNode` が定める (生成物)。
+ * Which node carries which type is set by `DataByNode` in `ids.ts`.
  */
 
 export interface UserData {
@@ -24,7 +24,7 @@ export interface MessageData {
   readonly guildId?: string;
   readonly createdAt: string;
   readonly editedAt?: string;
-  /** プレーンテキスト。Markdown の構文解析結果はノードとして現れる */
+  /** Plain text. Parsed Markdown appears as nodes. */
   readonly content: string;
   readonly author: UserData;
   readonly pinned: boolean;
@@ -63,14 +63,14 @@ export interface DmData {
 }
 
 /**
- * メンバー一覧に出る 1 人。
+ * One person in the member list.
  *
- * ⚠️ 役職は識別子ではなく**名前**で出る。識別子は利用者にとって意味を持たず、
- * プラグインが表示に使えば数字が並ぶだけになる。
+ * Roles appear by name, not identifier: an identifier means nothing to a
+ * user, and a plugin showing one would just show a number.
  */
 export interface MemberData {
   readonly user: UserData;
-  /** そのサーバでの呼び名。付けていなければ `user.displayName` と同じ */
+  /** Their name in this guild, or `user.displayName` if unset. */
   readonly displayName: string;
   /** `online` / `idle` / `dnd` / `offline` */
   readonly status: string;

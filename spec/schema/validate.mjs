@@ -1,11 +1,11 @@
-// spec/schema/*.schema.json の検証ツール。
+// Checks spec/schema/*.schema.json.
 //
-// 使い方:
+// Usage:
 //   node spec/schema/validate.mjs
 //
-// CI では spec/schema/** または examples/** の変更時に実行する。
-// 「スキーマが構文として正しい」だけでなく、
-// 「公式サンプルがスキーマを通る」「意図的に壊した入力が落ちる」ことまで確かめる。
+// CI runs this when spec/schema/** or examples/** changes. It checks not
+// only that the schemas are well formed, but that the sample themes pass
+// them and that deliberately broken input does not.
 
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -27,8 +27,8 @@ const ng = (msg, detail) => {
   if (detail) console.log(`       ${detail}`);
 };
 
-// ---------------------------------------------------------------- スキーマ自体
-console.log("スキーマのコンパイル");
+// ---------------------------------------------------------------- The schemas
+console.log("compiling the schemas");
 const schemas = {};
 for (const f of readdirSync(here).filter((f) => f.endsWith(".schema.json"))) {
   const src = JSON.parse(readFileSync(join(here, f), "utf8"));
@@ -42,12 +42,12 @@ for (const f of readdirSync(here).filter((f) => f.endsWith(".schema.json"))) {
 
 const themeValidate = schemas["theme.schema.json"];
 if (!themeValidate) {
-  console.log("\ntheme.schema.json をコンパイルできなかったため中断します");
+  console.log("\ntheme.schema.json did not compile; stopping here");
   process.exit(1);
 }
 
-// ---------------------------------------------------------------- 公式サンプル
-console.log("\n公式サンプルテーマ");
+// ---------------------------------------------------------------- The samples
+console.log("\nsample themes");
 const themesDir = join(repo, "examples", "themes");
 if (existsSync(themesDir)) {
   for (const name of readdirSync(themesDir)) {
@@ -55,15 +55,15 @@ if (existsSync(themesDir)) {
     if (!existsSync(p)) continue;
     const data = JSON.parse(readFileSync(p, "utf8"));
     if (themeValidate(data)) {
-      ok(`${name} (${data.rules?.length ?? 0} ルール, ${Object.keys(data.tokens ?? {}).length} トークン)`);
+      ok(`${name} (${data.rules?.length ?? 0} rules, ${Object.keys(data.tokens ?? {}).length} tokens)`);
     } else {
       ng(name, JSON.stringify(themeValidate.errors?.slice(0, 3), null, 2));
       continue;
     }
 
-    // スキーマは書式しか見ない。同梱アセットが実在するか、
-    // 外部 URL が manifest.remoteAssets で宣言されているか (SEC-022) までは
-    // スキーマでは表現できないので、ここで確かめる。
+    // The schema sees only the format. Whether a bundled asset exists, and
+    // whether an external URL is declared in manifest.remoteAssets, cannot be
+    // expressed there, so it is checked here.
     const dir = join(themesDir, name);
     const declared = new Set(data.manifest?.remoteAssets ?? []);
     const refs = collectAssetRefs(data);
@@ -71,25 +71,25 @@ if (existsSync(themesDir)) {
       if (ref.startsWith("data:")) continue;
       if (ref.startsWith("https://")) {
         const host = new URL(ref).hostname;
-        if (declared.has(host)) ok(`  外部 ${host} — remoteAssets で宣言済み`);
-        else ng(`  外部 ${host} — manifest.remoteAssets に宣言がない (SEC-022)`);
+        if (declared.has(host)) ok(`  external ${host} — declared in remoteAssets`);
+        else ng(`  external ${host} — not declared in manifest.remoteAssets`);
         continue;
       }
-      if (existsSync(join(dir, ref))) ok(`  同梱 ${ref}`);
-      else ng(`  同梱 ${ref} — ファイルが存在しない`);
+      if (existsSync(join(dir, ref))) ok(`  bundled ${ref}`);
+      else ng(`  bundled ${ref} — no such file`);
     }
 
-    // 宣言したのに一度も使っていないホストは、無用な権限要求である
+    // A host declared and never used is asking for more than it needs.
     const usedHosts = new Set(
       refs.filter((r) => r.startsWith("https://")).map((r) => new URL(r).hostname),
     );
     for (const h of declared) {
-      if (!usedHosts.has(h)) ng(`  ${h} を remoteAssets に宣言しているが使っていない`);
+      if (!usedHosts.has(h)) ng(`  ${h} is declared in remoteAssets but never used`);
     }
   }
 }
 
-/** テーマ内のすべてのアセット参照を集める */
+/** Collects every asset reference in a theme. */
 function collectAssetRefs(theme) {
   const out = [];
   const visit = (v) => {
@@ -97,7 +97,7 @@ function collectAssetRefs(theme) {
     if (Array.isArray(v)) return v.forEach(visit);
     for (const [k, val] of Object.entries(v)) {
       if ((k === "image" || k === "family") && typeof val === "string") {
-        // family はフォント名かアセット参照のどちらか。拡張子があればアセットとみなす
+        // family is a font name or an asset reference; an extension means an asset.
         if (k === "family" && !/\.(woff2|ttf|otf)$/i.test(val)) continue;
         out.push(val);
       } else {
@@ -110,75 +110,75 @@ function collectAssetRefs(theme) {
   return out;
 }
 
-// ---------------------------------------------------------------- 異常系
-// スキーマが「通してはいけないもの」を通さないことを確かめる。
-// これがないと、緩すぎるスキーマが「全部 OK」と言うだけになる。
-console.log("\n異常系 (落ちることを確認する)");
+// ---------------------------------------------------------------- Must fail
+// Checks the schema rejects what it should. Without this, a schema loose
+// enough to accept everything would pass.
+console.log("\nmust be rejected");
 
 const base = {
   manifest: { id: "dev.gumicord.t", name: "T", version: "1.0.0", abi: 1 },
 };
 
 const shouldFail = [
-  ["manifest なし", { tokens: {} }],
-  ["abi なし", { manifest: { id: "dev.gumicord.t", name: "T", version: "1.0.0" } }],
-  ["id が逆ドメインでない", { manifest: { ...base.manifest, id: "midnight" } }],
-  ["version が semver でない", { manifest: { ...base.manifest, version: "1.0" } }],
-  ["色の書式が不正", { ...base, tokens: { "color.a": "rgb(1,2,3)" } }],
-  ["長さが負", { ...base, tokens: { "radius.a": -4 } }],
-  ["トークン名が大文字を含む", { ...base, tokens: { "Color.Bg": "#fff" } }],
-  ["select にワイルドカード", { ...base, rules: [{ select: "chat.*", style: {} }] }],
-  ["select が 5 段", { ...base, rules: [{ select: "a.b.c.d.e", style: {} }] }],
-  ["未知の状態名", { ...base, rules: [{ select: "chat.message", when: { state: "pressed" }, style: {} }] }],
-  ["未知の platform", { ...base, rules: [{ select: "chat.message", when: { platform: "web" }, style: {} }] }],
-  ["未知の when キー", { ...base, rules: [{ select: "chat.message", when: { theme: "dark" }, style: {} }] }],
-  ["未知のスタイルプロパティ", { ...base, rules: [{ select: "chat.message", style: { boxShadow: 1 } }] }],
-  ["opacity が範囲外", { ...base, rules: [{ select: "chat.message", style: { opacity: 2 } }] }],
-  ["padding の要素数が不正", { ...base, rules: [{ select: "chat.message", style: { padding: [1, 2] } }] }],
-  ["トークン参照の書式が不正", { ...base, rules: [{ select: "chat.message", style: { color: "$Color.Bg" } }] }],
-  ["style なしのルール", { ...base, rules: [{ select: "chat.message" }] }],
-  ["トップレベルに未知のキー", { ...base, extra: 1 }],
+  ["no manifest", { tokens: {} }],
+  ["no abi", { manifest: { id: "dev.gumicord.t", name: "T", version: "1.0.0" } }],
+  ["id is not a reverse domain", { manifest: { ...base.manifest, id: "midnight" } }],
+  ["version is not semver", { manifest: { ...base.manifest, version: "1.0" } }],
+  ["malformed colour", { ...base, tokens: { "color.a": "rgb(1,2,3)" } }],
+  ["negative length", { ...base, tokens: { "radius.a": -4 } }],
+  ["uppercase in a token name", { ...base, tokens: { "Color.Bg": "#fff" } }],
+  ["wildcard in select", { ...base, rules: [{ select: "chat.*", style: {} }] }],
+  ["five-level select", { ...base, rules: [{ select: "a.b.c.d.e", style: {} }] }],
+  ["unknown state", { ...base, rules: [{ select: "chat.message", when: { state: "pressed" }, style: {} }] }],
+  ["unknown platform", { ...base, rules: [{ select: "chat.message", when: { platform: "web" }, style: {} }] }],
+  ["unknown when key", { ...base, rules: [{ select: "chat.message", when: { theme: "dark" }, style: {} }] }],
+  ["unknown style property", { ...base, rules: [{ select: "chat.message", style: { boxShadow: 1 } }] }],
+  ["opacity out of range", { ...base, rules: [{ select: "chat.message", style: { opacity: 2 } }] }],
+  ["wrong number of padding values", { ...base, rules: [{ select: "chat.message", style: { padding: [1, 2] } }] }],
+  ["malformed token reference", { ...base, rules: [{ select: "chat.message", style: { color: "$Color.Bg" } }] }],
+  ["rule without a style", { ...base, rules: [{ select: "chat.message" }] }],
+  ["unknown top-level key", { ...base, extra: 1 }],
 
-  // --- 背景画像 (EXT-021, SEC-022) ---
-  ["背景に未知のキー", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", repeat: "x" } } }] }],
-  ["fit が未知の値", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", fit: "fill" } } }] }],
-  ["position の要素数が不正", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", position: [0.5] } } }] }],
-  ["position が範囲外", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", position: [1.5, 0] } } }] }],
-  ["アセット参照が親ディレクトリへ出る", { ...base, rules: [{ select: "app.window", style: { background: { image: "../secret.png" } } }] }],
-  ["アセット参照が親を途中に含む", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/../../x.png" } } }] }],
-  ["アセット参照が絶対パス", { ...base, rules: [{ select: "app.window", style: { background: { image: "/etc/passwd.png" } } }] }],
-  ["アセット参照が Windows 絶対パス", { ...base, rules: [{ select: "app.window", style: { background: { image: "C:/x/a.png" } } }] }],
-  ["外部 URL が http", { ...base, rules: [{ select: "app.window", style: { background: { image: "http://e.com/a.png" } } }] }],
-  ["外部 URL が file スキーム", { ...base, rules: [{ select: "app.window", style: { background: { image: "file:///etc/passwd" } } }] }],
-  ["未対応の画像形式", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/a.bmp" } } }] }],
-  ["blur が負", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", blur: -1 } } }] }],
-  ["remoteAssets がホスト名でない", { manifest: { ...base.manifest, remoteAssets: ["https://cdn.example.com/"] } }],
+  // --- Background images ---
+  ["unknown key in a background", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", repeat: "x" } } }] }],
+  ["unknown fit", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", fit: "fill" } } }] }],
+  ["wrong number of position values", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", position: [0.5] } } }] }],
+  ["position out of range", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", position: [1.5, 0] } } }] }],
+  ["asset reference leaves the directory", { ...base, rules: [{ select: "app.window", style: { background: { image: "../secret.png" } } }] }],
+  ["asset reference climbs part way", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/../../x.png" } } }] }],
+  ["absolute asset reference", { ...base, rules: [{ select: "app.window", style: { background: { image: "/etc/passwd.png" } } }] }],
+  ["absolute Windows asset reference", { ...base, rules: [{ select: "app.window", style: { background: { image: "C:/x/a.png" } } }] }],
+  ["external URL over http", { ...base, rules: [{ select: "app.window", style: { background: { image: "http://e.com/a.png" } } }] }],
+  ["external URL with a file scheme", { ...base, rules: [{ select: "app.window", style: { background: { image: "file:///etc/passwd" } } }] }],
+  ["unsupported image format", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/a.bmp" } } }] }],
+  ["negative blur", { ...base, rules: [{ select: "app.window", style: { background: { image: "a.png", blur: -1 } } }] }],
+  ["remoteAssets is not a host name", { manifest: { ...base.manifest, remoteAssets: ["https://cdn.example.com/"] } }],
 ];
 
 for (const [label, data] of shouldFail) {
   if (themeValidate(data)) {
-    ng(`${label} — 通ってしまった`);
+    ng(`${label} — it passed`);
   } else {
     ok(label);
   }
 }
 
-// ---------------------------------------------------------------- 正常系
-console.log("\n正常系 (通ることを確認する)");
+// ---------------------------------------------------------------- Must pass
+console.log("\nmust be accepted");
 const shouldPass = [
-  ["最小構成 (manifest のみ)", base],
-  ["state の配列", { ...base, rules: [{ select: "chat.message", when: { state: ["hover", "unread"] }, style: {} }] }],
-  ["platform の配列", { ...base, rules: [{ select: "chat.message", when: { platform: ["ios", "android"] }, style: {} }] }],
-  ["トークンがトークンを参照", { ...base, tokens: { "color.a": "#fff", "color.b": "$color.a" } }],
-  ["8 桁の色 (アルファ)", { ...base, tokens: { "color.a": "#ffffff14" } }],
-  ["padding の 4 要素", { ...base, rules: [{ select: "chat.message", style: { padding: [1, 2, 3, 4] } }] }],
-  ["font の family 省略", { ...base, tokens: { "font.a": { size: 15, lineHeight: 22 } } }],
+  ["the minimum: a manifest alone", base],
+  ["an array of states", { ...base, rules: [{ select: "chat.message", when: { state: ["hover", "unread"] }, style: {} }] }],
+  ["an array of platforms", { ...base, rules: [{ select: "chat.message", when: { platform: ["ios", "android"] }, style: {} }] }],
+  ["a token referencing a token", { ...base, tokens: { "color.a": "#fff", "color.b": "$color.a" } }],
+  ["an eight-digit colour", { ...base, tokens: { "color.a": "#ffffff14" } }],
+  ["four padding values", { ...base, rules: [{ select: "chat.message", style: { padding: [1, 2, 3, 4] } }] }],
+  ["a font without a family", { ...base, tokens: { "font.a": { size: 15, lineHeight: 22 } } }],
 
-  // --- 背景画像 (EXT-021) ---
-  ["背景が色の短縮記法", { ...base, rules: [{ select: "app.window", style: { background: "#0f0f17" } }] }],
-  ["背景がトークン参照", { ...base, rules: [{ select: "app.window", style: { background: "$color.bg" } }] }],
+  // --- Background images ---
+  ["a background as the colour shorthand", { ...base, rules: [{ select: "app.window", style: { background: "#0f0f17" } }] }],
+  ["a background as a token reference", { ...base, rules: [{ select: "app.window", style: { background: "$color.bg" } }] }],
   [
-    "背景オブジェクト一式",
+    "a full background object",
     {
       ...base,
       rules: [
@@ -199,11 +199,11 @@ const shouldPass = [
       ],
     },
   ],
-  ["背景を token として定義", { ...base, tokens: { "bg.main": { image: "assets/a.webp", fit: "tile" } } }],
-  ["ネストした同梱アセット", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/img/bg.avif" } } }] }],
-  ["data URI の画像", { ...base, rules: [{ select: "app.window", style: { background: { image: "data:image/png;base64,iVBORw0KGgo=" } } }] }],
+  ["a background defined as a token", { ...base, tokens: { "bg.main": { image: "assets/a.webp", fit: "tile" } } }],
+  ["a nested bundled asset", { ...base, rules: [{ select: "app.window", style: { background: { image: "assets/img/bg.avif" } } }] }],
+  ["an image as a data URI", { ...base, rules: [{ select: "app.window", style: { background: { image: "data:image/png;base64,iVBORw0KGgo=" } } }] }],
   [
-    "外部 URL + remoteAssets 宣言",
+    "an external URL with remoteAssets",
     {
       manifest: { ...base.manifest, remoteAssets: ["cdn.example.com", "i.imgur.com"] },
       rules: [{ select: "app.window", style: { background: { image: "https://cdn.example.com/bg.png" } } }],
@@ -221,7 +221,7 @@ for (const [label, data] of shouldPass) {
 
 console.log();
 if (failed > 0) {
-  console.log(`[31m${failed} 件失敗[0m`);
+  console.log(`[31m${failed} failed[0m`);
   process.exit(1);
 }
-console.log("[32mすべて期待どおり[0m");
+console.log("[32mall as expected[0m");

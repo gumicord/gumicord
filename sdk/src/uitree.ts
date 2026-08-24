@@ -1,9 +1,9 @@
 /**
- * UITree の型。
+ * The UITree types.
  *
- * 安定 ID (`NodeId`) と `data` の対応 (`DataByNode`) は
- * `core/uitree/src/ids.rs` から生成された `ids.ts` にある。
- * **このファイルには手書きの部分だけを置く。**
+ * The stable IDs (`NodeId`) and their `data` (`DataByNode`) are generated
+ * into `ids.ts` from `core/uitree/src/ids.rs`. Only what is written by
+ * hand lives here.
  */
 
 import type { CoreCreatableNodeId, DataByNode, NodeId } from "./ids.js";
@@ -11,7 +11,7 @@ import type { CoreCreatableNodeId, DataByNode, NodeId } from "./ids.js";
 export type { NodeId, DataByNode } from "./ids.js";
 export type * from "./data.js";
 
-/** ノードの状態。テーマの条件分岐に対応する (`spec/03-uitree.md` 2.3) */
+/** A node state, matching what a theme can condition on. */
 export type NodeState =
   | "hover"
   | "active"
@@ -25,66 +25,66 @@ export type NodeState =
   | "collapsed";
 
 /**
- * プラグインが自分の名前空間に作る ID。
+ * An ID a plugin creates in its own namespace.
  *
- * 接頭辞は `plugin.` + プラグイン ID の `.` を `_` に置換したもの。
- * テーマから狙えるようにするためのフックであり、**この ID の後方互換性は
- * プラグイン作者が負う** (`spec/03-uitree.md` 8.3)。
+ * The prefix is `plugin.` followed by the plugin ID with `.` replaced by
+ * `_`. It is a hook for themes to aim at, and its compatibility is the
+ * plugin author's to keep.
  */
 export type PluginNodeId = `plugin.${string}`;
 
 /**
- * プラグインが**生成してよい** ID。
+ * The IDs a plugin may create.
  *
- * ⚠️ `app.*` / `chrome.*` / `nav.*` / `chat.*` は含まれない。
- * これらは実在するドメインオブジェクトと結びついており、偽物を作ると
- * アクセシビリティツリーが嘘をつき、他プラグインのセレクタが実体のない
- * ノードにマッチする (`spec/03-uitree.md` 8.2)。
+ * Not `app.*`, `chrome.*`, `nav.*` or `chat.*`: those are tied to real
+ * domain objects, and forging one would make the accessibility tree lie
+ * and let another plugin's selector match a node that is not there.
  *
- * **プラグインは受け取ったノードを変形するのであって、中核ノードを製造しない。**
+ * A plugin transforms the nodes it is given; it does not manufacture core
+ * ones.
  */
 export type CreatableNodeId = CoreCreatableNodeId | PluginNodeId;
 
 export interface UINode {
-  /** 安定 ID */
+  /** The stable ID. */
   id: NodeId | PluginNodeId;
-  /** 同じ親の下で同じ id を持つノードを区別する鍵。読み取り専用 */
+  /** Distinguishes siblings sharing an id under one parent. Read-only. */
   readonly key?: string;
-  /** 現在立っている状態 */
+  /** The states currently held. */
   readonly states?: readonly NodeState[];
   /**
-   * データが持ってきた色 (`#RRGGBB`)。役職の色、サーバフォルダの色。
+   * The colour the data carries (`#RRGGBB`): a role colour, a folder colour.
    *
-   * ⚠️ **スタイルではない。** どこに塗るかを決めるのはテーマであり、
-   * `$data.tint` と書いたプロパティにだけ入る (spec/04-theme.md 3.3.1)。
+   * Not a style. Where it lands is the theme's choice, and it only fills a
+   * property written as `$data.tint`.
    */
   readonly tint?: string;
   props?: Record<string, unknown>;
   children?: UINode[];
 }
 
-/** プラグインが新しく作るノード。中核 ID は使えない */
+/** A node a plugin creates. Core IDs are not allowed. */
 export interface NewUINode extends UINode {
   id: CreatableNodeId;
 }
 
 /**
- * パッチに渡される文脈。
+ * The context a patch receives.
  *
- * `data` の型は安定 ID から決まるため、`ctx.data.author.bot` のような
- * アクセスが**型安全**になる。`data` を持たないノードでは `undefined` になる。
+ * `data` is typed from the stable ID, so `ctx.data.author.bot` is type
+ * safe. It is `undefined` on a node that carries none.
  */
 export interface PatchContext<Id extends NodeId = NodeId> {
   readonly data: Id extends keyof DataByNode ? Readonly<DataByNode[Id]> : undefined;
 }
 
 /**
- * ノード変換。
+ * A node transform.
  *
- * ⚠️ **純粋関数でなければならない (規則 P7)。**
- * 仮想化により、同じメッセージに対して何度呼ばれるかは決まっていない。
- * 画面外へ出て戻るたびに呼び直される。副作用を書くと予測不能になる。
- * 出来事に反応したいときは Gateway イベントのミドルウェアを使う。
+ * It must be pure (rule P7). Virtualisation leaves it undefined how many
+ * times it runs for one message — again each time the node leaves the
+ * screen and comes back — so a side effect is unpredictable. To react to
+ * something happening, use Gateway event middleware.
  */
 export type PatchFn<Id extends NodeId = NodeId> = (
   node: UINode,
