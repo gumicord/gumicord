@@ -1,57 +1,31 @@
-//! Discord Gateway への接続 (C2)。
+//! The Discord gateway connection.
 //!
-//! 責務: 接続 / identify / ハートビート / resume / zstd-stream の解凍 /
-//! イベント配信 (`NFR-010`, `NFR-020`)。
-//!
-//! # 呼び出し側から見た形
-//!
-//! [`Gateway::next`] を回すだけでよい。**切断も再接続もこの中で起きる。**
-//! 呼び出し側が知るのは「いま繋がっているか」と「何が届いたか」だけである。
+//! Callers only drive [`Gateway::next`]; disconnects and reconnects happen
+//! inside. Nothing but `Fatal` ends the loop — while the network is down it
+//! keeps retrying with growing backoff.
 //!
 //! ```text
-//!   loop {
-//!       match gateway.next().await {
-//!           Event::Ready(r)        => 一覧を作り直す
-//!           Event::Resumed         => 取りこぼしが埋まった。何もしなくてよい
-//!           Event::Dispatch { .. } => 状態を更新する
-//!           Event::Reconnecting{..}=> 「再接続中」と出す
-//!           Event::Fatal(reason)   => 諦める。トークンを捨てる場合もある
-//!       }
-//!   }
-//! ```
-//!
-//! **`Fatal` 以外で `next` が終わることはない。** 網が切れている間は
-//! 待ち時間を伸ばしながら繋ぎ直し続ける。
-//!
-//! # 接続シーケンス
-//!
-//! ```text
-//!   ├─ WebSocket 確立 ───────────▶│   実測 338〜390 ms
-//!   │◀────────────── op=10 Hello ─┤   heartbeat_interval = 41250 ms
-//!   ├─ op=2 Identify ────────────▶│   (resume なら op=6)
-//!   │◀───────── op=0 t=READY ─────┤   実測 672〜1120 ms
-//!   ├─ op=1 Heartbeat ───────────▶│   最初は interval × jitter 後
+//!   ├─ open the WebSocket ───────▶│
+//!   │◀────────────── op=10 Hello ─┤   carries heartbeat_interval
+//!   ├─ op=2 Identify ────────────▶│   op=6 when resuming
+//!   │◀───────── op=0 t=READY ─────┤
+//!   ├─ op=1 Heartbeat ───────────▶│   first one after interval * jitter
 //!   │◀────────── op=11 ACK ───────┤
 //! ```
 //!
-//! ⚠️ **resume は `resume_gateway_url` へ繋ぐ。** READY で渡されるリージョン
-//! 別のホストで、初回と同じ `gateway.discord.gg` に戻ると別のサーバへ
-//! 割り当てられ、resume に失敗しうる。
+//! Resuming connects to `resume_gateway_url`, a region-specific host from
+//! READY. Going back to the original host lands on a different server and the
+//! resume can fail.
 //!
-//! # ハートビートの ACK は生存確認である
+//! A missing heartbeat ACK means the connection is dead. TCP does not notice a
+//! severed network for a long time, so this is the only detection there is:
+//! drop it and resume rather than waiting.
 //!
-//! 送る番が来たのに前回の ACK がまだ来ていない ⇒ **その接続は死んでいる**。
-//! 網が切れても TCP はすぐには気付かないので、これが唯一の検知手段になる。
-//! 待たずに捨てて resume する。
-//!
-//! # identify では嘘をつかない (`NFR-020`)
-//!
-//! ⚠️ 公式クライアントの `client_build_number` を騙るようなことはしない。
-//! `NFR-020` の「公式クライアントと同等の identify プロパティ」は**検出を
-//! 回避するためではなく、サーバーに嘘の情報を渡さないため**の要件である。
-//! 名乗るのは Gumicord であり、版も OS も実際の値を送る。
-//!
-//! 仕様: [`spec/09-discord-protocol.md`] 2〜6 章
+//! The identify claims to be the official desktop client. That is a
+//! deliberate reversal of an earlier decision, taken after the previous
+//! honest claim got the account flagged; see `spec/09-discord-protocol.md`
+//! and [`gumicord_model::identity`]. It violates Discord's terms of service
+//! and does not make anything safe.
 
 use std::time::Duration;
 
@@ -66,12 +40,12 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::zstd_stream::ZstdStream;
 
-/// 初回の接続先 ([`spec/09-discord-protocol.md`] 1 章)
+/// Where the first connection goes.
 const GATEWAY: &str = "wss://gateway.discord.gg/?v=10&encoding=json&compress=zstd-stream";
-/// resume 先に付ける問い合わせ。**`resume_gateway_url` には付いていない**
+/// Query appended when resuming; `resume_gateway_url` arrives without one.
 const QUERY: &str = "?v=10&encoding=json&compress=zstd-stream";
 
-/// 再接続を諦めない代わりに、間隔を伸ばす上限
+/// Reconnects never stop; the backoff stops growing here.
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 
@@ -91,73 +65,67 @@ pub enum GatewayError {
     Closed(u16),
 }
 
-/// もう繋がらない理由。**呼び出し側が後始末を決める。**
+/// Why the connection is over. The caller decides what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fatal {
-    /// トークンが弾かれた (`FR-004`)。**捨ててログイン画面へ戻す**
+    /// The token was rejected; discard it and return to login.
     Unauthorized,
-    /// こちらの送り方が誤っている。何度やっても同じ
+    /// We sent something wrong; retrying changes nothing.
     Rejected { code: u16, reason: String },
 }
 
-/// Gateway から届くもの。
+/// What the gateway delivers.
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// 繋がって初期状態が届いた
+    /// Connected, with the initial state.
     Ready(Box<Ready>),
-    /// 取りこぼしを埋め終えた。**`Ready` は来ない**
+    /// The gap was filled; no `Ready` follows.
     Resumed,
-    /// まだ型を付けていない出来事。
-    ///
-    /// ⚠️ **捨てずにそのまま渡す。** どれを使うかを決めるのは Store (C5)
-    /// であって、ここではない
+    /// An event with no type of its own yet, passed through untouched: which
+    /// ones matter is the store's decision.
     Dispatch {
         kind: String,
         data: serde_json::Value,
     },
-    /// 切れた。**繋ぎ直しはこの中で続く。** 画面に出すためだけの知らせ
+    /// Dropped; retrying continues internally. For display only.
     Reconnecting { reason: String, wait: Duration },
-    /// 諦めた
+    /// Given up.
     Fatal(Fatal),
 }
 
-/// READY で届く初期状態。
+/// The initial state from READY.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ready {
     pub user: CurrentUser,
     pub session_id: String,
-    /// resume で繋ぐ先。**リージョン別のホストが返る**
+    /// Where to resume; a region-specific host.
     #[serde(default)]
     pub resume_gateway_url: Option<String>,
-    /// ⚠️ **落ちているギルドは識別子だけの殻で来る。**
+    /// Unavailable guilds arrive as an id and nothing else.
     ///
-    /// 読めない要素があっても飛ばして残りを採る。**殻が 1 つ混ざっただけで
-    /// READY 全体が読めなくなり、Gateway が永久に繋ぎ直し続けた**ことがある
+    /// Unreadable entries are skipped: one shell once made the whole payload
+    /// unreadable and the gateway reconnected forever.
     #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
     pub guilds: Vec<Guild>,
-    /// 利用者の設定。**中身は base64 された protobuf** である。
-    ///
-    /// ここにサーバの並び順が入っている ([`crate::guild_order`])
+    /// User settings, as base64 protobuf. Carries the guild order.
     #[serde(default)]
     pub user_settings_proto: Option<String>,
-    /// どこまで読んだか (`FR-042`)。
-    ///
-    /// ⚠️ **形が 2 通りある。** 古い版は配列そのもの、新しい版は
-    /// `{ "entries": [...] }` で来る ([`ReadStates`])
+    /// How far each channel is read. Arrives either as a bare array or
+    /// wrapped in `entries`.
     #[serde(default)]
     pub read_state: Option<ReadStates>,
 }
 
-/// READY の `read_state`。**2 通りの形をそのまま受ける入れ物。**
+/// Accepts both shapes of `read_state`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ReadStates {
-    /// 新しい版
+    /// The newer shape.
     Wrapped {
         #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
         entries: Vec<ReadState>,
     },
-    /// 古い版。**配列がそのまま来る**
+    /// The older shape: a bare array.
     Flat(#[serde(deserialize_with = "gumicord_model::de::lenient_vec")] Vec<ReadState>),
 }
 
@@ -170,30 +138,27 @@ impl ReadStates {
     }
 }
 
-/// 1 チャンネルぶんの「どこまで読んだか」。
+/// One channel's read marker.
 ///
-/// ⚠️ **チャンネル以外のものも混ざる。** ギルドのイベントや実績にも
-/// 読んだ印が付いており、同じ配列で来る。`id` で引けないものは
-/// **黙って落ちる**ので、選り分けは要らない
+/// The same array carries markers for guild events and achievements; anything
+/// whose id resolves to no channel is dropped, so no filtering is needed.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadState {
-    /// チャンネルの識別子
+    /// The channel.
     pub id: ChannelId,
-    /// ここまで読んだ。**これより新しい発言があれば未読である**
+    /// Read up to here; anything newer is unread.
     #[serde(default)]
     pub last_message_id: Option<MessageId>,
-    /// 自分宛ての未読の数。**サーバが数えている**
+    /// Unread mentions, counted by the server.
     #[serde(default)]
     pub mention_count: u32,
 }
 
 impl Ready {
-    /// 利用者が Discord で並べ替えたサーバの順。
+    /// The order the user arranged in Discord.
     ///
-    /// ⚠️ **名前順で出してはいけない。** 自分で並べた順以外で並ぶと、
-    /// 「自分のサーバ一覧ではない」ものになる。
-    ///
-    /// 取り出せなければ空。呼び出し側は READY の順に落とす
+    /// Never sorted by name: any other order stops being their guild list.
+    /// Empty if it cannot be read, and the caller falls back to READY's order.
     pub fn guild_order(&self) -> Vec<GuildId> {
         let Some(proto) = &self.user_settings_proto else {
             return Vec::new();
@@ -201,7 +166,7 @@ impl Ready {
         crate::guild_order::from_settings_proto(proto, &self.known_guilds())
     }
 
-    /// サーバ一覧のフォルダ。**中身が 1 つのただのサーバも混ざる**
+    /// Sidebar folders; lone guilds appear in the same list.
     pub fn guild_folders(&self) -> Vec<crate::guild_order::Folder> {
         let Some(proto) = &self.user_settings_proto else {
             return Vec::new();
@@ -209,10 +174,8 @@ impl Ready {
         crate::guild_order::folders_from_settings_proto(proto, &self.known_guilds())
     }
 
-    /// 自分のステータス。
-    ///
-    /// ⚠️ **読めなければ `None`。** 繋がっていることを根拠に
-    /// 「オンライン」と名乗らない。取り込み中にしている人に対して嘘になる
+    /// Our status, or `None` when unreadable. Being connected is not
+    /// "online": it would lie about anyone set to do not disturb.
     pub fn status(&self) -> Option<crate::status::Status> {
         crate::status::from_settings_proto(self.user_settings_proto.as_deref()?)
     }
@@ -222,69 +185,55 @@ impl Ready {
     }
 }
 
-/// 接続を保ち続けるもの。
+/// Keeps the connection alive.
 pub struct Gateway {
     token: Token,
     conn: Option<Connection>,
-    /// resume に要る 3 つ組。**切断を跨いで持ち続ける**
+    /// What resuming needs; survives a disconnect.
     session: Option<SessionInfo>,
     backoff: Duration,
-    /// 次に返す `Reconnecting`。`next` の頭で吐き出す
+    /// A pending `Reconnecting`, emitted at the top of `next`.
     pending_notice: Option<Event>,
-    /// 見ているギルドと、その中で開いているチャンネル。
-    ///
-    /// ⚠️ **繋ぎ直すたびに送り直す。** 購読は接続に紐づく
+    /// What is being watched. Resent on every reconnect: subscriptions belong
+    /// to a connection.
     wanted: std::collections::HashMap<GuildId, ChannelId>,
     requests: tokio::sync::mpsc::UnboundedReceiver<Request>,
 }
 
-/// Gateway へ流す頼みごと。
+/// A request to send to the gateway.
 #[derive(Debug, Clone)]
 enum Request {
-    /// このチャンネルを見ている (`op 14`)
+    /// We are watching this channel.
     Watch(GuildId, ChannelId),
-    /// この人たちの、このギルドでの姿が要る (`op 8`)
+    /// We need these members in this guild.
     Members(GuildId, Vec<UserId>),
 }
 
-/// 「このチャンネルを見ている」と Gateway へ伝える手。
+/// Tells the gateway what is being watched.
 ///
-/// # なぜ要るのか
-///
-/// ⚠️ **利用者トークンでは、黙っていても `MESSAGE_CREATE` は来ない。**
-///
-/// READY のギルドには `"lazy": true` が付いている。公式クライアントは
-/// 画面に出ているギルドだけを `op 14` で購読し、Discord はそのギルドの
-/// 出来事だけを送る。**何百のサーバに入っている利用者へ全部送るのは、
-/// 双方にとって無駄だからである。**
-///
-/// 購読しないと、新着も入力中の表示も一切届かない。
+/// A user token receives no `MESSAGE_CREATE` until it subscribes. Guilds
+/// arrive marked lazy, and the official client subscribes only to the guild
+/// on screen — sending everything to someone in hundreds of servers would
+/// waste both ends. Without this, nothing arrives at all.
 #[derive(Clone, Debug)]
 pub struct Subscriptions {
     tx: tokio::sync::mpsc::UnboundedSender<Request>,
 }
 
 impl Subscriptions {
-    /// そのギルドの、そのチャンネルを見ていると伝える。
-    ///
-    /// **何度呼んでもよい。** 同じものは送り直されるだけである
+    /// Announces the watched channel. Safe to call repeatedly.
     pub fn watch(&self, guild: GuildId, channel: ChannelId) {
         let _ = self.tx.send(Request::Watch(guild, channel));
     }
 
-    /// この人たちの、このギルドでの姿を頼む (`op 8`)。
+    /// Requests members by id.
     ///
-    /// # なぜ要るのか
+    /// REST messages carry no `member`, so nicknames, per-guild avatars and
+    /// role colours only appear once this is asked for. The official client
+    /// behaves the same way.
     ///
-    /// ⚠️ **REST で取った発言には `member` が付いていない。** 呼び名も
-    /// サーバごとの顔も役職の色も、これを頼まないと出てこない。
-    /// 公式クライアントも同じで、チャンネルを開いた直後は名前が白い。
-    ///
-    /// ⚠️ **1 回 100 人まで。** 超えると Discord が弾く。分けるのは
-    /// 呼び出し側の仕事である。
-    ///
-    /// ⚠️ **同じ人を何度も頼まない。** これも線に流す payload であり、
-    /// 出しすぎればレート制限で接続ごと切られる (`4008`)
+    /// At most 100 per call, and never the same person twice: too many of
+    /// these gets the connection closed.
     pub fn request_members(&self, guild: GuildId, users: Vec<UserId>) {
         if users.is_empty() {
             return;
@@ -293,22 +242,18 @@ impl Subscriptions {
     }
 }
 
-/// 繋ぎ先の URL。`resume` するなら**リージョン別のホスト**へ。
+/// The URL to connect to; a region-specific host when resuming.
 ///
-/// ⚠️ **経路の `/` を落とさない。**
-///
-/// `resume_gateway_url` は `wss://gateway-us-east1-b.discord.gg` の形で来る。
-/// ここへ問い合わせをそのまま繋ぐと `wss://host?v=10…` になり、経路が
-/// **空**の URL になる。`http` はこれを `?v=10…` として持つので、
-/// 送られる要求行が
+/// The path separator must survive. `resume_gateway_url` arrives without a
+/// path, and appending the query directly produces a URL with an empty path,
+/// which sends a request line of
 ///
 /// ```text
 ///   GET ?v=10&encoding=json&compress=zstd-stream HTTP/1.1
 /// ```
 ///
-/// になる。要求先として不正なので Discord は **400 Bad Request** を返し、
-/// 繋がらない。しかも `session` を持ったままなので**同じ URL へ延々と
-/// 繋ぎ直し続け、二度と復帰しなかった**。
+/// Discord answers 400, and since the session is still held it retries the
+/// same URL forever and never recovers.
 fn connect_url(resume_host: Option<&str>) -> String {
     match resume_host {
         Some(host) => format!("{}/{QUERY}", host.trim_end_matches('/')),
@@ -316,14 +261,11 @@ fn connect_url(resume_host: Option<&str>) -> String {
     }
 }
 
-/// `op 14` — 見ているものを伝える。
+/// Announces what is being watched.
 ///
-/// `channels` の範囲は「メンバー一覧の何番目から何番目が要るか」で
-/// ある。**この形でないと購読そのものが成立しない**ので、一覧を出さない
-/// 画面でも送る。
-///
-/// ⚠️ **頼んだ範囲しか来ない** ([`MEMBER_RANGES`])。それより下を見せるには、
-/// 巻いた先を頼み直す必要がある ([`crate::member_list`])
+/// The ranges say which rows of the member list are wanted. The subscription
+/// does not work without them, so they are sent even with no list on screen.
+/// Only the requested rows arrive.
 fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
     json!({
         "op": OP_GUILD_SUBSCRIBE,
@@ -337,21 +279,17 @@ fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
     })
 }
 
-/// メンバー一覧のどこまでを頼むか。
+/// Which rows of the member list to ask for.
 ///
-/// ⚠️ **1 回に 3 つまで。** 公式クライアントも 3 つ送っており、それより
-/// 多いと Discord は黙って残りを無視する。100 人ずつなので 300 人まで。
-///
-/// ⚠️ **それより下は巻いたときに頼み直すしかない。** その仕組みはまだ無い
+/// Three ranges at most: the official client sends three, and Discord
+/// silently ignores the rest. Anything below needs re-requesting on scroll,
+/// which does not exist yet.
 /// ([`crate::member_list`])
 const MEMBER_RANGES: [[u32; 2]; 3] = [[0, 99], [100, 199], [200, 299]];
 
-/// `op 8` — この人たちの、このギルドでの姿を頼む。
+/// Requests members by id, 100 at a time.
 ///
-/// ⚠️ **`user_ids` は 1 回 100 人まで。** 分けるのは呼び出し側の仕事である。
-///
-/// `presences` は頼まない。**要らないものを運ばせない** — 姿が欲しいので
-/// あって、いま online かどうかはメンバー一覧のほうが持っている。
+/// No presences: the member list already carries who is online.
 fn request_members(guild: GuildId, users: &[UserId]) -> serde_json::Value {
     json!({
         "op": OP_REQUEST_MEMBERS,
@@ -365,7 +303,7 @@ fn request_members(guild: GuildId, users: &[UserId]) -> serde_json::Value {
 
 impl core::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // ⚠️ トークンを出さない (`SEC-001`)
+        // Never prints the token.
         f.debug_struct("Gateway")
             .field("connected", &self.conn.is_some())
             .field("resumable", &self.session.is_some())
@@ -381,7 +319,7 @@ struct SessionInfo {
 }
 
 impl Gateway {
-    /// 繋ぐものと、外から購読を頼む手を作る。
+    /// Builds the connection and the handle used to subscribe.
     pub fn new(token: Token) -> (Self, Subscriptions) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (
@@ -398,10 +336,8 @@ impl Gateway {
         )
     }
 
-    /// 頼まれている購読を全部送り直す。
-    ///
-    /// ⚠️ **繋ぎ直すたびに送る。** 購読は接続に紐づくので、resume でも
-    /// identify でも、新しい接続には引き継がれない
+    /// Resends every subscription. They belong to a connection and survive
+    /// neither identify nor resume.
     async fn resend_subscriptions(&mut self) -> Result<(), GatewayError> {
         let Some(conn) = self.conn.as_mut() else {
             return Ok(());
@@ -412,10 +348,7 @@ impl Gateway {
         Ok(())
     }
 
-    /// 次の出来事まで進める。
-    ///
-    /// **[`Event::Fatal`] を返した後は呼ばないこと。** 呼んでも同じものを
-    /// 返し続ける。
+    /// Advances to the next event. After `Fatal` it just repeats itself.
     pub async fn next(&mut self) -> Event {
         loop {
             if let Some(notice) = self.pending_notice.take() {
@@ -429,19 +362,18 @@ impl Gateway {
                         if let Some(fatal) = fatal_of(&e) {
                             return Event::Fatal(fatal);
                         }
-                        // ⚠️ **開けなかった resume 先に固執しない。**
+                        // Do not cling to a resume host that would not open.
                         //
-                        // resume は「繋がった上で取りこぼしを埋める」もので
-                        // あって、繋がらない相手に何度掛けても意味がない。
-                        // 持ち越すと**同じ失敗を延々と繰り返し、二度と
-                        // 復帰しない**。次は identify からやり直す
+                        // Resuming fills a gap on a working connection; it
+                        // means nothing against a host that will not answer.
+                        // Keeping it repeats the same failure forever.
                         if self.session.take().is_some() {
-                            tracing::warn!("resume 先へ繋げない。identify からやり直す");
+                            tracing::warn!("cannot reach the resume host; starting from identify");
                         }
                         let wait = self.grow_backoff();
-                        tracing::warn!(error = %e, wait_ms = wait.as_millis() as u64, "繋げない");
-                        // 待つ前に知らせる。**待ってから知らせると、
-                        // 画面が黙ったまま最大 1 分固まったように見える**
+                        tracing::warn!(error = %e, wait_ms = wait.as_millis() as u64, "cannot connect");
+                        // Reported before waiting, or the screen looks frozen
+                        // for up to a minute.
                         self.pending_notice = Some(Event::Reconnecting {
                             reason: e.to_string(),
                             wait,
@@ -452,38 +384,38 @@ impl Gateway {
                 }
             }
 
-            let conn = self.conn.as_mut().expect("直前に開いた");
+            let conn = self.conn.as_mut().expect("just opened");
             match conn
                 .pump(&mut self.session, &mut self.requests, &mut self.wanted)
                 .await
             {
                 Ok(Some(event)) => {
-                    // 何か届いたということは繋がっている。待ち時間を戻す
+                    // Anything arriving means the connection works.
                     self.backoff = BACKOFF_MIN;
-                    // ⚠️ **購読は接続に紐づく。** 繋ぎ直したら送り直さないと、
-                    // 新着も入力中の表示も二度と来ない
+                    // Subscriptions belong to the connection; without
+                    // resending, nothing arrives again.
                     if matches!(event, Event::Ready(_) | Event::Resumed)
                         && let Err(e) = self.resend_subscriptions().await
                     {
-                        tracing::warn!(error = %e, "購読を送り直せなかった");
+                        tracing::warn!(error = %e, "could not resend subscriptions");
                     }
                     return event;
                 }
-                // 心拍など、内部で片付いたもの
+                // Handled internally, such as heartbeats.
                 Ok(None) => continue,
                 Err(e) => {
                     self.conn = None;
                     if let Some(fatal) = fatal_of(&e) {
-                        // ⚠️ 二度と resume できない。持ち越さない
+                        // Not resumable; drop it.
                         self.session = None;
                         return Event::Fatal(fatal);
                     }
                     if !recoverable_session(&e) {
-                        // セッションは死んだが、identify からならやり直せる
+                        // The session is gone, but identify still works.
                         self.session = None;
                     }
                     let wait = self.grow_backoff();
-                    tracing::warn!(error = %e, "切れた。繋ぎ直す");
+                    tracing::warn!(error = %e, "disconnected; reconnecting");
                     self.pending_notice = Some(Event::Reconnecting {
                         reason: e.to_string(),
                         wait,
@@ -494,14 +426,14 @@ impl Gateway {
         }
     }
 
-    /// 待ち時間を倍にする。**上限で止める**
+    /// Doubles the backoff, up to the maximum.
     fn grow_backoff(&mut self) -> Duration {
         let wait = self.backoff;
         self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
         wait
     }
 
-    /// 繋いで Hello を受け、identify か resume を送る。
+    /// Connects, takes Hello, and sends identify or resume.
     async fn open(&mut self) -> Result<(), GatewayError> {
         let url = connect_url(self.session.as_ref().map(|s| &*s.url));
 
@@ -514,7 +446,7 @@ impl Gateway {
 
         match &self.session {
             Some(s) => {
-                tracing::debug!(session = %s.id, "resume する");
+                tracing::debug!(session = %s.id, "resuming");
                 conn.last_seq = s.seq;
                 conn.send(json!({
                     "op": OP_RESUME,
@@ -523,13 +455,12 @@ impl Gateway {
                 .await?;
             }
             None => {
-                tracing::debug!("identify する");
+                tracing::debug!("identifying");
                 conn.send(identify(&self.token)).await?;
             }
         }
 
-        // 最初の心拍は間隔 × ゆらぎの後。
-        // **全クライアントが同時に叩かないため** (仕様 5 章)
+        // interval * jitter, so clients do not all beat at once.
         conn.schedule_first_heartbeat();
         self.conn = Some(conn);
         Ok(())
@@ -546,9 +477,9 @@ const OP_RECONNECT: u8 = 7;
 const OP_INVALID_SESSION: u8 = 9;
 const OP_HELLO: u8 = 10;
 const OP_HEARTBEAT_ACK: u8 = 11;
-/// `op 8` — 名指しでメンバーを頼む。**1 回 100 人まで**
+/// Requests members by id, 100 at a time.
 const OP_REQUEST_MEMBERS: u8 = 8;
-/// 見ているギルドとチャンネルを伝える。**利用者トークンでは必須**
+/// Announces the watched guild and channel; required for a user token.
 const OP_GUILD_SUBSCRIBE: u8 = 14;
 
 #[derive(Debug, Deserialize)]
@@ -562,11 +493,10 @@ struct Payload {
     t: Option<String>,
 }
 
-/// identify のペイロード ([`spec/09-discord-protocol.md`] 3 章)。
+/// The identify payload.
 ///
-/// ⚠️ **名乗りは [`gumicord_model::identity`] が 1 か所で決める。**
-/// ここで組み立て直すと、REST の `X-Super-Properties` と食い違う。
-/// **食い違いそのものが目印になる**
+/// The claim comes from one place; rebuilding it here would let it drift from
+/// the REST header, and the disagreement is itself a signal.
 fn identify(token: &Token) -> serde_json::Value {
     json!({
         "op": OP_IDENTIFY,
@@ -594,26 +524,27 @@ fn identify(token: &Token) -> serde_json::Value {
     })
 }
 
-/// 利用者トークンで要求する機能の組 ([`spec/09-discord-protocol.md`] 3 章)。
+/// Capabilities requested with a user token.
 ///
-/// ⚠️ **意味の内訳は未検証である。** 仕様に載っている値をそのまま送っている。
-/// 分かったら名前付きの定数に割る
+/// The individual bits are unverified; this is the documented value sent
+/// verbatim. Split it into named constants once they are known.
 const CAPABILITIES: u32 = 161789;
 
 // ─────────────────────────────────────────────── 接続 1 本
 
-/// 接続 1 本ぶんの状態。**繋ぎ直したら丸ごと捨てる。**
+/// State for one connection; discarded entirely on reconnect.
 struct Connection {
     ws: Ws,
-    /// ⚠️ 接続の生存期間中ずっと持つ。フレームを跨ぐ 1 本のストリームである
+    /// One stream spanning frames, so it lives as long as the connection.
     zstd: ZstdStream,
     heartbeat: Duration,
-    /// 次に心拍を送る時刻
+    /// When the next heartbeat is due.
     next_beat: tokio::time::Instant,
-    /// 前回の心拍に ACK が返ったか。**返っていなければその接続は死んでいる**
+    /// Whether the last heartbeat was acknowledged; if not, the connection is
+    /// dead.
     acked: bool,
     last_seq: Option<u64>,
-    /// 1 枚のフレームに複数入っていたぶんの残り
+    /// Leftovers from a frame that held several payloads.
     queued: std::collections::VecDeque<Payload>,
 }
 
@@ -635,10 +566,10 @@ impl Connection {
         Ok(())
     }
 
-    /// 最初の心拍を `間隔 × ゆらぎ` 後に置く。
+    /// Schedules the first heartbeat after interval * jitter.
     ///
-    /// ⚠️ **乱数の質は問題ではない。** 目的は世界中のクライアントが同じ瞬間に
-    /// 叩かないようにすることだけなので、時刻の端数で足りる
+    /// The randomness only has to stop every client beating at the same
+    /// moment, so the clock's low bits are enough.
     fn schedule_first_heartbeat(&mut self) {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -648,7 +579,7 @@ impl Connection {
         self.next_beat = tokio::time::Instant::now() + self.heartbeat.mul_f64(jitter);
     }
 
-    /// Hello を待って `heartbeat_interval` を返す。
+    /// Waits for Hello and returns the heartbeat interval.
     async fn wait_for_hello(&mut self) -> Result<u64, GatewayError> {
         loop {
             let payload = match self.queued.pop_front() {
@@ -669,12 +600,11 @@ impl Connection {
         }
     }
 
-    /// 1 歩進める。返すものが無ければ `Ok(None)`。
+    /// Advances one step.
     ///
-    /// ⚠️ **ここで待つものは全部 cancel-safe でなければならない。**
-    /// `select!` は負けたほうの未来を捨てるので、送信の途中で捨てられると
-    /// WebSocket の書き込みが半端なところで切れる。だから**送るのは
-    /// 勝ったあと**にしかしない。
+    /// Everything awaited here must be cancel-safe: `select!` drops the losing
+    /// future, and dropping mid-send would truncate a WebSocket write. So
+    /// sending only happens after winning.
     async fn pump(
         &mut self,
         session: &mut Option<SessionInfo>,
@@ -700,8 +630,8 @@ impl Connection {
         match step {
             Step::Beat => {
                 if !self.acked {
-                    // ⚠️ 網が切れても TCP はすぐには気付かない。
-                    // **これが唯一の検知手段である**
+                    // TCP takes a long time to notice a severed network; this
+                    // is the only detection there is.
                     return Err(GatewayError::Closed(CLOSE_NO_ACK));
                 }
                 self.acked = false;
@@ -713,39 +643,33 @@ impl Connection {
             Step::Received(Some(())) => Ok(None),
             Step::Received(None) => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
             Step::Watch(Some(Request::Members(guild, users))) => {
-                tracing::debug!(%guild, users = users.len(), "メンバーを名指しで頼む");
+                tracing::debug!(%guild, users = users.len(), "requesting members by id");
                 self.send(request_members(guild, &users)).await?;
                 Ok(None)
             }
             Step::Watch(Some(Request::Watch(guild, channel))) => {
-                // ⚠️ **同じ購読を送り直さない。**
+                // Never resend an identical subscription.
                 //
-                // 呼ぶ側は「毎回伝える」でよい — 見ているものが変わった
-                // ことを言い落とすほうが困るからである。だが**同じことを
-                // 何度も線に流してよい理由にはならない**。
-                //
-                // 実機では 1 つのチャンネルを開いているだけで数百回送られ、
-                // Discord に**レート制限で切られた** (`4008`)。切れては
-                // 繋ぎ直し、繋ぎ直しては送り直す循環になっていた。
-                //
-                // 繋ぎ直したときは [`Gateway::resend_subscriptions`] が
-                // 改めて全部送るので、ここで覚えていて構わない。
+                // Callers announce every time, since missing a change is
+                // worse — but that is no reason to put it on the wire. With
+                // one channel open this sent hundreds of times and Discord
+                // closed the connection, which reconnected and resent, and so
+                // on. Reconnects resend everything anyway.
                 if wanted.get(&guild) == Some(&channel) {
                     return Ok(None);
                 }
                 wanted.insert(guild, channel);
-                tracing::debug!(%guild, %channel, "購読する");
+                tracing::debug!(%guild, %channel, "subscribing");
                 self.send(subscribe(guild, channel)).await?;
                 Ok(None)
             }
-            // 頼む側が居なくなった。**接続を切る理由にはならない**
+            // No requesters left, which is not a reason to disconnect.
             Step::Watch(None) => Ok(None),
         }
     }
 
-    /// フレームを 1 枚読み、解凍して `queued` へ積む。
-    ///
-    /// 接続が終わったら `Ok(None)`。**空のフレームは誤りではない**
+    /// Reads one frame, decompresses it and queues the payloads. An empty
+    /// frame is not an error.
     async fn recv(&mut self) -> Result<Option<()>, GatewayError> {
         let Some(message) = self.ws.next().await else {
             return Ok(None);
@@ -753,22 +677,22 @@ impl Connection {
 
         let plain = match message? {
             Message::Binary(bytes) => self.zstd.push(&bytes)?,
-            // 圧縮を頼んでいるので普通は来ないが、来たらそのまま読む
+            // Unexpected given the compression request, but read it anyway.
             Message::Text(text) => text.as_bytes().to_vec(),
             Message::Close(frame) => {
                 let code = frame.map(|f| u16::from(f.code)).unwrap_or(CLOSE_ABNORMAL);
                 return Err(GatewayError::Closed(code));
             }
-            // ping/pong は tokio-tungstenite が返す
+            // Answered by the WebSocket library.
             _ => return Ok(Some(())),
         };
 
         if plain.is_empty() {
-            // フレームを跨いだ途中。次を待つ
+            // Mid-message across frames; wait for the next.
             return Ok(Some(()));
         }
 
-        // ⚠️ 1 枚に複数の JSON が入っていることがある。連結したまま読む
+        // One frame can hold several JSON payloads.
         for value in serde_json::Deserializer::from_slice(&plain).into_iter::<Payload>() {
             self.queued.push_back(value?);
         }
@@ -793,15 +717,14 @@ impl Connection {
                 let data = payload.d.unwrap_or_default();
                 match kind.as_str() {
                     "READY" => {
-                        // ⚠️ **形が変わったときにここだけを見れば分かるように
-                        // しておく。** Discord は同じ名前のフィールドの
-                        // 入れ子をこちらに断りなく変えてくる
+                        // Discord renests fields without notice, so a shape
+                        // change should be visible from this one place.
                         if tracing::enabled!(tracing::Level::DEBUG) {
                             log_ready_shape(&data);
                         }
                         let ready: Ready = serde_json::from_value(data)?;
-                        // resume 先が来なければ初回の URL へ戻る。
-                        // 落ちるよりは「別サーバに当たるかもしれない」ほうがまし
+                        // Without a resume host, fall back to the original
+                        // URL: possibly the wrong server beats failing.
                         *session = Some(SessionInfo {
                             id: ready.session_id.clone(),
                             url: ready
@@ -824,7 +747,7 @@ impl Connection {
                     _ => Ok(Some(Event::Dispatch { kind, data })),
                 }
             }
-            // サーバから催促された。**即座に返す**
+            // The server asked; answer at once.
             OP_HEARTBEAT => {
                 self.acked = false;
                 self.next_beat = tokio::time::Instant::now() + self.heartbeat;
@@ -836,19 +759,19 @@ impl Connection {
                 self.acked = true;
                 Ok(None)
             }
-            // 繋ぎ直せと言われた。resume はできる
+            // Told to reconnect; resuming is still allowed.
             OP_RECONNECT => Err(GatewayError::Closed(CLOSE_RECONNECT)),
             OP_INVALID_SESSION => {
-                // d が true なら resume し直せる。false ならセッションごと死んだ
+                // True means resumable; false means the session is gone.
                 let resumable = payload.d.and_then(|d| d.as_bool()).unwrap_or(false);
                 if !resumable {
                     *session = None;
                 }
                 Err(GatewayError::Closed(CLOSE_INVALID_SESSION))
             }
-            // Hello は open が食べている。ここへ来るのは二重の Hello だけ
+            // `open` consumed the first Hello; only a duplicate reaches here.
             other => {
-                tracing::debug!(op = other, "知らないオペコード。読み飛ばす");
+                tracing::debug!(op = other, "unknown opcode; skipping");
                 Ok(None)
             }
         }
@@ -857,26 +780,26 @@ impl Connection {
 
 // ─────────────────────────────────────────────── 切断の分岐
 
-/// ACK が返らないまま次の番が来た。**内部で作る番号**
+/// The next heartbeat came due with the previous one unacknowledged.
 const CLOSE_NO_ACK: u16 = 4_900;
-/// op=7 で繋ぎ直しを指示された
+/// Told to reconnect.
 const CLOSE_RECONNECT: u16 = 4_901;
-/// op=9。セッションの生死は `session` 側で決めてある
+/// Invalid session; whether it is resumable is decided by the payload.
 const CLOSE_INVALID_SESSION: u16 = 4_902;
-/// 何も言われずに切れた
+/// Closed without explanation.
 const CLOSE_ABNORMAL: u16 = 1_006;
 
-/// もう繋いでも無駄な切断か ([`spec/09-discord-protocol.md`] 6 章)。
+/// Whether reconnecting is pointless.
 ///
-/// ⚠️ **ここに挙げていないものは全部やり直す。** Discord は予告なく
-/// コードを足すので、知らないコードを「諦める」側に倒すと、直せる切断で
-/// 利用者を追い出すことになる。
+/// Anything not listed is retried: Discord adds codes without notice, and
+/// treating an unknown one as fatal would eject the user over a recoverable
+/// disconnect.
 fn fatal_of(error: &GatewayError) -> Option<Fatal> {
     let GatewayError::Closed(code) = error else {
         return None;
     };
     match code {
-        // 認証失敗。**トークンを捨てる** (`FR-004`)
+        // Authentication failed; discard the token.
         4004 => Some(Fatal::Unauthorized),
         4010 => Some(Fatal::Rejected {
             code: *code,
@@ -902,34 +825,30 @@ fn fatal_of(error: &GatewayError) -> Option<Fatal> {
     }
 }
 
-/// その切断の後も **resume を試してよい**か。
+/// Whether resuming is still worth trying after this close.
 ///
-/// 駄目なら identify からやり直す。⚠️ **迷ったら resume 側に倒す。**
-/// 無駄な resume は 1 往復で失敗が分かるだけだが、無駄な identify は
-/// 取りこぼしたイベントを永久に失う。
+/// When unsure, resume: a wasted resume costs one round trip, while a wasted
+/// identify loses the missed events for good.
 fn recoverable_session(error: &GatewayError) -> bool {
     match error {
-        // 網の都合。セッションは生きている
+        // A network problem; the session is still alive.
         GatewayError::Connect(_) | GatewayError::Decompress(_) | GatewayError::Decode(_) => true,
         GatewayError::NoHello => true,
         GatewayError::Closed(code) => !matches!(
             *code,
-            // 4007: seq が不正 / 4009: セッション期限切れ
+            // Bad sequence, or an expired session.
             4007 | 4009 | CLOSE_INVALID_SESSION
         ),
     }
 }
 
-/// READY の中の guilds が**どういう形で来ているか**を記録に残す。
+/// Logs the shape of READY's guilds.
 ///
-/// # なぜ残すのか
+/// An empty list looks the same whether the user is in no guilds or the
+/// payload could not be read. Eleven once arrived and none could be shown,
+/// because the name had moved inside `properties`.
 ///
-/// 一覧が空になったとき、原因が「入っていない」のか「読めていない」のかは
-/// 外から見分けが付かない。実際に **11 件届いていたのに 1 件も出せなかった**
-/// ことがある (名前が `properties` の中に移っていた)。
-///
-/// ⚠️ **中身は出さない。鍵の名前だけを出す。** ここには利用者のサーバ名も
-/// トークンも通るので、丸ごと記録すると秘密が残る
+/// Keys only, never values: guild names and the token pass through here.
 fn log_ready_shape(data: &serde_json::Value) {
     let guilds = data.get("guilds").and_then(|g| g.as_array());
     let keys: Vec<&str> = guilds
@@ -953,27 +872,24 @@ mod tests {
         GatewayError::Closed(code)
     }
 
-    /// ⚠️ **要求行に載る経路が `/` で始まること。**
-    ///
-    /// `resume_gateway_url` には経路が付いていない。問い合わせをそのまま
-    /// 繋ぐと `GET ?v=10… HTTP/1.1` になり、Discord は 400 を返す。
-    /// 繋がらないまま `session` を持ち続けて**二度と復帰しなかった**
+    /// The request line's path must start with `/`. Without it Discord
+    /// answers 400, and the retained session makes it retry forever.
     #[test]
     fn the_resume_url_keeps_its_path() {
         use tokio_tungstenite::tungstenite::http::Uri;
 
         let target = |url: &str| {
             url.parse::<Uri>()
-                .expect("URL として読める")
+                .expect("a valid URL")
                 .path_and_query()
-                .expect("経路がある")
+                .expect("a path")
                 .as_str()
                 .to_owned()
         };
 
         for host in [
             "wss://gateway-us-east1-b.discord.gg",
-            // 末尾に `/` が付いてきても二重にしない
+            // A trailing slash must not be doubled.
             "wss://gateway-us-east1-b.discord.gg/",
         ] {
             let url = connect_url(Some(host));
@@ -984,25 +900,25 @@ mod tests {
             assert!(target(&url).starts_with("/?v=10"), "{url}");
         }
 
-        // 初回も同じ形である
+        // The first connection has the same shape.
         assert!(target(&connect_url(None)).starts_with("/?v=10"));
     }
 
-    /// トークンが弾かれたら諦める。**捨ててログイン画面へ戻すため**
+    /// A rejected token is fatal, so the caller can discard it.
     #[test]
     fn an_invalid_token_is_fatal() {
         assert_eq!(fatal_of(&closed(4004)), Some(Fatal::Unauthorized));
     }
 
-    /// **知らないコードは諦めない。** Discord は予告なく足す
+    /// Unknown codes are retried; Discord adds them without notice.
     #[test]
     fn unknown_close_codes_are_retried() {
         for code in [4000, 4001, 4002, 4003, 4005, 4008, 4020, 4999, 1006] {
-            assert_eq!(fatal_of(&closed(code)), None, "コード {code} で諦めている");
+            assert_eq!(fatal_of(&closed(code)), None, "gave up on code {code}");
         }
     }
 
-    /// 網の都合で切れただけならセッションは生きている
+    /// A network close leaves the session alive.
     #[test]
     fn a_network_hiccup_keeps_the_session() {
         assert!(recoverable_session(&GatewayError::NoHello));
@@ -1011,7 +927,7 @@ mod tests {
         assert!(recoverable_session(&closed(CLOSE_RECONNECT)));
     }
 
-    /// セッションが死んだと言われたら identify からやり直す
+    /// A dead session means starting from identify.
     #[test]
     fn an_expired_session_is_not_resumed() {
         assert!(!recoverable_session(&closed(4007)));
@@ -1019,7 +935,7 @@ mod tests {
         assert!(!recoverable_session(&closed(CLOSE_INVALID_SESSION)));
     }
 
-    /// 待ち時間は倍々に伸び、**上限で止まる**
+    /// The backoff doubles and stops at the maximum.
     #[test]
     fn the_backoff_grows_but_is_capped() {
         let (mut g, _subs) = Gateway::new(Token::new("x"));
@@ -1030,10 +946,10 @@ mod tests {
         for _ in 0..20 {
             g.grow_backoff();
         }
-        assert_eq!(g.grow_backoff(), BACKOFF_MAX, "上限を超えて伸びている");
+        assert_eq!(g.grow_backoff(), BACKOFF_MAX, "grew past the maximum");
     }
 
-    /// ⚠️ **トークンが Debug に出ない** (`SEC-001`)
+    /// The token never reaches the debug output.
     #[test]
     fn the_token_never_appears_in_debug() {
         let (g, _subs) = Gateway::new(Token::new("mfa.SUPER_SECRET"));
@@ -1044,34 +960,29 @@ mod tests {
         );
     }
 
-    /// identify の名乗りが [`gumicord_model::identity`] と同じであること
-    /// (`NFR-020`)。
+    /// The identify claim matches the one source.
     ///
-    /// # ⚠️ かつてここは逆の試験だった
-    ///
-    /// 2026-08-23 まで、この試験は「`browser` は `Gumicord` である」ことを
-    /// 確かめていた。**騙らないという方針だった。**
-    ///
-    /// 実際に走らせたところ Discord に検知され、パスワードの再設定を
-    /// 求められた。利用者の判断で方針を反転させている
-    /// ([`spec/09-discord-protocol.md`] 3 章)。
-    ///
-    /// ⚠️ **ここで押さえるのは「騙らないこと」ではなく「食い違わないこと」**
-    /// になった。Gateway と REST で違うことを名乗れば、**食い違いそのものが
-    /// 目印になる**
+    /// This test used to assert the opposite — that the client identified as
+    /// itself. Doing so got the account flagged and forced a password reset,
+    /// and the decision was reversed. What is checked now is that the gateway
+    /// and REST agree, since a disagreement is itself a signal.
     #[test]
     fn identify_matches_the_rest_headers() {
         let payload = identify(&Token::new("t"));
         let props = &payload["d"]["properties"];
 
-        assert_eq!(*props, Identity::detect().properties(), "名乗りが食い違う");
+        assert_eq!(
+            *props,
+            Identity::detect().properties(),
+            "the two claims disagree"
+        );
         assert_eq!(payload["d"]["token"], "t");
-        // 利用者トークンの形である。**`intents` は bot の形**
+        // The user-token shape; `intents` would be the bot one.
         assert!(payload["d"]["capabilities"].is_number());
         assert!(payload["d"].get("intents").is_none());
     }
 
-    /// READY が読める。**知らないフィールドで落ちない**
+    /// READY parses, and unknown fields do not break it.
     #[test]
     fn ready_is_parsed_and_tolerates_unknown_fields() {
         let ready: Ready = serde_json::from_str(
@@ -1083,15 +994,14 @@ mod tests {
                 "まだ知らないもの": {"入れ子": [1,2]}
             }"#,
         )
-        .expect("READY を読めない");
+        .expect("could not read READY");
 
         assert_eq!(ready.session_id, "abc");
         assert_eq!(ready.guilds.len(), 1);
         assert_eq!(ready.user.user.display_name(), "ねんねこ");
     }
 
-    /// `resume_gateway_url` が無くても落ちない。
-    /// **無いほうが普通ではないが、無くても動けるべきである**
+    /// A missing `resume_gateway_url` is unusual but must still work.
     #[test]
     fn ready_without_a_resume_url_still_parses() {
         let ready: Ready =
@@ -1100,14 +1010,14 @@ mod tests {
         assert!(ready.guilds.is_empty());
     }
 
-    /// 1 枚のフレームに複数の JSON が入っていても全部読む
+    /// Several payloads in one frame all get read.
     #[test]
     fn several_payloads_in_one_frame_are_all_read() {
         let raw = br#"{"op":11}{"op":0,"t":"MESSAGE_CREATE","s":5,"d":{}}"#;
         let payloads: Vec<Payload> = serde_json::Deserializer::from_slice(raw)
             .into_iter::<Payload>()
             .collect::<Result<_, _>>()
-            .expect("連結した JSON を読めない");
+            .expect("could not read concatenated JSON");
 
         assert_eq!(payloads.len(), 2);
         assert_eq!(payloads[0].op, OP_HEARTBEAT_ACK);
