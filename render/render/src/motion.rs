@@ -1,37 +1,27 @@
-//! アニメーション。**確定したスタイルを、そこへ動かす。**
+//! Animation: moves resolved styles towards their targets.
 //!
-//! # ⚠️ フレーム駆動ではなく時間駆動である
-//!
-//! ([`spec/06-renderer.md`] 13 章の未確定項目に対する答え。)
-//!
-//! 「1 フレームごとに少しずつ近づける」書き方は簡単だが、**60Hz と 144Hz
-//! で速さが変わる**。`EXT-020` (全プラットフォームで同じ描画結果) を
-//! 掲げている以上、それは採れない。経過時間で位置を決める。
+//! Driven by time, not frames. Stepping a fraction per frame is simpler but
+//! runs at different speeds on different refresh rates, which is
+//! incompatible with identical rendering everywhere.
 //!
 //! ```text
-//!   t = (いま − 始めた時刻) / 長さ
-//!   出す値 = from + (to − from) × ease(t)
+//!   t     = (now - started) / duration
+//!   value = from + (to - from) * ease(t)
 //! ```
 //!
-//! # 何が動くか
+//! The tree's shape never animates; only already-resolved style values do.
+//! Nodes that appear and disappear would need something else, which does not
+//! exist here.
 //!
-//! **木の形は動かない。** 動くのは既に確定したスタイルの値だけである。
-//! 出たり消えたりするノード (選択の印など) が滑らかに現れるようにするには
-//! 別の仕組みが要り、それはここには無い。
+//! Colours, radii, border widths, opacity and sizes move. A moving size moves
+//! the layout with it.
 //!
-//! 動くのは色・角の丸み・枠の太さ・不透明度・寸法である。**寸法が動くと
-//! レイアウトも動く** — メンションの印が伸び縮みするのはこれによる。
+//! Only nodes whose theme wrote a transition animate; everything else
+//! switches instantly. Animating by default would set dozens of rows in
+//! motion on every scroll, which is noise rather than polish.
 //!
-//! # 動くのはテーマが言ったものだけ
-//!
-//! `transition` を書いたノードだけが動く。書いていなければ即座に切り替わる。
-//! ⚠️ **既定で全部動かさない。** 一覧をめくるたびに何十行も動き出すのは
-//! 見栄えではなく騒音である。
-//!
-//! # 止まったら寝る (`NFR-005`)
-//!
-//! [`Motion::apply`] は「まだ動いているか」を返す。動いていない間は
-//! 1 フレームも描かない。**動いているあいだだけ** 60Hz で回る。
+//! [`Motion::apply`] reports whether anything is still moving, and the loop
+//! sleeps once nothing is.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -39,31 +29,24 @@ use std::time::Instant;
 use gumicord_uitree::value::{Background, Color};
 use gumicord_uitree::{Style, UiNode};
 
-/// これ以下の差は「同じ」とみなす (論理 px / 0〜1 の比)
+/// Differences below this count as equal.
 const EPSILON: f32 = 0.01;
 
-/// ノードを跨いで覚えておくための鍵。**木の中の位置**である。
+/// Identifies a node across frames by its path from the root.
 ///
-/// # ⚠️ 安定 ID と `key` だけでは足りない
+/// A stable ID and key are not enough: a key only distinguishes siblings
+/// under the same parent. A guild icon carries no key, since its parent guild
+/// does, and using the ID alone made every guild's icon share one record —
+/// the target was rewritten several times per frame and the animation
+/// vanished.
 ///
-/// `key` が区別するのは「**同じ親の下の**同じ安定 ID」であって
-/// ([`spec/03-uitree.md`] 2.2)、木全体で一意ではない。
+/// Siblings are counted per stable ID rather than by overall position: an
+/// overall index shifts as soon as a node of another kind appears beside
+/// them, and the icon would look like a node never seen before.
 ///
-/// サーバの絵 `nav.guild_list.item.icon` は鍵を持たない — 親のサーバが
-/// 鍵を持っているので、そこでは要らないからである。だが記録の鍵に
-/// 使うと**サーバの数だけあるものが 1 つの記録を取り合う**。1 フレームの
-/// 中で行き先が何度も書き換わり、**動きが消える**。実際に消えた。
-///
-/// そこで根からの道を畳んで持つ。鍵があればそれを、無ければ兄弟の中の
-/// 位置を混ぜる。
-///
-/// ⚠️ **数えるのは同じ安定 ID の中での順番である。** 兄弟の通し番号だと、
-/// 隣に別の種類のノードが 1 つ増えただけで番号がずれる。サーバに印が
-/// 出た瞬間に絵の番号が動き、**絵が「初めて見たノード」になって飛ぶ**。
-///
-/// ⚠️ **鍵の無い同じ安定 ID の兄弟が並び替わると、動きは引き直しになる。**
-/// 位置しか手がかりが無いので、それが「別のもの」と区別できない。
-/// 並び替わっても同じものだと言いたいなら、`key` を付けるのが答えである。
+/// Reordering keyless siblings of the same ID restarts their animations,
+/// since position is the only handle. Adding a key is the answer where that
+/// matters.
 type Ident = u64;
 
 fn ident(parent: Ident, node: &UiNode, index: usize) -> Ident {
@@ -78,25 +61,25 @@ fn ident(parent: Ident, node: &UiNode, index: usize) -> Ident {
     h.finish()
 }
 
-/// 1 ノードぶんの、動いている最中の記録。
+/// One node's in-flight animation.
 #[derive(Debug, Clone)]
 struct Track {
-    /// 動き始めた時点で見えていた値
+    /// What was on screen when it started.
     from: Style,
-    /// 向かっている先。**テーマが確定させた値そのもの**
+    /// Where it is going: the resolved value.
     to: Style,
     started: Instant,
-    /// ミリ秒
+    /// Milliseconds.
     duration: f32,
-    /// このフレームで見かけたか。**見かけなかったものは捨てる**
+    /// Seen this frame; anything unseen is dropped.
     seen: u64,
 }
 
-/// 動いているものの記録。
+/// Everything currently animating.
 #[derive(Debug, Default)]
 pub struct Motion {
     tracks: HashMap<Ident, Track>,
-    /// 何フレーム目か。**消えたノードを捨てるためだけに使う**
+    /// The frame counter, used only to drop vanished nodes.
     frame: u64,
 }
 
@@ -105,15 +88,13 @@ impl Motion {
         Motion::default()
     }
 
-    /// 木のスタイルを「いまの値」へ書き換える。**まだ動いていれば真**。
-    ///
-    /// 真が返る間、呼び出し側は次のフレームを要求すること。止まったら
-    /// 요求をやめる — それが `NFR-005` である。
+    /// Rewrites the tree's styles to their current values, reporting whether
+    /// anything is still moving. The caller keeps requesting frames while it
+    /// is, and stops when it is not.
     pub fn apply(&mut self, root: &mut UiNode, now: Instant) -> bool {
         self.frame = self.frame.wrapping_add(1);
         let moving = self.walk(root, ident(0, root, 0), now);
-        // ⚠️ **消えたノードの記録を捨てる。** 残すと、一覧をめくるたびに
-        // 増え続ける
+        // Drop vanished nodes, or this grows with every scroll.
         let frame = self.frame;
         self.tracks.retain(|_, t| t.seen == frame);
         moving
@@ -122,11 +103,10 @@ impl Motion {
     fn walk(&mut self, node: &mut UiNode, at: Ident, now: Instant) -> bool {
         let mut moving = self.node(node, at, now);
 
-        // ⚠️ **兄弟の通し番号ではなく、同じ安定 ID の中での順番で数える。**
+        // Counted per stable ID, not by overall sibling position.
         //
-        // 通し番号だと、隣に別の種類のノードが 1 つ増えただけで番号が
-        // ずれる。サーバに印が出た瞬間に絵の番号が 0 から 1 へ動き、
-        // **絵が「初めて見たノード」になって角が飛ぶ**。
+        // An overall index shifts when a node of another kind appears
+        // beside them, and the icon then looks like a node never seen before.
         let mut nth: HashMap<gumicord_uitree::NodeId, usize> = HashMap::new();
         for child in &mut node.children {
             let n = nth.entry(child.id).or_default();
@@ -144,8 +124,8 @@ impl Motion {
         let frame = self.frame;
 
         let Some(track) = self.tracks.get_mut(&ident) else {
-            // 初めて見たノードは動かさない。**開いた瞬間に画面じゅうが
-            // 動き出すのは見栄えではない**
+            // A node seen for the first time does not animate; the whole
+            // screen moving on open is not polish.
             self.tracks.insert(
                 ident,
                 Track {
@@ -160,8 +140,8 @@ impl Motion {
         };
         track.seen = frame;
 
-        // 行き先が変わったら、**いま見えている値から**引き直す。
-        // ⚠️ 途中で向きが変わったときに `to` から始めると、一度飛ぶ
+        // A new target restarts from what is on screen; starting from the old
+        // target would jump when the direction reverses.
         if track.to != node.style {
             track.from = displayed(&track.from, &track.to, progress(track, now));
             track.to = node.style.clone();
@@ -175,7 +155,7 @@ impl Motion {
     }
 }
 
-/// 0.0〜1.0。**長さが 0 なら即座に 1.0**
+/// Progress from 0 to 1; a zero duration is immediately 1.
 fn progress(track: &Track, now: Instant) -> f32 {
     if track.duration <= 0.0 {
         return 1.0;
@@ -184,26 +164,25 @@ fn progress(track: &Track, now: Instant) -> f32 {
     (elapsed / track.duration).clamp(0.0, 1.0)
 }
 
-/// 出だしが速く、着地が静かな曲線。
+/// Fast out, quiet in.
 ///
-/// ⚠️ **等速にしない。** 等速で動くものは機械が動いているように見え、
-/// 止まった瞬間が不自然に目立つ。Discord も含め、UI はほぼ例外なく
-/// 「速く出て静かに止まる」を使う。
+/// Never linear: linear motion reads as machinery and makes the stop
+/// conspicuous.
 fn ease_out(t: f32) -> f32 {
     let inv = 1.0 - t;
     1.0 - inv * inv * inv
 }
 
-/// `from` と `to` の間の、`t` の位置の値。
+/// The value at `t` between two others.
 fn displayed(from: &Style, to: &Style, t: f32) -> Style {
     if t >= 1.0 {
         return to.clone();
     }
     let e = ease_out(t);
 
-    // ⚠️ **混ぜられないものは行き先をそのまま使う。** 書体も影も、
-    // 途中の値に意味が無い。中途半端に混ぜるより即座に切り替わるほうが
-    // 読み違えを生まない
+    // What cannot be interpolated jumps to the target: an intermediate font
+    // or shadow means nothing, and switching is less confusing than a
+    // half-blend.
     let mut out = to.clone();
     out.color = lerp_color(from.color, to.color, e);
     out.border_color = lerp_color(from.border_color, to.border_color, e);
@@ -217,8 +196,8 @@ fn displayed(from: &Style, to: &Style, t: f32) -> Style {
     out
 }
 
-/// ⚠️ **片方が未指定なら混ぜない。** 「指定なし」は値ではないので、
-/// 0 とみなして混ぜると黒や幅 0 を経由することになる
+/// Nothing is blended when either side is unset: "unset" is not a value, and
+/// treating it as zero passes through black or zero width.
 fn lerp_opt(from: Option<f32>, to: Option<f32>, t: f32) -> Option<f32> {
     match (from, to) {
         (Some(a), Some(b)) if (a - b).abs() > EPSILON => Some(a + (b - a) * t),
@@ -243,10 +222,10 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     v.round().clamp(0.0, 255.0) as u8
 }
 
-/// 背景は**色だけ**を混ぜる。
+/// Only a background's colour is blended.
 ///
-/// ⚠️ **絵は混ぜない。** 2 枚の画像の中間に意味は無く、混ぜるには
-/// 両方を描いて重ねる必要がある。そこまでするものではない
+/// Images are not blended: an intermediate between two of them means
+/// nothing, and producing one would mean drawing both.
 fn lerp_background(
     from: Option<&Background>,
     to: Option<&Background>,
@@ -278,8 +257,7 @@ mod tests {
         n
     }
 
-    /// ⚠️ **初めて見たノードは動かさない。**
-    /// 開いた瞬間に画面じゅうが動き出すのは見栄えではない
+    /// A node seen for the first time does not animate.
     #[test]
     fn the_first_sight_of_a_node_does_not_move() {
         let mut m = Motion::new();
@@ -290,7 +268,7 @@ mod tests {
         assert_eq!(n.style.radius, Some(12.0));
     }
 
-    /// 行き先が変わったら、そこへ**時間をかけて**動く
+    /// A new target is moved to over time.
     #[test]
     fn a_changed_value_travels_over_time() {
         let mut m = Motion::new();
@@ -298,28 +276,28 @@ mod tests {
 
         m.apply(&mut node(12.0, Some(100.0)), start);
 
-        // 変わった直後は、まだ元の値のあたりにいる
+        // Just after the change it is still near the old value.
         let mut n = node(8.0, Some(100.0));
-        assert!(m.apply(&mut n, start), "動いている");
-        assert_eq!(n.style.radius, Some(12.0), "まだ動き出していない");
+        assert!(m.apply(&mut n, start), "should be moving");
+        assert_eq!(n.style.radius, Some(12.0), "should not have moved yet");
 
-        // 途中
+        // Partway.
         let mut n = node(8.0, Some(100.0));
         assert!(m.apply(&mut n, start + Duration::from_millis(50)));
-        let mid = n.style.radius.expect("値がある");
+        let mid = n.style.radius.expect("a value");
         assert!(mid < 12.0 && mid > 8.0, "{mid}");
 
-        // 終わり
+        // Done.
         let mut n = node(8.0, Some(100.0));
         assert!(
             !m.apply(&mut n, start + Duration::from_millis(200)),
-            "止まった"
+            "should have stopped"
         );
         assert_eq!(n.style.radius, Some(8.0));
     }
 
-    /// ⚠️ **`transition` を書いていないノードは即座に切り替わる。**
-    /// 既定で全部動かすと、一覧をめくるたびに何十行も動き出す
+    /// Without a transition it switches instantly; animating everything would
+    /// set dozens of rows moving on every scroll.
     #[test]
     fn without_a_transition_nothing_moves() {
         let mut m = Motion::new();
@@ -328,11 +306,11 @@ mod tests {
         m.apply(&mut node(12.0, None), start);
         let mut n = node(8.0, None);
         assert!(!m.apply(&mut n, start));
-        assert_eq!(n.style.radius, Some(8.0), "すぐそこへ行く");
+        assert_eq!(n.style.radius, Some(8.0), "should arrive immediately");
     }
 
-    /// ⚠️ **途中で向きが変わったら、いま見えている値から引き直す。**
-    /// 行き先から始めると一度飛ぶ
+    /// A reversal restarts from what is on screen; from the target it would
+    /// jump.
     #[test]
     fn reversing_midway_starts_from_where_it_is() {
         let mut m = Motion::new();
@@ -341,15 +319,20 @@ mod tests {
         m.apply(&mut node(12.0, Some(100.0)), start);
         let mut n = node(8.0, Some(100.0));
         m.apply(&mut n, start + Duration::from_millis(50));
-        let mid = n.style.radius.expect("値がある");
+        let mid = n.style.radius.expect("a value");
 
-        // 引き返す
+        // Reverse.
         let mut n = node(12.0, Some(100.0));
         m.apply(&mut n, start + Duration::from_millis(50));
-        assert_eq!(n.style.radius, Some(mid), "飛ばずにその場から");
+        assert_eq!(
+            n.style.radius,
+            Some(mid),
+            "should continue from where it was"
+        );
     }
 
-    /// ⚠️ **片方が未指定なら混ぜない。** 0 とみなすと黒や幅 0 を経由する
+    /// Nothing is blended when either side is unset; zero would pass through
+    /// black or zero width.
     #[test]
     fn an_unset_value_is_not_treated_as_zero() {
         assert_eq!(lerp_opt(None, Some(10.0), 0.5), Some(10.0));
@@ -360,18 +343,17 @@ mod tests {
         );
     }
 
-    /// ⚠️ **同じ安定 ID が並んでいても、それぞれ別に動く。**
+    /// Siblings sharing a stable ID animate independently.
     ///
-    /// サーバの絵は鍵を持たない (親のサーバが持っているので要らない)。
-    /// 安定 ID と鍵だけを記録の鍵にすると**サーバの数だけあるものが 1 つの
-    /// 記録を取り合い**、1 フレームの中で行き先が何度も書き換わって
-    /// **動きが消える**。実際に消えた
+    /// Guild icons carry no key, since their parent does. Keying records by ID
+    /// alone made them all share one, the target was rewritten several times
+    /// per frame, and the animation vanished.
     #[test]
     fn siblings_with_the_same_id_move_on_their_own() {
         fn rail(hovered_radius: f32) -> UiNode {
             let mut list = UiNode::new(NodeId::NavGuildList);
             for i in 0..3u64 {
-                // 親のサーバだけが鍵を持ち、絵は持たない
+                // Only the parent carries a key.
                 let mut icon = UiNode::new(NodeId::NavGuildListItemIcon);
                 icon.style.radius = Some(if i == 1 { hovered_radius } else { 12.0 });
                 icon.style.transition = Some(100.0);
@@ -386,7 +368,7 @@ mod tests {
 
         fn radii(n: &UiNode, out: &mut Vec<f32>) {
             if n.id == NodeId::NavGuildListItemIcon {
-                out.push(n.style.radius.expect("値がある"));
+                out.push(n.style.radius.expect("a value"));
             }
             for c in &n.children {
                 radii(c, out);
@@ -397,7 +379,8 @@ mod tests {
         let start = Instant::now();
         m.apply(&mut rail(12.0), start);
 
-        // 真ん中だけにポインタが乗った。**気付いた瞬間はまだ動き出さない**
+        // The pointer lands on the middle one; the first frame does not move
+        // yet.
         m.apply(&mut rail(8.0), start);
 
         let mut tree = rail(8.0);
@@ -405,20 +388,21 @@ mod tests {
 
         let mut got = Vec::new();
         radii(&tree, &mut got);
-        assert_eq!(got[0], 12.0, "乗っていないものは動かない");
-        assert_eq!(got[2], 12.0, "乗っていないものは動かない");
+        assert_eq!(got[0], 12.0, "an unhovered one moved");
+        assert_eq!(got[2], 12.0, "an unhovered one moved");
         assert!(
             got[1] > 8.0 && got[1] < 12.0,
-            "乗ったものだけが途中: {}",
+            "only the hovered one should be partway: {}",
             got[1]
         );
     }
 
-    /// ⚠️ **隣に別の種類のノードが増えても、動きは続く。**
+    /// A node of another kind appearing beside them does not restart the
+    /// animation.
     ///
-    /// サーバにポインタを乗せると、絵の角が変わると**同時に**左端の印が
-    /// 現れる。兄弟の通し番号で数えると、そこで絵の番号が 0 から 1 へ
-    /// ずれて「初めて見たノード」になり、角が飛ぶ
+    /// Hovering a guild changes the icon's radius and adds the pill at the
+    /// same moment. Counting siblings overall would shift the icon's index and
+    /// make it look new.
     #[test]
     fn a_new_kind_of_sibling_does_not_restart_the_animation() {
         fn item(radius: f32, with_pill: bool) -> UiNode {
@@ -428,7 +412,7 @@ mod tests {
 
             let mut item = UiNode::new(NodeId::NavGuildListItem).with_id_key(1);
             if with_pill {
-                // 印は絵より**前**に来る
+                // The pill comes before the icon.
                 item = item.child(UiNode::new(NodeId::NavGuildListItemPill));
             }
             item.child(icon)
@@ -438,7 +422,7 @@ mod tests {
         let start = Instant::now();
         m.apply(&mut item(12.0, false), start);
 
-        // ポインタが乗った。印が生えて、同時に角が変わる
+        // Hovered: the pill appears and the radius changes together.
         m.apply(&mut item(8.0, true), start);
 
         let mut tree = item(8.0, true);
@@ -448,12 +432,13 @@ mod tests {
             .children
             .iter()
             .find(|c| c.id == NodeId::NavGuildListItemIcon)
-            .expect("絵がある");
-        let r = icon.style.radius.expect("値がある");
-        assert!(r > 8.0 && r < 12.0, "飛ばずに動いている: {r}");
+            .expect("an icon");
+        let r = icon.style.radius.expect("a value");
+        assert!(r > 8.0 && r < 12.0, "should be moving, not jumping: {r}");
     }
 
-    /// ⚠️ **消えたノードの記録は捨てる。** 一覧をめくるたびに増え続ける
+    /// Records for vanished nodes are dropped, or they grow with every
+    /// scroll.
     #[test]
     fn a_node_that_went_away_is_forgotten() {
         let mut m = Motion::new();

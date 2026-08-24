@@ -1,21 +1,13 @@
-//! レンダラ。UITree を受け取り GPU の描画コマンドを出す。
+//! The renderer: takes a UITree and emits GPU draw commands.
 //!
-//! **プラットフォーム固有のコードを一切含まない。** OS に触る必要が生じたら
-//! それは [`gumicord_platform`] の仕事である。
+//! Contains no platform-specific code; anything touching the OS belongs in
+//! the platform crate.
 //!
-//! 描画プリミティブは 3 種類しかない:
-//! - 角丸矩形 (SDF)
-//! - テクスチャ付きクアッド (画像・グリフ)
-//! - クリップ矩形
+//! There are three primitives: rounded rects, textured quads, and clip rects.
 //!
-//! ⚠️ **描画にコンピュートシェーダを使わない。** 使うと GL / GLES バックエンドが
-//! 選べなくなる。S1 の実測では Windows で DX12 と GL の間に常駐メモリで
-//! 16 倍 (285.7 MB vs 18.1 MB) の差があった。
-//!
-//! S1 の実測: Intel HD 520 で 20,000 インスタンスまで 60fps を維持。
-//!
-//! 要件: `NFR-001`〜`NFR-007`, `NFR-015`, `EXT-020`〜`EXT-027`
-//! 仕様: [`spec/06-renderer.md`]
+//! No compute shaders, which would rule out the GL and GLES backends. On the
+//! machine this was measured on, DX12 held sixteen times the resident memory
+//! GL did.
 
 pub mod draw;
 pub mod geom;
@@ -38,75 +30,72 @@ use gumicord_uitree::{Key, NodeId, UiNode};
 use crate::gpu::Gpu;
 use crate::text::TextEngine;
 
-/// 1 フレームで何を描いたか。性能の見張りに使う。
+/// What one frame drew, for watching performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameStats {
     pub nodes: usize,
     pub rects: u32,
     pub glyphs: u32,
-    /// draw の発行回数。パイプラインか切り取りが変わるたびに増える
+    /// Draw calls; one more per pipeline or clip change.
     pub draw_calls: usize,
-    /// 実際に表示できたか。`Failed` ならもう一度描き直しを要求する
+    /// Whether it reached the screen; a failure asks for another redraw.
     pub presented: Presented,
 }
 
-/// 当たり判定の結果 1 件。
+/// One hit.
 ///
-/// [`crate::layout::Placed`] は木を借用するので、フレームをまたいで持てない。
-/// 当たり判定に要るぶんだけ写して持つ。
+/// A placed node borrows the tree and cannot outlive the frame, so this copies
+/// just what hit testing needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub id: NodeId,
     pub key: Option<Key>,
     pub rect: Rect,
-    /// 切り取り矩形。**この外側に出た部分は当たらない。**
-    /// スクロールで隠れた項目に反応してはいけない
+    /// Anything outside this does not hit; a row scrolled out of view must
+    /// not respond.
     pub clip: Option<Rect>,
 }
 
-/// 掴んでいるスクロールバー。
+/// A scrollbar being dragged.
 ///
-/// 掴んだ瞬間の寸法を持ち続ける。引いている最中に配置が変わっても
-/// 摘みが手から逃げないようにするためである。
+/// Holds the measurements taken when it was grabbed, so a relayout mid-drag
+/// does not pull the thumb out from under the pointer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollGrab {
     bar: ScrollBar,
-    /// 摘みの上端から、掴んだ点までの距離
+    /// From the thumb's top edge to where it was grabbed.
     grab: f32,
 }
 
 impl ScrollGrab {
-    /// 掴んでいるスクロールバーが動かす領域
+    /// The region it drives.
     pub fn owner(&self) -> NodeId {
         self.bar.owner
     }
 }
 
-/// UITree を描くもの。
+/// Draws a UITree.
 pub struct Renderer {
     gpu: Gpu,
     text: TextEngine,
-    /// ページごとの束ね。**増えたら作り直す**
+    /// Per-page bind groups, rebuilt when a page is added.
     atlas_binds: Vec<wgpu::BindGroup>,
     scale: f32,
     scroll: ScrollState,
-    /// 直前のフレームの配置。入力の当たり判定に使う
+    /// The previous frame's layout, for hit testing.
     hits: Vec<Hit>,
-    /// スクロール領域ごとの、はみ出した量
+    /// Overflow per scroll region.
     overflow: std::collections::HashMap<NodeId, f32>,
-    /// 直前のフレームに置かれたスクロールバー
+    /// Scrollbars placed last frame.
     scrollbars: Vec<ScrollBar>,
-    /// 上へ足されたので、見ている場所を保ちたい領域。**1 フレームだけ効く**
+    /// A region that grew at the top and should hold its position, for one
+    /// frame.
     keep_place: Option<NodeId>,
-    /// 直前のフレームで、画面に出ようとしたのに無かった絵。
-    ///
-    /// ⚠️ **描いてみるまで分からない。** 見えているかどうかは配置と
-    /// 切り取りが決めることなので、木を組む側は知らない
+    /// Images the last frame wanted and did not have. Only drawing reveals
+    /// them, since visibility comes from layout and clipping.
     missing_images: Vec<String>,
-    /// キャレットをいま描くか。
-    ///
-    /// ⚠️ **点滅の刻みはプラットフォーム層が持つ。** 速さは OS の設定で
-    /// 決まり、**点滅させない設定もある**ので、ここで決め打ちにはできない
+    /// Whether the caret is lit. The blink is timed by the platform layer,
+    /// since the rate is an OS setting and can be off entirely.
     caret_visible: bool,
 }
 
@@ -139,8 +128,8 @@ impl Renderer {
         self.gpu.resize(width, height);
     }
 
-    /// DPI が変わった。グリフは物理ピクセルでラスタライズされているので、
-    /// アトラスごと作り直す ([`spec/06-renderer.md`] 3 章)。
+    /// The DPI changed. Glyphs are rasterised in physical pixels, so the
+    /// atlas is rebuilt.
     pub fn set_scale(&mut self, scale: f32) {
         if (scale - self.scale).abs() < f32::EPSILON {
             return;
@@ -154,7 +143,7 @@ impl Renderer {
         self.scale
     }
 
-    /// 表示領域 (論理 px)。テーマの `when.maxWidth` の照合にも使う
+    /// The viewport, which themes also match `when.maxWidth` against.
     pub fn viewport(&self) -> Size {
         let (w, h) = self.gpu.size();
         Size::new(w as f32 / self.scale, h as f32 / self.scale)
@@ -168,23 +157,20 @@ impl Renderer {
         &self.gpu.adapter_name
     }
 
-    /// スクロールを動かす。`delta` は論理 px。**再描画が要るかを返す。**
+    /// Scrolls, and reports whether a redraw is needed.
     ///
-    /// 上限は直前のフレームで分かったはみ出し量で抑える。1 フレーム遅れるが、
-    /// 動かしてから測り直すと 1 フレームぶん余計にレイアウトすることになる。
+    /// Bounded by the previous frame's overflow: a frame behind, but measuring
+    /// after moving would cost an extra layout.
     ///
-    /// ⚠️ **小さすぎる移動でも位置は必ず更新する。**
-    ///
-    /// 精密タッチパッドは 1 回のホイールを細かい差分の連続として送ってくる。
-    /// 「動きが小さいから」と捨てると、その細かい差分がどこにも溜まらず、
-    /// **指を動かしているのに何も起きない**ことになる。捨てるのは再描画の
-    /// 要求だけで、位置は積む。
+    /// Tiny movements still accumulate. A precision touchpad sends one gesture
+    /// as many small deltas, and discarding them means nothing happens while
+    /// the finger moves. Only the redraw request is skipped.
     pub fn scroll_by(&mut self, id: NodeId, delta: f32) -> bool {
         let max = self.overflow.get(&id).copied().unwrap_or(0.0);
         if max <= 0.0 || !delta.is_finite() {
             return false;
         }
-        // まだ動かされていない領域の現在位置は、既定の貼り付き先である
+        // An untouched region starts at its default anchor.
         let default = if intrinsic(id).anchor_end { max } else { 0.0 };
         let cur = self
             .scroll
@@ -196,14 +182,12 @@ impl Renderer {
         let next = (cur + delta).clamp(0.0, max);
         self.scroll.insert(id, layout::remember(id, next, max));
 
-        // 半ピクセルに満たない動きは、描き直しても見た目が変わらない
+        // Sub-half-pixel movement looks identical redrawn.
         (next - cur).abs() >= 0.5
     }
 
-    /// いまどこを見ているか。`(先頭からの距離, はみ出し量)`。
-    ///
-    /// ⚠️ **どちらも直前のフレームの寸法で言っている。** 「一番下」を
-    /// 意図として覚えていても、ここでは px に直して返す
+    /// The current position and overflow, both in the previous frame's terms.
+    /// A remembered "bottom" is resolved to pixels here.
     pub fn scroll_place(&self, id: NodeId) -> (f32, f32) {
         let max = self.overflow.get(&id).copied().unwrap_or(0.0);
         let default = if intrinsic(id).anchor_end { max } else { 0.0 };
@@ -216,27 +200,23 @@ impl Renderer {
         (at, max)
     }
 
-    /// スクロール位置を直接置く。[`SCROLL_TO_END`] で一番下に貼り付く。
+    /// Sets the position directly.
     pub fn set_scroll(&mut self, id: NodeId, at: f32) {
         self.scroll.insert(id, at);
     }
 
-    /// 上へ足したので、**見ている場所を動かさないでほしい**。
+    /// Holds the scroll position across a prepend, for one frame.
     ///
-    /// 次の 1 フレームだけ効く。伸びた量を測って、そのぶん位置を下げる。
-    ///
-    /// ⚠️ **足す側が言う。** レンダラには、伸びたのが上なのか下なのかを
-    /// 知る手がかりが無い。新着が下に付いたときにこれを効かせると、
-    /// **読んでいる場所が勝手に動く**
+    /// The caller says so: the renderer cannot tell which end grew, and
+    /// applying this to an append would move what is being read.
     pub fn keep_place(&mut self, id: NodeId) {
         self.keep_place = Some(id);
     }
 
-    /// スクロールバーを掴む。座標は**論理 px**。
+    /// Grabs a scrollbar.
     ///
-    /// 摘みの上を押したらその場を掴む。溝の上を押したら、**その位置へ摘みの
-    /// 中心が来るように飛ばしてから**掴む。押した瞬間から引っ張れるので、
-    /// 押す・飛ぶ・掴み直す、にならない。
+    /// On the thumb it grabs in place; on the track it jumps the thumb's
+    /// centre there first, so dragging works from the same press.
     pub fn grab_scrollbar(&mut self, x: f32, y: f32) -> Option<ScrollGrab> {
         let bar = *self.scrollbars.iter().find(|b| b.track.contains(x, y))?;
 
@@ -251,10 +231,8 @@ impl Renderer {
         Some(grab)
     }
 
-    /// 掴んだまま動かす。**再描画が要るかを返す。**
-    ///
-    /// 摘みが動ける距離は「溝の高さ − 摘みの高さ」であり、それが
-    /// はみ出し量の全体に対応する。
+    /// Drags a grabbed scrollbar. The thumb's travel is the track minus the
+    /// thumb, which maps to the whole overflow.
     pub fn drag_scrollbar(&mut self, grab: &ScrollGrab, y: f32) -> bool {
         let max = self.overflow.get(&grab.bar.owner).copied().unwrap_or(0.0);
         let travel = grab.bar.track.h - grab.bar.thumb.h;
@@ -275,37 +253,33 @@ impl Renderer {
         (next - cur).abs() >= 0.5
     }
 
-    /// キャレットを描くかどうかを切り替える。
-    ///
-    /// 点滅させるのはプラットフォーム層の仕事である。ここは**言われたとおりに
-    /// 描くか描かないか**だけを持つ
+    /// Sets whether the caret is drawn; the blinking is the platform layer's.
     pub fn set_caret_visible(&mut self, visible: bool) {
         self.caret_visible = visible;
     }
 
-    /// 1 フレーム描く。木は**スタイル解決済み**でなければならない。
+    /// Draws one frame. The tree must already have its style resolved.
     pub fn render(&mut self, root: &UiNode) -> FrameStats {
         let viewport = self.viewport();
         let mut layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
 
-        // ⚠️ **上へ足されたぶんだけ、見ている場所を下げる。**
+        // Shift the position down by however much was prepended.
         //
-        // 位置は先頭から測っているので、前に 50 件付くとその高さのぶん
-        // だけ読んでいた行が下へ逃げる。**遡ったのに読んでいた場所を
-        // 見失う**のでは、遡る意味がない。
+        // Positions are measured from the top, so prepending pushes the row
+        // being read downwards — which defeats the point of paging back.
         //
-        // 伸びた量は「はみ出し量の差」で分かる。枠の大きさは変わって
-        // いないので、増えたぶんがそのまま上に足された高さである。
+        // The growth is the change in overflow, since the box did not change
+        // size.
         //
-        // ⚠️ **もう一度測り直す。** 描いてから直すと、その 1 フレームだけ
-        // 飛んで見える。継ぎ足しは滅多に起きないので、そのときだけ 2 度測る
+        // Measured again rather than corrected after drawing, which would
+        // jump for one frame. Prepends are rare enough to pay for two passes.
         if let Some(id) = self.keep_place.take()
             && let (Some(before), Some(after)) =
                 (self.overflow.get(&id).copied(), layout.overflow.get(&id))
         {
             let grew = after - before;
             let at = self.scroll.get(&id).copied().unwrap_or(0.0);
-            // 一番下に貼り付いている人は動かさない。**意図のほうが強い**
+            // Someone pinned to the bottom stays there; the intent wins.
             if grew > 0.0 && at != layout::SCROLL_TO_END {
                 self.scroll.insert(id, (at + grew).min(*after));
                 layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
@@ -343,17 +317,13 @@ impl Renderer {
         }
     }
 
-    /// 直前のフレームで置かれたノードの一覧。
-    ///
-    /// IME へ入力欄の位置を伝えるように、点ではなく「あの ID のノードは
-    /// どこか」を知りたい場面がある。
+    /// The previous frame's placed nodes, for when the question is where a
+    /// given ID landed rather than what is under a point.
     pub fn hit_boxes(&self) -> &[Hit] {
         &self.hits
     }
 
-    /// 点の上にあるノードを手前から順に。座標は**論理 px**。
-    ///
-    /// 直前に描いたフレームの配置に対して答える。
+    /// Nodes under a point, front to back, against the last frame's layout.
     pub fn hit_test(&self, x: f32, y: f32) -> impl Iterator<Item = &Hit> {
         self.hits
             .iter()
@@ -362,55 +332,45 @@ impl Renderer {
     }
 }
 
-/// 最初のフレームが出るまでの色。テーマの背景がすぐ上に載るので、
-/// これが見えるのは起動直後の一瞬だけである
+/// The colour before the first frame; the theme covers it immediately.
 const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 impl Renderer {
-    /// 取ってきた画像をアトラスへ入れる。
+    /// Puts a fetched image in the atlas. The renderer never touches the
+    /// network; this arrives already decoded.
     ///
-    /// ⚠️ **レンダラは網に触らない。** 取得も復号もアプリの仕事で、ここへ
-    /// 来るのは既に RGBA になったものだけである
-    /// ([`spec/02-architecture.md`])。
-    ///
-    /// 入らなければ黙って諦める。**絵が出ないだけで、他は何も壊れない**
+    /// A failure to fit is ignored: the image does not appear, and nothing
+    /// else breaks.
     pub fn put_image(&mut self, image: &crate::text::ImageData) {
         self.text
             .put_image(&self.gpu.device, &self.gpu.queue, image);
-        // ⚠️ **ページが増えたら束ね直す。** 束ね直さないと、新しい
-        // ページのテクスチャを選べず、そこに載ったものが描かれない
+        // A new page needs rebinding, or its texture can never be selected.
         if self.text.took_atlas_growth() {
             self.atlas_binds = bind_pages(&self.gpu, &self.text);
         }
     }
 
-    /// 画面に出ようとしたのに無かった絵。**取ってくる側が頼む。**
-    ///
-    /// ⚠️ **見えているものだけである。** 一覧に 300 行あっても、
-    /// 切り取りを抜けて実際に描かれたところしか載らない
+    /// Images that were about to draw and were missing, for the fetcher.
+    /// Only what survived clipping.
     pub fn missing_images(&self) -> &[String] {
         &self.missing_images
     }
 
-    /// 絵を忘れたか。**1 回だけ真を返す。**
+    /// Whether images were forgotten; true once.
     ///
-    /// アトラスの絵の側が埋まったとき、まとめて忘れて詰め直す。
-    /// ⚠️ **真のときは、取ってきた側が入れ直しを頼み直す必要がある。**
-    /// 頼まないと、忘れられた顔は二度と出てこない
+    /// The image side is cleared and repacked when it fills. The fetcher must
+    /// re-add them, or they never come back.
     pub fn took_image_recycle(&mut self) -> bool {
         self.text.took_image_recycle()
     }
 
-    /// その画像を既に持っているか。**取りに行くかの判断に使う**
+    /// Whether the image is already held, which decides whether to fetch it.
     pub fn has_image(&self, url: &str) -> bool {
         self.text.has_image(url)
     }
 }
 
-/// アトラスのページごとに束ねる。
-///
-/// ⚠️ **ページが増えるたびに作り直す。** 束ねは 1 枚のテクスチャしか
-/// 指せないので、ページの数だけ要る
+/// Builds one bind group per atlas page; each can name only one texture.
 fn bind_pages(gpu: &Gpu, text: &TextEngine) -> Vec<wgpu::BindGroup> {
     text.atlas_views()
         .into_iter()
@@ -418,9 +378,8 @@ fn bind_pages(gpu: &Gpu, text: &TextEngine) -> Vec<wgpu::BindGroup> {
         .collect()
 }
 
-/// 木を置いた結果を、GPU 無しで見るための入口。**試験と診断だけに使う。**
-///
-/// ⚠️ 本番の描画はここを通らない。整形器を作り直すので**遅い**
+/// Lays out a tree without a GPU, for tests and diagnostics. Rebuilds the
+/// shaper each call, so it is slow, and drawing never goes through it.
 #[doc(hidden)]
 pub fn layout_for_test(
     tree: &gumicord_uitree::UiNode,
