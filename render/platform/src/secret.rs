@@ -1,64 +1,51 @@
-//! OS のセキュアストレージ (`FR-003`, P4)。
+//! The OS secure store.
 //!
-//! # 一番大事な規則
+//! The rule that matters: if it cannot be encrypted, it is not stored. Writing
+//! plaintext and fixing it later means the user's token sits on disk until
+//! then. An unsupported platform returns [`SecretError::Unsupported`] and the
+//! caller simply logs in again each start — inconvenient, but only that.
 //!
-//! **暗号化できないなら保存しない。**
-//!
-//! 平文で置いて「あとで直す」は、直るまでの間ずっと利用者のトークンが
-//! ディスクに転がっているということである。対応していないプラットフォーム
-//! では [`SecretError::Unsupported`] を返し、呼び出し側は**保存を諦めて
-//! 起動のたびにログインし直す**。不便だが、こちらの不便で済む。
-//!
-//! | プラットフォーム | 実装 | 状態 |
+//! | Platform | Backend | State |
 //! |---|---|---|
-//! | Windows | DPAPI (`CryptProtectData`) | ある |
-//! | macOS | Keychain | まだない (M1.2) |
-//! | Linux | Secret Service | まだない (M1.2) |
-//! | Android | Keystore | まだない (M1.2) |
-//! | iOS | Keychain | まだない (M1.2) |
+//! | Windows | DPAPI (`CryptProtectData`) | done |
+//! | macOS | Keychain | to come |
+//! | Linux | Secret Service | to come |
+//! | Android | Keystore | to come |
+//! | iOS | Keychain | to come |
 //!
-//! # DPAPI が守るもの・守らないもの
+//! DPAPI keeps another user account out: the key derives from the Windows
+//! logon credentials, so pulling the disk out is not enough. It does not keep
+//! out a program running as the same user — the extra entropy is in this
+//! source and is a label, not a wall.
 //!
-//! 守る: **他の利用者アカウントからは開けない。** 鍵は Windows のログオン
-//! 資格情報から導かれる。ディスクを抜き出しても、その利用者のパスワードが
-//! なければ開かない。
-//!
-//! 守らない: **同じ利用者として走るプログラムからは開ける。** 追加の
-//! エントロピーを渡してはいるが、それはこの原文がソースに書いてある以上、
-//! 秘密ではない。区別を付けるためのものであって、防壁ではない。
-//!
-//! これは公式の Discord クライアントと同じ強さである。**OS の利用者
-//! アカウントが乗っ取られた時点で守れるものはない**、という線を共有する。
+//! That is the strength the official client has too, and the same line: once
+//! the OS account is taken, nothing here can help.
 
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
-    /// このプラットフォームにはまだ実装がない。**平文へは退避しない**
+    /// No backend here yet; never falls back to plaintext.
     #[error("このプラットフォームにセキュアストレージの実装がない")]
     Unsupported,
     #[error("保存場所を決められない: {0}")]
     NoHome(&'static str),
     #[error("読み書きに失敗した: {0}")]
     Io(#[from] std::io::Error),
-    /// 暗号化・復号そのものの失敗。
-    ///
-    /// **中身は出さない。** 失敗の詳細に秘密が混じる余地を作らない
+    /// Encryption or decryption itself failed. Carries no content, so no
+    /// secret can reach the message.
     #[error("暗号化に失敗した (OS エラー {0})")]
     Crypto(u32),
 }
 
-/// OS のセキュアストレージに預けたもの。
-///
-/// 名前で出し入れする。いま入っているのはトークン 1 つだけだが、
-/// あとから通知の登録鍵などが増える。
+/// What the OS secure store holds, by name. Only the token for now.
 #[derive(Debug, Clone)]
 pub struct SecretStore {
     dir: PathBuf,
 }
 
 impl SecretStore {
-    /// 保存場所を用意する。**作れなければここで失敗する。**
+    /// Prepares the directory, failing here if it cannot be made.
     pub fn new() -> Result<Self, SecretError> {
         let dir = base_dir()?.join("secrets");
         std::fs::create_dir_all(&dir)?;
@@ -66,7 +53,7 @@ impl SecretStore {
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        // ⚠️ 名前はこちらが決めた定数しか来ないが、経路を跨がせない
+        // Only our own constants reach this, but never let one traverse.
         let safe: String = name
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -74,20 +61,20 @@ impl SecretStore {
         self.dir.join(format!("{safe}.bin"))
     }
 
-    /// 預ける。**既にあれば上書きする。**
+    /// Stores, replacing anything already there.
     pub fn store(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
         let blob = protect(secret)?;
-        // 途中で落ちても壊れた鍵束を残さない。書いてから差し替える
+        // Written then renamed, so a crash leaves no half-written secret.
         let tmp = self.path(name).with_extension("tmp");
         std::fs::write(&tmp, &blob)?;
         std::fs::rename(&tmp, self.path(name))?;
         Ok(())
     }
 
-    /// 取り出す。**無ければ `Ok(None)`。** 開けなければ誤りである。
+    /// Reads one back; absent is `Ok(None)`, unreadable is an error.
     ///
-    /// ⚠️ 開けないのは普通に起こる。別の Windows 利用者としてログオンした、
-    /// プロファイルを作り直した、など。呼び出し側は**捨ててログインし直す**
+    /// Unreadable happens normally — a different Windows user, a rebuilt
+    /// profile — and the caller should discard it and log in again.
     pub fn load(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
         let blob = match std::fs::read(self.path(name)) {
             Ok(b) => b,
@@ -97,10 +84,8 @@ impl SecretStore {
         unprotect(&blob).map(Some)
     }
 
-    /// 捨てる。**無くても成功である。**
-    ///
-    /// トークンが弾かれたとき (`FR-004`) に呼ばれるので、
-    /// 「無かった」で失敗されると後始末が書きにくい
+    /// Discards one. Absent still succeeds: this runs when a token is
+    /// rejected, and failing on "not there" makes that path awkward.
     pub fn clear(&self, name: &str) -> Result<(), SecretError> {
         match std::fs::remove_file(self.path(name)) {
             Ok(()) => Ok(()),
@@ -110,7 +95,7 @@ impl SecretStore {
     }
 }
 
-/// 設定と鍵束を置く場所。
+/// Where settings and secrets live.
 fn base_dir() -> Result<PathBuf, SecretError> {
     #[cfg(windows)]
     {
@@ -119,7 +104,7 @@ fn base_dir() -> Result<PathBuf, SecretError> {
     }
     #[cfg(not(windows))]
     {
-        // XDG に従う。実装が入るのは M1.2 だが、置き場所は先に決めておく
+        // XDG. The backend comes later; the location is settled now.
         if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
             return Ok(PathBuf::from(x).join("gumicord"));
         }
@@ -128,11 +113,11 @@ fn base_dir() -> Result<PathBuf, SecretError> {
     }
 }
 
-/// この製品を指す追加のエントロピー。
+/// Extra entropy naming this product.
 ///
-/// ⚠️ **秘密ではない。** ソースに書いてある。同じ利用者として走る別の
-/// プログラムがこれを渡せば開けてしまう。他の DPAPI の塊と取り違えない
-/// ための目印であって、防壁ではない
+/// Not a secret — it is right here, and another program running as the same
+/// user can pass it. It tells our blobs from other DPAPI blobs; it is not a
+/// wall.
 #[cfg(windows)]
 const ENTROPY: &[u8] = b"dev.gumicord.secret.v1";
 
@@ -140,8 +125,8 @@ const ENTROPY: &[u8] = b"dev.gumicord.secret.v1";
 fn protect(secret: &[u8]) -> Result<Vec<u8>, SecretError> {
     use windows_sys::Win32::Security::Cryptography::{CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData};
 
-    // SAFETY: 入出力とも下の blob_in / take_blob が寿命を管理する。
-    // 出力の確保は OS 側が行い、LocalFree で返す
+    // SAFETY: `blob_in` and `take_blob` own both lifetimes. The OS allocates
+    // the output and `LocalFree` returns it.
     unsafe {
         let input = blob_in(secret);
         let entropy = blob_in(ENTROPY);
@@ -153,8 +138,8 @@ fn protect(secret: &[u8]) -> Result<Vec<u8>, SecretError> {
             &entropy,
             std::ptr::null_mut(),
             std::ptr::null(),
-            // UI を出さない。**背景の仕事から呼ばれるので、
-            // 誰も見ていない画面で入力待ちになると固まる**
+            // No UI: this runs from background work, where a prompt nobody
+            // sees would hang.
             CRYPTPROTECT_UI_FORBIDDEN,
             &mut out,
         );
@@ -171,7 +156,7 @@ fn unprotect(blob: &[u8]) -> Result<Vec<u8>, SecretError> {
         CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
     };
 
-    // SAFETY: protect と同じ
+    // SAFETY: as in `protect`.
     unsafe {
         let input = blob_in(blob);
         let entropy = blob_in(ENTROPY);
@@ -193,7 +178,7 @@ fn unprotect(blob: &[u8]) -> Result<Vec<u8>, SecretError> {
     }
 }
 
-/// 借りたバイト列を DPAPI の入力の形にする。**中身は複製しない**
+/// Shapes borrowed bytes as a DPAPI input, without copying them.
 #[cfg(windows)]
 fn blob_in(data: &[u8]) -> windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB {
     windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB {
@@ -202,22 +187,22 @@ fn blob_in(data: &[u8]) -> windows_sys::Win32::Security::Cryptography::CRYPT_INT
     }
 }
 
-/// DPAPI が確保した出力を受け取り、**確実に解放する**。
+/// Takes DPAPI's output and frees it.
 ///
-/// ⚠️ 復号した平文がここを通る。読み終えたら 0 で潰してから返す。
-/// プロセスのヒープに秘密の複製を残さない
+/// Decrypted plaintext passes through here, so it is zeroed before the memory
+/// goes back and no copy is left on the heap.
 ///
 /// # Safety
 ///
-/// `out` は `CryptProtectData` / `CryptUnprotectData` が成功したときに
-/// 埋めた blob でなければならない。
+/// `out` must be a blob filled by a successful `CryptProtectData` or
+/// `CryptUnprotectData`.
 #[cfg(windows)]
 unsafe fn take_blob(
     out: windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB,
 ) -> Vec<u8> {
     use windows_sys::Win32::Foundation::LocalFree;
 
-    // SAFETY: 呼び出し側の契約により、out は OS が確保した有効な blob である
+    // SAFETY: by the contract above, `out` is a valid OS-allocated blob.
     unsafe {
         let data = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
         std::ptr::write_bytes(out.pbData, 0, out.cbData as usize);
@@ -228,7 +213,7 @@ unsafe fn take_blob(
 
 #[cfg(windows)]
 fn last_error() -> u32 {
-    // SAFETY: 引数も戻り値もない
+    // SAFETY: no arguments, no return value.
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 
@@ -246,7 +231,7 @@ fn unprotect(_blob: &[u8]) -> Result<Vec<u8>, SecretError> {
 mod tests {
     use super::*;
 
-    /// 試験ごとに別の場所を使う。**利用者の本物の鍵束を触らない**
+    /// A fresh location per test, never the user's real store.
     fn scratch(tag: &str) -> SecretStore {
         let dir = std::env::temp_dir().join(format!("gumicord-secret-test-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -261,7 +246,7 @@ mod tests {
         s.clear("token").expect("無いものを消しても成功する");
     }
 
-    /// 保存したものがそのまま戻る
+    /// What went in comes back.
     #[cfg(windows)]
     #[test]
     fn what_goes_in_comes_back_out() {
@@ -276,7 +261,7 @@ mod tests {
         assert!(s.load("token").unwrap().is_none());
     }
 
-    /// **ディスクに平文が残らない。** ここが破れたら P4 の意味がない
+    /// No plaintext reaches the disk; the whole point fails otherwise.
     #[cfg(windows)]
     #[test]
     fn the_plaintext_is_not_on_disk() {
@@ -290,7 +275,7 @@ mod tests {
         );
     }
 
-    /// 上書きできる。ログインし直したときに古いトークンが残らない
+    /// Overwriting works, so logging in again leaves no old token.
     #[cfg(windows)]
     #[test]
     fn storing_twice_replaces_the_first() {
@@ -300,8 +285,8 @@ mod tests {
         assert_eq!(s.load("token").unwrap().as_deref(), Some(&b"second"[..]));
     }
 
-    /// 壊れた塊は**誤りとして返る**。黙って空を返すと、
-    /// 「保存できていない」と「開けない」の区別が付かない
+    /// A corrupt blob errors; returning empty would blur "never stored" and
+    /// "cannot be opened".
     #[cfg(windows)]
     #[test]
     fn a_corrupt_blob_is_an_error() {

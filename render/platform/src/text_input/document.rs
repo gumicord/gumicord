@@ -1,34 +1,29 @@
-//! 編集中のテキスト。**OS に触らない。**
+//! The text being edited. Touches no OS API.
 //!
-//! Windows の TSF も Android の `InputConnection` も iOS の `UITextInput` も、
-//! 結局は「文字列と選択範囲を持つ文書」に対する読み書きを要求してくる。
-//! その文書をここに 1 つだけ置き、プラットフォームごとの層はこれを操作する。
+//! Windows TSF, Android's `InputConnection` and iOS's `UITextInput` all end up
+//! asking to read and write a document holding a string and a selection. That
+//! document lives here, once, and each platform layer drives it.
 //!
-//! # 位置はすべて**バイト位置**である
+//! Every position is a UTF-8 byte offset. All three talk in UTF-16 units, but
+//! storing UTF-16 would make every Rust operation precarious, so converting at
+//! the boundary is the platform layer's job.
 //!
-//! TSF も `InputConnection` も UTF-16 の単位で話しかけてくるが、内部を
-//! UTF-16 にすると Rust 側のあらゆる操作が危うくなる。**境界の変換は
-//! プラットフォーム層の責務**とし、ここは UTF-8 のバイト位置で通す。
-//!
-//! # カーソルは書記素単位で動く
-//!
-//! `char` 単位で動かすと、結合文字や ZWJ で繋いだ絵文字の途中で止まる。
-//! 👨‍👩‍👧‍👦 は 7 個の `char` でできているが、利用者にとっては 1 文字である。
-//!
-//! 仕様: [`spec/adr/0005-ime-strategy.md`], `PLT-001`
+//! The caret moves by grapheme. By `char` it would stop inside a combining
+//! sequence or a ZWJ emoji: 👨‍👩‍👧‍👦 is seven `char`s and one character to the
+//! person typing.
 
 use std::ops::Range;
 
 use unicode_segmentation::GraphemeCursor;
 
-/// 編集中のテキスト 1 つぶん。
+/// One editable text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextDocument {
     text: String,
-    /// 選択の始点。`caret` と等しければ選択なし
+    /// Where the selection began; equal to `caret` means none.
     anchor: usize,
     caret: usize,
-    /// 変換中の範囲。確定していない文字がここに入る
+    /// The composing range, holding what is not committed yet.
     composing: Option<Range<usize>>,
 }
 
@@ -49,7 +44,7 @@ impl TextDocument {
         self.caret
     }
 
-    /// 選択範囲。始点 ≤ 終点になるよう並べ替えて返す
+    /// The selection, ordered.
     pub fn selection(&self) -> Range<usize> {
         if self.anchor <= self.caret {
             self.anchor..self.caret
@@ -62,7 +57,7 @@ impl TextDocument {
         self.anchor != self.caret
     }
 
-    /// 変換中の範囲。確定していない文字を下線で示すのに使う
+    /// The composing range, underlined while it is uncommitted.
     pub fn composing(&self) -> Option<Range<usize>> {
         self.composing.clone()
     }
@@ -71,9 +66,9 @@ impl TextDocument {
         self.composing.is_some()
     }
 
-    // ─────────────────────────────────────────────── 編集
+    // ─────────────────────────────────────────────── Editing
 
-    /// 文字列を挿入する。選択範囲があれば置き換える。
+    /// Inserts, replacing the selection if there is one.
     pub fn insert(&mut self, s: &str) {
         self.delete_selection();
         self.text.insert_str(self.caret, s);
@@ -82,10 +77,8 @@ impl TextDocument {
         self.composing = None;
     }
 
-    /// 変換中の文字列を置く (`PLT-001`)。
-    ///
-    /// **確定ではない。** 直前の変換中の文字列があれば差し替える。
-    /// `cursor` は変換中の文字列の中でのバイト位置で、IME が指定してくる。
+    /// Sets the composing text, replacing any previous one. Not a commit.
+    /// `cursor` is the IME's caret, a byte offset within that text.
     pub fn set_composition(&mut self, s: &str, cursor: Option<usize>) {
         let start = match self.composing.take() {
             Some(r) => {
@@ -102,12 +95,12 @@ impl TextDocument {
         let end = start + s.len();
         self.composing = (!s.is_empty()).then_some(start..end);
 
-        // IME がカーソル位置を言ってこなければ末尾に置く
+        // Without one from the IME, the caret goes to the end.
         self.caret = cursor.map_or(end, |c| (start + c).min(end));
         self.anchor = self.caret;
     }
 
-    /// 変換を確定する。`s` が空なら変換中の文字列を取り消す。
+    /// Commits. An empty `s` cancels the composition.
     pub fn commit_composition(&mut self, s: &str) {
         if let Some(r) = self.composing.take() {
             self.text.replace_range(r.clone(), s);
@@ -119,7 +112,7 @@ impl TextDocument {
         self.anchor = self.caret;
     }
 
-    /// 変換を捨てる。Esc を押されたとき
+    /// Drops the composition, as Esc does.
     pub fn cancel_composition(&mut self) {
         if let Some(r) = self.composing.take() {
             self.text.replace_range(r.clone(), "");
@@ -128,7 +121,7 @@ impl TextDocument {
         }
     }
 
-    /// 後ろへ 1 文字消す (Backspace)。
+    /// Deletes backwards.
     pub fn delete_back(&mut self) {
         if self.delete_selection() {
             return;
@@ -140,7 +133,7 @@ impl TextDocument {
         }
     }
 
-    /// 前へ 1 文字消す (Delete)。
+    /// Deletes forwards.
     pub fn delete_forward(&mut self) {
         if self.delete_selection() {
             return;
@@ -150,7 +143,7 @@ impl TextDocument {
         }
     }
 
-    /// 選択範囲を消す。消したなら真
+    /// Deletes the selection, reporting whether there was one.
     fn delete_selection(&mut self) -> bool {
         let sel = self.selection();
         if sel.is_empty() {
@@ -162,11 +155,11 @@ impl TextDocument {
         true
     }
 
-    // ─────────────────────────────────────────────── 移動
+    // ─────────────────────────────────────────────── Movement
 
-    /// 左へ。`extend` なら選択を伸ばす
+    /// Left, extending the selection when asked.
     pub fn move_left(&mut self, extend: bool) {
-        // 選択があって伸ばさないなら、選択の先頭へ畳む
+        // An unextended move collapses to the start of the selection.
         if self.has_selection() && !extend {
             self.caret = self.selection().start;
             self.anchor = self.caret;
@@ -213,7 +206,7 @@ impl TextDocument {
         self.caret = self.text.len();
     }
 
-    /// 中身を取り出して空にする。送信したとき
+    /// Takes the text and empties this, as sending does.
     pub fn take(&mut self) -> String {
         self.composing = None;
         self.anchor = 0;
@@ -221,7 +214,7 @@ impl TextDocument {
         std::mem::take(&mut self.text)
     }
 
-    // ─────────────────────────────────────────────── 書記素の境界
+    // ─────────────────────────────────────────────── Grapheme boundaries
 
     fn prev_boundary(&self, at: usize) -> Option<usize> {
         GraphemeCursor::new(at, self.text.len(), true)
@@ -256,7 +249,7 @@ mod tests {
         assert!(!d.has_selection());
     }
 
-    /// **書記素単位で動く。** ZWJ で繋いだ絵文字の途中で止まってはいけない
+    /// The caret moves by grapheme, never stopping inside a ZWJ emoji.
     #[test]
     fn the_caret_steps_over_a_whole_emoji() {
         let family = "👨‍👩‍👧‍👦";
@@ -277,7 +270,7 @@ mod tests {
         assert_eq!(d.text(), "あ");
         d.delete_back();
         assert_eq!(d.text(), "");
-        // 空の文書で消しても壊れない
+        // Deleting in an empty document is harmless.
         d.delete_back();
         assert_eq!(d.text(), "");
     }
@@ -292,7 +285,7 @@ mod tests {
         assert!(!d.has_selection());
     }
 
-    /// PLT-001: 変換中の文字列は確定していない。差し替えられる
+    /// Composing text is uncommitted and can be replaced.
     #[test]
     fn a_composition_is_replaced_not_appended() {
         let mut d = doc("送信: ");
@@ -321,14 +314,14 @@ mod tests {
         assert!(!d.is_composing());
     }
 
-    /// IME が変換中の文字列の中のカーソル位置を指定してくる
+    /// The IME places the caret within the composing text.
     #[test]
     fn the_ime_can_place_the_caret_inside_the_composition() {
         let mut d = TextDocument::new();
         d.set_composition("にほんご", Some("にほ".len()));
         assert_eq!(d.caret(), "にほ".len());
 
-        // 範囲外を指定されても壊れない
+        // An out-of-range position is harmless.
         d.set_composition("にほんご", Some(9999));
         assert_eq!(d.caret(), "にほんご".len());
     }
@@ -343,7 +336,7 @@ mod tests {
         assert_eq!(&d.text()[sel], "えお");
     }
 
-    /// 選択があるときに矢印を押したら、選択を畳むだけで動かない
+    /// An arrow with a selection collapses it rather than moving.
     #[test]
     fn an_arrow_key_collapses_a_selection() {
         let mut d = doc("あいうえお");

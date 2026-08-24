@@ -1,55 +1,47 @@
-//! テキスト入力層 (`PLT-001`)。
+//! Text input.
 //!
-//! # なぜ自前で持つのか
-//!
-//! `winit` が渡してくるのは「変換中の文字列が変わった」「確定した」という
-//! 通知だけである。**その文字列をどこへ挿し、キャレットと選択がどう動くかは
-//! アプリが持つしかない。**
-//!
-//! # 段取り
+//! `winit` reports only that the composing text changed or was committed.
+//! Where that text goes, and how the caret and selection follow, is the app's
+//! to hold.
 //!
 //! | | |
 //! |---|---|
-//! | 文書モデル ([`TextDocument`]) | ✅ 全プラットフォーム共通。OS に触らない |
-//! | Windows の入力の取り込み | ✅ `winit` の `Ime` イベントで足りる |
-//! | Android `InputConnection` | ❌ M1.2 (A2) |
-//! | iOS `UITextInput` | ❌ M1.2 (I2) |
+//! | [`TextDocument`] | done, shared, touches no OS API |
+//! | Windows input | done, `winit`'s `Ime` events suffice |
+//! | Android `InputConnection` | to come |
+//! | iOS `UITextInput` | to come |
 //!
-//! **文書モデルを先に固めたのは、どのプラットフォームでも同じものを操作させる
-//! ためである。** `InputConnection` も `UITextInput` も、結局は
-//! 「文字列と選択範囲を持つ文書」への読み書きを要求してくる。
+//! The document model came first so every platform drives the same thing:
+//! `InputConnection` and `UITextInput` both end up asking to read and write a
+//! string with a selection.
 //!
-//! # Windows で TSF テキストストアは要らなかった
-//!
-//! かつては「アプリが `ITextStoreACP` を実装しないと変換候補ウィンドウが
-//! 出ない」と結論していたが、**それは誤りだった**
-//! ([ADR-0006](../../../spec/adr/0006-windows-ime-via-winit.md))。
-//!
-//! 実際の原因は `set_ime_cursor_area` へ渡していた矩形である。`winit` は
-//! `CANDIDATEFORM` を `CFS_EXCLUDE` で設定するため、渡すのは「候補を出す場所」
-//! ではなく**避けるべき領域**である。**入力欄全体の矩形を渡すこと。**
-//! キャレット幅の矩形を渡すと IME が候補を置く場所を決められない。
+//! Windows needed no TSF text store. The earlier conclusion that a candidate
+//! window requires `ITextStoreACP` was wrong (see ADR-0006); the real cause was
+//! the rectangle passed to `set_ime_cursor_area`. `winit` sets `CANDIDATEFORM`
+//! with `CFS_EXCLUDE`, so that rectangle is the area to avoid, not where to put
+//! the candidates. Pass the whole input field: a caret-width rectangle leaves
+//! the IME nowhere to place them.
 
 mod document;
 
 pub use document::TextDocument;
 
-/// テキスト入力の宛先。
+/// Where text input goes.
 ///
-/// 入力は**フォーカスのある 1 つの文書**へ流れる。どれに流すかを決めるのは
-/// アプリであり、プラットフォーム層はここへ渡すだけである。
+/// Input reaches one focused document. Which one is the app's choice; the
+/// platform layer only hands it over.
 pub trait TextInputHost {
-    /// いま入力を受け取る文書。`None` ならテキスト入力は起きていない
+    /// The document receiving input; `None` means no text input is happening.
     fn focused_document(&mut self) -> Option<&mut TextDocument>;
 
-    /// 確定した文字列が入った。送信などの引き金にする
+    /// Something was committed, which may trigger a send.
     fn on_commit(&mut self) {}
 }
 
-/// キー入力のうち、テキスト編集に関わるもの。
+/// The keys that edit text.
 ///
-/// **ここに OS の型は現れない。** `winit` のキーコードをそのまま渡すと、
-/// Android と iOS で別の型を持ち込むことになる。
+/// No OS type appears here: passing `winit` key codes through would drag a
+/// different type in on Android and iOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKey {
     Backspace,
@@ -58,18 +50,18 @@ pub enum EditKey {
     Right,
     Home,
     End,
-    /// 変換中なら取り消し、そうでなければフォーカスを外す
+    /// Cancels a composition, or drops focus.
     Escape,
-    /// 送信 (`FR-024`)
+    /// Send.
     Enter,
     SelectAll,
 }
 
 impl EditKey {
-    /// 文書へ適用する。**何か変わったら真**を返す。
+    /// Applies this to a document, reporting whether anything changed.
     ///
-    /// `Enter` と `Escape` はここでは扱わない。送信もフォーカスも文書の外の
-    /// 話であり、呼び出し側が決める。
+    /// `Enter` and `Escape` are not handled here: sending and focus live
+    /// outside the document.
     pub fn apply(self, doc: &mut TextDocument, shift: bool) -> bool {
         match self {
             EditKey::Backspace => doc.delete_back(),
@@ -79,7 +71,7 @@ impl EditKey {
             EditKey::Home => doc.move_home(shift),
             EditKey::End => doc.move_end(shift),
             EditKey::SelectAll => doc.select_all(),
-            // 呼び出し側の仕事
+            // The caller's business.
             EditKey::Enter | EditKey::Escape => return false,
         }
         true
