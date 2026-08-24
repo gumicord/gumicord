@@ -1,13 +1,12 @@
-//! テーマの解決。
+//! Theme resolution: parsing, validation, tokens, selector matching and
+//! settling a style.
 //!
-//! 責務: JSON のパース / 検証 / トークン解決 / セレクタ照合 / スタイル確定。
+//! One cascade rule: later rules override earlier ones, per property. No
+//! specificity, so a theme author can read top to bottom and see why a rule
+//! did not take effect.
 //!
-//! カスケード規則は 1 つだけである — **記述順に適用し、後のルールが前のルールを
-//! プロパティ単位で上書きする**。CSS の詳細度は採用しない。テーマ作者が
-//! 「なぜこのルールが効かないのか」を上から読んで必ず分かる状態を優先する。
-//!
-//! 検証に失敗しても**テーマ全体を捨てない**。誤りのあるルールやプロパティ
-//! だけを無視して残りを適用する (`EXT-016`)。
+//! A validation failure never discards the whole theme; only the offending
+//! rule or property is ignored.
 //!
 //! ```
 //! use gumicord_theme::{MatchContext, Theme};
@@ -20,13 +19,12 @@
 //! }"##;
 //!
 //! let loaded = Theme::parse(src);
-//! let theme = loaded.theme.expect("適用できる");
+//! let theme = loaded.theme.expect("usable");
 //! let style = theme.style_for(NodeId::AppWindow, &MatchContext::new(1280.0));
 //! assert!(style.background.is_some());
 //! ```
 //!
-//! 要件: `EXT-010`〜`EXT-027`
-//! 仕様: [`spec/04-theme.md`], [`spec/schema/theme.schema.json`]
+//! See `spec/04-theme.md`.
 
 pub mod cond;
 pub mod diag;
@@ -34,12 +32,9 @@ mod parse;
 pub mod resolve;
 pub mod token;
 
-// `Style` と値の型は**拡張 ABI のデータ型**であり、テーマ・プラグイン・
-// レンダラの 3 者が触る。定義元は ABI の定義元である `gumicord-uitree` に
-// 置き、ここからは再エクスポートする。
-//
-// テーマ側に置くと、`UiNode` が `Style` を持つ以上
-// `gumicord-uitree` → `gumicord-theme` → `gumicord-uitree` の循環になる。
+// `Style` and the value types belong to the extension ABI and are touched by
+// themes, plugins and the renderer, so they live in the ABI crate and are
+// re-exported here. Defining them here would make the dependency circular.
 pub use gumicord_uitree::{style, value};
 
 use std::collections::HashMap;
@@ -56,35 +51,32 @@ pub use crate::style::Style;
 pub use crate::token::{TokenValue, Tokens};
 pub use crate::value::{AssetKind, AssetRef, Background, Color, Edges, Fit, Font, Shadow};
 
-/// このクライアントが解釈できる UITree の ABI メジャーバージョン。
-///
-/// テーマの `manifest.abi` がこれより大きい場合、「このテーマは新しすぎる」と
-/// 利用者に伝えた上で**既知のルールのみを適用する** ([`spec/04-theme.md`] 2.1)。
+/// The ABI version this client understands. A theme declaring a higher one is
+/// reported as too new, and only its known rules apply.
 pub const CLIENT_ABI: u32 = 1;
 
-/// 適用可能なテーマ。
+/// A usable theme.
 ///
-/// セレクタは安定 ID の**完全一致のみ**である。ワイルドカードを持たないのは、
-/// 安定 ID の追加が既存テーマの見た目を変えないようにするためである
-/// (`03-uitree.md` の C3 と両立させる)。
+/// Selectors match a stable ID exactly. Without wildcards, adding an ID can
+/// never change how an existing theme looks.
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub manifest: Manifest,
     rules: Vec<Rule>,
-    /// 安定 ID から、その ID を選ぶルールの添字へ (記述順)
+    /// Stable ID to the rules selecting it, in order.
     ///
-    /// ノードごとに全ルールを走査すると O(ノード数 × ルール数) になる。
-    /// テーマは 1 度読めば変わらないので、読んだときに索引化しておく。
+    /// Scanning every rule per node would be quadratic; a theme never changes
+    /// once parsed, so it is indexed then.
     index: HashMap<NodeId, Vec<u32>>,
 }
 
-/// [`Theme::parse`] の結果。
+/// The result of parsing.
 ///
-/// **`Result` ではない。** テーマが適用できたかどうかと、何が無視されたかは
-/// 別の情報である。ルールが 3 本無視されてもテーマは適用される (`EXT-016`)。
+/// Not a `Result`: whether the theme applies and what was ignored are
+/// different questions, and three ignored rules still leave a usable theme.
 #[derive(Debug, Clone)]
 pub struct ParseResult {
-    /// 適用できるテーマ。`None` ならテーマ全体が適用されない
+    /// The theme, or `None` if none of it applies.
     pub theme: Option<Theme>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -108,19 +100,17 @@ impl ParseResult {
 }
 
 impl Theme {
-    /// テーマの JSON を読む。
+    /// Parses a theme.
     ///
-    /// テーマ全体が捨てられるのは次の 2 つだけである ([`spec/04-theme.md`] 7 章)。
-    ///
-    /// - JSON として壊れている
-    /// - `manifest` が欠けている、または不正
+    /// Only two things discard the whole theme: malformed JSON, and a missing
+    /// or invalid manifest.
     pub fn parse(src: &str) -> ParseResult {
         let mut diags = Diagnostics::new();
 
         let root: Value = match serde_json::from_str(src) {
             Ok(v) => v,
             Err(e) => {
-                // 構文誤りに限り、行番号を伝えられる
+                // Only a syntax error carries a line number.
                 diags.error(
                     format!("{}行{}列", e.line(), e.column()),
                     Ignored::Theme,
@@ -219,26 +209,20 @@ impl Theme {
         }
     }
 
-    /// 1 ノードのスタイルを確定する。
-    ///
-    /// **規則 K1 の実装そのものである。** 記述順に走査し、条件が成立した
-    /// ルールをプロパティ単位で重ねていく。詳細度は計算しない。
+    /// Settles one node's style: rules in order, layered per property, no
+    /// specificity.
     pub fn style_for(&self, node: NodeId, ctx: &MatchContext) -> Style {
         self.style_for_tinted(node, ctx, None)
     }
 
-    /// そのノードのスタイル。**データが持ってきた色を差し込む。**
+    /// A node's style, with any data-supplied colour substituted in.
     ///
-    /// # ⚠️ 後から素の色を書いたルールが勝つ
+    /// The tint marker says "use that colour here"; it is not a value. A later
+    /// rule writing a literal colour clears it, or a rule branching on `when`
+    /// would silently stop working.
     ///
-    /// `$data.tint` は「ここにその色を使う」という印であって、値ではない。
-    /// 後のルールが同じプロパティに素の色を書いたら、**印は下りる**。
-    /// 下ろさないと、`when` で分岐して色を上書きしたつもりのルールが
-    /// 黙って効かなくなる。
-    ///
-    /// ⚠️ **色を持たないノードでは何も起きない。** 前のルールが書いた色が
-    /// そのまま残る。これが「色があればそれ、無ければ既定」の書き方に
-    /// なっている ([`Tinted`])
+    /// A node without a colour changes nothing, which is what makes "the
+    /// colour if there is one, the default otherwise" expressible.
     pub fn style_for_tinted(&self, node: NodeId, ctx: &MatchContext, tint: Option<Color>) -> Style {
         let mut out = Style::default();
         let Some(indices) = self.index.get(&node) else {
@@ -273,9 +257,8 @@ impl Theme {
         out
     }
 
-    /// このテーマが何らかのルールを持つ安定 ID か。
-    ///
-    /// レンダラが「テーマの影響を受けないノード」を早期に判定するために使う。
+    /// Whether any rule selects this ID, so unaffected nodes can be skipped
+    /// early.
     pub fn affects(&self, node: NodeId) -> bool {
         self.index.contains_key(&node)
     }
@@ -290,7 +273,7 @@ mod tests {
     use super::*;
     use gumicord_uitree::{State, StateSet};
 
-    /// manifest だけを補って、本体を包む
+    /// Wraps a body with a minimal manifest.
     fn wrap(body: &str) -> String {
         format!(
             r#"{{
@@ -323,14 +306,14 @@ mod tests {
         Some(Background::solid(Color::parse(hex).unwrap()))
     }
 
-    // ------------------------------------------------ テーマ全体を捨てる 2 つの場合
+    // ------------------------------------------------ Discarding the theme
 
     #[test]
     fn broken_json_rejects_the_whole_theme() {
         let r = Theme::parse("{ not json");
         assert!(!r.is_applied());
         assert_eq!(r.errors().count(), 1);
-        // 構文誤りなら行番号を伝えられる
+        // A syntax error carries a line number.
         assert!(r.diagnostics[0].path.contains('行'));
     }
 
@@ -355,7 +338,7 @@ mod tests {
         }
     }
 
-    /// 逆に、これらは通る
+    /// These, by contrast, are accepted.
     #[test]
     fn valid_manifest_variants() {
         for version in ["1.0.0", "0.0.1", "10.20.30", "1.0.0-beta.1"] {
@@ -369,7 +352,7 @@ mod tests {
 
     // ------------------------------------------------ K1
 
-    /// K1: 後のルールが勝つ
+    /// Later rules win.
     #[test]
     fn later_rule_wins() {
         let (theme, _) = parse_ok(&wrap(
@@ -382,7 +365,7 @@ mod tests {
         assert_eq!(s.background, solid("#222222"));
     }
 
-    /// 5.1: 上書きの単位はプロパティ
+    /// Overriding is per property.
     #[test]
     fn override_is_per_property() {
         let (theme, _) = parse_ok(&wrap(
@@ -396,7 +379,7 @@ mod tests {
         assert_eq!(s.radius, Some(8.0));
     }
 
-    /// 5 章の例: 順序を逆にすると hover が効かなくなる
+    /// Reversing the order stops hover taking effect.
     #[test]
     fn order_matters_even_for_conditional_rules() {
         let hover_last = wrap(
@@ -454,9 +437,9 @@ mod tests {
         assert!(!theme.affects(NodeId::ChatMessage));
     }
 
-    // ------------------------------------------------ EXT-016 の粒度
+    // ------------------------------------------------ Granularity
 
-    /// 未知の安定 ID → **ルール**を無視し、**警告**
+    /// An unknown stable ID drops the rule, with a warning.
     #[test]
     fn unknown_node_id_is_a_warning_and_skips_the_rule() {
         let (theme, diags) = parse_ok(&wrap(
@@ -478,7 +461,7 @@ mod tests {
         assert_eq!(warnings[0].ignored, Ignored::Rule);
     }
 
-    /// 未知のプロパティ → **プロパティ**を無視し、**警告**
+    /// An unknown property drops the property, with a warning.
     #[test]
     fn unknown_property_is_a_warning_and_skips_only_the_property() {
         let (theme, diags) = parse_ok(&wrap(
@@ -498,7 +481,7 @@ mod tests {
         );
     }
 
-    /// 未知の when のキー → **ルール**を無視し、**警告**
+    /// An unknown `when` key drops the rule, with a warning.
     #[test]
     fn unknown_when_key_is_a_warning_and_skips_the_rule() {
         let (theme, diags) = parse_ok(&wrap(
@@ -515,7 +498,7 @@ mod tests {
         );
     }
 
-    /// 未知の状態名も「将来追加された状態」でありうるので警告
+    /// An unknown state may be one added later, so it warns.
     #[test]
     fn unknown_state_name_is_a_warning() {
         let (theme, diags) = parse_ok(&wrap(
@@ -528,7 +511,7 @@ mod tests {
         assert!(diags.iter().all(|d| d.severity == Severity::Warning));
     }
 
-    /// 未定義のトークン参照 → **プロパティ**を無視し、**エラー**
+    /// An undefined token drops the property, as an error.
     #[test]
     fn undefined_token_is_an_error_and_skips_only_the_property() {
         let (theme, diags) = parse_ok(&wrap(
@@ -546,7 +529,7 @@ mod tests {
         );
     }
 
-    /// 値の型が違う → **プロパティ**を無視し、**エラー**
+    /// A wrong value type drops the property, as an error.
     #[test]
     fn wrong_type_is_an_error_and_skips_only_the_property() {
         let (theme, diags) = parse_ok(&wrap(
@@ -560,7 +543,7 @@ mod tests {
         assert!(diags.iter().any(|d| d.severity == Severity::Error));
     }
 
-    /// 循環参照したトークンを参照するルールは、そのプロパティだけ落ちる
+    /// A rule using a cyclic token loses only that property.
     #[test]
     fn cyclic_token_only_kills_the_referring_property() {
         let (theme, _) = parse_ok(&wrap(
@@ -574,7 +557,7 @@ mod tests {
         assert_eq!(s.radius, Some(8.0));
     }
 
-    /// すべてのプロパティが落ちたルールは残さない
+    /// A rule with every property dropped is not kept.
     #[test]
     fn rule_with_nothing_left_is_dropped() {
         let (theme, _) = parse_ok(&wrap(
@@ -583,7 +566,7 @@ mod tests {
         assert_eq!(theme.rules().len(), 0);
     }
 
-    // ------------------------------------------------ トークン
+    // ------------------------------------------------ Tokens
 
     #[test]
     fn token_reference_resolves_in_styles() {
@@ -602,7 +585,7 @@ mod tests {
         assert_eq!(s.radius, Some(8.0));
     }
 
-    /// オブジェクトのトークンは使用箇所で型が決まる
+    /// An object token is typed at the point of use.
     #[test]
     fn object_token_is_typed_by_use_site() {
         let (theme, diags) = parse_ok(&wrap(
@@ -621,7 +604,7 @@ mod tests {
         assert_eq!(f.weight, Some(600));
     }
 
-    /// 同じオブジェクトを別の型として使うと、そこで型が合わずに落ちる
+    /// Using the same object as another type fails there.
     #[test]
     fn object_token_used_as_wrong_type_fails_at_use_site() {
         let (theme, diags) = parse_ok(&wrap(
@@ -636,7 +619,7 @@ mod tests {
         assert!(diags.iter().any(|d| d.severity == Severity::Error));
     }
 
-    // ------------------------------------------------ 背景 (EXT-021〜027)
+    // ------------------------------------------------ Backgrounds
 
     #[test]
     fn background_shorthand_is_a_color() {
@@ -684,7 +667,7 @@ mod tests {
         assert_eq!(bg.tint, Color::parse("#0f0f1766"));
     }
 
-    /// EXT-027: 画像が読めなくても色は残り、テーマ全体は生きる
+    /// An unreadable image keeps the colour and the theme.
     #[test]
     fn bad_image_falls_back_to_color() {
         let (theme, diags) = parse_ok(&wrap(
@@ -702,7 +685,7 @@ mod tests {
         assert!(diags.iter().any(|d| d.severity == Severity::Error));
     }
 
-    /// SEC-022: 宣言のないホストへは到達しない
+    /// An undeclared host is never contacted.
     #[test]
     fn remote_image_requires_declaration() {
         let (theme, diags) = parse_ok(&wrap(
@@ -711,8 +694,8 @@ mod tests {
                 "style": { "background": { "image": "https://cdn.example.com/bg.png" } }
             }]"#,
         ));
-        // EXT-027: 画像は落ちるが、テーマもルールも生きたまま
-        // background.color (ここでは未指定 = 透明) にフォールバックする
+        // The image is dropped; the theme and the rule survive, falling back
+        // to the background colour.
         let bg = theme
             .style_for(NodeId::AppWindow, &ctx())
             .background
@@ -742,7 +725,7 @@ mod tests {
         );
     }
 
-    /// 背景オブジェクトそのものをトークンにできる
+    /// A whole background object can be a token.
     #[test]
     fn background_can_come_from_a_token() {
         let (theme, diags) = parse_ok(&wrap(
@@ -775,12 +758,10 @@ mod tests {
         assert!(diags.iter().any(|d| d.path == "manifest.abi"));
     }
 
-    // ------------------------------------------------ 公式サンプル
+    // ------------------------------------------------ Sample themes
 
-    /// 公式サンプルは診断ゼロで通らなければならない。
-    ///
-    /// スキーマ検証 (`cargo xtask schema`) とこの試験は**別々の実装**である。
-    /// 食い違えばどちらかが間違っているとすぐ分かる。
+    /// The samples must parse without a single diagnostic. The schema check is
+    /// a separate implementation, so a disagreement shows up at once.
     #[test]
     fn official_sample_midnight() {
         let src = include_str!("../../../examples/themes/midnight/theme.json");
@@ -812,7 +793,7 @@ mod tests {
         assert!(bg.has_image(), "背景画像が読めていない");
     }
 
-    /// 6.2 の要点: 背景色を指定しないノードは透明のまま残る
+    /// A node with no background stays transparent.
     #[test]
     fn nodes_without_background_stay_transparent() {
         let src = include_str!("../../../examples/themes/wallpaper/theme.json");

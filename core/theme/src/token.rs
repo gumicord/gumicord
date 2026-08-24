@@ -1,19 +1,13 @@
-//! デザイントークン (`EXT-011`)。
+//! Design tokens.
 //!
-//! **トークン名はテーマ作者が自由に決める。** クライアントが特定の名前を
-//! 要求することはない ([`spec/04-theme.md`] 3.1)。
+//! Names are the theme author's to choose; the client never requires a
+//! particular one.
 //!
-//! # 型はここでは決めない
+//! Types are not decided here. An object with a colour reads as either a
+//! shadow or a background, and picking one at definition time would pick
+//! wrongly. Objects are kept as they are and typed at the point of use.
 //!
-//! `{ "color": "#000" }` というオブジェクトは、影としても背景としても
-//! 読める。定義した時点でどちらか一方に決めてしまうと、テーマ作者が
-//! 意図しない側に倒れる。
-//!
-//! したがってトークンは**オブジェクトのまま保持し、使われた場所で型が
-//! 決まる**。`"shadow": "$x"` なら影として、`"background": "$x"` なら
-//! 背景として読む。曖昧さは使用箇所が解消する。
-//!
-//! 色と数値は曖昧になりようがないので、その場で確定させる。
+//! Colours and numbers cannot be ambiguous, so they settle immediately.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,18 +16,18 @@ use serde_json::{Map, Value};
 use crate::diag::{Diagnostics, Ignored};
 use crate::value::Color;
 
-/// 解決済みのトークンの値。
+/// A resolved token value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenValue {
     Color(Color),
-    /// 論理ピクセル、またはミリ秒 (`motion.*`)
+    /// Logical pixels, or milliseconds.
     Length(f32),
-    /// フォント / 影 / 背景。**型は使用箇所が決める**
+    /// A font, shadow or background; typed at the point of use.
     Object(Map<String, Value>),
 }
 
 impl TokenValue {
-    /// 診断メッセージ用の型名。
+    /// The type name used in diagnostics.
     pub const fn kind_name(&self) -> &'static str {
         match self {
             Self::Color(_) => "色",
@@ -43,16 +37,16 @@ impl TokenValue {
     }
 }
 
-/// 解決済みのトークン表。
+/// The resolved token table.
 #[derive(Debug, Clone, Default)]
 pub struct Tokens {
     map: HashMap<String, TokenValue>,
 }
 
-/// 解決前の 1 エントリ
+/// One unresolved entry.
 enum Raw {
     Value(TokenValue),
-    /// `$other` — 他のトークンへの参照
+    /// A reference to another token.
     Ref(String),
 }
 
@@ -69,11 +63,10 @@ impl Tokens {
         self.map.is_empty()
     }
 
-    /// `tokens` オブジェクトから表を組み立て、参照をすべて解決する。
+    /// Builds the table and resolves every reference.
     ///
-    /// 解決できなかったトークンは**表に入らない**。それを参照する
-    /// プロパティは使用箇所で「未定義のトークン」として無視される
-    /// ([`spec/04-theme.md`] 7 章)。
+    /// Unresolvable tokens are left out, and properties referring to them are
+    /// ignored as undefined at the point of use.
     pub fn build(src: &Map<String, Value>, diags: &mut Diagnostics) -> Tokens {
         let mut raw: HashMap<&str, Raw> = HashMap::with_capacity(src.len());
 
@@ -105,11 +98,11 @@ impl Tokens {
     }
 }
 
-/// 参照の解決に失敗した理由
+/// Why a reference could not be resolved.
 enum ResolveError {
-    /// 循環参照
+    /// A cycle.
     Cycle(Vec<String>),
-    /// 存在しないトークンを参照している
+    /// A reference to something that does not exist.
     Undefined(String),
 }
 
@@ -126,11 +119,11 @@ impl ResolveError {
     }
 }
 
-/// 参照の連鎖をたどる。
+/// Follows a chain of references.
 ///
-/// 参照先はちょうど 1 つなので、木ではなく鎖である。訪問済み集合を持って
-/// 線形にたどれば、再帰なしで循環を検出できる。**深く入れ子にした
-/// テーマでスタックを溢れさせない**ためである。
+/// Each points at exactly one other, so this is a chain rather than a tree,
+/// and walking it with a visited set detects cycles without recursion — a
+/// deeply nested theme cannot overflow the stack.
 fn resolve<'a>(
     start: &'a str,
     raw: &'a HashMap<&'a str, Raw>,
@@ -150,7 +143,7 @@ fn resolve<'a>(
         match raw.get_key_value(cur) {
             Some((_, Raw::Value(v))) => return Ok(v),
             Some((_, Raw::Ref(next))) => {
-                // 参照先が表にない = 未定義、または値として不正だったもの
+                // Absent from the table: undefined, or invalid as a value.
                 let Some((key, _)) = raw.get_key_value(next.as_str()) else {
                     return Err(ResolveError::Undefined(next.clone()));
                 };
@@ -209,7 +202,7 @@ mod tests {
         assert_eq!(t.get("radius.md"), Some(&TokenValue::Length(8.0)));
     }
 
-    /// 3.2: トークンは他のトークンを参照できる
+    /// A token can reference another.
     #[test]
     fn reference_chain_resolves() {
         let (t, d) = build(
@@ -224,7 +217,7 @@ mod tests {
         assert_eq!(t.get("color.link"), Some(&color("#7c6cf0")));
     }
 
-    /// 7 章: 循環参照は当該トークンを解決不能として扱う
+    /// A cycle makes those tokens unresolvable.
     #[test]
     fn cycle_is_detected_and_reported() {
         let (t, d) = build(r##"{ "a": "$b", "b": "$a" }"##);
@@ -245,7 +238,7 @@ mod tests {
         assert_eq!(t.get("a"), None);
     }
 
-    /// 長い鎖でも再帰せずに解決できる (スタックを溢れさせない)
+    /// A long chain resolves without recursion.
     #[test]
     fn long_chain_does_not_overflow() {
         let n = 5000;
@@ -271,7 +264,7 @@ mod tests {
         assert!(d.items().iter().any(|x| x.message.contains("$missing")));
     }
 
-    /// 不正な値のトークンだけが落ち、他は生き残る (EXT-016)
+    /// Only the invalid token is dropped.
     #[test]
     fn bad_token_does_not_kill_the_others() {
         let (t, d) = build(r##"{ "good": "#111", "bad": "notacolor", "also_good": 4 }"##);

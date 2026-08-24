@@ -1,41 +1,32 @@
-//! UITree へのテーマ適用 — フレームパイプラインの **[5]**。
+//! Applies a theme to the tree: stage [5] of the frame pipeline.
 //!
 //! ```text
-//! [4] プラグインの構造介入
-//! [5] テーマ解決          ← ここ
-//! [6] プラグインのスタイル介入
+//! [4] plugin structure pass
+//! [5] theme resolution     <- here
+//! [6] plugin style pass
 //! ```
 //!
-//! [`Theme::style_for`] が「1 ノードのスタイルを確定する」規則 (K1) を持ち、
-//! ここが「それを木全体に配り、継承を流す」役を持つ。
+//! Settling one node's style is the theme's job; distributing that across the
+//! tree and flowing inheritance is this layer's, since only something holding
+//! the tree knows which parent to inherit from.
 //!
-//! # 継承は木を歩くこの層の責務である
-//!
-//! [`Style::inherit_from`] は 1 段ぶんの規則しか知らない。**どの親から
-//! 継承するか**は木を持っている側にしか分からないので、ここで解決する。
-//!
-//! 継承するのは `color` と `font` だけである ([`spec/04-theme.md`] 6 章)。
-//!
-//! 仕様: [`spec/02-architecture.md`], [`spec/04-theme.md`]
+//! Only colour and font inherit.
 
 use gumicord_uitree::{Style, UiNode};
 
 use crate::Theme;
 use crate::cond::MatchContext;
 
-/// 木全体のスタイルを確定する。
+/// Settles the whole tree's styles.
 ///
-/// `ctx` の `states` はノードごとに差し替えられるため、呼び出し側が
-/// 設定した値は無視される。それ以外 (プラットフォーム / 配色 / ウィンドウ幅)
-/// はフレーム全体で共通である。
+/// The context's states are replaced per node, so anything the caller set
+/// there is ignored; the rest is constant for the frame.
 pub fn resolve(theme: &Theme, root: &mut UiNode, ctx: &MatchContext) {
     resolve_node(theme, root, &Style::default(), ctx);
 }
 
-/// テーマがないときに木を既定のスタイルへ戻す。
-///
-/// テーマの読み込みに失敗しても**前のテーマの残骸が残らない**ようにする。
-/// `EXT-015` (ホットリロード) で必要になる。
+/// Resets the tree to default styles, so a failed load leaves nothing of the
+/// previous theme behind. Hot reload needs this.
 pub fn clear(root: &mut UiNode) {
     root.style = Style::default();
     for c in &mut root.children {
@@ -44,15 +35,15 @@ pub fn clear(root: &mut UiNode) {
 }
 
 fn resolve_node(theme: &Theme, node: &mut UiNode, parent: &Style, ctx: &MatchContext) {
-    // ⚠️ **スノーフレークは渡さない。** テーマが特定のサーバや相手だけを
-    // 飾れてしまうと、**テーマが利用者のデータに依存する**
+    // No snowflakes: a theme able to single out one guild or person would
+    // depend on the user's data.
     let slot = match node.key {
         Some(gumicord_uitree::Key::Slot(s)) => Some(s),
         _ => None,
     };
     let mine = ctx.with_states(node.states).with_slot(slot);
-    // ⚠️ **色は渡すが、識別子は渡さない。** テーマが決めるのは
-    // 「どこに塗るか」であって、誰の色かではない
+    // The colour crosses, the identifier does not: a theme decides where it
+    // lands, not whose it is.
     let mut style = theme.style_for_tinted(node.id, &mine, node.tint);
     style.inherit_from(parent);
 
@@ -81,7 +72,7 @@ mod tests {
         "id": "test.theme", "name": "T", "version": "1.0.0", "abi": 1
     }"##;
 
-    /// color は親から子へ流れる。背景は流れない
+    /// Colour flows to children; backgrounds do not.
     #[test]
     fn color_inherits_but_background_does_not() {
         let t = theme(&format!(
@@ -100,7 +91,7 @@ mod tests {
         assert_eq!(leaf.style.background, None, "背景は継承しない");
     }
 
-    /// 子が自分で指定していれば、そちらが勝つ
+    /// A child's own value wins.
     #[test]
     fn child_own_color_beats_inherited() {
         let t = theme(&format!(
@@ -117,7 +108,7 @@ mod tests {
         assert_eq!(tree.children[0].style.color, Color::parse("#ff0000"));
     }
 
-    /// EXT-013: ノードごとに states を差し替えて照合する
+    /// States are replaced per node before matching.
     #[test]
     fn per_node_states_select_rules() {
         let t = theme(&format!(
@@ -143,7 +134,7 @@ mod tests {
         );
     }
 
-    /// `when.slot`: 同じ安定 ID を、位置で飾り分けられる
+    /// A slot styles siblings of the same ID differently.
     #[test]
     fn a_slot_can_be_dressed_on_its_own() {
         let t = theme(&format!(
@@ -166,10 +157,8 @@ mod tests {
         assert_eq!(tree.children[2].style.background, bg("#666666"), "鍵が無い");
     }
 
-    /// ⚠️ **スノーフレークには効かない。**
-    ///
-    /// 効いてしまうと、テーマが「このサーバだけ赤くする」と書けることに
-    /// なる。**テーマが利用者のデータに依存し、配れるものでなくなる**
+    /// Snowflakes never match: a theme that could redden one specific guild
+    /// would depend on the user's data and stop being shareable.
     #[test]
     fn a_snowflake_is_never_a_slot() {
         let t = theme(&format!(
@@ -187,7 +176,7 @@ mod tests {
         assert_eq!(tree.children[0].style.background, None);
     }
 
-    /// データが持ってきた色は、**テーマが場所を書いたところにだけ**入る
+    /// A data colour only lands where the theme said it should.
     #[test]
     fn the_theme_decides_where_the_data_colour_lands() {
         let t = theme(&format!(
@@ -204,12 +193,12 @@ mod tests {
         resolve(&t, &mut tree, &MatchContext::new(1280.0));
 
         assert_eq!(tree.children[0].style.color, Some(red));
-        // 色を書いていないところは何も変わらない
+        // Nothing changes where no colour was written.
         assert_eq!(tree.style.background, bg("#111111"));
     }
 
-    /// ⚠️ **色を持たないノードでは前のルールが残る。**
-    /// これが「色があればそれ、無ければ既定」の書き方になっている
+    /// A node without a colour keeps what the previous rule wrote, which is
+    /// how "the colour if there is one, the default otherwise" is written.
     #[test]
     fn without_a_colour_the_earlier_rule_stands() {
         let t = theme(&format!(
@@ -230,10 +219,8 @@ mod tests {
         assert_eq!(tinted.style.color, Some(red));
     }
 
-    /// ⚠️ **後から素の色を書いたルールが勝つ。**
-    ///
-    /// 印が下りないと、`when` で分岐して色を上書きしたつもりのルールが
-    /// 黙って効かなくなる
+    /// A later literal colour wins; otherwise a rule branching on `when` would
+    /// silently stop working.
     #[test]
     fn a_later_plain_colour_takes_the_mark_back() {
         let t = theme(&format!(

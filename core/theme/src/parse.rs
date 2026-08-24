@@ -1,16 +1,9 @@
-//! JSON からテーマを読む。
+//! Reads a theme from JSON.
 //!
-//! # なぜ JSON Schema をそのまま使わないのか
-//!
-//! `spec/schema/theme.schema.json` はテーマ作者のための検証器であり、
-//! **文書全体の可否しか答えない**。しかし `EXT-016` が要求するのは
-//! 「誤りのある**プロパティだけ**を無視して残りを適用する」であり、
-//! 粒度が違う。したがって実行時の読み取りはここで手書きする。
-//!
-//! スキーマは CI (`cargo xtask schema`) が公式テーマに対して回し続けるので、
-//! **2 つの実装が食い違えばそこで気づける**。
-//!
-//! 仕様: [`spec/04-theme.md`] 7 章
+//! The JSON Schema is a validator for theme authors and answers only whether
+//! the whole document is valid. Runtime parsing needs to ignore one offending
+//! property and keep the rest, so it is written out here instead. CI runs the
+//! schema against the sample themes, so the two disagreeing shows up there.
 
 use serde_json::{Map, Value};
 
@@ -22,43 +15,40 @@ use crate::style::Style;
 use crate::token::{TokenValue, Tokens};
 use crate::value::{AssetKind, AssetRef, Background, Color, Edges, Fit, Font, Shadow};
 
-/// テーマの manifest。
+/// A theme's manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: String,
-    /// 想定する UITree の ABI メジャーバージョン
+    /// The UITree ABI version it expects.
     pub abi: u32,
     pub author: Option<String>,
     pub description: Option<String>,
     pub homepage: Option<String>,
     pub license: Option<String>,
-    /// 外部アセットの取得を許すホスト (`SEC-022`)
+    /// Hosts external assets may come from.
     pub remote_assets: Vec<String>,
 }
 
-/// 1 本のルール。
+/// One rule.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rule {
     pub select: NodeId,
     pub when: When,
     pub style: Style,
-    /// **データが持ってきた色を使うプロパティ** ([`Tinted`])
+    /// Properties painted with a data-supplied colour.
     pub tinted: Tinted,
 }
 
-/// データが持ってきた色 (`$data.tint`) で塗るプロパティ。
+/// Properties painted with the colour the data carries.
 ///
-/// # ⚠️ 値はテーマの中では決まらない
+/// The value is not decided in the theme: role and folder colours differ per
+/// node, so a theme can only say where to use one.
 ///
-/// 役職の色もサーバフォルダの色も**ノードごとに違う**。テーマが書けるのは
-/// 「ここにその色を使う」という**場所の指定**だけであり、色そのものは
-/// [`gumicord_uitree::UiNode::tint`] が運んでくる。
-///
-/// ⚠️ **色が無いノードでは何も起きない。** 直前のルールが書いた色が
-/// そのまま残るので、下のように書けば「色があればそれ、無ければ既定」に
-/// なる。
+/// A node without a colour changes nothing, leaving whatever the previous
+/// rule wrote, which is what makes "the colour if there is one, the default
+/// otherwise" expressible:
 ///
 /// ```json
 /// { "select": "nav.member_list.item.name", "style": { "color": "$color.text.secondary" } },
@@ -71,24 +61,24 @@ pub struct Tinted {
     pub border_color: bool,
 }
 
-/// データが持ってきた色への参照。
+/// A reference to a data-supplied colour.
 ///
-/// ⚠️ **トークンではない。** `$color.*` はテーマが自分で決めた表を引くが、
-/// これは引く表を持たない。**ノードが運んでくる**
+/// Not a token: a token looks up the theme's own table, while this has no
+/// table and arrives on the node.
 const DATA_TINT: &str = "$data.tint";
 
 fn is_data_tint(v: &Value) -> bool {
     v.as_str() == Some(DATA_TINT)
 }
 
-/// トークン表と `remoteAssets` — 値を読む間ずっと必要になるもの。
+/// The token table and declared hosts, needed throughout parsing.
 #[derive(Clone, Copy)]
 struct Env<'a> {
     tokens: &'a Tokens,
     hosts: &'a [String],
 }
 
-/// `$参照` を 1 段解いた値。
+/// A `$` reference resolved by one level.
 enum Resolved<'a> {
     Color(Color),
     Number(f32),
@@ -111,10 +101,8 @@ impl Resolved<'_> {
     }
 }
 
-/// `$name` ならトークンを引き、そうでなければ値をそのまま返す。
-///
-/// **未定義のトークンはここで診断になる。** 使用箇所ごとに同じ判定を
-/// 書かないための一点集約である。
+/// Resolves a `$name` against the tokens, passing anything else through.
+/// Undefined tokens become a diagnostic here rather than at every use.
 fn resolve<'a>(
     v: &'a Value,
     env: Env<'a>,
@@ -168,7 +156,7 @@ fn type_error(path: &str, diags: &mut Diagnostics, want: &str, got: &Resolved<'_
     );
 }
 
-// ------------------------------------------------------------------ 値の読み取り
+// ------------------------------------------------------------------ Values
 
 fn color(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option<Color> {
     match resolve(v, env, path, diags)? {
@@ -191,7 +179,7 @@ fn color(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option
     }
 }
 
-/// 長さ (論理 px)。負の値は受けない。
+/// A length; negatives are rejected.
 fn length(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option<f32> {
     match resolve(v, env, path, diags)? {
         Resolved::Number(n) if n >= 0.0 => Some(n),
@@ -206,7 +194,7 @@ fn length(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Optio
     }
 }
 
-/// 0.0〜1.0 に収まる数値。
+/// A number within 0 to 1.
 fn ratio(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option<f32> {
     match resolve(v, env, path, diags)? {
         Resolved::Number(n) if (0.0..=1.0).contains(&n) => Some(n),
@@ -282,7 +270,7 @@ fn font(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option<
                 None => {}
             },
             "letterSpacing" => match resolve(value, env, &p, diags) {
-                // 字間だけは負の値に意味がある
+                // Letter spacing is the one place a negative means something.
                 Some(Resolved::Number(n)) => f.letter_spacing = Some(n),
                 Some(other) => type_error(&p, diags, "数値", &other),
                 None => {}
@@ -343,7 +331,7 @@ fn shadow(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Optio
     for (key, value) in obj {
         let p = format!("{path}.{key}");
         match key.as_str() {
-            // オフセットは負にできる
+            // The offset may be negative.
             "x" | "y" | "spread" => match resolve(value, env, &p, diags) {
                 Some(Resolved::Number(n)) => match key.as_str() {
                     "x" => s.x = n,
@@ -379,9 +367,7 @@ fn shadow(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Optio
     Some(s)
 }
 
-/// 背景 (`EXT-021`〜`EXT-024`, `EXT-027`)。
-///
-/// 色の短縮記法とオブジェクトの両方を受ける。
+/// A background, accepting both the colour shorthand and the object form.
 fn background(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option<Background> {
     let obj = match resolve(v, env, path, diags)? {
         // "background": "#111" / "$color.panel"
@@ -439,8 +425,8 @@ fn background(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> O
             }
             "blur" => {
                 if let Some(n) = length(value, env, &p, diags) {
-                    // EXT-023: 読み込み時に一度だけ適用される。上限は
-                    // 事故 (blur: 100000) でメモリを溶かさないための歯止め
+                    // Applied once at load time; the cap stops an accidental
+                    // huge value from exhausting memory.
                     if n > 256.0 {
                         diags.error(&p, Ignored::Property, format!("blur の上限は 256: {n}"));
                     } else {
@@ -480,10 +466,8 @@ fn position(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Opt
     Some([x, y])
 }
 
-/// アセット参照 (`EXT-017`, `SEC-022`)。
-///
-/// **読み込み失敗はテーマ全体を無効化しない** (`EXT-027`)。ここで弾かれた
-/// 画像は単に `None` になり、`background.color` にフォールバックする。
+/// An asset reference. A rejected image becomes `None` and falls back to the
+/// background colour; it never invalidates the theme.
 fn asset(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option<AssetRef> {
     let s = match resolve(v, env, path, diags)? {
         Resolved::Str(s) => s,
@@ -503,11 +487,10 @@ fn asset(v: &Value, env: Env<'_>, path: &str, diags: &mut Diagnostics) -> Option
 
 // ------------------------------------------------------------------ style
 
-/// `style` オブジェクトを読む。
+/// Reads a style object.
 ///
-/// **未知のプロパティは警告であって誤りではない。** 新しいクライアント
-/// 向けに書かれたテーマを古いクライアントで開いたとき、知らないプロパティ
-/// が出てくるのは正常な状況である ([`spec/04-theme.md`] 7.1)。
+/// An unknown property warns rather than failing: opening a theme written for
+/// a newer client is an ordinary thing to do.
 fn style(
     obj: &Map<String, Value>,
     env: Env<'_>,
@@ -519,8 +502,8 @@ fn style(
     for (key, v) in obj {
         let p = format!("{path}.{key}");
         match key.as_str() {
-            // ⚠️ **色の代わりに「データの色を使う」と書ける。**
-            // 値はここでは決まらない。決まるのはノードごとである
+            // A colour can be replaced by "use the data's colour"; the value
+            // is decided per node.
             "background" if is_data_tint(v) => t.background = true,
             "color" if is_data_tint(v) => t.color = true,
             "borderColor" if is_data_tint(v) => t.border_color = true,
@@ -542,8 +525,7 @@ fn style(
             "maxHeight" => s.max_height = length(v, env, &p, diags),
             "opacity" => s.opacity = ratio(v, env, &p, diags),
             "shadow" => s.shadow = shadow(v, env, &p, diags),
-            // ⚠️ **見た目ではなく「見た目の変わり方」である。**
-            // ここ自身は何も描かない
+            // How appearance changes, not appearance; draws nothing itself.
             "transition" => s.transition = length(v, env, &p, diags),
             "decoration" => s.decoration = decoration(v, &p, diags),
             _ => diags.warn(
@@ -558,10 +540,10 @@ fn style(
 
 // ------------------------------------------------------------------ when
 
-/// `when` を読む。
+/// Reads a `when`.
 ///
-/// 未知のキーや未知の値は**ルールごと無視する**。条件を落として適用すると、
-/// 意図より広い範囲にスタイルが当たってしまうためである。無視するほうが安全側に倒れる。
+/// An unknown key or value drops the whole rule: dropping the condition and
+/// applying anyway would style more than intended.
 fn when(obj: &Map<String, Value>, path: &str, diags: &mut Diagnostics) -> Option<When> {
     let mut w = When::default();
     for (key, v) in obj {
@@ -609,11 +591,10 @@ fn when(obj: &Map<String, Value>, path: &str, diags: &mut Diagnostics) -> Option
     Some(w)
 }
 
-/// `"underline"` / `"strikethrough"` / `"none"`、および空白で並べたもの。
+/// One or more decoration names, space separated.
 ///
-/// ⚠️ **知らない語が 1 つでもあればプロパティごと捨てる。** 一部だけ効かせると
-/// 「打ち消しは出たのに下線は出ない」という、綴りの誤りに気づけない形の
-/// 壊れ方をする
+/// One unknown word drops the property: applying the rest gives a
+/// strikethrough without an underline, which hides the typo.
 fn decoration(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<Decoration> {
     let Some(text) = v.as_str() else {
         diags.warn(
@@ -628,7 +609,7 @@ fn decoration(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<Decorati
         match word {
             "underline" => d.underline = true,
             "strikethrough" => d.strikethrough = true,
-            // 明示的に「何も引かない」と書けること。前のルールを打ち消せる
+            // Explicitly none, so a previous rule can be cancelled.
             "none" => {}
             _ => {
                 diags.warn(
@@ -645,7 +626,7 @@ fn decoration(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<Decorati
     Some(d)
 }
 
-/// `when` の数値。負のウィンドウ幅は意味を持たない。
+/// A number in a `when`; a negative width means nothing.
 fn non_negative(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<f32> {
     match v.as_f64() {
         Some(n) if n >= 0.0 && n.is_finite() => Some(n as f32),
@@ -660,7 +641,7 @@ fn non_negative(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<f32> {
     }
 }
 
-/// 文字列、またはその配列を取り出す。それ以外はルールごと無視する。
+/// A string or an array of them; anything else drops the rule.
 fn string_list<'a>(v: &'a Value, path: &str, diags: &mut Diagnostics) -> Option<Vec<&'a str>> {
     match v {
         Value::String(s) => Some(vec![s.as_str()]),
@@ -764,8 +745,8 @@ pub(crate) fn rules(
             diags.error(&path, Ignored::Rule, "select が必要");
             continue;
         };
-        // 未知の安定 ID は「将来追加されたノード」かもしれない。
-        // 誤りではなく警告として扱い、残りのルールは適用する (EXT-016)
+        // An unknown ID may be a node added later, so it warns and the rest
+        // of the rules still apply.
         let Ok(select) = select.parse::<NodeId>() else {
             diags.warn(
                 format!("{path}.select"),
@@ -797,9 +778,8 @@ pub(crate) fn rules(
         };
         let (st, tinted) = style(st, env, &format!("{path}.style"), diags);
 
-        // すべてのプロパティが無視された結果、何も残らないこともある。
-        // ⚠️ `$data.tint` だけのルールは**空ではない**。値がまだ無いだけで、
-        // ノードごとに色が入る
+        // Every property may end up ignored. A rule with only a tint marker
+        // is not empty: the value simply arrives per node.
         if st.is_empty() && tinted == Tinted::default() {
             diags.warn(
                 &path,
@@ -819,10 +799,10 @@ pub(crate) fn rules(
     out
 }
 
-/// manifest を読む。**ここで失敗したらテーマ全体を適用しない。**
+/// Reads the manifest; a failure here discards the theme.
 ///
-/// 他と違って寛容にできないのは、テーマの同一性・バージョン・外部アクセス
-/// の許可範囲がすべてここで決まるためである。
+/// It cannot be lenient like the rest, because a theme's identity, version
+/// and permitted external access are all decided here.
 pub(crate) fn manifest(v: &Value, diags: &mut Diagnostics) -> Option<Manifest> {
     let Some(obj) = v.as_object() else {
         diags.error(

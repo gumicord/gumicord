@@ -1,17 +1,12 @@
-//! ルールの適用条件 (`when`)。
+//! Rule conditions. Every key must hold.
 //!
-//! すべてのキーが成立したときだけルールが適用される。
-//!
-//! **`state` の配列は AND、`platform` の配列は OR である。** 非対称に見えるが、
-//! 状態は同時に複数立ちうるのに対し、プラットフォームは同時に 1 つしか
-//! 成立しないためである。`["hover","unread"]` は「両方」以外に意味がなく、
-//! `["android","ios"]` は「どちらか」以外に意味がない。
-//!
-//! 仕様: [`spec/04-theme.md`] 4.2
+//! An array of states means all of them; an array of platforms means any. The
+//! asymmetry follows from the values: several states hold at once, while
+//! exactly one platform does.
 
 use gumicord_uitree::{State, StateSet};
 
-/// 実行中のプラットフォーム。
+/// The platform being run on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
     Windows,
@@ -36,7 +31,7 @@ impl Platform {
         }
     }
 
-    /// このバイナリがビルドされたプラットフォーム。
+    /// The platform this binary was built for.
     pub const fn current() -> Platform {
         #[cfg(target_os = "windows")]
         {
@@ -66,7 +61,7 @@ impl Platform {
     }
 }
 
-/// `when.platform` に書ける値。`desktop` と `mobile` は集合を指す。
+/// What a platform condition accepts; desktop and mobile name groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlatformSel {
     Exact(Platform),
@@ -91,8 +86,8 @@ impl PlatformSel {
     pub const fn matches(self, p: Platform) -> bool {
         match self {
             PlatformSel::Exact(want) => {
-                // Platform は Copy な fieldless enum なので比較で足りるが、
-                // const fn では PartialEq が使えないため as で比べる
+                // Compared as integers because `PartialEq` is unavailable in
+                // a const fn.
                 want as u8 == p as u8
             }
             PlatformSel::Desktop => !p.is_mobile(),
@@ -101,7 +96,7 @@ impl PlatformSel {
     }
 }
 
-/// OS の配色設定 (`PLT-005`)。
+/// The OS colour scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum ColorScheme {
     Light,
@@ -126,26 +121,26 @@ impl ColorScheme {
     }
 }
 
-/// ルールの適用条件。すべて省略されていれば無条件で成立する。
+/// A rule's conditions; all absent means unconditional.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct When {
-    /// 立っていなければならない状態。**すべて**必要 (`EXT-013`)
+    /// States that must all hold.
     pub states: StateSet,
-    /// 空なら無条件。複数あれば**いずれか**成立で可 (`EXT-014`)
+    /// Empty is unconditional; several mean any of them.
     pub platforms: Vec<PlatformSel>,
     pub color_scheme: Option<ColorScheme>,
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
-    /// 同じ安定 ID を持つノードの、位置による区別 (`Key::Slot`)。
+    /// Distinguishes siblings by position.
     ///
-    /// ⚠️ **スノーフレークには効かない。** テーマが特定のサーバや相手
-    /// だけを飾れてしまうと、**テーマが利用者のデータに依存する**。
-    /// 配れるものではなくなるし、飾りたい相手が誰かも漏れる
+    /// Snowflakes never match: a theme able to single out one guild or person
+    /// would depend on the user's data, stop being shareable, and reveal who
+    /// it singled out.
     pub slot: Option<String>,
 }
 
 impl When {
-    /// 常に成立する条件か。索引化のときに条件付きルールと区別するために使う。
+    /// Whether this always holds, used when indexing.
     pub fn is_unconditional(&self) -> bool {
         self.states.is_empty()
             && self.platforms.is_empty()
@@ -186,20 +181,20 @@ impl When {
     }
 }
 
-/// 照合の文脈。**ノードごとに変わるのは `states` と `slot` だけ**である。
+/// The matching context; only the states and slot change per node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MatchContext {
     pub states: StateSet,
-    /// そのノードの `Key::Slot`。**スノーフレークはここへ来ない**
+    /// The node's slot. Snowflakes never reach here.
     pub slot: Option<&'static str>,
     pub platform: Platform,
     pub color_scheme: ColorScheme,
-    /// ウィンドウ幅 (論理 px)
+    /// The window width.
     pub window_width: f32,
 }
 
 impl MatchContext {
-    /// 現在のプラットフォームでの既定の文脈。
+    /// The default context for this platform.
     pub fn new(window_width: f32) -> Self {
         MatchContext {
             states: StateSet::EMPTY,
@@ -210,12 +205,12 @@ impl MatchContext {
         }
     }
 
-    /// 状態だけを差し替える。ノードごとの照合で使う。
+    /// Replaces the states, for per-node matching.
     pub fn with_states(self, states: StateSet) -> Self {
         MatchContext { states, ..self }
     }
 
-    /// 位置による区別を差し替える。ノードごとの照合で使う。
+    /// Replaces the slot, for per-node matching.
     pub fn with_slot(self, slot: Option<&'static str>) -> Self {
         MatchContext { slot, ..self }
     }
@@ -248,7 +243,7 @@ mod tests {
         assert!(When::default().is_unconditional());
     }
 
-    /// EXT-013: state の配列は「すべて成立」
+    /// An array of states means all of them.
     #[test]
     fn state_array_is_and() {
         let when = When {
@@ -259,7 +254,7 @@ mod tests {
         assert!(
             when.matches(&ctx().with_states([State::Hover, State::Unread].into_iter().collect()))
         );
-        // 余分な状態が立っていても成立する
+        // Extra states do not prevent a match.
         assert!(
             when.matches(
                 &ctx().with_states(
@@ -271,7 +266,7 @@ mod tests {
         );
     }
 
-    /// EXT-014: platform の配列は「いずれか成立」
+    /// An array of platforms means any of them.
     #[test]
     fn platform_array_is_or() {
         let when = When {
@@ -334,7 +329,7 @@ mod tests {
             color_scheme: Some(ColorScheme::Light),
             ..Default::default()
         };
-        // 状態は合うが配色が合わない
+        // The state matches; the colour scheme does not.
         assert!(!when.matches(&ctx().with_state(State::Hover)));
         assert!(when.matches(&MatchContext {
             color_scheme: ColorScheme::Light,

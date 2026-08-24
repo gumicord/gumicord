@@ -1,23 +1,22 @@
-//! 診断。**テーマ全体を捨てないための道具**である。
+//! Diagnostics: what makes it possible not to discard a whole theme.
 //!
-//! `EXT-016` が要求するのは「誤りのある箇所だけを無視し、残りを適用し、
-//! 何が起きたかを利用者に伝える」ことである。したがってパースの結果は
-//! `Result<Theme, Error>` ではなく、**テーマと診断の両方**になる。
+//! Ignoring only the offending part, applying the rest, and saying what
+//! happened means parsing returns both a theme and a list of complaints
+//! rather than one or an error.
 //!
-//! 誤り 1 つで画面が真っ白になる体験を作らない ([`spec/04-theme.md`] 7 章)。
+//! One mistake must never blank the screen.
 
 use core::fmt;
 
-/// 診断の重大度。
+/// How serious a diagnostic is.
 ///
-/// **未知のものは警告であって誤りではない。** 新しいクライアント向けに
-/// 書かれたテーマを古いクライアントで開いたとき、知らない安定 ID や
-/// プロパティが出てくるのは正常な状況である ([`spec/04-theme.md`] 7.1)。
+/// Unknown things warn rather than fail: opening a theme written for a newer
+/// client is an ordinary thing to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
-    /// 前方互換性のために無視してよいもの
+    /// Safe to ignore, for forward compatibility.
     Warning,
-    /// テーマ作者の誤り
+    /// The theme author's mistake.
     Error,
 }
 
@@ -30,18 +29,18 @@ impl Severity {
     }
 }
 
-/// 無視された単位。利用者に「何が効かなかったのか」を伝えるために持つ。
+/// What was ignored, so the user can be told what did not take effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Ignored {
-    /// テーマ全体を適用しない
+    /// The whole theme.
     Theme,
-    /// このルールだけを無視する
+    /// One rule.
     Rule,
-    /// このプロパティだけを無視する
+    /// One property.
     Property,
-    /// このトークンだけを解決不能として扱う
+    /// One token.
     Token,
-    /// 適用には影響しない
+    /// Nothing; the theme applies unchanged.
     Nothing,
 }
 
@@ -57,18 +56,15 @@ impl Ignored {
     }
 }
 
-/// 1 件の診断。
+/// One diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub severity: Severity,
-    /// JSON 内の位置。`rules[3].style.background` の形式。
-    ///
-    /// ⚠️ 行番号ではない。`serde_json::Value` は位置情報を保持しないため、
-    /// 意味解析の段階では行番号を復元できない。JSON 自体の構文誤りに限り
-    /// 行番号が付く ([`crate::ParseResult`] を参照)。
+    /// A path within the JSON, not a line number: the parsed value carries no
+    /// positions, so only a syntax error can name a line.
     pub path: String,
     pub message: String,
-    /// この診断の結果、何が無視されたか
+    /// What this caused to be ignored.
     pub ignored: Ignored,
 }
 
@@ -85,7 +81,7 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-/// 診断の収集先。
+/// Collects diagnostics.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
