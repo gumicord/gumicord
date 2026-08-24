@@ -1,55 +1,34 @@
-//! アプリケーション層。画面遷移・アプリ状態・各層の結線。
+//! The application layer: screens, app state, and the wiring between layers.
 //!
-//! フレームのパイプラインの順序を保証する責務を持つ。
-//! **この順序が拡張の意味論を決めるため、仕様として固定されている**:
-//!
-//! ```text
-//! [1] 入力・イベント取り込み
-//! [2] 状態更新                    gumicord-store
-//! [3] UITree 構築 (差分)          gumicord-uitree
-//! [4] プラグインの構造介入         gumicord-plugin
-//! [5] テーマ解決                  gumicord-theme
-//! [6] プラグインのスタイル介入     gumicord-plugin
-//! [7] レイアウト                  gumicord-render
-//! [8] 描画コマンド生成 → GPU
-//! [9] アクセシビリティツリー更新   gumicord-platform
-//! ```
-//!
-//! [4] が [5] より前なのは、プラグインが挿入したノードにもテーマを適用する
-//! ためである。[6] が [5] より後なのは、テーマとプラグインが衝突したとき
-//! プラグインが勝つと決めたためである。
-//!
-//! # いま通っているのは [1] [2] [3] [5] [7] [8] である
-//!
-//! | 段 | 状態 |
-//! |---|---|
-//! | [1] 入力 | ポインタ・キーボード・IME |
-//! | [2] 状態更新 | ある。[`gumicord_store`] が正規化して持ち、SQLite に残す |
-//! | [3] UITree 構築 | ある。ただし毎フレーム全体を組み直している |
-//! | [4] [6] プラグイン | ない (E4, E5) |
-//! | [5] テーマ解決 | ある |
-//! | [7] [8] レイアウトと描画 | ある |
-//! | [9] a11y | ない (P3) |
-//!
-//! # 画面は 2 通りある
+//! It owns the order of the frame pipeline, which the extension semantics
+//! depend on:
 //!
 //! ```text
-//!   キャッシュがある   ──▶ app.screen.main    **ログインを待たずに出す**
-//!   ログインした       ──▶ app.screen.main    本物のギルド・チャンネル・発言
-//!   どちらも無い       ──▶ app.screen.login   QR を出して待つ
-//!   GUMICORD_SKIP_LOGIN ─▶ app.screen.main    [`demo`] の固定データ
+//! [1] input
+//! [2] state update              gumicord-store
+//! [3] build the UITree          gumicord-uitree
+//! [4] plugin structure pass     gumicord-plugin
+//! [5] theme resolution          gumicord-theme
+//! [6] plugin style pass         gumicord-plugin
+//! [7] layout                    gumicord-render
+//! [8] draw commands -> GPU
+//! [9] accessibility tree        gumicord-platform
 //! ```
 //!
-//! ⚠️ **キャッシュがあればログインを待たない** (`NFR-011`, C6)。S4 の実測で
-//! READY まで 672〜1120 ms かかるので、待つと `NFR-001` (500 ms) に入らない。
-//! ログアウトするとキャッシュごと消える (`SEC-021`) ので、**残っていること
-//! 自体が「前回このアカウントで入れていた」証拠**になる。
+//! [4] precedes [5] so themes apply to nodes plugins inserted. [6] follows
+//! [5] because plugins win when the two disagree.
 //!
-//! **demo と本物の分かれ目は `uses_live()` の 1 箇所だけ**である。木を組み立てる
-//! ところが「どちらのデータか」を気にし始めると、分岐が画面のあちこちに散る。
-//! `GuildRow` / `ChannelRow` / `MessageRow` がその境目を吸収する。
+//! [4], [6] and [9] do not exist yet, and [3] rebuilds the whole tree every
+//! frame rather than diffing.
 //!
-//! 仕様: [`spec/02-architecture.md`]
+//! There are two screens. A cache, a login, or `GUMICORD_SKIP_LOGIN` all lead
+//! to the main screen; nothing leads to the login screen. Having a cache
+//! skips waiting for login, since READY takes closer to a second and would
+//! blow the cold-start budget — and because signing out deletes the cache,
+//! its presence is itself proof of a previous session on this account.
+//!
+//! `uses_live()` is the single place that distinguishes demo data from real
+//! data. The row types absorb the difference so the tree builder never asks.
 
 pub mod demo;
 pub mod images;
@@ -70,43 +49,35 @@ use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 use live::Live;
 use session::Login;
 
-/// クライアント同梱の既定テーマ。
-///
-/// `EXT-016` はテーマが読めなくても動くことを求めるので、既定は
-/// **ファイルではなくバイナリに埋め込む**。
+/// The default theme, embedded rather than loaded: the app has to run even
+/// when no theme file can be read.
 const DEFAULT_THEME: &str = include_str!("../../../examples/themes/midnight/theme.json");
 
-/// テーマを差し替える環境変数。
-///
-/// テーマ作成時に見比べるためのもので、設定画面とホットリロード
-/// (`EXT-015`, E2) ができたら消える。
+/// Swaps the theme, for comparing themes while writing one. Goes away once
+/// there is a settings screen and hot reload.
 const THEME_ENV: &str = "GUMICORD_THEME";
 
-/// CDN に頼む絵の、論理 px での辺の長さ。**実際に描く大きさである**
+/// Image sizes requested from the CDN, in logical px, matching what is drawn.
 ///
-/// # ⚠️ 描く大きさより大きく頼まない
-///
-/// アトラスは 1 枚 2048×2048 しかない。40px で描くものを 128px で頼むと
-/// **10 倍の面積を食い**、すぐ埋まって新しい顔が出なくなる。実際に
-/// 溢れた (`アトラスの絵の側が溢れた`)。
-///
-/// 公式クライアントも描く大きさで頼んでいる。
+/// Never ask for more than is drawn: the atlas is one 2048-square page, and
+/// requesting 128px for something drawn at 40px costs ten times the area. It
+/// has overflowed in practice.
 const GUILD_ICON_PX: f32 = 48.0;
 const MESSAGE_AVATAR_PX: f32 = 40.0;
-/// 自分の欄とメンバー一覧。どちらも 32px の丸である
+/// The user panel and the member list.
 const SMALL_AVATAR_PX: f32 = 32.0;
 
-/// 閉じたフォルダに敷き詰める枚数。Discord と同じく 2×2 まで。
+/// Icons tiled inside a folded folder, 2x2 as in Discord.
 ///
-/// ⚠️ **ここを増やすならテーマの `grouped` の寸法も変える。**
-/// 枚数と一枚の大きさの積が、フォルダの内側に収まっていなければならない
+/// Raising this needs the theme's `grouped` size raised too, or the tiles no
+/// longer fit inside the folder.
 const FOLDER_TILES: usize = 4;
 
-/// ポインタが乗ったときに反応するノード。
+/// Nodes that respond to the pointer.
 ///
-/// ⚠️ **ここに挙げていないノードにホバー状態は立たない。** テーマが
-/// `when.state = hover` を書いても効かないので、増やすときはここも見る。
-/// 返信・編集をやめるボタンの slot。**押した先と組み立てる先で同じ字を使う**
+/// A theme's `when.state = hover` does nothing for anything missing here.
+/// Slot for the cancel button; the same string is used to build it and to
+/// match the press.
 const CANCEL_COMPOSING: &str = "cancel_composing";
 
 const INTERACTIVE: &[NodeId] = &[
@@ -124,41 +95,33 @@ const INTERACTIVE: &[NodeId] = &[
     NodeId::OverlayModalAction,
 ];
 
-/// 画面に出すペインの数 (`PLT-046`)。
+/// How many panes to show.
 ///
-/// # なぜ幅で決めるのか
+/// Decided by width, not platform: a portrait tablet and a narrowed desktop
+/// window want the same treatment, and asking the platform cannot answer
+/// "Windows, but 500px wide". Themes do the same with `when.maxWidth`.
 ///
-/// **プラットフォームではなく幅で決める。** 縦持ちのタブレットと横に細くした
-/// デスクトップの窓は、同じ扱いでよい。プラットフォームで分けると、
-/// 「Windows だが幅 500px」に答えられない。
-///
-/// テーマ側も同じ考えで、`when.maxWidth` が使える (`midnight` は
-/// `chat.message` の余白をこれで詰めている)。**ここはその構造版**である。
-///
-/// ⚠️ **ペインを隠すだけで、戻る手段はまだない。** 触って切り替える操作は
-/// M1.2 の X1 でナビゲーション状態と一緒に入る。いまは窓を広げれば戻る。
+/// Panes are only hidden; there is no gesture to bring one back yet, so
+/// widening the window is the only way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panes {
-    /// ギルド + チャンネル + チャット + メンバー
+    /// Guilds, channels, chat, members.
     Four,
-    /// ギルド + チャンネル + チャット
+    /// Guilds, channels, chat.
     Three,
-    /// チャンネル + チャット
+    /// Channels, chat.
     Two,
-    /// チャットのみ
+    /// Chat only.
     One,
 }
 
 impl Panes {
-    /// メンバー一覧まで出せる下限 (論理 px)。
-    ///
-    /// ⚠️ **メンバー一覧が真っ先に消える。** 誰が居るかは、何が書いてあるか
-    /// より後で構わない。Discord も狭くするとここから畳む
+    /// Narrowest width that still fits the member list, which is the first
+    /// thing to go: who is present matters less than what was said.
     const FOUR: f32 = 1140.0;
-    /// 3 ペインを保てる下限 (論理 px)。
-    /// ギルド 64 + チャンネル 240 に、チャットが窮屈にならない幅を足した値
+    /// Narrowest width for three panes: the two lists plus enough chat.
     const THREE: f32 = 900.0;
-    /// 2 ペインを保てる下限。これを割ると一覧が本文を圧迫する
+    /// Narrowest width for two panes.
     const TWO: f32 = 600.0;
 
     pub fn for_width(w: f32) -> Self {
@@ -185,11 +148,8 @@ impl Panes {
         self == Panes::Four
     }
 
-    /// メニューをどう包むか (`FR-024`, `FR-028` の受け皿)。
-    ///
-    /// ⚠️ **端末の種類ではなく幅で決める。** 窓を狭くした机の上でも、
-    /// 指の下にメニューが出るより下から出たほうが読める。
-    /// 「携帯かどうか」を聞くと、狭くした窓で不便なままになる
+    /// How to present a menu. By width, not device: a narrowed desktop window
+    /// reads better with a sheet too.
     pub fn present(self) -> crate::menu::Present {
         match self {
             Panes::One => crate::menu::Present::Sheet,
@@ -198,24 +158,20 @@ impl Panes {
     }
 }
 
-/// 入力欄が何をしているか (`FR-024`, `FR-028`)。
+/// What the composer is doing.
 ///
-/// # ⚠️ 3 つの状態を 1 つの入力欄で兼ねる
-///
-/// 新規・返信・編集は、どれも「打って Enter」である。**別々の入力欄を
-/// 出すと、打ち始めてから返信だと気づいて打ち直すことになる。**
-///
-/// ⚠️ **いま何をしているのかが画面に出ていなければならない。** 編集して
-/// いるつもりで新規発言を送る、返信のつもりで独り言を言う、はどちらも
-/// 取り消せない
+/// One field serves all three: new, reply and edit are all "type and press
+/// enter", and separate fields would mean retyping after realising it was a
+/// reply. Which one is active must be visible — sending a new message while
+/// meaning to edit cannot be undone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Composing {
-    /// 新しく書いている
+    /// Writing something new.
     #[default]
     New,
-    /// この発言への返信を書いている (`FR-028`)
+    /// Replying to a message.
     Reply(u64),
-    /// この発言を書き換えている (`FR-024`)
+    /// Editing a message.
     Edit(u64),
 }
 
@@ -228,84 +184,68 @@ impl Composing {
     }
 }
 
-/// アプリケーションの状態と、そこから UITree を組み立てる責務。
+/// The app state, and building the UITree from it.
 pub struct Gumicord {
     theme: Option<Theme>,
-    /// 背景の仕事を載せる土台。
-    ///
-    /// ⚠️ **手放すと走っている仕事が止まる。** アプリがその持ち主である
+    /// Dropping this stops everything running on it.
     runtime: Option<tokio::runtime::Runtime>,
-    /// イベントループを起こす手。ログインが済んだ後に Gateway へ渡す
+    /// Wakes the event loop; handed to the gateway after login.
     waker: Option<Waker>,
-    /// ログインの進み具合 (`FR-001`)。**画面の切り替えはこれが決める**
+    /// Login progress; decides which screen is shown.
     login: Login,
-    /// 本物のデータ (C2, C3)。**demo との分かれ目はここが空かどうか**
+    /// Real data. Whether this is empty is what separates demo from live.
     live: Live,
-    /// 画面の拡大率。**CDN に頼む絵の大きさを決めるのに要る**
+    /// Scale factor, needed to size CDN requests.
     scale: f32,
-    /// ポインタが乗っているノード
+    /// The node under the pointer.
     hovered: Option<(NodeId, Option<Key>)>,
-    /// ポインタが入っている、一番内側の巻ける領域。
-    /// **その一覧にしかスクロールバーを出さない**
+    /// The innermost scrollable under the pointer; only that list shows a
+    /// scrollbar.
     hovered_scroll: Option<NodeId>,
     selected_guild: u64,
-    /// テーマ照合の文脈。**木を組む前に控える。**
+    /// Theme match context, captured before building.
     ///
-    /// ⚠️ 本文の飾り (太字・リンク) は走りであってノードではないので、
-    /// [`gumicord_theme::resolve`] の走査に乗らない。木を組みながら
-    /// テーマを引くしかなく、そのために要る ([`crate::markdown`])
+    /// Inline decoration is spans rather than nodes, so it never reaches the
+    /// resolver's walk; the theme has to be consulted while building.
     match_ctx: MatchContext,
-    /// スポイラーを開けたメッセージ。
-    ///
-    /// ⚠️ **メッセージ単位である。** 走りごとに開けるには走りごとの
-    /// 当たり判定が要り、それは走りをノードにすることを意味する。
-    /// それはできない ([`crate::markdown`])
+    /// Messages whose spoilers are revealed. Per message, since per-span
+    /// would require spans to be nodes.
     revealed: std::collections::HashSet<u64>,
-    /// 開いているメニュー (`FR-024`, `FR-028` の受け皿)。**同時に 1 つだけ**
+    /// Whatever is floating; at most one.
     floating: Option<crate::menu::Floating>,
-    /// いま入力欄が何をしているか (`FR-024`, `FR-028`)
+    /// What the composer is doing.
     composing: Composing,
     selected_channel: u64,
-    /// 入力欄にフォーカスがあるか
+    /// Whether the composer has focus.
     input_focused: bool,
-    /// 入力欄の中身 (`PLT-001`)
+    /// The composer's contents.
     input: TextDocument,
-    /// demo のときにこの場で送ったもの。**本物では使わない**
+    /// Messages sent in demo mode; unused when live.
     sent: Vec<demo::Message>,
-    /// 絵を取ってくるもの (R5)
+    /// Fetches images.
     images: images::Images,
-    /// フレームの頭で読んだ時刻 (UTC 秒)。
-    ///
-    /// ⚠️ **組んでいる最中に読み直さない。** 隣り合う `<t:…:R>` が
-    /// 同じ時刻を指しうる
+    /// The time read at the head of the frame. Never re-read while building,
+    /// or adjacent relative timestamps disagree.
     now: i64,
-    /// 組んだ結果が、あと何秒そのままでよいか。
-    ///
-    /// `None` は「時間で変わるものが無い」= 寝たままでよい (`NFR-005`)。
-    /// 木を組むのは `&self` なので [`Cell`](std::cell::Cell) で溜める
+    /// How long the built tree stays valid. `None` means nothing changes
+    /// with time. A `Cell` because building takes `&self`.
     holds: std::cell::Cell<Option<i64>>,
 }
 
 impl Gumicord {
     pub fn new() -> Self {
-        // ⚠️ **ここでキャッシュを読む。** 最初のフレームに間に合わせるため
-        // で、これが `NFR-011` と C6 の実体である
+        // Reads the cache here, so the first frame has something to draw.
         Gumicord::with(Login::new(), Live::new())
     }
 
-    /// ログインを飛ばし、[`demo`] の固定データで画面を組む。
-    ///
-    /// レンダラやテーマを触るのに毎回スマホを出すのは馬鹿らしい。
-    /// `GUMICORD_SKIP_LOGIN=1` で起動したときと同じ状態になる。
-    ///
-    /// ⚠️ **キャッシュも開かない。** 本物のデータが混ざると、
-    /// 「demo を見ている」という前提が崩れる
+    /// Skips login and builds from fixed demo data, as `GUMICORD_SKIP_LOGIN`
+    /// does. Opens no cache: real data mixed in would break the premise.
     pub fn demo() -> Self {
         Gumicord::with(Login::skipped(), Live::without_cache())
     }
 
     fn with(login: Login, live: Live) -> Self {
-        // 前回開いていたチャンネルを、そのギルドごと復元する
+        // Restore the last channel, and the guild it belongs to.
         let (guild, channel) = match live.last_channel() {
             Some(ch) => {
                 let guild = live
@@ -350,30 +290,18 @@ impl Gumicord {
         }
     }
 
-    /// その一覧のスクロールバー。**ポインタがその一覧の中にあるときだけ出す。**
+    /// A list's scrollbar, shown only while the pointer is inside it.
     ///
-    /// 出しっぱなしにすると、48px の丸が並ぶだけのサーバ一覧の右端に
-    /// いつも 1 本線が入る。**触っていない一覧の巻き具合は、いま要る話ではない**。
+    /// "While scrolling" would need a timer to hide it again, and the event
+    /// loop sleeps. Since scrolling requires the pointer to be there anyway,
+    /// position gives the same result without one.
     ///
-    /// # なぜ「巻いている間」ではないのか
+    /// Dragging the thumb keeps it visible outside the list, because hover is
+    /// not updated while dragging.
+    /// What pixel size to request for something drawn this large.
     ///
-    /// 「巻いている間だけ」にすると、止めた後に消すための時計が要る。
-    /// イベントループは `ControlFlow::Wait` で寝ており、時計で起こすのは
-    /// `NFR-005` (非アクティブ時に描画を止める) と噛み合わない。
-    /// **巻くにはその一覧の上にポインタが要る**以上、居場所で決めれば
-    /// 時計を持たずに同じことになる。
-    ///
-    /// ⚠️ **摘みを掴んでいる間は、指が一覧の外へ出ても消えない。**
-    /// 掴んでいる間はホバーを更新しない ([`Self::hover_changed`] を
-    /// 呼ばない) ためである。ここが変わると掴んだ先が消える
-    /// その大きさで描く絵を、CDN に何 px で頼むか。
-    ///
-    /// ⚠️ **画面の拡大率を掛ける。** 200% の画面で 40px の丸を 40px で
-    /// 頼むと、拡大されてぼやける。
-    ///
-    /// ⚠️ **2 の冪へ切り上がる** ([`gumicord_model::Asset::with_size`])。
-    /// Discord が受けるのがその値だけだからで、切り上げはあちらの都合に
-    /// 合わせているだけである
+    /// Multiplied by the scale factor: asking for 40px on a 200% display
+    /// gives a blurry upscale. Discord rounds up to a power of two.
     fn asset_px(&self, logical: f32) -> u16 {
         let px = (logical * self.scale.max(1.0)).ceil();
         px.clamp(16.0, 4096.0) as u16
@@ -407,7 +335,8 @@ fn load_theme() -> Option<Theme> {
     };
 
     let result = Theme::parse(&src);
-    // EXT-016: ルールが無視されてもテーマ自体は適用する。黙って捨てない
+    // A rejected rule does not reject the theme, but is never dropped
+    // silently.
     for d in &result.diagnostics {
         tracing::warn!("テーマ: {d}");
     }
@@ -419,9 +348,8 @@ impl Application for Gumicord {
         "Gumicord".to_owned()
     }
 
-    /// ログインを始める。**ウィンドウが出るより前に呼ばれる。**
-    ///
-    /// 鍵の生成に 1 秒前後かかるので、早く始めたぶんだけ QR が早く出る
+    /// Starts login, before the window exists. Key generation takes about a
+    /// second, so earlier means the QR appears sooner.
     fn start(&mut self, waker: Waker) {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -441,25 +369,19 @@ impl Application for Gumicord {
         self.runtime = Some(runtime);
     }
 
-    /// 取ってきた絵を渡す。**描く直前に呼ばれる。**
-    ///
-    /// ⚠️ ここで**要る絵を注文する**。木を組んだ直後なので、いま画面に
-    /// 出ているものが分かっている。一覧を先読みして全部取りに行くと、
-    /// 何百枚も要求することになる
-    /// アトラスが絵を忘れた。**もう一度読み直す。**
-    ///
-    /// ⚠️ **円盤には残っているので、網へは出ない。** 読み直して入れ直す
-    /// だけである。1 フレームだけ顔が消える
+    /// Hands over fetched images, just before drawing.
+    /// The atlas evicted images. They are still on disk, so this re-reads
+    /// rather than refetching; avatars vanish for one frame.
     fn images_dropped(&mut self) {
         tracing::debug!("アトラスが絵を忘れた。読み直す");
         self.images.forget_requested();
     }
 
-    /// 画面に出ようとしたのに無かった絵を頼む。
+    /// Requests images that were about to draw and were missing.
     ///
-    /// ⚠️ **木を歩いて集めない。** 見えているかどうかは配置と切り取りが
-    /// 決めることで、木を組む側は知らない。メンバー一覧は 300 行あるが
-    /// 見えているのは 15 行ほどで、**残りの顔は要らない**
+    /// Not gathered by walking the tree: visibility is decided by layout and
+    /// clipping. A 300-row member list shows about 15, and the rest are not
+    /// wanted.
     fn request_images(&mut self, urls: &[String]) {
         for url in urls {
             self.images.request(url);
@@ -470,16 +392,15 @@ impl Application for Gumicord {
         self.images.take()
     }
 
-    /// 一覧が動いた。**上端に近づいたら過去を取りに行く** (`FR-020`)。
+    /// A list scrolled; fetches history when it nears the top.
     ///
-    /// ⚠️ **上端ちょうどまで待たない。** 着いてから頼むと、着いた瞬間から
-    /// 返ってくるまで何も無い場所を見ることになる。手前で頼めば、たいてい
-    /// 着く前に届いている。
+    /// Not at the top exactly: asking on arrival means staring at nothing
+    /// until it returns. Asking early usually has it there first.
     ///
-    /// ⚠️ **まだ 1 件も出ていないうちは頼まない。** はみ出していない一覧の
-    /// 「上端」は開いた直後の状態でもあり、開くたびに叩くことになる
+    /// Never before anything is shown: a list that does not overflow is also
+    /// "at the top", which would fetch on every open.
     fn scrolled(&mut self, id: NodeId, at: f32, max: f32) {
-        /// 上端からこれだけの距離に入ったら、次の頁を頼む (論理 px)
+        /// Distance from the top that triggers the next page.
         const REACH: f32 = 400.0;
 
         if id != NodeId::ChatMessageList || max <= 0.0 || at > REACH {
@@ -489,38 +410,34 @@ impl Application for Gumicord {
         self.live.load_older(channel);
     }
 
-    /// 時間で変わる表示 (`<t:…:R>`) が、あと何秒持つか。
-    ///
-    /// ⚠️ **`None` は「寝たままでよい」である。** 相対表示が画面に 1 つも
-    /// 無ければ起きる理由が無い (`NFR-005`)
+    /// How long the time-dependent parts of the tree stay valid. `None`
+    /// means there is no reason to wake.
     fn next_frame_in(&self) -> Option<std::time::Duration> {
         self.holds
             .get()
             .map(|s| std::time::Duration::from_secs(s.max(1) as u64))
     }
 
-    /// 上へ足したので、**見ている場所を動かさないでほしい**
+    /// Something was prepended; hold the scroll position.
     fn keep_place(&mut self) -> Option<NodeId> {
         self.live
             .take_prepended()
             .then_some(NodeId::ChatMessageList)
     }
 
-    /// 背景の知らせを取り込む。**ここが唯一の入り口である。**
+    /// Drains background events. The only entry point for them.
     fn wake(&mut self) -> bool {
         let mut changed = self.login.poll();
         changed |= self.live.poll();
-        // ⚠️ **絵が届いたことも「変わった」である。** ここで数えないと
-        // 再描画が要求されず、届いた顔がいつまでも出ない
+        // An arrived image counts as a change, or it never gets drawn.
         changed |= self.images.poll();
 
-        // ログインが済んだら Gateway へ進む。**`Live::start` は 2 回目から
-        // 何もしない**ので、ここで毎回呼んでも構わない
+        // `Live::start` is a no-op once started, so calling it every time is
+        // fine.
         if let (Some(l), Some(rt), Some(waker)) =
             (self.login.session().logged_in(), &self.runtime, &self.waker)
         {
-            // ⚠️ **自分が誰かを先に教える。** READY より前に誰かが打ち始めても、
-            // 自分の「入力中」を出さないため
+            // Set before READY, so our own typing is filtered from the start.
             let me = l.me.user.id;
             self.live.start(
                 rt.handle(),
@@ -546,8 +463,7 @@ impl Application for Gumicord {
     fn hover_changed(&mut self, hits: &[Hit]) -> bool {
         let mut changed = false;
 
-        // ⚠️ **一番内側の巻ける領域を採る。** `hits` は手前から並ぶので、
-        // 最初に見つかったものが一番内側である
+        // Hits come front to back, so the first scrollable is the innermost.
         let scroll = hits
             .iter()
             .find(|h| gumicord_render::intrinsic(h.id).scroll)
@@ -569,8 +485,8 @@ impl Application for Gumicord {
     }
 
     fn pressed(&mut self, hits: &[Hit]) -> bool {
-        // ⚠️ **開いている間は下へ渡さない。** 渡すと、メニューを閉じる
-        // つもりで押した場所のチャンネルへ移動する
+        // Never passed through: a press meant to dismiss the menu would
+        // navigate to whatever is underneath.
         if self.floating.is_some() {
             let item = hits.iter().find_map(|h| match (h.id, &h.key) {
                 (NodeId::OverlayMenuItem | NodeId::OverlayModalAction, Some(Key::Index(i))) => {
@@ -580,9 +496,9 @@ impl Application for Gumicord {
             });
             return match item {
                 Some(i) => self.run_action(i),
-                // ⚠️ **窓の外を押しても閉じない。** メニューは押し間違えても
-                // 閉じるだけだが、窓は「まだ決めていない」ことを示している。
-                // 外を押して消えると、決めたのか消えたのかが分からない
+                // A dialog does not close on an outside press: it represents
+                // an unmade decision, and dismissing it silently leaves the
+                // outcome ambiguous.
                 None => match &self.floating {
                     Some(crate::menu::Floating::Confirm(_)) => false,
                     _ => self.close_menu(),
@@ -592,17 +508,17 @@ impl Application for Gumicord {
 
         let mut changed = false;
 
-        // 入力欄の外を押したらフォーカスが外れる
+        // Pressing outside the composer removes focus.
         let on_input = hits.iter().any(|h| h.id == NodeId::ChatInputField);
         if on_input != self.input_focused {
             self.input_focused = on_input;
             changed = true;
         }
 
-        // 手前から見て、最初に見つかった選択対象だけを処理する
+        // Only the frontmost selectable hit.
         for h in hits {
             match (h.id, &h.key) {
-                // フォルダは開閉するだけ。**サーバを選び直さない**
+                // Folders only fold; they do not change the selected guild.
                 (NodeId::NavGuildListFolder, Some(Key::Id(id))) => {
                     self.live.toggle_folder(*id);
                     changed = true;
@@ -612,8 +528,7 @@ impl Application for Gumicord {
                         break;
                     }
                     self.selected_guild = *id;
-                    // ⚠️ **チャンネルの選択を落とす。** 別のギルドの
-                    // チャンネルが選ばれたままだと、一覧と本文が食い違う
+                    // Clear the channel, or the list and the body disagree.
                     self.selected_channel = 0;
                     changed = true;
                 }
@@ -624,9 +539,7 @@ impl Application for Gumicord {
                 (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
                     changed |= self.stop_composing();
                 }
-                // ⚠️ **メッセージ単位で開く。** 走りごとに開けるには
-                // 走りごとの当たり判定が要り、それは走りをノードにする
-                // ことを意味する。それはできない ([`crate::markdown`])
+                // Per message: per-span would require spans to be nodes.
                 (NodeId::ChatMessage, Some(Key::Id(id))) => {
                     changed |= self.revealed.insert(*id);
                 }
@@ -635,19 +548,18 @@ impl Application for Gumicord {
             break;
         }
 
-        // ⚠️ **押した直後にここで取りに行く。** 次に何かが起きるまで
-        // 待っていると、選んだのに空のまま止まって見える
+        // Fetch immediately, or the selection looks stuck on empty until
+        // something else happens.
         changed |= self.sync_selection();
         changed
     }
 
-    /// 副ボタン。押されたものからメニューの中身を決める。
+    /// Secondary press; what was hit decides the menu.
     fn context_menu(&mut self, hits: &[Hit], at: (f32, f32)) -> bool {
-        // ⚠️ **開いている上で更に押したら、開き直す。** 閉じるだけだと
-        // 「隣の発言のメニューを出す」のに 2 回押すことになる
+        // Reopens rather than closing, or opening the next message's menu
+        // would take two presses.
         let items = hits.iter().find_map(|h| match (h.id, &h.key) {
-            // ⚠️ **入力欄を先に見る。** 発言の一覧の上に重なっているので、
-            // 後ろに置くと入力欄の上で押しても発言のメニューが出る
+            // The composer first: it overlaps the message list.
             (NodeId::ChatInputField, _) => Some(self.field_menu()),
             (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
             (NodeId::NavChannelListItem, Some(Key::Id(id))) => Some(self.channel_menu(*id)),
@@ -657,27 +569,24 @@ impl Application for Gumicord {
         });
         match items {
             Some(items) => self.open_menu(at, items),
-            // 何も無いところで押したら、開いていたものを閉じるだけ
+            // A press on nothing just closes whatever is open.
             None => self.close_menu(),
         }
     }
 
-    /// `PLT-001`: 入力を受け取るのは、フォーカスのある入力欄だけである
+    /// Only a focused field receives input.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
         self.input_focused.then_some(&mut self.input)
     }
 
-    /// `FR-024`: 送信・書き換え。`FR-028`: 返信。
-    ///
-    /// ⚠️ **何をしているかで送り先が変わる。** ここで [`Composing`] を
-    /// 見落とすと、書き換えたつもりが新しい発言として出る
+    /// Sends, edits or replies, depending on [`Composing`]. Missing that
+    /// turns an intended edit into a new message.
     fn submit(&mut self) -> bool {
         let body = self.input.text().trim().to_owned();
         let mode = self.composing;
 
-        // ⚠️ **書き換えで空にするのは「消す」ではない。**
-        // Discord も空の編集は弾く。うっかり全部消して Enter を押した
-        // ときに発言が消えるのは、取り返しがつかない
+        // Emptying an edit is not a delete; Discord rejects it too. Clearing
+        // the field and pressing enter must not destroy the message.
         if body.is_empty() {
             return false;
         }
@@ -690,9 +599,7 @@ impl Application for Gumicord {
                 Composing::Edit(id) => {
                     self.live.edit_message(channel, MessageId::from(id), body);
                 }
-                // ⚠️ **ここで一覧に足さない。** 送れたら Gateway が
-                // `MESSAGE_CREATE` を返してくるので、そこで 1 回だけ足る。
-                // 先に足すと、届いたときに同じものが二重に並ぶ
+                // The gateway echoes it back; adding it here shows it twice.
                 Composing::Reply(id) => {
                     self.live
                         .send_message(channel, body, Some(MessageId::from(id)));
@@ -702,7 +609,7 @@ impl Application for Gumicord {
             return true;
         }
 
-        // demo ではどこへも行かない。**その場の一覧に足すだけである**
+        // Demo mode just appends locally.
         let id = 1000 + self.sent.len() as u64;
         self.sent.push(demo::Message {
             id,
@@ -715,13 +622,12 @@ impl Application for Gumicord {
     }
 
     fn cancel_input(&mut self) -> bool {
-        // ⚠️ **メニューが先である。** 入力欄のフォーカスより手前に
-        // 浮かんでいるので、Esc がそこまで届いてはいけない
+        // The menu floats above the composer, so escape stops here.
         if self.close_menu() {
             return true;
         }
-        // ⚠️ **書きかけを捨てる前に、返信・編集をやめる。** 一度に両方
-        // 起きると、打った文字が消えたのか宛先が消えたのかが分からない
+        // Cancel the reply or edit before discarding the draft; doing both at
+        // once leaves it unclear which was lost.
         if self.stop_composing() {
             return true;
         }
@@ -732,28 +638,25 @@ impl Application for Gumicord {
         true
     }
 
-    /// パイプラインの [3] と [5]。
-    ///
-    /// [4] と [6] (プラグインの介入) はまだない。入るのはこの間である。
+    /// Pipeline stages [3] and [5]. The plugin passes will go between them.
     fn build(&mut self, cx: &FrameCx) -> UiNode {
-        // ⚠️ **頼む絵の大きさが DPI で変わる。** 木を組む前に控える
+        // Image sizes depend on it, so capture before building.
         self.scale = cx.scale;
 
-        // ⚠️ **時計はフレームの頭で 1 回だけ読む。** 組んでいる最中に
-        // 読み直すと、同じ画面に並んだ「3 分前」と「4 分前」が同じ時刻を
-        // 指しうる
+        // Read once per frame; re-reading mid-build makes adjacent relative
+        // timestamps disagree.
         self.now = gumicord_platform::now_unix();
         self.holds.set(None);
 
-        // ⚠️ **木を組む前に控える。** 本文の飾りは走りであってノードでは
-        // ないので、[5] の走査では拾えない。組みながら引くしかない
+        // Inline decoration is spans, which stage [5] never walks, so the
+        // theme is consulted while building.
         let ctx = MatchContext::new(cx.viewport.w);
         self.match_ctx = ctx;
 
-        // [3] UITree 構築
+        // [3] build the tree
         let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
 
-        // [5] テーマ解決
+        // [5] resolve the theme
         match &self.theme {
             Some(theme) => {
                 gumicord_theme::resolve(theme, &mut tree, &ctx);
@@ -765,11 +668,10 @@ impl Application for Gumicord {
 }
 
 impl Gumicord {
-    /// ⚠️ 毎フレーム木を丸ごと組み直している。差分構築 (B2 の残件) は
-    /// レンダラ側の要求が固まってから入れる。
+    /// Rebuilds the whole tree every frame; diffing waits until the renderer's
+    /// requirements settle.
     fn build_tree(&self, panes: Panes) -> UiNode {
-        // **画面の分かれ目はここだけである。** ログインしていなければ
-        // メイン画面は組み立てもしない
+        // The only place the two screens diverge.
         let screen = if self.shows_main() {
             UiNode::new(NodeId::AppScreenMain)
                 .children(self.sidebar(panes))
@@ -785,33 +687,28 @@ impl Gumicord {
                     .child(self.titlebar())
                     .child(UiNode::new(NodeId::AppScreen).child(screen)),
             )
-            // ⚠️ **開いているときだけ載せる。** 常に載せると、窓いっぱいの
-            // 層が当たりを受け止め続けて、何も押せなくなる
+            // Only while open: a full-window layer would absorb every press.
             .child_if(self.floating.is_some(), || {
                 let f = self.floating.as_ref().expect("直前に確かめた");
                 f.node(panes.present(), self.hovered_item())
             })
     }
 
-    /// 発言のメニュー (`FR-024`, `FR-028` の受け皿)。
-    ///
-    /// ⚠️ **できることだけを並べる。** 返信・編集・削除はまだ無いので
-    /// 出さない。灰色で並べても、押せる場所を探す手間が増えるだけである
+    /// A message's menu. Only what can actually be done: a greyed row adds to
+    /// the search for a usable one.
     fn message_menu(&self, id: u64) -> Vec<crate::menu::Item> {
         use crate::menu::{Action, Item};
         let mut items = Vec::new();
 
         items.push(Item::new(Action::Reply(id), "返信").icon("reply"));
 
-        // ⚠️ **自分の発言だけ。** 他人の発言に編集と削除を出しても、
-        // サーバが 403 を返すだけである。押せる場所に出さないのが先で、
-        // サーバの拒否はその後ろの守りである
+        // Only our own: the server would return 403 anyway, but not offering
+        // it comes first.
         if self.is_mine(id) {
             items.push(Item::new(Action::Edit(id), "編集").icon("edit"));
         }
 
-        // ⚠️ **飾りを剥がした素の本文を渡す。** 貼り付けた先で
-        // `**太字**` と出るのが、打った人が書いたものである
+        // The raw body, since `**bold**` is what the author actually typed.
         if let Some(text) = self.raw_body(id) {
             items.push(Item::new(Action::Copy(text), "本文をコピー").icon("copy"));
         }
@@ -823,11 +720,8 @@ impl Gumicord {
         items
     }
 
-    /// 自分の発言か。
-    ///
-    /// ⚠️ **ログインしていなければ偽である。** demo では誰も自分ではない。
-    /// 「分からない」を「自分である」に化けさせると、他人の発言に
-    /// 編集と削除が並ぶ
+    /// Whether a message is ours. False when signed out: turning "unknown"
+    /// into "ours" would offer edit and delete on other people's messages.
     fn is_mine(&self, id: u64) -> bool {
         let Some(me) = self.login.session().logged_in().map(|l| l.me.user.id) else {
             return false;
@@ -839,11 +733,10 @@ impl Gumicord {
             .any(|m| m.id.get() == id && m.author.id == me)
     }
 
-    /// 発言の、打たれたままの本文。
+    /// A message's body as typed.
     ///
-    /// ⚠️ **組み立てたノードから拾わない。** ノードに載っているのは
-    /// 解析して飾りを剥がした後の文字で、`<@123>` は `@みどり` に
-    /// なっている。それは打った人が書いたものではない
+    /// Not taken from the built nodes: those hold parsed text, where `<@123>`
+    /// has already become a display name.
     fn raw_body(&self, id: u64) -> Option<String> {
         if !self.uses_live() {
             return None;
@@ -885,7 +778,7 @@ impl Gumicord {
         ]
     }
 
-    /// いま指が乗っているメニューの項目、または窓のボタン。
+    /// The hovered menu item or dialog button.
     fn hovered_item(&self) -> Option<usize> {
         match &self.hovered {
             Some((NodeId::OverlayMenuItem | NodeId::OverlayModalAction, Some(Key::Index(i)))) => {
@@ -895,7 +788,7 @@ impl Gumicord {
         }
     }
 
-    /// メニューを開く。**同じ場所で開き直したら閉じる。**
+    /// Opens a menu; an empty one closes instead.
     fn open_menu(&mut self, at: (f32, f32), items: Vec<crate::menu::Item>) -> bool {
         if items.is_empty() {
             return self.close_menu();
@@ -908,7 +801,7 @@ impl Gumicord {
         self.floating.take().is_some()
     }
 
-    /// 項目を押した。**メニューの項目にも、窓のボタンにも来る。**
+    /// An item was pressed; also reached by dialog buttons.
     fn run_action(&mut self, index: usize) -> bool {
         let Some(f) = self.floating.take() else {
             return false;
@@ -920,13 +813,13 @@ impl Gumicord {
             },
             crate::menu::Floating::Confirm(c) => match index {
                 crate::menu::button::CONFIRM => c.action.clone(),
-                // ⚠️ **やめるほうは何もしない。** 窓は既に閉じている
+                // Cancel does nothing; the dialog is already closed.
                 _ => return true,
             },
         };
 
-        // ⚠️ **窓を挟むものは、ここで折り返して窓を開く。** 開いたら
-        // その先へは進まない。次に来るのは窓のボタンからである
+        // Anything needing confirmation turns back here and opens the dialog;
+        // the next call comes from its buttons.
         if let Some(confirm) = self.needs_confirming(&f, &action) {
             self.floating = Some(crate::menu::Floating::Confirm(confirm));
             return true;
@@ -935,10 +828,10 @@ impl Gumicord {
         self.perform(action)
     }
 
-    /// この操作の前に窓を挟むか。**挟むなら、その窓の中身を返す。**
+    /// Whether an action needs confirming, and with what.
     ///
-    /// ⚠️ **既に窓から来たものには、もう一度挟まない。** 挟むと窓が
-    /// 出続けて永久に進めない
+    /// Never for something already coming from a dialog, or it would reopen
+    /// forever.
     fn needs_confirming(
         &self,
         from: &crate::menu::Floating,
@@ -948,13 +841,13 @@ impl Gumicord {
             return None;
         }
         match action {
-            // ⚠️ **消した発言は戻せない。** メニューの中に埋もれた 1 行で
-            // 押した瞬間に消えるのは危うい
+            // A deleted message cannot be recovered, and this is one row
+            // among others in a menu.
             crate::menu::Action::Delete(id) => Some(crate::menu::Confirm {
                 title: "この発言を削除しますか".to_owned(),
                 body: "削除した発言は元に戻せません。".to_owned(),
-                // 何が消えるのかを一緒に出す。**「本当に？」だけでは、
-                // 一覧が入れ替わったときに違うものを消しうる**
+                // Show what goes: "are you sure" alone could delete the wrong
+                // thing if the list changed.
                 preview: self
                     .raw_body(*id)
                     .as_deref()
@@ -983,12 +876,12 @@ impl Gumicord {
         }
     }
 
-    /// 窓を挟まずに、その場でやる。
+    /// Performs an action directly.
     fn perform(&mut self, action: crate::menu::Action) -> bool {
         match &action {
             crate::menu::Action::Copy(text) => {
-                // ⚠️ **失敗を黙って飲まない。** 「コピーした」と思って
-                // 貼り付けたら前のものが出てくる、が一番困る
+                // Never swallowed: pasting the previous contents while
+                // believing the copy worked is the worst outcome.
                 if let Err(e) = gumicord_platform::clipboard::set_text(text) {
                     tracing::warn!(%e, "クリップボードへ入れられなかった");
                 }
@@ -997,14 +890,14 @@ impl Gumicord {
                 self.live.mark_read(ChannelId::from(*channel));
             }
             crate::menu::Action::Reply(id) => {
-                // ⚠️ **書きかけを消さない。** 打ちかけた文にそのまま
-                // 宛先が付くのが、押した人の期待である
+                // Keeps the draft: the expectation is that it gains a
+                // recipient.
                 self.composing = Composing::Reply(*id);
                 self.input_focused = true;
             }
             crate::menu::Action::Edit(id) => {
-                // ⚠️ **打たれたままの本文を入れる。** 解析して飾りを剥がした
-                // ものを入れると、押しただけで `**太字**` が消える
+                // The raw body; the parsed one would silently drop the
+                // markup.
                 let Some(text) = self.raw_body(*id) else {
                     return true;
                 };
@@ -1014,11 +907,11 @@ impl Gumicord {
                 self.input_focused = true;
             }
             crate::menu::Action::Delete(id) => {
-                // ⚠️ **ここへ来るのは窓で確かめた後だけである**
+                // Only reached after the dialog confirmed.
                 // ([`Self::needs_confirming`])
                 self.live
                     .delete_message(ChannelId::from(self.selected_channel), MessageId::from(*id));
-                // 書き換えている最中に消したら、書き換えもやめる
+                // Deleting what is being edited also cancels the edit.
                 if self.composing.target() == Some(*id) {
                     self.composing = Composing::New;
                     self.input.take();
@@ -1039,9 +932,8 @@ impl Gumicord {
             }
             crate::menu::Action::Paste => {
                 match gumicord_platform::clipboard::text() {
-                    // ⚠️ **改行をそのまま入れない。** 入力欄は 1 行で、
-                    // 貼った瞬間に見えないところへ文字が消える。
-                    // Discord も貼り付けた改行は空白に潰す
+                    // The field is one line, so newlines would hide text.
+                    // Discord collapses them on paste too.
                     Ok(Some(text)) => self.input.insert(&text.replace(['\r', '\n'], " ")),
                     Ok(None) => {}
                     Err(e) => tracing::warn!(%e, "クリップボードを読めなかった"),
@@ -1078,7 +970,7 @@ impl Gumicord {
         true
     }
 
-    /// 選んだところをクリップボードへ。**何も選んでいなければ何もしない。**
+    /// Copies the selection, if any.
     fn copy_selection(&mut self) -> bool {
         let sel = self.input.selection();
         if sel.is_empty() {
@@ -1092,11 +984,7 @@ impl Gumicord {
         true
     }
 
-    /// 入力欄のメニュー。**机の上だけに出る。**
-    ///
-    /// ⚠️ **できないものを並べない。** 何も選んでいないのに「コピー」、
-    /// 空のクリップボードで「貼り付け」を出しても、押して何も起きないだけ
-    /// である
+    /// The composer's menu, desktop only. Lists only what would do something.
     fn field_menu(&self) -> Vec<crate::menu::Item> {
         use crate::menu::{Action, Item};
         let mut items = Vec::new();
@@ -1105,9 +993,8 @@ impl Gumicord {
             items.push(Item::new(Action::Cut, "切り取り").icon("cut"));
             items.push(Item::new(Action::CopySelection, "コピー").icon("copy"));
         }
-        // ⚠️ **中身までは見に行かない。** 開いて読むのは他のプログラムから
-        // クリップボードを奪う操作であり、メニューを出すたびにやることでは
-        // ない
+        // Not read: opening the clipboard takes it from other programs, which
+        // is not something to do every time a menu opens.
         items.push(Item::new(Action::Paste, "貼り付け").icon("paste"));
 
         if !self.input.is_empty() {
@@ -1116,13 +1003,8 @@ impl Gumicord {
         items
     }
 
-    /// ログイン画面 (`FR-001`)。QR を出して読まれるのを待つ。
-    ///
-    /// **入力欄も押しボタンも無い。** 利用者がここですることは、スマホで
-    /// QR を読むことだけである。パスワード経路 (C4b) が入るとここに増える。
-    ///
-    /// 上下の `layout.spacer` が縦の余りを分け合うことで中央に来る。
-    /// `app.screen.login` の交差軸は `Center` なので横は勝手に揃う
+    /// The login screen: a QR and nothing else to press, since scanning it is
+    /// the only thing to do here. Spacers above and below centre it.
     fn login_screen(&self) -> UiNode {
         let s = self.login.session();
 
@@ -1132,8 +1014,7 @@ impl Gumicord {
                 NodeId::AppScreenLoginTitle,
                 "QR コードでログイン",
             ))
-            // QR が無い間 (接続中・交換中) は出さない。
-            // **枠だけ出して中身が空だと、読めない QR を見せることになる**
+            // Nothing while connecting: an empty frame is an unscannable QR.
             .child_if(s.qr().is_some(), || {
                 UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
             })
@@ -1141,13 +1022,11 @@ impl Gumicord {
             .child(UiNode::new(NodeId::LayoutSpacer))
     }
 
-    /// `PLT-020`: 独自タイトルバー。
-    ///
-    /// ボタンは `key` の [`Key::Slot`] で区別する。プラットフォーム層は
-    /// この文字列だけを見てウィンドウ操作へつなぐ。
+    /// The custom title bar. Buttons are told apart by their slot, which is
+    /// all the platform layer reads.
     fn titlebar(&self) -> UiNode {
-        // ⚠️ 字ではなくアイコンで描く。`−` `□` `✕` を文字として並べると
-        // 太さも大きさも書体任せになり、3 つ並べたときに揃わない
+        // Icons, not glyphs: as text their weight and size follow the font
+        // and the three never line up.
         let button = |slot: &'static str, icon: &str| {
             UiNode::icon(NodeId::ChromeTitlebarControl, icon)
                 .with_key(Key::Slot(slot))
@@ -1157,8 +1036,8 @@ impl Gumicord {
                 )
         };
 
-        // ログインできたら誰として入っているかを出す。**本物のデータが
-        // 通っていることが目で分かる唯一の場所**でもある (Store は C5)
+        // Shows who is signed in, and is the only visible sign that real data
+        // is flowing.
         let title = match self.login.session().logged_in() {
             Some(l) => format!("  Gumicord — {}", l.me.user.display_name()),
             None => "  Gumicord".to_owned(),
@@ -1174,10 +1053,7 @@ impl Gumicord {
             )
     }
 
-    /// ギルド一覧 (`FR-010`)。
-    ///
-    /// ⚠️ **未読とメンションの印はまだ本物ではない。** read-state は C5 と
-    /// 一緒に入る。demo のときだけ印が付く
+    /// The guild list.
     fn guild_list(&self) -> UiNode {
         let mut list = UiNode::new(NodeId::NavGuildList).child(
             UiNode::text(NodeId::NavGuildListHome, "DM").with_state_if(
@@ -1187,13 +1063,13 @@ impl Gumicord {
         );
 
         for g in self.guild_rows() {
-            // フォルダの見出し。**押すと開閉する**
+            // The folder header; pressing it folds.
             if g.folder_of_own.is_some() {
                 list = list.child(self.folder_face(&g));
                 continue;
             }
-            // ⚠️ **フォルダの中身はフォルダの子として置く。** ここで
-            // 兄弟としても出すと二重になる
+            // Contents belong to the folder; emitting them as siblings too
+            // would duplicate them.
             if g.in_folder {
                 continue;
             }
@@ -1203,13 +1079,13 @@ impl Gumicord {
         list.children(self.scrollbar(NodeId::NavGuildList))
     }
 
-    /// サーバ 1 個。**フォルダの中でも外でも同じものである**
+    /// One guild, identical inside and outside a folder.
     fn guild_item(&self, g: &GuildRow) -> UiNode {
         let selected = g.id == self.selected_guild;
         let hovered = self.hovered_id(NodeId::NavGuildListItem, g.id);
 
-        // ⚠️ **入れ物と絵を分ける。** 入れ物のほうが広く、左端に印の
-        // 通り道がある。絵をそのまま項目にすると、印を置く場所が無い
+        // The container is wider than the icon, leaving a lane at the left
+        // for the pill.
         let icon = face(NodeId::NavGuildListItemIcon, g.icon.as_deref(), &g.name)
             .with_data(g.id)
             .with_state_if(selected, State::Selected)
@@ -1222,39 +1098,30 @@ impl Gumicord {
             .with_state_if(selected, State::Selected)
             .with_state_if(g.unread, State::Unread)
             .with_state_if(g.mentions > 0, State::Mentioned)
-            // ⚠️ **フォルダの中にいることは状態で伝える。**
-            // 空白のノードを挟むと、字下げの量が焼き付いてテーマから
-            // 揃えられなくなる (`chat.message` の grouped と同じ考え)
+            // Carried as state, not a spacer node: a spacer bakes in the
+            // indent and takes it away from the theme.
             .with_state_if(g.in_folder, State::Grouped)
             .with_state_if(hovered, State::Hover)
             .children(self.guild_pill(g, selected, hovered))
             .child(icon)
-            // ⚠️ **未読の丸は出さない。数だけを出す。**
-            // 「未読がある」ことは既に左の印が言っている
+            // Counts only; the pill already says there is something unread.
             .children((g.mentions > 0).then(|| {
                 UiNode::text(NodeId::NavGuildListItemBadge, g.mentions.to_string()).with_data(g.id)
             }))
     }
 
-    /// サーバの左端に出る白い印 (Discord の「ピル」)。
+    /// The pill at a guild's left edge.
     ///
     /// ```text
-    ///   ▍◯   選択中     — 背が高い
-    ///   ▪◯   未読       — 点だけ
-    ///   ▎◯   ホバー     — その中間
-    ///    ◯   それ以外   — 出ない
+    ///   ▍◯   selected   tall
+    ///   ▪◯   unread     a dot
+    ///   ▎◯   hovered    in between
+    ///    ◯   otherwise  absent
     /// ```
     ///
-    /// # ⚠️ 意味が無いときは出さない
-    ///
-    /// 高さ 0 のノードを置いて隠すのではなく、置かない。**出ている印は
-    /// 必ず何かを言っている**ようにする。
-    ///
-    /// ⚠️ **大きさはテーマが決める。** ここが渡すのは「どういう理由で
-    /// 出ているか」だけである。
-    ///
-    /// ⚠️ **未読はまだ来ない。** READY の `read_state` を読んでいないので、
-    /// いま出るのは選択中とホバーだけである
+    /// Absent rather than zero-height when it would say nothing, so a visible
+    /// pill always means something. The size is the theme's; this only says
+    /// why it is there.
     fn guild_pill(&self, g: &GuildRow, selected: bool, hovered: bool) -> Option<UiNode> {
         if !selected && !hovered && !g.unread {
             return None;
@@ -1268,9 +1135,7 @@ impl Gumicord {
         )
     }
 
-    /// フォルダを 1 つ組む。
-    ///
-    /// # 開いているときは中身を抱え込む
+    /// One folder. Open, it wraps its contents.
     ///
     /// ```text
     ///   閉じている        開いている
@@ -1281,8 +1146,8 @@ impl Gumicord {
     ///                     └───────┘
     /// ```
     ///
-    /// 閉じているときは**中身のサーバの絵を 2×2 で敷き詰める**。折り畳んだ
-    /// ものが何かを、開かずに分かるようにするためである。
+    /// Folded, it tiles the icons inside, so what was folded away is visible
+    /// without unfolding.
     ///
     /// ⚠️ **開いているときに敷き詰めない。** 中身はすぐ下に並んでいるので、
     /// 同じ絵が上下に二重に出ることになる。
