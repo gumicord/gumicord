@@ -132,14 +132,13 @@ pub fn blocks(mut buf: &[u8], field: u64) -> Vec<&[u8]> {
     out
 }
 
-/// 詰めた `fixed64` の列として読む。**8 の倍数でなければ空**
+/// Reads a packed run of `fixed64`. Empty unless the length is a multiple of 8.
 pub fn fixed64s(body: &[u8]) -> Vec<u64> {
     if body.is_empty() || !body.len().is_multiple_of(8) {
         return Vec::new();
     }
-    body.chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().expect("8 バイトある")))
-        .collect()
+    let (chunks, _) = body.as_chunks::<8>();
+    chunks.iter().copied().map(u64::from_le_bytes).collect()
 }
 
 /// 可変長整数を 1 つ読む。読めなければ `None`
