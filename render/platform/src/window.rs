@@ -1,54 +1,25 @@
-//! ウィンドウとイベントループ。
+//! The window and the event loop.
 //!
-//! # 独自タイトルバー (`PLT-020`, `PLT-021`)
+//! The OS title bar is not used, so a theme's reach extends to the window's
+//! edge on every platform. What it provided has to be replaced: dragging the
+//! title bar area moves the window, a 6px border resizes it, the control
+//! buttons are told apart by their slot, and the cursor follows the zone.
+//! Snap layouts, which Windows attaches to a real maximise button, are not
+//! handled.
 //!
-//! OS 標準のタイトルバーを使わない。テーマが全プラットフォームで同じ見た目に
-//! なる範囲を、ウィンドウの縁まで広げるためである。
+//! If the title bar disappears and the drawing area looks cropped, suspect a
+//! surface larger than the window: the GL origin is bottom-left, so the top of
+//! the UI lands above the visible area and the right edge overflows. Missing
+//! one resize notification is enough to cause it, so [`Host::redraw`] resizes
+//! the surface from the window's real size immediately before drawing.
 //!
-//! 代わりに、標準タイトルバーが提供していた操作を自前で補う必要がある。
+//! Maximising a borderless window used to overflow the work area. Do not try
+//! to fix that here: winit already clamps the client rect in `WM_NCCALCSIZE`,
+//! and correcting it again makes the window smaller by the border width. Nor
+//! should the maximised state be tracked locally — see [`Host::maximized`].
 //!
-//! | 失うもの | 補い方 |
-//! |---|---|
-//! | ドラッグでの移動 | `chrome.titlebar` の当たりで `drag_window` |
-//! | 端のドラッグでのリサイズ | 縁 6px の当たりで `drag_resize_window` |
-//! | 最小化・最大化・閉じる | `chrome.titlebar.control` の `key` で分岐 |
-//! | リサイズカーソル | 当たりに応じて `set_cursor` |
-//!
-//! ⚠️ `PLT-022` (スナップレイアウト) はまだ調べていない。Windows で最大化
-//! ボタンにポインタを置いたときに出る配置候補は、標準タイトルバーの機能である。
-//!
-//! ## サーフェスの大きさがずれると、上端と右端が切れる
-//!
-//! **タイトルバーが消えて描画範囲が狭く見えたら、まずこれを疑う。**
-//!
-//! GL バックエンドの原点は左下である。サーフェスをウィンドウより大きく
-//! 構成したまま描くと、UI の上端は見えている領域より**上**へ写り、右端は
-//! はみ出す。`chrome.titlebar` は上端にあるので真っ先に消える。
-//!
-//! リサイズの通知を 1 回でも取りこぼすとこの状態になるので、
-//! [`Host::redraw`] は**描く直前にウィンドウの実寸からサーフェスを合わせる**。
-//! `GUMICORD_LOG=debug` にすると「サーフェスを作り直す from=… to=…」が出るので、
-//! ずれていればそこで分かる。
-//!
-//! ## 最大化ではみ出す件 (`WM_NCCALCSIZE`) は `winit` が既に直している
-//!
-//! Windows は窓を最大化するとき、**枠の太さのぶんだけ作業領域より大きい**
-//! 矩形にする。枠のある窓ならその枠が画面の外に隠れて辻褄が合うが、枠を
-//! 消した窓では**クライアント領域がそのまま画面の外へ出る**。
-//!
-//! ⚠️ **これを自前で直そうとしないこと。** `winit` は枠なし窓の
-//! `WM_NCCALCSIZE` で、最大化中はクライアント矩形をそのディスプレイの
-//! `rcWork` へ置き換えている
-//! (`winit-0.30.13/src/platform_impl/windows/event_loop.rs` の `WM_NCCALCSIZE`)。
-//! **上から更に内側へ寄せると、今度は窓が枠のぶん小さくなる。**
-//!
-//! ⚠️ **最大化しているかを自前で覚えないこと。** [`Host::maximized`] を見よ。
-//!
-//! # 再描画は待って行う
-//!
-//! S1 は計測のために `ControlFlow::Poll` で回していたが、常時描画は
-//! `NFR-005` (非アクティブ時に描画を止める) と両立しない。ここでは `Wait` に
-//! し、状態が変わったときだけ再描画を要求する ([`spec/06-renderer.md`] 9.2)。
+//! Redraws are on demand. Drawing continuously cannot coexist with stopping
+//! while inactive, so the loop waits and only redraws when something changed.
 
 use std::sync::Arc;
 
@@ -61,176 +32,138 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
-/// ウィンドウの縁で、リサイズの掴みしろとする幅 (論理 px)
+/// Width of the resize grip at the window's edge.
 const RESIZE_BORDER: f32 = 6.0;
-/// ホイール 1 段の移動量 (論理 px)。行数で来る環境のための換算
+/// Distance per wheel notch, for platforms reporting lines.
 const LINE_SCROLL: f32 = 48.0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
-    #[error("イベントループを作れない: {0}")]
+    #[error("cannot create the event loop: {0}")]
     EventLoop(#[from] winit::error::EventLoopError),
-    #[error("ウィンドウを作れない: {0}")]
+    #[error("cannot create the window: {0}")]
     Window(#[from] winit::error::OsError),
-    #[error("GPU の準備に失敗した: {0}")]
+    #[error("GPU setup failed: {0}")]
     Gpu(#[from] gumicord_render::GpuError),
 }
 
-/// 1 フレームを組み立てるときに分かっている情報。
+/// What is known while building one frame.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameCx {
-    /// 表示領域 (論理 px)。テーマの `when.maxWidth` の照合にも使う
+    /// The viewport, which themes also match `when.maxWidth` against.
     pub viewport: Size,
     pub scale: f32,
 }
 
-/// プラットフォーム層から見たアプリケーション。
-///
-/// **ここに OS の型は現れない。** `winit` を [`gumicord_app`] へ漏らさないため
-/// である ([`spec/02-architecture.md`])。
+/// The application, as the platform layer sees it. No OS types appear here,
+/// so winit never leaks into the app crate.
 pub trait Application {
-    /// UITree を組み立てて返す。**スタイル解決まで済ませること。**
-    ///
-    /// パイプラインの [3] から [6] がこの中で起きる。
+    /// Builds the tree, with the style already resolved.
     fn build(&mut self, cx: &FrameCx) -> UiNode;
 
-    /// ポインタの下のノードが変わった。再描画が要るなら `true`。
-    ///
-    /// `hits` は手前から順に並ぶ。ポインタが窓の外へ出たときは空。
+    /// The node under the pointer changed. `hits` runs front to back, and is
+    /// empty when the pointer leaves the window.
     fn hover_changed(&mut self, hits: &[Hit]) -> bool;
 
-    /// 左ボタンが押された。再描画が要るなら `true`。
-    ///
-    /// タイトルバーの操作はここへ来る前にプラットフォーム層が処理する。
+    /// The primary button was pressed. Title bar presses are handled before
+    /// this.
     fn pressed(&mut self, hits: &[Hit]) -> bool;
 
-    /// 副ボタン (右) で押された。再描画が要るなら `true`。
+    /// The secondary button was pressed.
     ///
-    /// `at` は論理 px、ウィンドウの左上から。**押された場所そのもの**で
-    /// あって、そこへメニューを置けという意味ではない。どこへ置くかは
-    /// 中身とウィンドウの大きさが分かってから決まる
-    /// ([`gumicord_uitree::Anchor`])
+    /// `at` is where the press happened, not where a menu should go: that
+    /// needs the menu's size and the window's.
     fn context_menu(&mut self, _hits: &[Hit], _at: (f32, f32)) -> bool {
         false
     }
 
-    /// スクロール領域が動いた。`at` は先頭からの距離、`max` ははみ出し量。
-    ///
-    /// **上端に着いたら過去を取りに行く**ような判断はアプリの仕事である。
-    /// プラットフォーム層は「どこまで巻いたか」を伝えるだけで、それが
-    /// 何の一覧なのかを知らない。
+    /// A scroll region moved. Deciding what that means is the app's job; this
+    /// layer does not know what the list holds.
     fn scrolled(&mut self, _id: NodeId, _at: f32, _max: f32) {}
 
-    /// 入力が無くても、**この時間が経ったら描き直してほしい**。
+    /// Redraw after this long even with no input.
     ///
-    /// # なぜ要るのか
+    /// A relative timestamp changes on its own, and left alone "just now"
+    /// would sit there for hours. Waking every second is not an option
+    /// either, so knowing when the text next changes allows sleeping until
+    /// exactly then.
     ///
-    /// `<t:…:R>` の「3 分前」は、誰も何もしなくても文字が変わる。出した
-    /// きり寝てしまうと、開きっぱなしの画面で「たった今」が何時間も残る。
-    ///
-    /// かといって毎秒起きるのは `NFR-005` (非アクティブ時に描画を停止する)
-    /// に反する。**次に文字が変わるまでの時間**が分かれば、そこまでは寝て
-    /// いられる。
-    ///
-    /// ⚠️ **`None` は「寝たままでよい」である。** 0 秒ではない。
-    /// 相対表示が画面に 1 つも無ければ、起きる理由が無い。
-    ///
-    /// 描いた直後に 1 回だけ聞かれる。
+    /// `None` means there is no reason to wake, not zero. Asked once after
+    /// each draw.
     fn next_frame_in(&self) -> Option<std::time::Duration> {
         None
     }
 
-    /// 上へ足したので、**見ている場所を動かさないでほしい**一覧。
-    ///
-    /// 描く直前に呼ばれ、**1 回だけ効く**。伸びたのが上か下かを知って
-    /// いるのはアプリだけである
+    /// A list that grew at the top and should hold its scroll position.
+    /// Consumed once; only the app knows which end grew.
     fn keep_place(&mut self) -> Option<NodeId> {
         None
     }
 
     fn title(&self) -> String;
 
-    /// いま入力を受け取る文書 (`PLT-001`)。`None` ならテキスト入力は起きない。
-    ///
-    /// **どれに入力を流すかを決めるのはアプリである。** プラットフォーム層は
-    /// フォーカスの概念を持たない。
+    /// The document receiving input, if any. This layer has no notion of
+    /// focus; the app decides.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
         None
     }
 
-    /// 入力を確定して送る (`FR-024`)。Enter が押されたときに呼ばれる。
+    /// Commits and sends, on enter.
     ///
-    /// **変換中は呼ばれない。** 変換の確定に使う Enter を送信と取り違えると、
-    /// 日本語がまともに打てなくなる。
+    /// Never called while composing: mistaking the enter that commits an IME
+    /// candidate for send makes Japanese unusable.
     fn submit(&mut self) -> bool {
         false
     }
 
-    /// テキスト入力から抜ける。Esc が押されたときに呼ばれる
+    /// Leaves text input, on escape.
     fn cancel_input(&mut self) -> bool {
         false
     }
 
-    /// ウィンドウが開く前に一度だけ呼ばれる。**背景の仕事はここから始める。**
-    ///
-    /// 渡される [`Waker`] が、外のスレッドからイベントループを起こす唯一の手
-    /// である。
+    /// Called once before the window opens; background work starts here. The
+    /// [`Waker`] is the only way another thread can wake the loop.
     fn start(&mut self, _waker: Waker) {}
 
-    /// アトラスが絵を忘れた。**取ってきたぶんを入れ直す。**
-    ///
-    /// ⚠️ 忘れられた顔は、頼み直さなければ二度と出てこない。取ってきた
-    /// ものは円盤に残っているので、往復は起きない
+    /// The atlas evicted images; put back what was fetched. They are still on
+    /// disk, so no round trip happens.
     fn images_dropped(&mut self) {}
 
-    /// 画面に出ようとしたのに無かった絵を頼む。**描く直前に呼ばれる。**
+    /// Requests images that were about to draw and were missing.
     ///
-    /// ⚠️ **見えているものだけが来る。** 一覧に 300 行あっても、切り取りを
-    /// 抜けて実際に描かれたところしか来ない。木を歩いて集めると、
-    /// **見えていない 285 行ぶんまで取りに行くことになる**
+    /// Only what survived clipping arrives, so a 300-row list asks for the
+    /// dozen or so actually on screen.
     fn request_images(&mut self, _urls: &[String]) {}
 
-    /// 取ってきた画像を引き取る。**描く直前に呼ばれる。**
+    /// Takes fetched images.
     ///
-    /// ⚠️ **レンダラは網に触らない** ([`spec/02-architecture.md`])。
-    /// 取得も復号もアプリの仕事で、ここを通って画素だけが渡る。
-    /// 渡したものは**アプリの手元から消えてよい** — アトラスへ入る
+    /// The renderer never touches the network: fetching and decoding are the
+    /// app's, and only pixels cross here. The app can drop them afterwards.
     fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
         Vec::new()
     }
 
-    /// [`Waker::wake`] で起こされた。溜まった知らせを取り込む。
-    /// 再描画が要るなら `true`。
-    ///
-    /// ⚠️ **何回起こされるかは約束されない。** 複数の `wake` が 1 回に
-    /// まとめられることがあるので、**溜まっているぶんを全部**取り込むこと。
+    /// Woken by [`Waker::wake`]; drain everything pending. Wakes coalesce, so
+    /// the count is not meaningful.
     fn wake(&mut self) -> bool {
         false
     }
 }
 
-/// イベントループを外から起こす手。
+/// Wakes the event loop from another thread.
 ///
-/// # なぜ要るのか
+/// The loop sleeps, and async work happens elsewhere, so without this the
+/// screen would sleep through it.
 ///
-/// イベントループは [`ControlFlow::Wait`] で寝ている (`NFR-005`)。
-/// 非同期の仕事 — ログインの進み具合、Gateway のイベント — は別スレッドで
-/// 進むので、**そのままでは画面が何も知らないまま眠り続ける**。
-///
-/// `wake` を呼ぶと [`Application::wake`] が主スレッドで呼ばれる。
-///
-/// ⚠️ **知らせそのものはここを通らない。** 運べるのは「何かあった」だけで
-/// ある。中身はアプリが自前の通り道 (チャネルなど) で渡す。ここに載せると
-/// `winit` の型がアプリの型に混ざり、`gumicord-app` から `winit` を隠せなく
-/// なる ([`spec/02-architecture.md`])。
+/// Carries no payload, only "something happened": the app moves the contents
+/// over its own channel. Putting them here would mix winit's types into the
+/// app's.
 #[derive(Clone)]
 pub struct Waker(winit::event_loop::EventLoopProxy<()>);
 
 impl Waker {
-    /// 主スレッドを起こす。**どのスレッドから呼んでもよい。**
-    ///
-    /// イベントループが既に終わっていれば黙って何もしない。終了処理の途中で
-    /// 背景の仕事が最後の知らせを出すのは普通のことで、誤りではない。
+    /// Wakes the main thread, from any thread. A no-op once the loop has
+    /// ended, which happens normally during shutdown.
     pub fn wake(&self) {
         let _ = self.0.send_event(());
     }
@@ -242,13 +175,13 @@ impl core::fmt::Debug for Waker {
     }
 }
 
-/// ウィンドウを開いてアプリを走らせる。**返ってくるのは終了時である。**
+/// Opens the window and runs until exit.
 pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    // ⚠️ ウィンドウを作る前に渡す。ログインは窓が出るより先に始めてよく、
-    // むしろ先に始めたほうが QR が早く出る
+    // Before the window exists: login may start early, and earlier means the
+    // QR appears sooner.
     app.start(Waker(event_loop.create_proxy()));
 
     let mut host = Host {
@@ -272,7 +205,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
     Ok(())
 }
 
-/// ポインタが何の上にあるか。**ウィンドウ操作にだけ関わる区分**である。
+/// What the pointer is over, as far as window management is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Zone {
     Client,
@@ -285,28 +218,28 @@ struct Host {
     app: Box<dyn Application>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    /// ポインタの位置 (論理 px)
+    /// Pointer position.
     cursor: (f32, f32),
     zone: Zone,
-    /// 掴んでいるスクロールバー。押している間だけ入る
+    /// The scrollbar being dragged, while held.
     scroll_grab: Option<ScrollGrab>,
-    /// 押されている修飾キー。Shift での選択と Ctrl+A に使う
+    /// Held modifiers.
     modifiers: ModifiersState,
-    /// IME を許可しているか。切り替えたときだけ OS へ伝える
+    /// Whether IME is allowed; only changes are told to the OS.
     ime_allowed: bool,
     first_frame: bool,
-    /// `run` に入った時刻。**最初のフレームまでを測る** (`NFR-001`)
+    /// When `run` started, for measuring time to first frame.
     started: std::time::Instant,
-    /// キャレットの点滅の間隔。`None` は**点滅させない設定**である
+    /// Blink interval; `None` means blinking is switched off.
     blink: Option<std::time::Duration>,
-    /// いまキャレットが見えている拍か
+    /// Whether the caret is currently visible.
     caret_on: bool,
-    /// 次に切り替える時刻
+    /// When it next toggles.
     next_blink: std::time::Instant,
-    /// 入力が無くても描き直す時刻。`None` は**寝たままでよい**
+    /// When to redraw without input; `None` means never.
     /// ([`Application::next_frame_in`])
     next_frame: Option<std::time::Instant>,
-    /// 動いている最中のスタイル。**止まったら寝る** (`NFR-005`)
+    /// Styles in motion; the loop sleeps once they settle.
     motion: gumicord_render::Motion,
 }
 
@@ -317,10 +250,8 @@ impl Host {
         }
     }
 
-    /// キャレットを**点いた状態から**数え直す。
-    ///
-    /// ⚠️ 打っている最中に消える拍が来ると、**書いている場所を見失う**。
-    /// 入力があったら必ずここを通す。フォーカスが移ったときも同じ
+    /// Restarts the blink from visible. A dark phase mid-keystroke loses the
+    /// caret, so every input and focus change goes through here.
     fn restart_caret(&mut self) {
         self.caret_on = true;
         if let Some(interval) = self.blink {
@@ -328,7 +259,7 @@ impl Host {
         }
     }
 
-    /// ポインタの下にあるノードを手前から。
+    /// Nodes under the pointer, front to back.
     fn hits(&self) -> Vec<Hit> {
         let Some(r) = &self.renderer else {
             return Vec::new();
@@ -336,21 +267,19 @@ impl Host {
         r.hit_test(self.cursor.0, self.cursor.1).cloned().collect()
     }
 
-    /// いま最大化しているか。
-    ///
-    /// ⚠️ **自前で覚えない。** 最大化はこちらのボタン以外からも起きる —
-    /// Win+↑、画面上端へのスナップ、タスクバーの右クリック、
-    /// タイトルバーのダブルクリック。覚えておいた真偽値はそこで食い違い、
-    /// **最大化中なのに縁がリサイズを掴み、ボタンが 1 回空振りする**
+    /// Whether the window is maximised. Asked, never remembered: it also
+    /// happens through the keyboard, edge snapping, the taskbar and
+    /// double-clicking, and a stale flag makes the border grab a resize while
+    /// maximised and wastes a button press.
     fn maximized(&self) -> bool {
         self.window.as_ref().is_some_and(|w| w.is_maximized())
     }
 
-    /// ウィンドウ操作に関わる領域かを判定する。
+    /// Which window-management zone the pointer is in.
     ///
-    /// 縁のリサイズだけは UITree の外側の話なので座標で見る。それ以外は
-    /// **UITree の安定 ID で見る**。タイトルバーの位置や大きさをテーマが
-    /// 変えても、ここが追随できるようにするためである。
+    /// The resize border is outside the tree, so it goes by coordinates;
+    /// everything else goes by stable ID, so a theme moving the title bar
+    /// does not break it.
     fn zone_at(&self, hits: &[Hit]) -> Zone {
         if !self.maximized()
             && let Some(r) = &self.renderer
@@ -406,17 +335,15 @@ impl Host {
         w.set_cursor(icon);
     }
 
-    /// IME からの通知を文書へ流す。**再描画が要るなら真。**
-    ///
-    /// Windows ではこれで足りる。**TSF テキストストアは要らない**
-    /// ([ADR-0006](../../../spec/adr/0006-windows-ime-via-winit.md))。
+    /// Feeds IME notifications to the document. On Windows this is enough; no
+    /// TSF text store is needed.
     fn on_ime(&mut self, ime: Ime) -> bool {
         let Some(doc) = self.app.focused_document() else {
             return false;
         };
         match ime {
             Ime::Preedit(s, cursor) => {
-                // cursor は (開始, 終了) のバイト位置。開始だけ使う
+                // Byte offsets; only the start is used.
                 doc.set_composition(&s, cursor.map(|(a, _)| a));
                 true
             }
@@ -424,20 +351,19 @@ impl Host {
                 doc.commit_composition(&s);
                 true
             }
-            // 入力の開始と終了。文書は変わらない
+            // Start and end of composition; the document is unchanged.
             Ime::Enabled | Ime::Disabled => false,
         }
     }
 
-    /// キー入力を文書へ流す。**再描画が要るなら真。**
+    /// Feeds key input to the document.
     fn on_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
 
         let shift = self.modifiers.shift_key();
         let ctrl = self.modifiers.control_key();
 
-        // 変換中かどうかで Enter と Esc の意味が変わる。
-        // **変換の確定に使う Enter を送信と取り違えてはならない**
+        // Enter and escape mean different things while composing.
         let composing = self
             .app
             .focused_document()
@@ -476,11 +402,11 @@ impl Host {
             None => {}
         }
 
-        // ⚠️ **変換中の文字は `Ime::Preedit` で来る。** ここで拾うと二重に入る
+        // Composing text arrives as preedit; taking it here duplicates it.
         if composing || ctrl {
             return false;
         }
-        // 制御文字を弾く。Tab や改行が生の文字として来ることがある
+        // Tab and newline can arrive as literal characters.
         match event
             .text
             .as_ref()
@@ -497,29 +423,27 @@ impl Host {
         }
     }
 
-    /// IME に「入力欄はここ」と伝える (`PLT-001`)。
-    ///
-    /// **変換候補ウィンドウの位置はこれで決まる。** 伝えないと画面の隅に出る。
+    /// Tells the IME where the field is, which is what positions the
+    /// candidate window; without it, it appears in a corner of the screen.
     fn update_ime_area(&mut self) {
         let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
             return;
         };
         let has_input = self.app.focused_document().is_some();
 
-        // ⚠️ **許可しない限り `Ime` イベントは一切来ない。** winit の既定は
-        // 不許可であり、これを呼び忘れると変換中の文字列がどこにも届かない。
+        // No IME events arrive until this is allowed; winit defaults to off.
         //
-        // 変わったときだけ呼ぶ。毎フレーム呼ぶと IME の文脈を繋ぎ直し続ける
+        // Only on change: per frame this keeps resetting the IME context.
         if has_input != self.ime_allowed {
             self.ime_allowed = has_input;
             w.set_ime_allowed(has_input);
-            tracing::debug!(allowed = has_input, "IME の許可を切り替えた");
+            tracing::debug!(allowed = has_input, "toggled IME");
         }
         if !has_input {
             return;
         }
 
-        // 入力欄の位置は当たり判定の記録から引く
+        // The field's position comes from the hit record.
         let Some(field) = r
             .hit_boxes()
             .iter()
@@ -534,24 +458,21 @@ impl Host {
     }
 
     fn redraw(&mut self) {
-        // ⚠️ **描く直前に窓の実寸からサーフェスを合わせる。**
+        // Resize the surface from the window's real size, right before
+        // drawing.
         //
-        // `Resized` を取りこぼすとサーフェスの大きさが古いままになり、
-        // `get_current_texture` が `Outdated` を返し続ける。再構成しても
-        // 古い大きさで作り直すだけなので、窓が空白のまま回り続ける。
-        // 実際に「大きさを変えると真っ白のまま戻らない」が起きた。
-        //
-        // `inner_size()` の呼び出しは 1 フレームに 1 回で、大きさが同じなら
-        // `resize` は何もしない。
+        // Missing a `Resized` leaves the surface stale, the swapchain
+        // permanently outdated, and reconfiguring only rebuilds it at the old
+        // size — the window stays blank. This happened. One `inner_size()` per
+        // frame, and resizing to the same size is a no-op.
         let size = self.window.as_ref().map(|w| w.inner_size());
         if let (Some(size), Some(r)) = (size, &mut self.renderer) {
             r.resize(size.width, size.height);
         }
 
         let caret_on = self.caret_on;
-        // ⚠️ **描く前に入れる。** このフレームで使えるようにするため
-        // ⚠️ **絵を忘れたなら、先に伝える。** 伝えてから引き取らないと、
-        // 入れ直すぶんがこのフレームに間に合わない
+        // Before drawing, so this frame can use them.
+        // Report evictions first, or the replacements miss this frame.
         if self
             .renderer
             .as_mut()
@@ -559,8 +480,7 @@ impl Host {
         {
             self.app.images_dropped();
         }
-        // ⚠️ **直前のフレームで足りなかったぶんを頼む。** 見えている
-        // ものだけが載っている
+        // What the previous frame was missing; only visible things.
         if let Some(r) = &self.renderer {
             let want: Vec<String> = r.missing_images().to_vec();
             if !want.is_empty() {
@@ -568,7 +488,7 @@ impl Host {
             }
         }
         let images = self.app.take_images();
-        // 上へ足したものがあれば、見ている場所を保つ。**1 フレームだけ**
+        // Holds the scroll position for one frame after a prepend.
         let keep_place = self.app.keep_place();
         let moving;
 
@@ -585,56 +505,48 @@ impl Host {
                 viewport: r.viewport(),
                 scale: r.scale(),
             };
-            tracing::trace!(w = cx.viewport.w, h = cx.viewport.h, "描画");
+            tracing::trace!(w = cx.viewport.w, h = cx.viewport.h, "drawing");
             let mut tree = self.app.build(&cx);
 
-            // ⚠️ **確定したスタイルを、そこへ動かす。**
+            // Move the resolved styles towards their targets.
             //
-            // 木の形は触らない。動くのは既に決まった値だけである
+            // The tree's shape is untouched; only settled values move.
             // ([`gumicord_render::motion`])
             moving = self.motion.apply(&mut tree, std::time::Instant::now());
 
             (r.render(&tree), r.backend())
         };
 
-        // ⚠️ **動いているあいだだけ回す。** 止まったら要求をやめて寝る。
-        // それが `NFR-005` (非アクティブ時に描画を停止する) である
+        // Only while something moves; once settled, stop asking and sleep.
         if moving {
             self.request_redraw();
         }
 
-        // 時間で変わる表示 (`<t:…:R>`) があれば、変わる頃に起き直す。
-        // ⚠️ **毎フレーム聞き直す。** 「3 分前」の次は 1 分後だが、
-        // 「59 秒前」の次は 1 秒後である
+        // Asked every frame: after "3 minutes ago" the next change is a
+        // minute away, but after "59 seconds ago" it is one second.
         self.next_frame = self
             .app
             .next_frame_in()
             .map(|d| std::time::Instant::now() + d);
 
-        // ⚠️ **表示できなかったら、もう一度描き直しを要求する。**
-        // `ControlFlow::Wait` で回している以上、ここで諦めると次の入力が
-        // 来るまで窓が空白のままになる。リサイズ直後は実際にそうなった。
-        //
-        // 隠れているだけ (`Skipped`) のときは要求しない。要求すると
-        // 最小化している間じゅう回り続ける (`NFR-005`)。
+        // A failed present asks again: the loop waits, so giving up here
+        // leaves the window blank until the next input. Being merely hidden
+        // does not, or it would spin for as long as the window is minimised.
         if stats.presented == Presented::Failed {
             self.request_redraw();
             return;
         }
 
-        // ⚠️ **ホバーは配置が変われば変わる。ポインタが動いたときだけでは足りない。**
-        //
-        // スクロールすると行がカーソルの下を通り過ぎるのに、当たり判定は
-        // 前のフレームの配置に対して答える。描き終えたここで見直さないと、
-        // ハイライトが通り過ぎた行に貼り付いたままになる。
-        //
-        // 変わったときだけ再描画を要求するので、次のフレームで落ち着く。
+        // Hover changes with layout, not only with the pointer: scrolling
+        // moves rows under a stationary cursor, and hit testing answers
+        // against the previous frame. Without rechecking here the highlight
+        // sticks to the row that moved away.
         if self.app.hover_changed(&self.hits()) {
             self.request_redraw();
         }
 
-        // 入力欄の位置が決まるのは配置のあとである。
-        // **変換候補ウィンドウの位置はこれで決まる** (`PLT-001`)
+        // The field's position is only known after layout, and it is what
+        // positions the IME candidate window.
         self.update_ime_area();
 
         if self.first_frame && stats.presented == Presented::Yes {
@@ -645,8 +557,8 @@ impl Host {
                 rects = stats.rects,
                 glyphs = stats.glyphs,
                 draw_calls = stats.draw_calls,
-                // `NFR-001` はコールドスタート 500 ms を求める。
-                // **測れる形にしておかないと、守れているかが分からない**
+                // Cold start has a budget; without measuring it there is no
+                // way to tell whether it is met.
                 ms = self.started.elapsed().as_millis() as u64,
                 "最初のフレームを描いた"
             );
@@ -655,31 +567,24 @@ impl Host {
 }
 
 impl ApplicationHandler for Host {
-    /// 次に何を待つかを決める。**キャレットの点滅はここが刻む。**
+    /// Decides what to wait for; the caret blink is driven from here.
     ///
-    /// # 入力欄にフォーカスが無い間は寝たままでよい
-    ///
-    /// `NFR-005` (非アクティブ時に描画を止める) があるので、**点滅のために
-    /// 常時起きるようなことはしない**。打てる場所が無ければ点滅させるものも
-    /// 無いので、[`ControlFlow::Wait`] に戻す。
-    ///
-    /// 速さは OS の設定に従う。**点滅させない設定もある** ので、
-    /// [`crate::clock::caret_blink_interval`] が `None` を返したら
-    /// 点けっぱなしにする。
+    /// Nothing wakes for a blink when no field has focus, since there is
+    /// nothing to blink. The rate follows the OS setting, which can also be
+    /// "never", in which case the caret stays lit.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = std::time::Instant::now();
 
-        // ⚠️ **一番早いものまで寝る。** 待つ理由は 2 つあり、どちらか
-        // 片方だけを見ると、もう片方がその間ずっと止まる
+        // Sleep until the earliest deadline; watching only one stalls the
+        // other.
         let mut until: Option<std::time::Instant> = None;
         let mut soonest = |at: std::time::Instant| {
             until = Some(until.map_or(at, |cur: std::time::Instant| cur.min(at)));
         };
 
-        // ── キャレットの点滅
+        // Caret blink.
         //
-        // 打てる場所が無ければ点滅させるものも無い。**そのときは
-        // 点滅のために起きない** (`NFR-005`)
+        // Nothing to blink without a focused field.
         match self.blink.filter(|_| self.app.focused_document().is_some()) {
             Some(interval) => {
                 if now >= self.next_blink {
@@ -689,14 +594,14 @@ impl ApplicationHandler for Host {
                 }
                 soonest(self.next_blink);
             }
-            // 次にフォーカスが当たったとき、点いた状態から始まるように戻す
+            // Reset so the next focus starts lit.
             None => self.caret_on = true,
         }
 
-        // ── 時間で変わる表示 (`<t:…:R>`)
+        // Time-dependent display.
         if let Some(at) = self.next_frame {
             if now >= at {
-                // 描き直せば、次にいつ起きるかも一緒に決まる
+                // Redrawing settles the next deadline too.
                 self.next_frame = None;
                 self.request_redraw();
             } else {
@@ -704,17 +609,15 @@ impl ApplicationHandler for Host {
             }
         }
 
-        // ⚠️ **理由が無ければ寝る。** `WaitUntil` を置きっぱなしにすると、
-        // 何も変わらないのに起き続ける
+        // With no reason, sleep: a stale deadline wakes for no change.
         event_loop.set_control_flow(match until {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
     }
 
-    /// [`Waker::wake`] で起こされた。
-    ///
-    /// **中身は運ばれてこない。** アプリが自前の通り道から取り込む
+    /// Woken by [`Waker::wake`]; the payload comes over the app's own
+    /// channel.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         if self.app.wake() {
             self.request_redraw();
@@ -726,7 +629,7 @@ impl ApplicationHandler for Host {
             return;
         }
 
-        // PLT-020: OS 標準のタイトルバーを使わない
+        // No OS title bar.
         let attrs = Window::default_attributes()
             .with_title(self.app.title())
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
@@ -736,7 +639,7 @@ impl ApplicationHandler for Host {
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                tracing::error!(%e, "ウィンドウを作れなかった");
+                tracing::error!(%e, "could not create the window");
                 event_loop.exit();
                 return;
             }
@@ -747,7 +650,7 @@ impl ApplicationHandler for Host {
         match Renderer::new(window.clone().into(), size.width, size.height, scale) {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
-                tracing::error!(%e, "GPU を初期化できなかった");
+                tracing::error!(%e, "could not initialise the GPU");
                 event_loop.exit();
                 return;
             }
@@ -762,10 +665,9 @@ impl ApplicationHandler for Host {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                // ⚠️ 最大化のときは画面の実寸も残す。「はみ出している」を
-                // 憶測ではなく引き算で言えるようにするためである。
-                // 出るはずの値は `画面 - タスクバー` で、`画面 + 枠 × 2` なら
-                // はみ出している
+                // Log the screen size too, so overflow can be shown by
+                // subtraction rather than guessed at: the expected value is
+                // the screen minus the taskbar.
                 let screen = self
                     .window
                     .as_ref()
@@ -785,7 +687,7 @@ impl ApplicationHandler for Host {
                 self.request_redraw();
             }
 
-            // PLT-009: DPI 変更・ディスプレイ間の移動への追従
+            // Follows DPI changes and moves between displays.
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(r) = &mut self.renderer {
                     r.set_scale(scale_factor as f32);
@@ -797,8 +699,8 @@ impl ApplicationHandler for Host {
                 let scale = self.renderer.as_ref().map_or(1.0, Renderer::scale) as f64;
                 self.cursor = ((position.x / scale) as f32, (position.y / scale) as f32);
 
-                // スクロールバーを引いている間は、それ以外を見ない。
-                // 摘みから指がはみ出しても掴んだままにする (OS の作法)
+                // While dragging a scrollbar nothing else is consulted; the
+                // grip is kept even when the pointer leaves the thumb.
                 if let (Some(grab), Some(r)) = (self.scroll_grab, &mut self.renderer) {
                     let moved = r.drag_scrollbar(&grab, self.cursor.1);
                     let owner = grab.owner();
@@ -822,9 +724,8 @@ impl ApplicationHandler for Host {
             }
 
             WindowEvent::CursorLeft { .. } => {
-                // ⚠️ **摘みを引いている間は出ていったことにしない。**
-                // 窓の外まで引くのは普通の操作であり、ここで手を離した
-                // ことにすると、掴んでいる最中にスクロールバーが消える
+                // Dragging past the window edge is ordinary; treating it as a
+                // release makes the scrollbar vanish mid-drag.
                 if self.scroll_grab.is_some() {
                     return;
                 }
@@ -843,7 +744,7 @@ impl ApplicationHandler for Host {
                 };
                 let hits = self.hits();
                 let Some(r) = &mut self.renderer else { return };
-                // ポインタの下にある、もっとも手前のスクロール領域を動かす
+                // The frontmost scroll region under the pointer.
                 let target = hits
                     .iter()
                     .find(|h| gumicord_render::intrinsic(h.id).scroll)
@@ -851,10 +752,9 @@ impl ApplicationHandler for Host {
                 let Some(id) = target else { return };
                 let moved = r.scroll_by(id, dy);
                 let (at, max) = r.scroll_place(id);
-                // ⚠️ **動かなかったときも伝える。** 上端に着いてからさらに
-                // 巻き上げるのが「もっと読みたい」の合図であり、そこでは
-                // もう位置が動かない。動いたときだけ伝えると**過去を
-                // 取りに行く合図が永久に来ない**
+                // Reported even when nothing moved: scrolling further at the
+                // top is the request for more history, and by then the
+                // position no longer changes.
                 self.app.scrolled(id, at, max);
                 if moved {
                     self.request_redraw();
@@ -868,27 +768,27 @@ impl ApplicationHandler for Host {
             } => {
                 let Some(w) = self.window.clone() else { return };
                 match self.zone {
-                    // PLT-021: ドラッグでの移動
+                    // Drag to move.
                     Zone::Titlebar => {
                         if let Err(e) = w.drag_window() {
-                            tracing::warn!(%e, "ウィンドウをドラッグできなかった");
+                            tracing::warn!(%e, "could not drag the window");
                         }
                     }
-                    // PLT-021: 端のドラッグでのリサイズ
+                    // Drag the edge to resize.
                     Zone::Resize(dir) => {
                         if let Err(e) = w.drag_resize_window(dir) {
-                            tracing::warn!(%e, "ウィンドウをリサイズできなかった");
+                            tracing::warn!(%e, "could not resize the window");
                         }
                     }
                     Zone::Control("minimize") => w.set_minimized(true),
                     Zone::Control("maximize") => w.set_maximized(!w.is_maximized()),
                     Zone::Control("close") => event_loop.exit(),
                     Zone::Control(other) => {
-                        tracing::debug!(slot = other, "知らないタイトルバーのボタン");
+                        tracing::debug!(slot = other, "unknown title bar button");
                     }
                     Zone::Client => {
-                        // スクロールバーはアプリより先に見る。
-                        // 一覧の中身と重なっているので、どちらかしか反応できない
+                        // Scrollbars come before the app: they overlap the
+                        // list, and only one can answer.
                         let grabbed = self
                             .renderer
                             .as_mut()
@@ -901,8 +801,8 @@ impl ApplicationHandler for Host {
 
                         let hits = self.hits();
                         if self.app.pressed(&hits) {
-                            // 入力欄を押した直後にキャレットが消えていると、
-                            // **押せたのかどうか分からない**
+                            // A dark caret right after pressing the field
+                            // leaves it unclear whether the press landed.
                             self.restart_caret();
                             self.request_redraw();
                         }
@@ -918,11 +818,8 @@ impl ApplicationHandler for Host {
                 self.scroll_grab = None;
             }
 
-            // 副ボタン。
-            //
-            // ⚠️ **窓の操作に関わるところでは出さない。** タイトルバーを
-            // 右クリックしたときに出るのは OS の窓メニューであって、
-            // アプリのメニューではない
+            // Secondary press. Not over window chrome: right-clicking a title
+            // bar opens the OS window menu, not the app's.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
@@ -936,17 +833,15 @@ impl ApplicationHandler for Host {
                 }
             }
 
-            // ⚠️ **ここでフォーカスを見てはならない。** 非アクティブな窓でも、
-            // 大きさが変わったり内容が変わったりすれば描き直す必要がある。
-            // 見ないと、隣に並べた窓が空白のままになる。
-            //
-            // `NFR-005` (非アクティブ時に描画を止める) を満たしているのは
-            // `ControlFlow::Wait` と「変化したときだけ再描画を要求する」ほうで
-            // あって、ここではない。何も起きなければそもそも呼ばれない。
-            // PLT-001: 変換中の文字列。**確定ではない**
+            // Focus is deliberately not consulted: an inactive window still
+            // has to redraw when it resizes or its contents change, and a
+            // window tiled beside another would otherwise stay blank. Not
+            // drawing while inactive comes from waiting and redrawing on
+            // change, not from here.
+            // Composing text; not committed.
             WindowEvent::Ime(ime) => {
                 if self.on_ime(ime) {
-                    // 打っている最中に消える拍が来ると場所を見失う
+                    // A dark phase mid-keystroke loses the caret.
                     self.restart_caret();
                     self.request_redraw();
                 }
