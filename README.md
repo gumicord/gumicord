@@ -18,42 +18,10 @@ The fastest and customizable discord unofficial client
 > [!CAUTION]
 > That section is currently under preparation.
 
-## Build
+## Contributing
 
-If you want to build Gumicord, you need them:
-- Rust
-- Node.js
-
-### Commands
-
-```bash
-npm install           # Only the first
-(cd sdk && npm install)
-
-cargo xtask check-light  # Inspection only, without a build (a few seconds)
-cargo xtask check        # All Tests (Including Builds)
-cargo xtask fmt          # Beautify
-cargo xtask lint         # Clippy
-cargo xtask test         # Test
-cargo xtask schema       # Validating JSON Schema and Official Samples
-cargo xtask sdk          # Verify the SDK's type-level guarantees
-cargo xtask abi          # Backward Compatibility Testing for Stable IDs
-```
-
-### Resource Usage During Builds
-
-A routine `cargo build --release` run uses thin LTO and will complete even on modest machines.
-
-Use the `dist` profile for distribution and performance measurements.
-
-```bash
-cargo build --profile dist
-```
-
-> [!WARNING]
-> Since `dist` uses fat LTO, it consumes **several GB of memory** during linking, and the `target/` directory will also grow to several GB. On machines with limited memory, please close other applications before running this command.
-
-You can delete unnecessary build artifacts with `cargo clean`. You can safely delete spike artifacts with `rm -rf spike/*/target` (the code remains, and the measurement results are already recorded in [`spec/adr/`](spec/adr/)).
+Building Gumicord yourself, and everything else you need to work on it, is in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
