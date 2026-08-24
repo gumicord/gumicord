@@ -1,78 +1,63 @@
-//! ローカルキャッシュ (SQLite)。
-//!
-//! # 読むのは同期、書くのは投げっぱなし
+//! The local cache. Reads are synchronous, writes are fire and forget.
 //!
 //! ```text
-//!   起動時          Db::open()          主スレッドで同期に読む (数 ms)
-//!                        │              **最初のフレームに要る**ので待つ
-//!                        ▼
-//!   走っている間    db.save_*()  ──▶ 書き込みスレッド (SQLite を専有)
-//!                   すぐ返る            **主スレッドは待たない**
+//!   at startup   Db::open()      read on the main thread; the first frame
+//!                    │           needs it, so it waits (a few ms)
+//!                    ▼
+//!   while running  save_*()  ──▶  writer thread, owning the connection
+//!                  returns at once
 //! ```
 //!
-//! ⚠️ **`Connection` を複数スレッドで共有しない。** SQLite は 1 本の接続を
-//! 1 スレッドが持つのが一番素直で速い。錠を掛けて回すより、書き込み専用の
-//! スレッドに送りつけるほうが、待ちも競合も起きない。
+//! The connection is never shared: one thread owning one connection is the
+//! simplest and fastest arrangement, and sending work to a writer thread
+//! avoids both locking and waiting.
 //!
-//! # 書けなくても動く
+//! The cache only makes things faster, so a full disk, missing permissions or
+//! a corrupt file must not stop the app. Failures here are logged and not
+//! propagated.
 //!
-//! キャッシュは**速くするためだけのもの**である。ディスクが一杯でも、
-//! 権限が無くても、壊れていても、アプリは動かなければならない。
-//! したがってここの失敗は**記録するだけで、上へ返さない**。
-//!
-//! # ⚠️ 中身は暗号化されていない
-//!
-//! `SEC-020` (キャッシュの暗号化) は M2 である。**いまの版は、読んだ
-//! メッセージの本文が平文でディスクに残る。** これは仕様が決めた順序だが、
-//! 使う人が知らないままでよいことではない。
-//!
-//! `SEC-021` (ログアウト時の完全削除) は M1 なので [`Db::wipe`] にある。
-//!
-//! 要件: `NFR-011`, `SEC-021`
-//! 仕様: [`spec/02-architecture.md`]
+//! The contents are not encrypted: message bodies sit on disk in the clear.
+//! That is the planned order of work, but not something a user should have to
+//! discover. Signing out deletes all of it — see [`Db::wipe`].
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
 use gumicord_model::{Channel, ChannelId, Guild, GuildId, Member, Message, User};
 
-/// 1 チャンネルにつきディスクに残す件数。
-///
-/// 開いたときに画面が埋まればよく、それ以上は REST で取り直せる。
-/// **際限なく貯めると、使うほど起動が遅くなる**
+/// Messages kept per channel: enough to fill the screen on open, since the
+/// rest can be refetched. Keeping everything makes startup slower over time.
 const KEEP_PER_CHANNEL: usize = 200;
 
-/// 書き込みスレッドへの待ち行列の深さ。
-///
-/// ⚠️ **溢れたら捨てる。** キャッシュのために主スレッドを待たせるのは
-/// 本末転倒である。捨てても次の起動で REST から取り直せる
+/// Writer queue depth. Overflow is dropped: blocking the main thread for the
+/// cache defeats its purpose, and the next start refetches anyway.
 const QUEUE: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("キャッシュを開けない: {0}")]
+    #[error("cannot open the cache: {0}")]
     Open(#[from] rusqlite::Error),
-    #[error("保存場所を決められない")]
+    #[error("cannot determine where to store it")]
     NoHome,
 }
 
-/// 起動時に読み出した、前回までの状態。
+/// The previous state, read at startup.
 #[derive(Debug, Default)]
 pub struct Snapshot {
     pub guilds: Vec<Guild>,
-    /// 前回開いていたチャンネル。**そこを開いた状態で起動する**
+    /// The channel to reopen.
     pub last_channel: Option<ChannelId>,
-    /// `last_channel` のメッセージ。古い順
+    /// Its messages, oldest first.
     pub messages: Vec<Message>,
-    /// 利用者が並べた順。**空なら分からないということ**
+    /// The user's guild order; empty means unknown.
     pub guild_order: Vec<GuildId>,
-    /// サーバ一覧のフォルダ
+    /// Sidebar folders.
     pub folders: Vec<crate::FolderRow>,
-    /// 閉じているフォルダ。**開き直すのは利用者の仕事ではない**
+    /// Folded folders; refolding them is not the user's job.
     pub collapsed: Vec<u64>,
 }
 
-/// 書き込みスレッドへ送る仕事。
+/// Work sent to the writer thread.
 enum Job {
     Guilds(Vec<Guild>),
     Messages {
@@ -81,20 +66,20 @@ enum Job {
     },
     LastChannel(ChannelId),
     GuildOrder(String),
-    /// `state` の表へ 1 行置く
+    /// Writes one row of key-value state.
     State(&'static str, String),
-    /// 読み出し。**返す先は呼んだ側が渡す**
+    /// A read; the caller supplies where the answer goes.
     Load {
         channel: ChannelId,
         then: Box<dyn FnOnce(Vec<Message>) + Send>,
     },
-    /// `SEC-021`: 全部消す
+    /// Deletes everything.
     Wipe,
-    /// ここまでの仕事が片付いたことを知らせる
+    /// Signals that everything queued has been done.
     Barrier(SyncSender<()>),
 }
 
-/// ローカルキャッシュ。**複製して構わない。**
+/// The local cache. Cloneable.
 #[derive(Clone)]
 pub struct Db {
     tx: SyncSender<Job>,
@@ -107,10 +92,10 @@ impl core::fmt::Debug for Db {
 }
 
 impl Db {
-    /// 開いて、**前回までの状態を読み出す**。
+    /// Opens the cache and reads the previous state.
     ///
-    /// ここだけは同期に読む。最初のフレームに要るものなので、
-    /// 待たないと「一瞬空っぽの画面」が出てしまう (`NFR-011`)。
+    /// Synchronous, because the first frame needs it and deferring shows an
+    /// empty screen for a moment.
     pub fn open(path: &Path) -> Result<(Db, Snapshot), DbError> {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -119,18 +104,18 @@ impl Db {
         init(&conn)?;
         let snapshot = read_snapshot(&conn)?;
 
-        // ⚠️ 溢れたら捨てる。**主スレッドを待たせない**
+        // Overflow is dropped; the main thread never waits.
         let (tx, rx) = sync_channel::<Job>(QUEUE);
         std::thread::Builder::new()
             .name("gumicord-cache".to_owned())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    // 書けなくても動く。**記録するだけで諦める**
+                    // The app works without writing; log and move on.
                     if let Err(e) = run(&conn, job) {
-                        tracing::warn!(%e, "キャッシュに書けなかった");
+                        tracing::warn!(%e, "could not write to the cache");
                     }
                 }
-                tracing::debug!("キャッシュの書き込みスレッドを終える");
+                tracing::debug!("cache writer thread stopping");
             })
             .map_err(|_| DbError::NoHome)?;
 
@@ -138,9 +123,9 @@ impl Db {
     }
 
     fn send(&self, job: Job) {
-        // ⚠️ 待たない。溢れていたら捨てる
+        // Never waits; drops on overflow.
         if self.tx.try_send(job).is_err() {
-            tracing::debug!("キャッシュの待ち行列が詰まっている。今回は捨てる");
+            tracing::debug!("cache queue is full; dropping this write");
         }
     }
 
@@ -156,16 +141,14 @@ impl Db {
         self.send(Job::LastChannel(channel));
     }
 
-    /// `SEC-021`: ログアウトしたら**キャッシュを完全に消す**。
-    ///
-    /// ⚠️ 残しておくと、次に別の人がその機械を使ったときに前の人の
-    /// メッセージが読める
+    /// Deletes the cache on sign-out. Leaving it behind lets the next person
+    /// on this machine read the previous one's messages.
     pub fn wipe(&self) {
         self.send(Job::Wipe);
     }
 }
 
-/// 既定の置き場。
+/// The default location.
 pub fn default_path() -> Result<PathBuf, DbError> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
@@ -180,11 +163,11 @@ pub fn default_path() -> Result<PathBuf, DbError> {
         .join("cache.db"))
 }
 
-// ─────────────────────────────────────────────── スキーマ
+// ─────────────────────────────────────────────── Schema
 
-/// ⚠️ **識別子は文字列で持つ。** スノーフレークは 64 ビット符号なしで、
-/// SQLite の INTEGER は符号付きである。いまはまだ収まるが、収まらなくなる
-/// 日に静かに壊れるより、最初から文字列にしておく
+/// Ids are stored as text: snowflakes are unsigned 64-bit and SQLite's
+/// integers are signed. They still fit, but breaking silently on the day they
+/// stop is worse than storing text from the start.
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -230,22 +213,20 @@ CREATE TABLE IF NOT EXISTS state (
 );
 "#;
 
-/// いまの表の形。**変えたら 1 増やす**。
+/// The schema version; bump it on any change.
 ///
-/// # 合わなければ捨てて作り直す
+/// A mismatch drops everything and starts over. This is a cache, not a
+/// record: the contents can always be rebuilt, and writing a migration per
+/// column would add paths nobody ever exercises.
 ///
-/// ここはキャッシュであって記録ではない。中身は READY と REST から
-/// いくらでも作り直せるので、**列を足すたびに移行を書くより、捨てるほうが
-/// 正しい**。移行を書けば書くほど、実際には通らない経路が増えていく。
-///
-/// ⚠️ **記録を置く場所ができたら、この判断はそこには使えない。**
-/// 消えて困るものをここへ入れないこと
+/// That reasoning does not transfer to anything that must survive, so nothing
+/// of the sort belongs here.
 const SCHEMA_VERSION: i32 = 3;
 
 fn init(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let found: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if found != SCHEMA_VERSION {
-        tracing::info!(found, want = SCHEMA_VERSION, "キャッシュを作り直す");
+        tracing::info!(found, want = SCHEMA_VERSION, "rebuilding the cache");
         conn.execute_batch(
             "DROP TABLE IF EXISTS guilds;
              DROP TABLE IF EXISTS channels;
@@ -268,8 +249,8 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
                 icon_hash: row.get(2)?,
                 unavailable: false,
                 channels: Vec::new(),
-                // ⚠️ **役職は残さない。** メンバー一覧は繋がってから
-                // 取り直すもので、キャッシュから出しても古いだけである
+                // Roles are not kept: the member list is refetched on
+                // connect, and a cached one is only stale.
                 roles: Vec::new(),
             })
         })?
@@ -317,8 +298,8 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
         None => Vec::new(),
     };
 
-    // ⚠️ **順も戻す。** これが無いと、キャッシュから描いた最初の一瞬だけ
-    // 順が違い、READY が届いた瞬間に一覧が跳ねる
+    // The order too, or the first frame from cache is ordered differently and
+    // the list jumps when READY lands.
     let guild_order: Vec<GuildId> = conn
         .query_row(
             "SELECT value FROM state WHERE key = 'guild_order'",
@@ -358,13 +339,13 @@ fn read_snapshot(conn: &rusqlite::Connection) -> rusqlite::Result<Snapshot> {
     })
 }
 
-/// そのチャンネルのメッセージを**古い順**で読む。
+/// Reads a channel's messages, oldest first.
 fn read_messages(
     conn: &rusqlite::Connection,
     channel: ChannelId,
 ) -> rusqlite::Result<Vec<Message>> {
-    // ⚠️ スノーフレークは時刻順なので、**文字列としてではなく長さと
-    // 辞書順で**並べる。桁が同じなら辞書順が時刻順に一致する
+    // Snowflakes sort by time, so order by length then lexically: at equal
+    // length, lexical order is chronological.
     conn.prepare(
         "SELECT m.id, m.author_id, m.content, m.ts,
                 u.username, u.global_name, u.discriminator, u.avatar,
@@ -395,8 +376,7 @@ fn read_messages(
             attachments: Vec::new(),
             member: member(row.get(8)?, row.get(9)?),
             referenced_message: None,
-            // ⚠️ **残していない。** 未読は READY が持ってくるもので、
-            // キャッシュから作り直す種類のものではない
+            // Not stored: READY brings the unread state every time.
             mentions: Vec::new(),
             mention_everyone: false,
         })
@@ -404,13 +384,13 @@ fn read_messages(
     .collect()
 }
 
-/// 残しておいた「そのギルドでの姿」を戻す。
+/// Restores the stored guild members.
 ///
-/// ⚠️ **どちらも無ければ [`Member`] を作らない。** 何も上書きしていない
-/// `Member` と「そもそも一員ではない (DM)」は別のことである。
+/// No member is built when neither is present: a member that overrides
+/// nothing is not the same as not being a member at all.
 ///
-/// ⚠️ **役職と参加日は残していない。** 画面に出していないものを残すと、
-/// 出すようになった日に**古い値が出る**
+/// Roles and join dates are not stored; storing something not yet shown means
+/// showing a stale value the day it is.
 fn member(nick: Option<String>, avatar_hash: Option<String>) -> Option<Member> {
     if nick.is_none() && avatar_hash.is_none() {
         return None;
@@ -424,10 +404,10 @@ fn member(nick: Option<String>, avatar_hash: Option<String>) -> Option<Member> {
     })
 }
 
-/// 文字列の識別子を戻す。**読めなければ 0。**
+/// Parses a stored id, falling back to zero.
 ///
-/// ⚠️ ここで倒れない。自分で書いたものが読めないのは異常だが、
-/// **キャッシュが壊れているだけでアプリが起動しないほうが困る**
+/// Never panics: failing to read what we wrote is abnormal, but a corrupt
+/// cache must not stop the app from starting.
 fn parse_id<T: From<u64>>(s: String) -> T {
     T::from(s.parse::<u64>().unwrap_or(0))
 }
@@ -436,14 +416,14 @@ fn run(conn: &rusqlite::Connection, job: Job) -> rusqlite::Result<()> {
     match job {
         Job::Guilds(guilds) => write_guilds(conn, &guilds),
         Job::Messages { channel, list } => write_messages(conn, channel, &list),
-        // ここに届いた時点で、前に送ったものは全部片付いている
+        // Reaching this means everything queued before it is done.
         Job::Barrier(reply) => {
             let _ = reply.send(());
             Ok(())
         }
         Job::Load { channel, then } => {
-            // ⚠️ 読めなくても必ず呼び戻す。**返事が来ないと画面が
-            // 「読み込み中」のまま止まる**
+            // Always answers, even on failure; silence leaves the screen on
+            // "loading" forever.
             then(read_messages(conn, channel).unwrap_or_default());
             Ok(())
         }
@@ -472,7 +452,7 @@ fn run(conn: &rusqlite::Connection, job: Job) -> rusqlite::Result<()> {
             Ok(())
         }
         Job::Wipe => {
-            // `SEC-021`。**中身を消してから縮める**
+            // Delete the contents, then shrink the file.
             conn.execute_batch(
                 "DELETE FROM messages; DELETE FROM users; DELETE FROM channels;
                  DELETE FROM guilds;  DELETE FROM state;  VACUUM;",
@@ -484,13 +464,13 @@ fn run(conn: &rusqlite::Connection, job: Job) -> rusqlite::Result<()> {
 fn write_guilds(conn: &rusqlite::Connection, guilds: &[Guild]) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
 
-    // ⚠️ **消してから入れ直す。** 抜けたサーバやチャンネルが残り続けると、
-    // 押しても開けない項目が一覧に居座る
+    // Cleared before rewriting, or guilds and channels that were left stay
+    // in the list as rows that do not open.
     tx.execute("DELETE FROM guilds", [])?;
     tx.execute("DELETE FROM channels", [])?;
 
     for g in guilds {
-        // 殻だけのギルドは書かない。名前が無いので出しようがない
+        // Shells are not written; with no name there is nothing to show.
         if g.unavailable || g.name.is_empty() {
             continue;
         }
@@ -533,7 +513,7 @@ fn write_messages(
                 m.author.id.get().to_string(),
                 m.author.username,
                 m.author.global_name,
-                // ⚠️ **捨てない。** 既定のアバターの選び方がこれで変わる
+                // Kept: it decides which default avatar applies.
                 m.author.discriminator,
                 m.author.avatar_hash,
             ],
@@ -547,15 +527,15 @@ fn write_messages(
                 m.author.id.get().to_string(),
                 m.content,
                 m.timestamp,
-                // ⚠️ **そのギルドでの呼び名と顔も残す。** 捨てると、
-                // キャッシュから出した発言だけ別人の名前で並ぶ
+                // Per-guild names and avatars too, or messages restored from
+                // cache appear under a different name.
                 m.member.as_ref().and_then(|x| x.nick.as_deref()),
                 m.member.as_ref().and_then(|x| x.avatar_hash.as_deref()),
             ],
         )?;
     }
 
-    // 古いものを落とす。**際限なく貯めると使うほど起動が遅くなる**
+    // Trim: keeping everything makes startup slower over time.
     tx.execute(
         "DELETE FROM messages
           WHERE channel_id = ?1
@@ -569,11 +549,11 @@ fn write_messages(
 }
 
 impl Db {
-    /// そのチャンネルのメッセージを読む。**返るのは別スレッドからである。**
+    /// Reads a channel's messages; the answer arrives from another thread.
     ///
-    /// ⚠️ 読みも書き込みスレッドにやらせる。接続を 2 本持つと、片方が
-    /// 書いている最中にもう片方が読んで `SQLITE_BUSY` に当たる。
-    /// **読みは稀 (チャンネルを開いたとき) なので、順番待ちで困らない。**
+    /// Reads go through the writer thread too: a second connection would hit
+    /// a busy error mid-write. Reads only happen when a channel opens, so
+    /// queueing costs nothing.
     pub fn load_messages(
         &self,
         channel: ChannelId,
@@ -587,12 +567,11 @@ impl Db {
 }
 
 impl Db {
-    /// 送った仕事が全部片付くまで待つ。
+    /// Waits for everything queued to be written.
     ///
-    /// 待ち行列は先入れ先出しなので、**ここに返事が来た時点で前のものは
-    /// 全部書けている**。終了時と、試験で結果を確かめるときに使う。
-    ///
-    /// ⚠️ **走っている間の常用はしない。** 待たないことがこの層の要点である
+    /// The queue is FIFO, so an answer here means everything before it
+    /// landed. For shutdown and for tests; not for ordinary use, since not
+    /// waiting is the point of this layer.
     pub fn flush(&self) {
         let (tx, rx) = sync_channel(1);
         if self.tx.send(Job::Barrier(tx)).is_ok() {
@@ -602,10 +581,8 @@ impl Db {
 }
 
 impl Db {
-    /// 並び順を残す。
-    ///
-    /// ⚠️ **これが無いと、次の起動でキャッシュから描いたときだけ順が違う。**
-    /// READY が届いた瞬間に正しい順へ飛ぶので、起動のたびに一覧が跳ねる
+    /// Stores the guild order. Without it the first frame from cache is
+    /// ordered differently and the list jumps when READY lands.
     pub fn save_guild_order(&self, order: &[GuildId]) {
         let joined = order
             .iter()
@@ -617,20 +594,16 @@ impl Db {
 }
 
 impl Db {
-    /// フォルダを残す。**JSON 1 行で置く。**
-    ///
-    /// ⚠️ 表を切るほどの量ではない。フォルダは多くても数十で、
-    /// 検索も結合もしない。**中身が小さくて、まとめてしか読まないものに
-    /// 正規化した表を与えても、面倒が増えるだけである**
+    /// Stores the folders as one row of JSON. There are at most a few dozen,
+    /// never searched or joined, and always read together; a normalised table
+    /// would only add work.
     pub fn save_sidebar(&self, folders: &[crate::FolderRow]) {
         let json = serde_json::to_string(folders).unwrap_or_else(|_| "[]".to_owned());
         self.send(Job::State("folders", json));
     }
 
-    /// 閉じているフォルダを残す。
-    ///
-    /// ⚠️ **開き直すのは利用者の仕事ではない。** 覚えていないと、
-    /// 起動するたびに畳み直すことになる
+    /// Stores which folders are folded; refolding them at every start is not
+    /// the user's job.
     pub fn save_collapsed(&self, ids: &[u64]) {
         let joined = ids
             .iter()
@@ -641,7 +614,7 @@ impl Db {
     }
 }
 
-/// `state` の表から 1 行読む。**無ければ `None`**
+/// Reads one row of key-value state.
 fn read_state(conn: &rusqlite::Connection, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM state WHERE key = ?1", [key], |r| {
         r.get::<_, String>(0)
@@ -709,13 +682,13 @@ mod tests {
         }
     }
 
-    /// 書いたものが**次の起動で読める**。これが C6 の土台である
+    /// What was written comes back on the next start.
     #[test]
     fn what_is_written_survives_a_restart() {
         let path = scratch("roundtrip");
 
-        let (db, first) = Db::open(&path).expect("開けない");
-        assert!(first.guilds.is_empty(), "新しいはずが空でない");
+        let (db, first) = Db::open(&path).expect("cannot open");
+        assert!(first.guilds.is_empty(), "a fresh cache is not empty");
 
         db.save_guilds(vec![guild(1, "テスト鯖", 10)]);
         db.save_messages(
@@ -726,7 +699,7 @@ mod tests {
         db.flush();
         drop(db);
 
-        let (_db, again) = Db::open(&path).expect("開き直せない");
+        let (_db, again) = Db::open(&path).expect("cannot reopen");
         assert_eq!(again.guilds.len(), 1);
         assert_eq!(again.guilds[0].name, "テスト鯖");
         assert_eq!(again.guilds[0].channels.len(), 1);
@@ -734,20 +707,18 @@ mod tests {
         assert_eq!(again.last_channel, Some(ChannelId::from(10u64)));
 
         let bodies: Vec<_> = again.messages.iter().map(|m| &*m.content).collect();
-        assert_eq!(bodies, vec!["こんにちは", "またね"], "古い順になっていない");
-        // 送信者も引ける
+        assert_eq!(bodies, vec!["こんにちは", "またね"], "not oldest first");
+        // The author resolves too.
         assert_eq!(again.messages[0].author.display_name(), "ｽﾋﾟｷ");
     }
 
-    /// ⚠️ **4 桁も残す。**
-    ///
-    /// 既定のアバターの選び方がこれで変わるので、捨てるとキャッシュから
-    /// 出したボットの顔が、届いたばかりのボットの顔と食い違う
+    /// The four digits are kept: they decide the default avatar, and dropping
+    /// them makes a cached bot's face differ from a freshly arrived one.
     #[test]
     fn the_old_four_digits_survive_too() {
         let path = scratch("discriminator");
 
-        let (db, _) = Db::open(&path).expect("開けない");
+        let (db, _) = Db::open(&path).expect("cannot open");
         let mut m = message(100, 10, "ぼっとです");
         m.author.discriminator = "0007".to_owned();
         m.author.bot = true;
@@ -756,13 +727,13 @@ mod tests {
         db.flush();
         drop(db);
 
-        let (_db, again) = Db::open(&path).expect("開き直せない");
+        let (_db, again) = Db::open(&path).expect("cannot reopen");
         let author = &again.messages[0].author;
         assert_eq!(author.tag(), Some("0007"));
         assert_eq!(author.default_avatar_index(), 2, "7 % 5");
     }
 
-    /// **抜けたサーバは残らない。** 押しても開けない項目が居座ると困る
+    /// A guild that was left does not linger as an unopenable row.
     #[test]
     fn leaving_a_guild_removes_it() {
         let path = scratch("leave");
@@ -779,7 +750,7 @@ mod tests {
         assert_eq!(names, vec!["のこる"]);
     }
 
-    /// `SEC-021`: ログアウトで**跡形もなく消える**
+    /// Signing out leaves nothing behind.
     #[test]
     fn wiping_leaves_nothing_behind() {
         let path = scratch("wipe");
@@ -796,7 +767,7 @@ mod tests {
         assert!(again.guilds.is_empty());
         assert!(again.messages.is_empty());
 
-        // ⚠️ 消したものが**ファイルの中に残っていない**
+        // And nothing survives inside the file.
         let raw = std::fs::read(&path).unwrap_or_default();
         assert!(
             !raw.windows(12).any(|w| w == "ないしょ".as_bytes()),
@@ -804,7 +775,7 @@ mod tests {
         );
     }
 
-    /// 読めなくても呼び戻す。**返事が来ないと画面が止まる**
+    /// A failed read still answers; silence stalls the screen.
     #[test]
     fn loading_an_unknown_channel_still_answers() {
         let path = scratch("load");
