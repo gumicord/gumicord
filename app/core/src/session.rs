@@ -1,51 +1,17 @@
-//! ログインの状態と、それを進める背景の仕事 (`FR-001`)。
+//! Login state and the background work that advances it.
 //!
-//! # 二本ある経路のうち、ここは QR のほうである
+//! QR login is the default because it never raises a captcha, and there is no
+//! way to draw hCaptcha in this renderer. A password path would borrow the
+//! OS WebView for that; QR stays the default either way.
 //!
-//! [ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md) が既定に
-//! 選んだのは QR ログインである。**captcha が出ない**からで、hCaptcha を
-//! 自前レンダラで描く方法がないという一点で決まった。
+//! Everything happens on tokio and comes back over a channel. The event loop
+//! is asleep, so whoever posts a message wakes it. Wakes coalesce, so always
+//! drain the channel rather than reading one message.
 //!
-//! パスワード経路 (C4b) は OS の WebView を借りて captcha を出す。
-//! そちらが入っても、既定は QR のままである。
-//!
-//! # 主スレッドは止めない
-//!
-//! やりとりは丸ごと [`tokio`] の上で進み、結果だけがチャネルで戻る。
-//! イベントループは寝ているので ([`ControlFlow::Wait`]) 、**知らせを入れた
-//! 側が [`Waker`] で起こす**。
-//!
-//! ```text
-//!   背景 (tokio)                       主スレッド (winit)
-//!   ─────────────                      ──────────────────
-//!   RemoteAuth::next()
-//!        │
-//!        ├── tx.send(LoginEvent) ──▶  (チャネルに溜まる)
-//!        └── waker.wake()        ──▶  Application::wake()
-//!                                          │
-//!                                          ├── try_recv を空になるまで
-//!                                          └── 再描画
-//! ```
-//!
-//! ⚠️ **起こされる回数は約束されない。** 何度かの `wake` が 1 回にまとまる
-//! ことがあるので、取り込みは必ず空になるまで回す。
-//!
-//! # トークンは OS の鍵束に預ける (`FR-003`)
-//!
-//! 起動したらまず保存されたトークンを試し、通れば QR を出さない。
-//!
-//! ```text
-//!   起動
-//!    ├─ 鍵束にトークンがある ──▶ GET /users/@me ──┬─ 通った ──▶ そのまま入る
-//!    │                                            └─ 弾かれた ─▶ 捨てて ↓
-//!    └─ 無い ─────────────────────────────────────────────────▶ QR を出す
-//! ```
-//!
-//! ⚠️ **通らなかったトークンはその場で捨てる。** 残しておくと、次の起動でも
-//! 同じ失敗を繰り返したうえで結局 QR を出すことになる。
-//!
-//! ⚠️ **暗号化できない環境では保存しない** ([`gumicord_platform::SecretStore`])。
-//! 起動のたびに聞くほうが、平文をディスクに置くよりましである。
+//! On start a stored token is tried first, and discarded the moment it fails
+//! — keeping it means repeating the same failure on every later start before
+//! falling back to the QR anyway. Where the OS cannot encrypt it, nothing is
+//! stored: asking each time beats a plaintext token on disk.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
@@ -54,40 +20,35 @@ use gumicord_model::{CurrentUser, Token};
 use gumicord_platform::{SecretStore, Waker};
 use gumicord_rest::RestClient;
 
-/// ログインを飛ばして画面だけ見るための環境変数。
-///
-/// レンダラやテーマを触るのに毎回スマホを出すのは馬鹿らしい。
-/// **本物のデータは出ない。** [`crate::demo`] の固定データが出る
+/// Skips login to look at the UI. Shows fixed demo data, never real data.
 const SKIP_ENV: &str = "GUMICORD_SKIP_LOGIN";
 
-/// 鍵束の中でトークンを指す名前 (`FR-003`)
+/// The token's name in the OS keychain.
 const TOKEN_KEY: &str = "token";
 
-/// いまどこまで進んでいるか。**画面はこれだけを見て決まる。**
+/// How far login has got. The only thing the screen consults.
 #[derive(Debug, Clone)]
 pub enum Session {
-    /// 繋ぎに行っている。QR はまだ出せない
+    /// Connecting; no QR yet.
     Connecting,
-    /// QR を出して、読まれるのを待っている
+    /// Showing the QR, waiting for a scan.
     WaitingForScan {
-        /// QR に載せる URL
+        /// The URL the QR encodes.
         url: String,
-        /// 読んだ人。**読まれただけで、まだ承認されていない**
+        /// Who scanned it. Scanned is not yet approved.
         scanned: Option<ScannedUser>,
     },
-    /// 承認された。チケットをトークンへ換えている
+    /// Approved; exchanging the ticket for a token.
     Exchanging,
-    /// 入れた
     LoggedIn(Box<LoggedIn>),
-    /// 失敗した。**やり直せる**ので、原因を出して待つ
+    /// Failed, and retryable, so the reason is shown while waiting.
     Failed(String),
 }
 
-/// ログインできた後に手元へ残るもの。
+/// What remains after a successful login.
 ///
-/// ⚠️ **トークンがここにある。** REST は [`RestClient`] が中に持っているが、
-/// Gateway は identify に生のトークンが要るので、別に取り出せる形で置く。
-/// [`Token`] は表示しても中身が出ない型である (`SEC-001`)
+/// The token is here separately because the gateway's identify needs it raw,
+/// while REST keeps its own copy inside the client.
 #[derive(Debug, Clone)]
 pub struct LoggedIn {
     pub me: CurrentUser,
@@ -96,7 +57,7 @@ pub struct LoggedIn {
 }
 
 impl Session {
-    /// 画面に出す一行。**状態そのものより、この文が利用者の見るものである**
+    /// The line shown on screen; what the user actually reads.
     pub fn hint(&self) -> String {
         match self {
             Session::Connecting => "Discord に接続しています…".to_owned(),
@@ -112,7 +73,7 @@ impl Session {
         }
     }
 
-    /// QR に載せる URL。出せる状態でなければ `None`
+    /// The URL to encode, or `None` if there is nothing to show yet.
     pub fn qr(&self) -> Option<&str> {
         match self {
             Session::WaitingForScan { url, .. } => Some(url),
@@ -128,48 +89,44 @@ impl Session {
     }
 }
 
-/// 背景から主スレッドへ流れる知らせ。
+/// What the background reports to the main thread.
 ///
-/// **状態そのものではなく出来事を送る。** 状態を送ると、遅れて着いた古い
-/// 状態が新しい状態を上書きしうる
+/// Events, not states: a state arriving late would overwrite a newer one.
 #[derive(Debug)]
 pub enum LoginEvent {
-    /// QR を出せるようになった
+    /// The QR is ready to show.
     Qr(String),
     Scanned(ScannedUser),
-    /// 承認された。トークンを取りに行く
+    /// Approved; fetching the token.
     Approved,
     Done(Box<LoggedIn>),
     Failed(String),
-    /// 期限切れなどでやり直しになった。QR が出し直される
+    /// Restarted, usually after the QR expired.
     Restarted,
 }
 
-/// ログインの進行役。**アプリはこれを持ち、[`Self::poll`] で取り込む。**
+/// Drives login. The app holds one and drains it with [`Self::poll`].
 pub struct Login {
     session: Session,
     rx: Receiver<LoginEvent>,
     tx: Sender<LoginEvent>,
-    /// ログインを飛ばして画面だけ見る。**起動時に一度決まり、途中で変わらない**
+    /// Decided once at startup and never changes.
     skipped: bool,
 }
 
 impl Login {
-    /// ⚠️ **環境変数をここで一度だけ読む。** 毎フレーム読むと、画面が出るか
-    /// どうかが実行中に変わりうる
+    /// Reads the environment once: per frame, the screen shown could change
+    /// mid-run.
     pub fn new() -> Self {
         if std::env::var(SKIP_ENV).is_ok_and(|v| v != "0") {
-            tracing::warn!(
-                "{SKIP_ENV} が指定されている。ログインを飛ばし、demo の固定データを出す"
-            );
+            tracing::warn!("{SKIP_ENV} is set; skipping login and showing demo data");
             return Self::skipped();
         }
         Self::fresh(false)
     }
 
-    /// ログインを飛ばして画面だけ見る。**本物のデータは出ない。**
-    ///
-    /// レンダラやテーマを触るときと、試験のためにある
+    /// Skips login and shows demo data. For renderer and theme work, and for
+    /// tests.
     pub fn skipped() -> Self {
         Self::fresh(true)
     }
@@ -188,24 +145,23 @@ impl Login {
         &self.session
     }
 
-    /// メイン画面を出してよいか。**ログイン画面との分かれ目はここだけである**
+    /// The only thing that decides between the login and main screens.
     pub fn shows_main(&self) -> bool {
         self.skipped || self.session.logged_in().is_some()
     }
 
-    /// 背景の仕事を始める。**ウィンドウが出る前に呼んでよい。**
-    ///
-    /// 鍵の生成に 1 秒前後かかるので、早く始めたぶんだけ QR が早く出る。
+    /// Starts the background work. Safe to call before the window exists,
+    /// and worth doing: key generation takes about a second.
     pub fn start(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
         if self.skipped {
             return;
         }
 
-        // 鍵束が開けなくても**ログインはできる**。保存だけを諦める
+        // Login still works without a keychain; only storing is lost.
         let store = match SecretStore::new() {
             Ok(s) => Some(s),
             Err(e) => {
-                tracing::warn!(%e, "鍵束を開けない。トークンを保存せず、起動のたびに聞く");
+                tracing::warn!(%e, "no keychain; the token will not be stored");
                 None
             }
         };
@@ -216,9 +172,7 @@ impl Login {
         });
     }
 
-    /// 溜まっている知らせを**空になるまで**取り込む。変わったら `true`。
-    ///
-    /// ⚠️ 1 回の `wake` に複数の知らせが乗りうるので、1 件だけ読んではいけない
+    /// Drains every pending event. One wake can carry several.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         loop {
@@ -227,8 +181,8 @@ impl Login {
                     self.apply(event);
                     changed = true;
                 }
-                // 送り手が消えていても、状態はそのまま残す。
-                // 「繋ぎ直せない」のは Failed が既に知らせている
+                // Keep the state even if the sender is gone; Failed has
+                // already reported the disconnection.
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return changed,
             }
         }
@@ -237,8 +191,7 @@ impl Login {
     fn apply(&mut self, event: LoginEvent) {
         self.session = match event {
             LoginEvent::Qr(url) => Session::WaitingForScan { url, scanned: None },
-            // 読まれた。**URL は保ったまま**にする。承認前に取り消されたら
-            // 同じ QR がまだ生きている
+            // Keep the URL: if approval is cancelled the same QR still works.
             LoginEvent::Scanned(user) => {
                 match std::mem::replace(&mut self.session, Session::Connecting) {
                     Session::WaitingForScan { url, .. } => Session::WaitingForScan {
@@ -262,29 +215,20 @@ impl Default for Login {
     }
 }
 
-/// 失敗した後に繋ぎ直すまでの待ち時間。**倍々に伸びて上限で止まる**
+/// Reconnect backoff after a failure; doubles up to the maximum.
 const RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(2);
 const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// ログインする。**まず保存されたトークンを試し、駄目なら QR を出す。**
+/// Logs in: stored token first, QR otherwise.
 ///
-/// # 諦めない
-///
-/// QR には寿命があり、**公式クライアントでも 2 分ほどで消える**。置きっぱなしの
-/// 画面の前に戻ってきた利用者が死んだ QR を読んで無反応に困らないよう、
-/// 期限が切れたら黙って出し直す。
-///
-/// ⚠️ **失敗しても諦めない。** ここで止まると、画面に「失敗しました」と
-/// 出たまま二度と QR が出ず、**アプリを起動し直すしか道がなくなる**。
-/// 網が落ちているだけかもしれないので、待ち時間を伸ばしながら繋ぎ続ける。
-/// 理由は画面に出るので、黙って隠しているわけではない。
+/// Never gives up. A QR expires after about two minutes, so an expired one is
+/// quietly replaced rather than left dead in front of someone who walked away.
+/// A failure retries with growing backoff too: stopping here would leave
+/// "failed" on screen with no way forward but restarting the app.
 async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
-    // ⚠️ **一番先に測る。** [`RestClient`] も Gateway の identify も、
-    // ここより後で名乗りを組み立てる。後から測ると片方だけ古い番号を名乗り、
-    // **経路の間で食い違う** ([`gumicord_model::identity`])。
-    //
-    // 画面は既にキャッシュから出ているので (C6)、ここで数百 ms 待っても
-    // 利用者は待たされない。取れなくても埋め込みで進む
+    // Measure first: both REST and the gateway build their claim after this,
+    // and measuring later would leave one of them stale. The screen is
+    // already up from cache, so this wait is not felt.
     gumicord_rest::build_number::measure().await;
 
     if let Some(l) = restore(store.as_ref()).await {
@@ -296,17 +240,17 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
     let mut wait = RETRY_MIN;
     loop {
         match attempt(&tx, &waker, store.as_ref()).await {
-            // 入れた。もう繰り返さない
+            // In; stop looping.
             Ok(true) => return,
-            // 期限切れ。**すぐに**出し直す。待たせる理由がない
+            // Expired; reissue at once.
             Ok(false) => {
-                tracing::debug!("QR の期限が切れた。出し直す");
+                tracing::debug!("the QR expired; reissuing");
                 wait = RETRY_MIN;
                 let _ = tx.send(LoginEvent::Restarted);
                 waker.wake();
             }
             Err(e) => {
-                tracing::warn!(error = %e, wait_s = wait.as_secs(), "リモート認証が失敗した");
+                tracing::warn!(error = %e, wait_s = wait.as_secs(), "remote auth failed");
                 let _ = tx.send(LoginEvent::Failed(e));
                 waker.wake();
                 tokio::time::sleep(wait).await;
@@ -316,19 +260,18 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
     }
 }
 
-/// 保存されたトークンで入り直す (`FR-003`)。
+/// Signs in with the stored token, discarding it the moment it fails.
 ///
-/// ⚠️ **通らなかったトークンはその場で捨てる。** 残しておくと、次の起動でも
-/// 同じ失敗を繰り返したうえで結局 QR を出すことになる。パスワードを変えた、
-/// 端末を無効にした、期限が切れた — どれも普通に起こる。
+/// A changed password, a revoked device and an expired token are all
+/// ordinary; keeping a dead token repeats the failure on every later start.
 async fn restore(store: Option<&SecretStore>) -> Option<LoggedIn> {
     let store = store?;
     let raw = match store.load(TOKEN_KEY) {
         Ok(Some(raw)) => raw,
         Ok(None) => return None,
         Err(e) => {
-            // 開けないのは異常ではない。別の利用者としてログオンした等
-            tracing::warn!(%e, "保存されたトークンを開けない。捨てる");
+            // Not exceptional: a different OS user, for instance.
+            tracing::warn!(%e, "cannot read the stored token; discarding it");
             let _ = store.clear(TOKEN_KEY);
             return None;
         }
@@ -339,18 +282,18 @@ async fn restore(store: Option<&SecretStore>) -> Option<LoggedIn> {
 
     match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
-            tracing::info!(user = %me.user.display_name(), "保存されたトークンで入った");
+            tracing::info!(user = %me.user.display_name(), "signed in with the stored token");
             Some(LoggedIn { me, client, token })
         }
         Err(e) => {
-            tracing::warn!(%e, "保存されたトークンが通らない。捨ててログインし直す");
+            tracing::warn!(%e, "the stored token was rejected; discarding it");
             let _ = store.clear(TOKEN_KEY);
             None
         }
     }
 }
 
-/// 1 回ぶんのやりとり。入れたら `Ok(true)`、期限切れなら `Ok(false)`
+/// One exchange. `Ok(true)` on success, `Ok(false)` if the QR expired.
 async fn attempt(
     tx: &Sender<LoginEvent>,
     waker: &Waker,
@@ -362,47 +305,46 @@ async fn attempt(
     loop {
         let event = match auth.next().await {
             Ok(e) => e,
-            // ⚠️ **QR の期限切れはこの形で来る。**「取り消し」の合図が来る
-            // とは限らず、多くの場合は黙って接続を閉じられるだけである。
-            // これを誤りとして扱うと、2 分ごとに「失敗しました」が出る
+            // Expiry usually arrives as a silent close rather than a cancel.
+            // Treating that as an error puts "failed" on screen every two
+            // minutes.
             Err(gumicord_gateway::RemoteAuthError::Closed) => return Ok(false),
             Err(e) => return Err(e.to_string()),
         };
         match event {
             RemoteAuthEvent::Ready { url, fingerprint } => {
-                tracing::info!(%fingerprint, "QR を出せる");
+                tracing::info!(%fingerprint, "the QR is ready");
                 let _ = tx.send(LoginEvent::Qr(url));
             }
             RemoteAuthEvent::Scanned(user) => {
-                tracing::info!(user = %user.username, "読み取られた");
+                tracing::info!(user = %user.username, "the QR was scanned");
                 let _ = tx.send(LoginEvent::Scanned(user));
             }
             RemoteAuthEvent::Approved { ticket } => {
                 let _ = tx.send(LoginEvent::Approved);
                 waker.wake();
 
-                // ⚠️ このチケットは 1 回しか使えない。失敗しても再送しない
+                // Single-use; never resend after a failure.
                 let encrypted = rest
                     .remote_auth_login(&ticket)
                     .await
                     .map_err(|e| e.to_string())?;
                 let token = auth.decrypt_token(&encrypted).map_err(|e| e.to_string())?;
 
-                // 復号できただけでは、使えるトークンである証拠にならない。
-                // `GET /users/@me` が通って初めてログインしたと見なす
+                // Decrypting proves nothing about validity; only a successful
+                // `GET /users/@me` counts as logged in.
                 let (client, me) = rest
                     .authenticate(token.clone())
                     .await
                     .map_err(|e| e.to_string())?;
-                tracing::info!(user = %me.user.display_name(), "ログインした");
+                tracing::info!(user = %me.user.display_name(), "signed in");
 
-                // ⚠️ **通ることを確かめてから預ける** (`FR-003`)。
-                // 保存に失敗してもログインは成功である。次の起動で
-                // もう一度聞くだけなので、ここで倒れる理由がない
+                // Stored only after it is known to work. A failure to store
+                // does not fail the login; the next start just asks again.
                 if let Some(store) = store
                     && let Err(e) = store.store(TOKEN_KEY, token.expose().as_bytes())
                 {
-                    tracing::warn!(%e, "トークンを保存できなかった。次回もログインが要る");
+                    tracing::warn!(%e, "could not store the token; the next start will ask again");
                 }
 
                 let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
@@ -415,9 +357,7 @@ async fn attempt(
     }
 }
 
-/// 試験のための入り口。**背景の仕事は動かない。**
-///
-/// 網を叩かずに状態遷移だけを確かめるためにある
+/// Test entry point; runs no background work.
 #[cfg(test)]
 impl Login {
     pub(crate) fn fresh_for_test() -> Self {
@@ -430,10 +370,9 @@ impl Login {
 }
 
 impl Login {
-    /// トークンが無効になった (`FR-004`)。**鍵束から捨ててやり直す。**
+    /// Drops the stored token and starts over.
     ///
-    /// ⚠️ 捨てないと、次の起動でも同じ死んだトークンで入ろうとして、
-    /// 同じところで弾かれる。
+    /// Called both when the gateway rejects it and when the user signs out.
     pub fn forget(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
         if let Ok(store) = SecretStore::new() {
             let _ = store.clear(TOKEN_KEY);
@@ -460,13 +399,13 @@ mod tests {
     #[test]
     fn the_qr_only_appears_once_it_is_ready() {
         let mut login = Login::fresh(false);
-        assert!(login.session().qr().is_none(), "繋ぐ前に QR は出ない");
+        assert!(login.session().qr().is_none(), "a QR before connecting");
 
         login.apply(LoginEvent::Qr("https://example/1".to_owned()));
         assert_eq!(login.session().qr(), Some("https://example/1"));
     }
 
-    /// 読まれても QR は消えない。**承認前に取り消されたらまだ使える**
+    /// A scan does not clear the QR: it still works if approval is cancelled.
     #[test]
     fn scanning_keeps_the_qr_alive() {
         let mut login = Login::fresh(false);
@@ -477,8 +416,7 @@ mod tests {
         assert!(login.session().hint().contains("ねんねこ"));
     }
 
-    /// QR を出す前に読まれた知らせが来ても壊れない。
-    /// **順番は Discord 側の都合で入れ替わりうる**
+    /// Discord may reorder these, so a scan before the QR must not break.
     #[test]
     fn a_scan_without_a_qr_is_ignored() {
         let mut login = Login::fresh(false);
@@ -486,7 +424,7 @@ mod tests {
         assert!(matches!(login.session(), Session::Connecting));
     }
 
-    /// 溜まった知らせを 1 回で全部取り込む (`Waker` はまとめられる)
+    /// Wakes coalesce, so one poll must drain everything.
     #[test]
     fn polling_drains_everything_that_arrived() {
         let mut login = Login::fresh(false);
@@ -498,9 +436,13 @@ mod tests {
             .unwrap();
 
         assert!(login.poll());
-        assert_eq!(login.session().qr(), Some("b"), "最後の知らせまで進む");
+        assert_eq!(
+            login.session().qr(),
+            Some("b"),
+            "did not advance to the last event"
+        );
         assert!(login.session().hint().contains("ねんねこ"));
-        assert!(!login.poll(), "空なら再描画を要求しない");
+        assert!(!login.poll(), "an empty poll asked for a redraw");
     }
 
     #[test]
