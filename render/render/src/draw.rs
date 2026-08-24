@@ -1,24 +1,20 @@
-//! 配置結果から描画コマンドを組み立てる。
+//! Builds draw commands from the layout.
 //!
-//! ここが**論理ピクセルから物理ピクセルへ変換する唯一の場所**である
-//! ([`spec/06-renderer.md`] 3 章)。
+//! The only place logical pixels become physical ones.
 //!
-//! # 描画順がそのまま重なり順である
+//! There is no depth buffer: the tree's depth-first pre-order is the draw
+//! order, and alpha blending cannot be correct in any other one.
 //!
-//! 深度バッファを使わない。UITree の深さ優先・前順がそのまま描画順になる
-//! ([`spec/06-renderer.md`] 7.5)。半透明の合成を全ノードで正しく行うために、
-//! これ以外の順序にはできない。
-//!
-//! # 1 ノードの背景は最大 3 回の描画になる (`EXT-022`)
+//! A node's background is up to three draws:
 //!
 //! ```text
-//! [1] color   角丸矩形
-//! [2] image   テクスチャ付きクアッド   ← R5。まだない
-//! [3] tint    角丸矩形
+//! [1] color   rounded rect
+//! [2] image   textured quad (not implemented)
+//! [3] tint    rounded rect
 //! ```
 //!
-//! 枠線はこれとは別に、`color` の下へ一回り大きい角丸矩形を敷いて表現する。
-//! 背景色がない場合はそれができないので、4 辺を細い矩形で描く。
+//! A border is a slightly larger rect under the colour, or four thin rects
+//! where there is no background colour to sit under.
 
 use gumicord_uitree::value::{Color, Font};
 use gumicord_uitree::{Content, Span, Style};
@@ -28,30 +24,29 @@ use crate::intrinsic::{Axis, intrinsic};
 use crate::layout::LayoutResult;
 use crate::text::{ResolvedFont, TextEngine};
 
-/// 角丸矩形 1 個ぶんの float 数。48 バイト ([`spec/06-renderer.md`] 5.2)
+/// Floats per rounded rect.
 pub const FLOATS_PER_RECT: usize = 12;
-/// グリフ 1 個ぶんの float 数。64 バイト
+/// Floats per glyph.
 pub const FLOATS_PER_GLYPH: usize = 16;
 
-/// 入力欄が空のときの薄さ
+/// Placeholder opacity.
 const PLACEHOLDER_ALPHA: f32 = 0.45;
-/// 選択範囲の濃さ。文字が読める程度に抑える
+/// Selection opacity, low enough to read through.
 const SELECTION_ALPHA: f32 = 0.30;
-/// キャレットの太さ (論理 px)
+/// Caret width.
 const CARET_WIDTH: f32 = 2.0;
-/// 変換中を示す下線の太さ (論理 px)
+/// Preedit underline thickness.
 const UNDERLINE_THICKNESS: f32 = 2.0;
 
-/// テーマが文字色を指定しなかったときの色。
-///
-/// 真っ白ではなく少し落とす。テーマなしで起動したときに目が痛くならない程度
-/// スポイラーの塗りの角丸 (論理 px)
+/// Text colour when the theme sets none. Slightly off white, so starting
+/// without a theme is not painful to look at.
+/// Corner radius of a spoiler fill.
 const SPOILER_RADIUS: f32 = 3.0;
-/// 下線と打ち消しの太さ (論理 px)
+/// Underline and strikethrough thickness.
 const LINE_WIDTH: f32 = 1.0;
-/// 下線を行のどこに引くか (行の高さに対する割合)
+/// Where the underline sits, as a fraction of the line height.
 const UNDERLINE_AT: f32 = 0.82;
-/// 打ち消しを行のどこに引くか
+/// Where the strikethrough sits.
 const STRIKE_AT: f32 = 0.55;
 
 const FALLBACK_TEXT: Color = Color {
@@ -67,30 +62,29 @@ pub enum RunKind {
     Glyph,
 }
 
-/// 同じパイプライン・同じ切り取りで連続して描けるひとかたまり。
+/// A run of draws sharing a pipeline and a clip.
 #[derive(Debug, Clone, Copy)]
 pub struct Run {
     pub kind: RunKind,
-    /// アトラスの何ページ目から読むか。**矩形では使わない**
+    /// Which atlas page to read; unused for rects.
     pub page: u32,
-    /// インスタンスの範囲
+    /// The instance range.
     pub first: u32,
     pub count: u32,
-    /// シザー矩形 (物理 px)。`None` なら画面全体
+    /// The scissor rect; `None` is the whole screen.
     pub scissor: Option<[u32; 4]>,
 }
 
-/// 1 フレームぶんの描画コマンド。
+/// One frame's draw commands.
 #[derive(Debug, Default)]
 pub struct DrawList {
     pub rects: Vec<f32>,
     pub glyphs: Vec<f32>,
     pub runs: Vec<Run>,
-    /// **画面に出ようとしたのに、手元に無かった絵。**
+    /// Images that were about to draw and were missing.
     ///
-    /// ⚠️ 木を歩いて集めるのとは違う。ここに載るのは**切り取りを抜けて
-    /// 実際に描かれるところまで来たもの**だけである。一覧に 300 行
-    /// あっても、見えている 15 行ぶんしか要らない
+    /// Only what survived clipping reaches here, so a 300-row list asks for
+    /// the dozen or so actually visible.
     pub missing_images: Vec<String>,
 }
 
@@ -103,7 +97,7 @@ impl DrawList {
         (self.glyphs.len() / FLOATS_PER_GLYPH) as u32
     }
 
-    /// 角丸矩形を 1 個積む。`border` が 0 より大きければ**輪だけ**を描く。
+    /// Adds a rounded rect; a non-zero border draws only the ring.
     fn push_rect(
         &mut self,
         r: [f32; 4],
@@ -123,10 +117,8 @@ impl DrawList {
         self.extend_run(RunKind::Rect, first, scissor, 0);
     }
 
-    /// テクスチャ付きクアッドを 1 個積む。
-    ///
-    /// `radius` が 0 より大きければ**角丸で切り抜く**。丸いアバターは
-    /// これで作る — シザー矩形では丸く切れない
+    /// Adds a textured quad, rounded when `radius` is non-zero. This is what
+    /// makes avatars round; a scissor rect cannot.
     #[allow(clippy::too_many_arguments)]
     fn push_glyph(
         &mut self,
@@ -160,9 +152,9 @@ impl DrawList {
         self.extend_run(RunKind::Glyph, first, scissor, page);
     }
 
-    /// 直前の run と同じ種類・同じ切り取りなら伸ばし、違えば新しく作る。
-    /// ⚠️ **ページが違えば束ね直す。** 同じ束で描くとテクスチャが 1 枚
-    /// しか選べず、別のページに載った字が 1 枚目から読まれる
+    /// Extends the previous run when it matches, otherwise starts one.
+    /// A different page starts a new run: one draw binds one texture, and
+    /// glyphs from another page would read from the wrong one.
     fn extend_run(&mut self, kind: RunKind, first: u32, scissor: Option<[u32; 4]>, page: u32) {
         if let Some(last) = self.runs.last_mut()
             && last.kind == kind
@@ -182,11 +174,10 @@ impl DrawList {
     }
 }
 
-/// sRGB の 1 成分をリニアへ。
+/// Converts one sRGB component to linear.
 ///
-/// サーフェスが sRGB 形式なので、シェーダの出力はリニアでなければならない。
-/// `EXT-020` (全プラットフォームで同一の描画結果) は、この変換を全環境で
-/// 同じに行うことに依存する。
+/// The surface is sRGB, so the shader must output linear. Identical rendering
+/// across platforms depends on doing this the same way everywhere.
 fn srgb_to_linear(c: u8) -> f32 {
     let s = c as f32 / 255.0;
     if s <= 0.04045 {
@@ -205,10 +196,10 @@ fn linear(c: Color, opacity: f32) -> [f32; 4] {
     ]
 }
 
-/// 論理矩形を物理ピクセルグリッドへ吸着させる。
+/// Snaps a logical rect to the physical pixel grid.
 ///
-/// 丸めないと 1px の区切り線が 2px にぼやける ([`spec/06-renderer.md`] 3.1)。
-/// 幅ではなく**両端**を丸めるのは、隣り合う矩形の間に隙間を作らないため。
+/// Without it a one-pixel divider blurs across two. Both edges are rounded
+/// rather than the width, so adjacent rects leave no gap.
 fn snap(r: Rect, scale: f32) -> [f32; 4] {
     let x0 = (r.x * scale).round();
     let y0 = (r.y * scale).round();
@@ -227,9 +218,7 @@ fn scissor_of(clip: Option<Rect>, scale: f32, viewport: (u32, u32)) -> Option<[u
     Some([x, y, w, h])
 }
 
-/// 配置結果を描画コマンドへ落とす。
-///
-/// `viewport` は物理ピクセルでのサーフェスの大きさ。
+/// Turns a layout into draw commands.
 pub fn build(
     layout: &LayoutResult<'_>,
     text: &mut TextEngine,
@@ -237,7 +226,7 @@ pub fn build(
     queue: &wgpu::Queue,
     scale: f32,
     viewport: (u32, u32),
-    // キャレットをいま描くか。**点滅の刻みはプラットフォーム層が持つ**
+    // Whether the caret is lit; the blink is timed by the platform layer.
     caret_visible: bool,
 ) -> DrawList {
     let mut dl = DrawList::default();
@@ -247,17 +236,17 @@ pub fn build(
         let style = &node.style;
         let scissor = scissor_of(placed.clip, scale, viewport);
 
-        // 切り取りの外なら、そもそも積まない。
-        // 仮想化 (NFR-007) の代わりにはならないが、無駄な転送は減る
+        // Clipped-away nodes are skipped. Not a substitute for
+        // virtualisation, but it cuts wasted uploads.
         if let Some(c) = placed.clip
             && c.intersect(placed.rect).is_empty()
         {
             continue;
         }
 
-        // ⚠️ 本来の opacity はノードを一枚の層に描いてから合成する操作である。
-        // ここでは自分の描画の alpha に掛けているだけで、子には効かない。
-        // 層への描画は R6 (クリップと仮想化) と同じ機構が要るので、そこで直す
+        // Real opacity composites a node's own layer; this only scales the
+        // node's own alpha and does not reach its children. Fixing it needs
+        // the same machinery as layered clipping.
         let opacity = style.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
         let radius = style.radius.unwrap_or(0.0);
         let rect = snap(placed.rect, scale);
@@ -306,10 +295,8 @@ pub fn build(
     dl
 }
 
-/// アイコンを 1 個描く。
-///
-/// **整数のピクセルに合わせる。** アイコンは物理ピクセルちょうどの大きさで
-/// ラスタライズしてあるので、半端な位置に置くと折角の輪郭がぼやける。
+/// Draws one icon, snapped to whole pixels: they are rasterised at an exact
+/// physical size, and a fractional position blurs the outline.
 #[allow(clippy::too_many_arguments)]
 fn draw_icon(
     dl: &mut DrawList,
@@ -325,7 +312,7 @@ fn draw_icon(
     let style = &placed.node.style;
     let inner = placed.inner;
 
-    // 文字と同じ大きさを基準にし、入れ物からはみ出さないところまで詰める
+    // Sized from the text, shrunk to fit the container.
     let logical = ResolvedFont::from_style(style)
         .size()
         .min(inner.w)
@@ -333,7 +320,7 @@ fn draw_icon(
     let size = (logical * scale).round().max(1.0);
 
     let Some(e) = text.icon(device, queue, name, size as u32) else {
-        // 知らない名前。描かずに進む
+        // Unknown name; draw nothing.
         return;
     };
 
@@ -373,29 +360,28 @@ fn draw_background(
         dl.push_rect(rect, linear(bg, opacity), radius_px, 0.0, scissor);
     }
 
-    // [2] image — TODO: R5 (EXT-021〜EXT-024)。
-    // 画像が読めるまでは color がフォールバックであり、仕様上もその挙動でよい
+    // Background images are not implemented; the colour is the documented
+    // fallback.
 
     // [3] tint
     if let Some(tint) = style.background.as_ref().and_then(|b| b.tint) {
         dl.push_rect(rect, linear(tint, opacity), radius_px, 0.0, scissor);
     }
 
-    // 枠線は背景の**上**に、輪として描く。
-    // 半透明の背景でも枠線の色が中へ透けない (EXT-024)
+    // The border draws over the background as a ring, so a translucent
+    // background does not show through it.
     if let Some((bc, bw)) = border {
         dl.push_rect(rect, linear(bc, opacity), radius_px, bw * scale, scissor);
     }
 }
 
-/// 編集中のテキスト (`PLT-001`)。
+/// Draws text being edited.
 ///
-/// 重ねる順序が意味を持つ。**選択 → 文字 → 変換中の下線 → キャレット**。
-/// 選択を文字の後に描くと文字が隠れ、キャレットを文字の前に描くと文字に
-/// 隠れる。
+/// The order matters: selection, text, preedit underline, caret. Selection
+/// after the text hides it; the caret before the text is hidden by it.
 ///
-/// ⚠️ 選択と変換中の色は文字色から作っている。テーマに専用のトークンが
-/// ないためで、`spec/04-theme.md` に足すまでの当座の措置である。
+/// Selection and preedit colours are derived from the text colour, until the
+/// theme has tokens of its own for them.
 #[allow(clippy::too_many_arguments)]
 fn draw_editable(
     dl: &mut DrawList,
@@ -414,7 +400,7 @@ fn draw_editable(
     let inner = placed.inner;
     let fg = style.color.unwrap_or(FALLBACK_TEXT);
 
-    // 中身が空でも placeholder を薄く出す。**編集の対象ではない**
+    // The placeholder shows faintly; it is not editable.
     if e.text.is_empty() && !e.placeholder.is_empty() {
         let faded = Color {
             a: (fg.a as f32 * PLACEHOLDER_ALPHA) as u8,
@@ -433,12 +419,9 @@ fn draw_editable(
         );
     }
 
-    // ⚠️ **空でもキャレットは出す。** 何も打っていない状態では、
-    // キャレットだけが「ここへ打てる」ことを示す手掛かりである。
-    //
-    // 位置の基準は placeholder ではなく**編集している文字列**にする。
-    // placeholder は幅が違うので、そちらを基準にすると空の入力欄で
-    // キャレットが中途半端な位置に出る。
+    // The caret shows even when empty: it is the only sign the field can be
+    // typed into. Positioned from the edited text, not the placeholder, whose
+    // different width would put it somewhere arbitrary.
     let origin = text_origin(text, placed, &e.text, scale);
     let shaped = text.shaper().shape(&e.text, &font, Some(inner.w)).clone();
 
@@ -457,7 +440,7 @@ fn draw_editable(
         );
     };
 
-    // [1] 選択
+    // Selection.
     let sel = linear(
         Color {
             a: (fg.a as f32 * SELECTION_ALPHA) as u8,
@@ -469,7 +452,7 @@ fn draw_editable(
         mark(r, sel, dl);
     }
 
-    // [2] 文字
+    // Text.
     if !e.text.is_empty() {
         draw_glyph_run(
             dl,
@@ -484,7 +467,7 @@ fn draw_editable(
         );
     }
 
-    // [3] 変換中の下線。**確定していないことが見て分かる必要がある**
+    // The preedit underline, which is what shows the text is uncommitted.
     if let Some(c) = &e.composing {
         let thickness = (UNDERLINE_THICKNESS * scale).max(1.0);
         for r in shaped.range_rects(c) {
@@ -500,7 +483,7 @@ fn draw_editable(
         }
     }
 
-    // [4] キャレット。**消えている拍では描かない**
+    // The caret, skipped on a dark blink.
     if caret_visible {
         mark(
             shaped.caret(e.caret, (CARET_WIDTH * scale).max(1.0)),
@@ -510,20 +493,17 @@ fn draw_editable(
     }
 }
 
-/// QR コードを描く ([ADR-0007](../../../spec/adr/0007-login-paths-and-captcha.md))。
+/// Draws a QR code.
 ///
-/// **画像を作らない。** QR は正方形の格子なので、角丸矩形のバッチャで
-/// そのまま描ける。テクスチャも画像デコーダも要らない。
+/// No image is produced: a QR is a square grid, which the rounded-rect batcher
+/// already draws.
 ///
-/// # 1 マスは必ず整数ピクセルにする
+/// Each module must be a whole number of pixels, or rounding shifts the
+/// boundaries and warps the grid, and a warped QR does not scan. The scale is
+/// therefore truncated.
 ///
-/// 半端な大きさだと、隣り合うマスの境界が丸めでずれて格子が歪む。
-/// **歪んだ QR は読めない。** 詰まるところ、拡大率を切り捨てる。
-///
-/// # 静音領域を空ける
-///
-/// QR の規格は周囲に 4 マス分の余白 (quiet zone) を要求する。これが無いと
-/// 読み取り機が符号の端を見つけられない。
+/// The standard also requires a four-module quiet zone; without it a reader
+/// cannot find the code's edges.
 fn draw_qr(
     dl: &mut DrawList,
     placed: &crate::layout::Placed<'_>,
@@ -532,11 +512,11 @@ fn draw_qr(
     scale: f32,
     scissor: Option<[u32; 4]>,
 ) {
-    /// 規格が要求する静音領域 (マス)
+    /// The quiet zone the standard requires, in modules.
     const QUIET: u32 = 4;
 
     let Ok(code) = qrcode::QrCode::new(data) else {
-        tracing::warn!(len = data.len(), "QR に符号化できない");
+        tracing::warn!(len = data.len(), "cannot encode this as a QR");
         return;
     };
 
@@ -544,14 +524,14 @@ fn draw_qr(
     let total = modules + QUIET * 2;
     let box_px = snap(placed.inner, scale);
 
-    // 1 マスの大きさ。**切り捨てる**
+    // Module size, truncated.
     let cell = (box_px[2].min(box_px[3]) / total as f32).floor();
     if cell < 1.0 {
-        tracing::warn!("QR を描くには狭すぎる");
+        tracing::warn!("too small to draw a QR");
         return;
     }
 
-    // 使う正方形を中央に置く
+    // Centre the square actually used.
     let side = cell * total as f32;
     let ox = box_px[0] + ((box_px[2] - side) * 0.5).round();
     let oy = box_px[1] + ((box_px[3] - side) * 0.5).round();
@@ -584,25 +564,20 @@ fn draw_qr(
     }
 }
 
-/// QR の地とマスの色を決める。
+/// Picks the QR's background and module colours.
 ///
-/// # 読めるかどうかは好みの問題ではない
+/// Whether it scans is not a matter of taste. A theme may colour
+/// `primitive.qr`, but what happens when it does not cannot be left to the
+/// theme: colour inherits, so a dark theme's light text colour ends up as
+/// nearly invisible modules on a white ground. That happened.
 ///
-/// テーマは `primitive.qr` に色を書けるが、**書けなかった場合に何が起きるかを
-/// テーマ任せにできない**。`color` は継承する性質なので、何も書かなければ
-/// `app.window` の文字色が降りてくる。暗いテーマならそれは明るい色であり、
-/// QR の白地の上に**ほとんど見えないマス**が並ぶ。実際にそうなった。
-///
-/// したがってここは 2 つを強制する:
-///
-/// 1. **地は必ず明るい。** QR 規格は明るい地に暗いマスを前提とする。
-///    反転した QR を読める読み取り機もあるが、読めないものもある
-/// 2. **地とマスは十分に違う。** 足りなければテーマの指定を捨てて黒にする
+/// Two things are therefore enforced: the ground stays light, since the
+/// standard assumes dark on light and not every reader handles inversion; and
+/// the two colours stay far enough apart, falling back to black otherwise.
 fn qr_colors(style: &Style) -> (Color, Color) {
-    /// これを下回ったらテーマの指定を採らない。
-    /// WCAG の AA (4.5:1) を借りている。本来の黒と白は 21:1 ある
+    /// Below this the theme's choice is discarded. Black on white is 21:1.
     const MIN_CONTRAST: f32 = 4.5;
-    /// 「明るい」と見なす相対輝度の下限
+    /// The luminance above which a colour counts as light.
     const LIGHT_ENOUGH: f32 = 0.5;
 
     let themed_light = style.background.as_ref().and_then(|b| b.color);
@@ -617,28 +592,28 @@ fn qr_colors(style: &Style) -> (Color, Color) {
     };
 
     if themed_light != Some(light) || (style.color.is_some() && style.color != Some(dark)) {
-        // ⚠️ 毎フレーム来るので 1 回だけ言う
+        // Reached every frame, so warn once.
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
-            tracing::warn!("primitive.qr の色では読み取れないため、既定の白地に黒で描いた");
+            tracing::warn!("the theme's QR colours would not scan; using black on white");
         });
     }
     (light, dark)
 }
 
-/// 相対輝度 (WCAG)。0 が黒、1 が白
+/// Relative luminance: 0 is black, 1 is white.
 fn luminance(c: Color) -> f32 {
     0.2126 * srgb_to_linear(c.r) + 0.7152 * srgb_to_linear(c.g) + 0.0722 * srgb_to_linear(c.b)
 }
 
-/// 2 色のコントラスト比 (WCAG)。1.0 が同色、21.0 が黒と白
+/// Contrast ratio: 1.0 is identical, 21.0 is black on white.
 fn contrast(a: Color, b: Color) -> f32 {
     let (x, y) = (luminance(a), luminance(b));
     let (hi, lo) = if x > y { (x, y) } else { (y, x) };
     (hi + 0.05) / (lo + 0.05)
 }
 
-/// QR の既定の地の色。**白でないと読み取り機が困る**
+/// The QR's default ground; readers expect white.
 const QR_LIGHT: Color = Color {
     r: 0xff,
     g: 0xff,
@@ -646,7 +621,7 @@ const QR_LIGHT: Color = Color {
     a: 0xff,
 };
 
-/// QR の既定のマスの色
+/// The QR's default module colour.
 const QR_DARK: Color = Color {
     r: 0x00,
     g: 0x00,
@@ -654,7 +629,7 @@ const QR_DARK: Color = Color {
     a: 0xff,
 };
 
-/// テキストの原点 (物理 px)。文字も印もここを基準に置く
+/// The text origin, which glyphs and marks are placed from.
 fn text_origin(
     text: &mut TextEngine,
     placed: &crate::layout::Placed<'_>,
@@ -663,7 +638,8 @@ fn text_origin(
 ) -> (f32, f32) {
     let font = ResolvedFont::from_style(&placed.node.style);
     let inner = placed.inner;
-    // ⚠️ 1 行のものは折り返さずに測る。**縦の中心がずれる**
+    // Single-line text is measured unwrapped, or the vertical centring is
+    // wrong.
     let wrap = (!intrinsic(placed.node.id).single_line).then_some(inner.w);
     let size = text.shaper().measure(s, &font, wrap);
 
@@ -676,7 +652,8 @@ fn text_origin(
     ((x * scale).round(), (y * scale).round())
 }
 
-/// グリフを積む。色と文字列だけが違う 2 つの呼び出し元で共有する
+/// Adds glyphs, shared by the two callers that differ only in colour and
+/// string.
 #[allow(clippy::too_many_arguments)]
 fn draw_glyph_run(
     dl: &mut DrawList,
@@ -692,8 +669,8 @@ fn draw_glyph_run(
     let font = ResolvedFont::from_style(&placed.node.style);
     let (ox, oy) = text_origin(text, placed, s, scale);
 
-    // ⚠️ **測るときと同じ折り返し幅を渡す。** 食い違うと字が置かれる位置が
-    // 原点の計算とずれる
+    // The same wrap width as when measuring, or the glyph positions and the
+    // origin disagree.
     let wrap = (!intrinsic(placed.node.id).single_line).then_some(placed.inner.w);
 
     let mut out: Vec<([f32; 4], [f32; 4], bool, u32)> = Vec::new();
@@ -730,8 +707,7 @@ fn draw_text(
 ) {
     let color = linear(placed.node.style.color.unwrap_or(FALLBACK_TEXT), opacity);
 
-    // ⚠️ **1 行のものは、はみ出したぶんを「…」で切る。** 折り返すと行の
-    // 高さが揃わず、一覧として読めなくなる
+    // Single-line text is ellipsised; wrapping makes row heights uneven.
     if intrinsic(placed.node.id).single_line {
         let font = ResolvedFont::from_style(&placed.node.style);
         let fitted = text.shaper().fit_single_line(s, &font, placed.inner.w);
@@ -744,20 +720,15 @@ fn draw_text(
     draw_glyph_run(dl, text, device, queue, placed, s, color, scale, scissor);
 }
 
-/// 取ってきた画像を 1 枚描く。
+/// Draws one fetched image, filling its box while keeping the aspect ratio
+/// and cropping the overflow: an avatar's box is square but the source often
+/// is not, and stretching distorts faces.
 ///
-/// # 入れ物いっぱいに、比を保って、はみ出しは切る
+/// Cropped in texture coordinates, since a scissor rect cannot coexist with
+/// rounded corners.
 ///
-/// アバターは正方形の枠に収まるが、**元の絵が正方形とは限らない**。
-/// 引き伸ばすと人の顔が歪むので、短いほうに合わせて拡大し、長いほうの端を
-/// 切る。
-///
-/// ⚠️ **切るのはテクスチャ座標で行う。** シザー矩形で切ると角丸と両立できない。
-///
-/// # まだ手元に無ければ何も描かない
-///
-/// 取ってくるのはアプリの仕事である ([`spec/02-architecture.md`])。
-/// **ここで待たない。** 届いた次のフレームで出る
+/// Nothing is drawn until the image is in hand; fetching is the app's job and
+/// this never waits.
 #[allow(clippy::too_many_arguments)]
 fn draw_image(
     dl: &mut DrawList,
@@ -773,14 +744,14 @@ fn draw_image(
     if box_px[2] <= 0.0 || box_px[3] <= 0.0 {
         return;
     }
-    // ⚠️ **ここまで来て初めて「要る」と言う。** 切り取りで消えた行も、
-    // 潰れた枠も、ここへは来ない
+    // Only asked for here: clipped rows and collapsed boxes never reach this
+    // point.
     let Some(e) = text.image(url) else {
         dl.missing_images.push(url.to_owned());
         return;
     };
 
-    // 絵の縦横比と枠の縦横比を比べ、はみ出すほうを切る
+    // Crop whichever axis overflows.
     let (uw, uh) = (e.uv[2] - e.uv[0], e.uv[3] - e.uv[1]);
     let want = box_px[2] / box_px[3];
     let have = if e.h > 0 {
@@ -791,12 +762,12 @@ fn draw_image(
 
     let (mut u0, mut v0, mut u1, mut v1) = (e.uv[0], e.uv[1], e.uv[2], e.uv[3]);
     if have > want {
-        // 絵のほうが横長。左右を切る
+        // Wider than the box; crop the sides.
         let cut = uw * (1.0 - want / have) * 0.5;
         u0 += cut;
         u1 -= cut;
     } else if have < want {
-        // 絵のほうが縦長。上下を切る
+        // Taller than the box; crop top and bottom.
         let cut = uh * (1.0 - have / want) * 0.5;
         v0 += cut;
         v1 -= cut;
@@ -813,16 +784,14 @@ fn draw_image(
     );
 }
 
-/// 積む前のグリフ 1 個。`(矩形, UV, 色付きか, ページ, 何番目の走りか)`
+/// One glyph before it is added.
 type RichGlyph = ([f32; 4], [f32; 4], bool, u32, u32);
 
-/// 飾りの混じった文字を描く (`FR-021`)。
+/// Draws text with mixed decoration.
 ///
-/// # ⚠️ 走りごとに描かない
-///
-/// 走りを 1 つずつ [`draw_text`] へ渡して横にずらして置く、はできない。
-/// 折り返しが走りごとに独立して決まってしまうためである。整形は
-/// **1 回だけ**行い、出てきた字を走りの番号で塗り分ける。
+/// Never per run: passing each to `draw_text` and offsetting them wraps each
+/// independently. Shaping happens once, and the glyphs are coloured by their
+/// run index.
 #[allow(clippy::too_many_arguments)]
 fn draw_rich(
     dl: &mut DrawList,
@@ -843,7 +812,7 @@ fn draw_rich(
         .map(|s| s.color.map_or(base, |c| linear(c, opacity)))
         .collect();
 
-    // ⚠️ **測るときと同じ折り返し幅を渡す。** 食い違うと行が変わる
+    // The same wrap width as when measuring, or the lines differ.
     let max_w = placed.inner.w.is_finite().then_some(placed.inner.w);
     let size = text.shaper().measure_rich(&runs, max_w);
     let inner = placed.inner;
@@ -866,7 +835,8 @@ fn draw_rich(
         ));
     });
 
-    // 隠す走りは**先に塗る**。字より後ろに置くと透けて読める
+    // Spoiler fills go first; behind the glyphs they would be readable
+    // through.
     for r in &rects {
         let Some(sp) = spans.get(r.run as usize) else {
             continue;
@@ -884,8 +854,8 @@ fn draw_rich(
     }
 
     for (rect, uv, is_color, page, which) in out {
-        // ⚠️ **隠す走りの字は積まない。** 上から塗るだけでは、
-        // 角丸の外や半透明のところから中身が漏れる
+        // Hidden glyphs are not added at all: painting over them leaks at the
+        // rounded corners and through any transparency.
         if spans.get(which as usize).is_some_and(|s| s.hidden) {
             continue;
         }
@@ -893,7 +863,7 @@ fn draw_rich(
         dl.push_glyph(rect, uv, c, is_color, 0.0, scissor, page);
     }
 
-    // 線は字の上に引く
+    // Lines draw over the glyphs.
     for r in &rects {
         let Some(sp) = spans.get(r.run as usize) else {
             continue;
@@ -903,8 +873,8 @@ fn draw_rich(
         }
         let c = colors.get(r.run as usize).copied().unwrap_or(base);
         let w = (LINE_WIDTH * scale).max(1.0);
-        // 行の高さではなく**字の大きさ**を基準にする。行間が広いテーマで
-        // 下線が遠くへ離れないため
+        // From the font size, not the line height, so a theme with generous
+        // leading does not push the underline far away.
         let em = r.rect.h;
         if sp.line.under {
             let y = r.rect.y + em * UNDERLINE_AT;
@@ -917,17 +887,18 @@ fn draw_rich(
     }
 }
 
-/// [`Span`] の並びを、整形が受け取る形へ直す。
+/// Converts spans into what the shaper takes.
 ///
-/// ⚠️ **測るときと描くときで同じものを作ること。** 片方だけ書体の
-/// 引き継ぎ方を変えると、測った幅と描いた幅が食い違い、行末が切れる
+/// Measuring and drawing must build the same thing; differing font
+/// inheritance makes the measured and drawn widths disagree and clips the
+/// line.
 pub(crate) fn rich_runs(spans: &[Span], style: &Style) -> Vec<(String, ResolvedFont)> {
     let base = ResolvedFont::from_style(style);
     spans
         .iter()
         .map(|s| {
             let font = match &s.font {
-                // 走りが書いていないところは**ノードの書体を引き継ぐ**
+                // Unset fields inherit the node's font.
                 Some(f) => ResolvedFont::from_style(&Style {
                     font: Some(merge_font(style.font.clone(), f.clone())),
                     ..Style::default()
@@ -939,7 +910,7 @@ pub(crate) fn rich_runs(spans: &[Span], style: &Style) -> Vec<(String, ResolvedF
         .collect()
 }
 
-/// 走りの書体を、ノードの書体の上に重ねる。
+/// Layers a run's font over the node's.
 fn merge_font(base: Option<Font>, over: Font) -> Font {
     let mut f = base.unwrap_or_default();
     if over.family.is_some() {
@@ -966,10 +937,9 @@ fn merge_font(base: Option<Font>, over: Font) -> Font {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// 色を書かないテーマでも読める。**継承した文字色をそのまま使わない。**
-    ///
-    /// 暗いテーマの `color` は明るい色である。白地にそれを敷くと、実際に
-    /// 「見えるが読めない QR」になった
+    /// Readable even with no colour written. A dark theme's inherited text
+    /// colour is light, and on white that produced a visible but unscannable
+    /// QR.
     #[test]
     fn an_inherited_light_text_colour_is_not_used_for_the_qr() {
         let style = Style {
@@ -979,11 +949,14 @@ mod tests {
 
         let (light, dark) = qr_colors(&style);
         assert_eq!(light, QR_LIGHT);
-        assert_eq!(dark, QR_DARK, "地とほぼ同じ色で描こうとしている");
+        assert_eq!(
+            dark, QR_DARK,
+            "drawing almost the same colour as the ground"
+        );
         assert!(contrast(dark, light) > 20.0);
     }
 
-    /// 十分に暗い色ならテーマの指定を尊重する
+    /// A dark enough colour is honoured.
     #[test]
     fn a_dark_enough_theme_colour_is_kept() {
         let navy = Color {
@@ -1000,7 +973,7 @@ mod tests {
         assert_eq!(qr_colors(&style).1, navy);
     }
 
-    /// **地が暗いテーマは採らない。** 反転した QR を読めない読み取り機がある
+    /// A dark ground is rejected; not every reader handles inversion.
     #[test]
     fn a_dark_background_is_refused() {
         let style = Style {
@@ -1019,7 +992,7 @@ mod tests {
         assert_eq!(qr_colors(&style).0, QR_LIGHT);
     }
 
-    /// 黒と白は 21:1、同じ色は 1:1 (WCAG の定義どおり)
+    /// Black on white is 21:1; identical colours are 1:1.
     #[test]
     fn contrast_matches_the_wcag_definition() {
         assert!((contrast(QR_DARK, QR_LIGHT) - 21.0).abs() < 0.01);
@@ -1028,8 +1001,8 @@ mod tests {
 
     #[test]
     fn snap_keeps_adjacent_rects_flush() {
-        // 論理 10.4..20.4 と 20.4..30.4 が隣り合う。
-        // 幅を丸めると隙間か重なりが出るが、両端を丸めれば必ず接する
+        // Two adjacent logical rects: rounding the width leaves a gap or an
+        // overlap, while rounding both edges always meets.
         let a = snap(Rect::new(10.4, 0.0, 10.0, 1.0), 1.5);
         let b = snap(Rect::new(20.4, 0.0, 10.0, 1.0), 1.5);
         assert_eq!(a[0] + a[2], b[0]);
@@ -1041,10 +1014,8 @@ mod tests {
         assert!((srgb_to_linear(255) - 1.0).abs() < 1e-6);
     }
 
-    /// ⚠️ **ページが違えば束ね直す。**
-    ///
-    /// 同じ束で描くとテクスチャが 1 枚しか選べず、別のページに載った字が
-    /// 1 枚目から読まれる — 見たこともない字が出る
+    /// A different page starts a new run: one draw binds one texture, and
+    /// glyphs from another page come out as something else entirely.
     #[test]
     fn a_different_page_starts_a_new_run() {
         let mut dl = DrawList::default();
@@ -1053,14 +1024,14 @@ mod tests {
 
         dl.push_glyph([0.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 0);
         dl.push_glyph([1.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 0);
-        assert_eq!(dl.runs.len(), 1, "同じページなら 1 つ");
+        assert_eq!(dl.runs.len(), 1, "the same page should share a run");
 
         dl.push_glyph([2.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 1);
-        assert_eq!(dl.runs.len(), 2, "ページが変われば分かれる");
+        assert_eq!(dl.runs.len(), 2, "a different page should split the run");
         assert_eq!(dl.runs[0].page, 0);
         assert_eq!(dl.runs[1].page, 1);
 
-        // 戻ってもまた分かれる
+        // Returning splits again.
         dl.push_glyph([3.0, 0.0, 1.0, 1.0], uv, c, false, 0.0, None, 0);
         assert_eq!(dl.runs.len(), 3);
     }
@@ -1075,10 +1046,10 @@ mod tests {
         assert_eq!(dl.runs[0].count, 2);
 
         dl.push_rect([2.0, 0.0, 1.0, 1.0], white, 0.0, 0.0, Some([0, 0, 4, 4]));
-        assert_eq!(dl.runs.len(), 2, "切り取りが変われば run が分かれる");
+        assert_eq!(dl.runs.len(), 2, "a different clip should split the run");
     }
 
-    /// 透明・幅ゼロのものは積まない。GPU へ送る量を無駄に増やさない
+    /// Transparent and zero-width draws are skipped.
     #[test]
     fn degenerate_rects_are_dropped() {
         let mut dl = DrawList::default();
