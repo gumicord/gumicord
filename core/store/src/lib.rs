@@ -1,27 +1,12 @@
-//! 正規化された状態のインメモリ保持と SQLite への永続化。
+//! Normalised in-memory state, persisted to SQLite.
 //!
-//! 責務: Gateway イベントの状態への反映 / ローカルキャッシュ / 全文検索 (FTS5) / 暗号化。
+//! Startup draws from here before the gateway is even connected: READY takes
+//! closer to a second, which does not fit the cold-start budget.
 //!
-//! ⚠️ **起動時はここから先に描画する。** S4 の実測で Gateway の READY 到達に
-//! 672〜1120 ms かかることが分かっており、`NFR-001` (コールドスタート 500ms) の
-//! 「操作可能」の定義に READY を含めることはできない。
-//!
-//! # まだ無いもの
-//!
-//! | | いつ |
-//! |---|---|
-//! | 全文検索 (FTS5) | M2 (`FR-035`) |
-//! | キャッシュの暗号化 | M2 (`SEC-020`)。⚠️ **本文が平文でディスクに残る** |
-//! | 送信キューのオフライン退避 | M2 (`NFR-012`) |
-//! | 未読のミュート | 通知設定 (`FR-041`, M2) を読んでいないので、**黙らせたチャンネルも光る** |
-//! | 未読の保存 | 読んだ印は READY が毎回持ってくるので残していない |
-//!
-//! 要件: `FR-035`, `NFR-011`, `NFR-012`, `SEC-020`, `SEC-021`
-//! 仕様: [`spec/02-architecture.md`]
-
-pub mod db;
-
-pub use db::{Db, DbError, Snapshot, default_path};
+//! Not here yet: full-text search, encryption of the cache (message bodies sit
+//! on disk in the clear), an offline send queue, and muted-channel handling —
+//! notification settings are not read, so muted channels still light up.
+//! Read markers are not persisted, since READY brings them every time.
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,128 +14,112 @@ use gumicord_model::{
     Asset, Channel, ChannelId, Guild, GuildId, Member, Message, MessageId, Role, RoleId, UserId,
 };
 
-/// 正規化された状態。
+/// The normalised state.
 ///
-/// # 「正規化」が意味すること
-///
-/// **同じものを 2 箇所に持たない。** チャンネルはギルドの中の配列ではなく
-/// 識別子で引ける表にあり、ギルドは所属するチャンネルの識別子だけを持つ。
+/// Nothing is stored twice: channels live in a table keyed by id, and a guild
+/// holds only the ids of the channels in it.
 ///
 /// ```text
-///   guilds:         GuildId   → 名前・アイコン
-///   guild_channels: GuildId   → [ChannelId]      並び順つき
-///   channels:       ChannelId → 種別・名前・話題
-///   messages:       ChannelId → [Message]        古い順
+///   guilds:         GuildId   -> name, icon
+///   guild_channels: GuildId   -> [ChannelId]   in order
+///   channels:       ChannelId -> kind, name, topic
+///   messages:       ChannelId -> [Message]     oldest first
 /// ```
 ///
-/// ⚠️ **これをしないと同じチャンネルが 2 つの形で存在する。** READY が
-/// 持ってきたものと GUILD_UPDATE が持ってきたものが食い違ったとき、
-/// どちらが正しいかを決める場所が無くなる。
+/// Otherwise the same channel exists in two shapes, and when READY and
+/// GUILD_UPDATE disagree there is nowhere to decide which is right.
 ///
-/// # 画面より先にここが埋まる (`NFR-011`)
-///
-/// 起動時、Gateway に繋ぐより先に [`Db`] から読み込む。S4 の実測では
-/// READY まで 672〜1120 ms かかり、**`NFR-001` (500 ms) に入らない**。
-/// キャッシュから先に描いて、READY は後から差し替える。
+/// Filled from the cache before connecting, and replaced when READY arrives.
 #[derive(Debug, Default)]
 pub struct Store {
     guilds: HashMap<GuildId, GuildRow>,
-    /// ギルドごとのチャンネルの識別子。**並び順つき**
+    /// Channel ids per guild, in order.
     guild_channels: HashMap<GuildId, Vec<ChannelId>>,
     channels: HashMap<ChannelId, Channel>,
-    /// チャンネルごとのメッセージ。**古い順**
+    /// Messages per channel, oldest first.
     messages: HashMap<ChannelId, Vec<Message>>,
-    /// 画面に出す順。**毎フレーム並べ替えないため、ここに持つ**
+    /// Display order, kept here so nothing sorts per frame.
     order: Vec<GuildId>,
-    /// 利用者が Discord で並べた順 (`user_settings_proto` 由来)
+    /// The order the user arranged in Discord.
     preferred: Vec<GuildId>,
-    /// 届いた順。**並び順が分からないものはこの順で後ろに続く**
+    /// Arrival order; anything unplaced follows in it.
     arrival: Vec<GuildId>,
-    /// サーバ一覧の並び。**フォルダも単独のサーバも同じ列に入る**
+    /// The sidebar order; folders and lone guilds share the list.
     sidebar: Vec<FolderRow>,
-    /// 閉じているフォルダ。**残す** — 開き直すのは利用者の仕事ではない
+    /// Folded folders, persisted: refolding them is not the user's job.
     collapsed: std::collections::HashSet<u64>,
-    /// ギルドごとの役職。**メンバー一覧の見出しを名前にするために要る**
+    /// Roles per guild, needed to name member list headings.
     roles: HashMap<GuildId, Vec<Role>>,
-    /// どこまで読んだか (`FR-042`)。**チャンネルごと**
+    /// Read markers, per channel.
     read: HashMap<ChannelId, ReadMark>,
-    /// 見かけた人の、そのギルドでの姿。
+    /// Members seen, per guild.
     ///
-    /// # ⚠️ REST の発言には `member` が付いていない
+    /// Discord attaches `member` to gateway messages only, never to history
+    /// from REST. Reading it off the message left a freshly opened channel
+    /// with no nicknames, avatars or colours until one new message arrived.
     ///
-    /// Discord が発言に `member` を添えるのは **Gateway の
-    /// `MESSAGE_CREATE` / `MESSAGE_UPDATE` だけ**である。
-    /// `GET /channels/:id/messages` で取ってきた過去分には入っていない。
+    /// A member belongs to a (guild, person), not to a message, so it is
+    /// remembered where it is seen and looked up from the message.
     ///
-    /// そのままだと、チャンネルを開いた直後は**呼び名もサーバごとの顔も
-    /// 役職の色も出ず**、新しい発言が 1 つ来たときだけそこに色が付く。
-    /// 実際にそうなった。
-    ///
-    /// 姿は発言ではなく**(ギルド, 人) に属する**ので、見かけたところで
-    /// 覚えておいて、発言から引く。
-    ///
-    /// ⚠️ **見かけた人しか居ない。** オフラインで、かつ最近発言していない
-    /// 人は入らない。埋めるには `op 8` で名指しで頼む必要がある (まだ無い)。
+    /// Only people actually seen are here; filling the rest needs an explicit
+    /// request.
     members: HashMap<(GuildId, UserId), Member>,
 }
 
-/// 1 チャンネルぶんの「どこまで読んだか」。
+/// One channel's read marker.
 ///
-/// # ⚠️ 未読は差ではなく大小で決まる
-///
-/// スノーフレークは時刻を含むので、**「読んだ印より大きい発言があるか」**
-/// を見れば未読かどうかが決まる。件数は数えない — 数えるには全部の発言を
-/// 持っている必要があり、開いていないチャンネルの分は持っていない。
-///
-/// 名指しの数だけはサーバが数えて寄越すので、そのまま持つ。
+/// Unread is a comparison, not a count: snowflakes carry time, so anything
+/// above the marker is unread. Counting would need every message, which is
+/// not held for channels that were never opened. Mention counts come from the
+/// server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReadMark {
-    /// ここまで読んだ。`None` は**一度も読んでいない**
+    /// Read up to here; `None` means never read.
     pub seen: Option<MessageId>,
-    /// 自分宛ての未読の数
+    /// Unread mentions.
     pub mentions: u32,
 }
 
-/// サーバ一覧の 1 行。**フォルダか、サーバか。**
+/// One sidebar row: a folder or a guild.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuildEntry<'a> {
-    /// フォルダの見出し。**押すと開閉する**
+    /// A folder header; pressing it folds.
     Folder { id: u64, row: &'a FolderRow },
     Guild {
         row: &'a GuildRow,
-        /// どのフォルダの中にいるか。外にいれば `None`
+        /// Which folder it is in, if any.
         folder: Option<u64>,
     },
 }
 
-/// サーバ一覧のフォルダ 1 つ。
+/// One sidebar folder.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FolderRow {
-    /// ⚠️ **無ければフォルダではない。** フォルダに入れていないサーバも
-    /// 「識別子の無い入れ物」として同じ列に入る
+    /// Absent means this is not really a folder: unfoldered guilds arrive in
+    /// the same list as containers without an id.
     pub id: Option<u64>,
-    /// 付けていなければ `None`。**画面が中身の名前を並べて出す**
+    /// Unnamed folders borrow their contents' names.
     pub name: Option<String>,
     pub guilds: Vec<GuildId>,
-    /// 利用者が付けた色 (`0xRRGGBB`)。**付けていなければ `None`**
+    /// The colour the user chose, if any.
     #[serde(default)]
     pub color: Option<u32>,
 }
 
-/// チャンネル一覧の 1 行。**見出しか、開けるものか。**
+/// One channel row: a heading or something openable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelEntry<'a> {
-    /// カテゴリの見出し。**押しても開かない**
+    /// A category heading; nothing opens.
     Category(&'a Channel),
     Channel(&'a Channel),
 }
 
-/// ギルドのうち、チャンネル以外の部分。
+/// A guild, minus its channels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuildRow {
     pub id: GuildId,
     pub name: String,
-    /// アイコンの印。**URL ではない** (`Store::guild_icon`)
+    /// The icon hash, not a URL.
     pub icon_hash: Option<String>,
 }
 
@@ -159,28 +128,28 @@ impl Store {
         Store::default()
     }
 
-    /// 画面に出す順のギルド。**利用者が並べた順が先、残りは届いた順**
+    /// Guilds in display order: the user's arrangement first, the rest as
+    /// they arrived.
     pub fn guilds(&self) -> impl Iterator<Item = &GuildRow> {
         self.order.iter().filter_map(|id| self.guilds.get(id))
     }
 
-    /// サーバ一覧に出す順の、フォルダとサーバ。
+    /// Folders and guilds in sidebar order.
     ///
     /// ```text
-    ///   サーバ            フォルダの外。**位置はここ**
-    ///   [フォルダ]        押すと開閉する
-    ///     サーバ          開いていれば
-    ///   サーバ
+    ///   guild             outside a folder, positioned here
+    ///   [folder]          presses fold it
+    ///     guild           only while open
+    ///   guild
     /// ```
     ///
-    /// ⚠️ **フォルダに入れていないサーバを末尾にまとめてはいけない。**
-    /// Discord は並び順の一覧に、フォルダも単独のサーバも**同じ列**として
-    /// 入れてくる。フォルダだけを抜き出して先に出すと、**利用者が並べた
-    /// 位置が失われる。** 実際にそうなった。
+    /// Unfoldered guilds are not collected at the end: Discord puts folders
+    /// and lone guilds in one list, and pulling folders out first loses the
+    /// order the user arranged.
     ///
-    /// ⚠️ **閉じているフォルダの中身は出さない。** 出すと折り畳む意味がない。
+    /// A folded folder emits no contents.
     pub fn guild_entries(&self) -> Vec<GuildEntry<'_>> {
-        // 並び順を知らないなら、届いた順のまま平らに出す
+        // With no known order, emit arrival order, flat.
         if self.sidebar.is_empty() {
             return self
                 .guilds()
@@ -193,7 +162,7 @@ impl Store {
 
         for row in &self.sidebar {
             match row.id {
-                // 本当のフォルダ
+                // A real folder.
                 Some(id) => {
                     out.push(GuildEntry::Folder { id, row });
                     placed.extend(row.guilds.iter().copied());
@@ -207,7 +176,7 @@ impl Store {
                         })
                     }));
                 }
-                // フォルダではない。**中身をそのまま並びへ置く**
+                // Not a folder; its contents go straight into the list.
                 None => {
                     placed.extend(row.guilds.iter().copied());
                     out.extend(row.guilds.iter().filter_map(|g| {
@@ -219,7 +188,7 @@ impl Store {
             }
         }
 
-        // 並び順に載っていないもの。**新しく入ったサーバがここに来る**
+        // Anything unplaced, which is where a newly joined guild lands.
         out.extend(
             self.guilds()
                 .filter(|row| !placed.contains(&row.id))
@@ -228,10 +197,8 @@ impl Store {
         out
     }
 
-    /// サーバ一覧の並びを教える。
-    ///
-    /// ⚠️ **フォルダだけを渡さないこと。** フォルダに入れていないサーバも
-    /// 「識別子の無い入れ物」として、順のまま渡す
+    /// Sets the sidebar order. Pass unfoldered guilds too, as containers
+    /// without an id, in order.
     pub fn set_sidebar(&mut self, rows: Vec<FolderRow>) {
         self.sidebar = rows;
     }
@@ -240,7 +207,7 @@ impl Store {
         &self.sidebar
     }
 
-    /// 閉じているフォルダ。**保存して次の起動で戻す**
+    /// Folded folders, persisted across restarts.
     pub fn collapsed(&self) -> Vec<u64> {
         let mut ids: Vec<u64> = self.collapsed.iter().copied().collect();
         ids.sort_unstable();
@@ -255,7 +222,7 @@ impl Store {
         self.collapsed = ids.into_iter().collect();
     }
 
-    /// 開閉を切り替える。**開いたか閉じたかを返す**
+    /// Toggles a folder and reports the new state.
     pub fn toggle_folder(&mut self, id: u64) -> bool {
         if !self.collapsed.insert(id) {
             self.collapsed.remove(&id);
@@ -264,10 +231,8 @@ impl Store {
         false
     }
 
-    /// そのサーバのアイコン。**設定していなければ `None`**
-    ///
-    /// ⚠️ **サーバには既定のアイコンが無い。** 人と違って Discord は絵を
-    /// 配っていないので、無いときは頭文字を出すしかない
+    /// A guild's icon, if set. Unlike users, guilds have no built-in one, so
+    /// callers fall back to initials.
     pub fn guild_icon(&self, id: GuildId) -> Option<Asset> {
         let hash = self.guilds.get(&id)?.icon_hash.as_ref()?;
         Some(Asset::guild_icon(id, hash))
@@ -277,10 +242,8 @@ impl Store {
         self.guilds.get(&id)
     }
 
-    /// その役職の名前。**知らなければ `None`**。
-    ///
-    /// ⚠️ **識別子を名前の代わりに出さない。** メンバー一覧の見出しに
-    /// 18 桁の数字が並んでも、利用者にできることは何も増えない
+    /// A role's name, if known. Never the id: an 18-digit number as a heading
+    /// tells the reader nothing.
     pub fn role_name(&self, guild: GuildId, role: RoleId) -> Option<&str> {
         self.roles
             .get(&guild)?
@@ -289,14 +252,11 @@ impl Store {
             .map(|r| &*r.name)
     }
 
-    /// その人の名前に出す色 (`0xRRGGBB`)。**無ければ `None`**。
+    /// The colour for a person's name.
     ///
-    /// ⚠️ **一番上の「色を付けている」役職が勝つ。** 一番上の役職ではない。
-    /// 色を付けていない役職が上にあっても、名前の色は下の色付き役職から
-    /// 来る。Discord もそうしている。
-    ///
-    /// ⚠️ **知らない役職は飛ばす。** ギルドの中身がまだ届いていない
-    /// ときに、順を勝手に決めない
+    /// The topmost *coloured* role wins, not the topmost role: an uncoloured
+    /// role above it does not take the colour away. Unknown roles are skipped
+    /// rather than guessed at while the guild is still arriving.
     pub fn member_tint(&self, guild: GuildId, roles: &[RoleId]) -> Option<u32> {
         let table = self.roles.get(&guild)?;
         table
@@ -307,28 +267,23 @@ impl Store {
             .map(|(_, tint)| tint)
     }
 
-    // ─────────────────────────────────────────── 未読 (`FR-042`)
+    // ─────────────────────────────────────────── Unread
 
-    /// 読んだ印を置く。READY から来たものをそのまま入れる。
+    /// Stores read markers from READY verbatim.
     ///
-    /// ⚠️ **知らないチャンネルの分も入れる。** `read_state` には
-    /// ギルドのイベントなど、チャンネルでないものの印も混ざっている。
-    /// 選り分けずに持っておいて、引くときにチャンネルとして扱う
+    /// Markers for things that are not channels are kept too; filtering
+    /// happens on lookup instead.
     pub fn set_read_marks(&mut self, marks: impl IntoIterator<Item = (ChannelId, ReadMark)>) {
         self.read = marks.into_iter().collect();
     }
 
-    /// そのチャンネルに、まだ読んでいない発言があるか。
+    /// Whether a channel has unread messages.
     ///
-    /// ⚠️ **一度も読んでいないチャンネルを未読にしない。**
+    /// A never-read channel is not unread: a freshly joined guild arrives with
+    /// no markers at all, and treating that as unread lights up every channel
+    /// the moment someone joins. Discord ignores anything from before joining.
     ///
-    /// 入ったばかりのサーバは、全チャンネルが「読んだ印なし」で来る。
-    /// それを未読にすると**入った瞬間に全部が光る**。Discord は入った
-    /// 時刻より前の発言を未読として扱わないので、こちらも印が無ければ
-    /// 未読としない。
-    ///
-    /// ⚠️ **ミュートを見ていない。** 通知設定 (`FR-041`, M2) を読んで
-    /// いないので、**黙らせたチャンネルも光る**
+    /// Mutes are not read yet, so muted channels still light up.
     pub fn is_unread(&self, channel: ChannelId) -> bool {
         let Some(last) = self.channels.get(&channel).and_then(|c| c.last_message_id) else {
             return false;
@@ -339,14 +294,12 @@ impl Store {
         }
     }
 
-    /// そのチャンネルの、自分宛ての未読の数
+    /// Unread mentions in a channel.
     pub fn mentions(&self, channel: ChannelId) -> u32 {
         self.read.get(&channel).map_or(0, |m| m.mentions)
     }
 
-    /// そのサーバに未読があるか、名指しが何件あるか。
-    ///
-    /// **中のチャンネルを畳んだもの**である。サーバ一覧の印はこれで決まる
+    /// A guild's unread state, rolled up from its channels.
     pub fn guild_unread(&self, guild: GuildId) -> (bool, u32) {
         let mut unread = false;
         let mut mentions = 0;
@@ -357,37 +310,34 @@ impl Store {
         (unread, mentions)
     }
 
-    /// そこまで読んだことにする。**変わったら真**。
-    ///
-    /// ⚠️ **サーバへ伝えるのは呼び出し側の仕事である。** ここは手元の
-    /// 見た目を先に直すだけで、往復を待たない
+    /// Marks a channel read locally. Telling the server is the caller's job.
     pub fn mark_read(&mut self, channel: ChannelId) -> bool {
         let last = self.channels.get(&channel).and_then(|c| c.last_message_id);
         let mark = self.read.entry(channel).or_default();
-        // ⚠️ **一度も読んでいないチャンネルにも印を置く。** 置かないと
-        // 開いても未読のままになる
+        // A never-read channel gets a marker too, or opening it leaves it
+        // unread.
         let changed = mark.seen != last || mark.mentions != 0;
         mark.seen = last;
         mark.mentions = 0;
         changed
     }
 
-    // ─────────────────────────────── ギルドでの姿 (`FR-043`)
+    // ─────────────────────────────── Guild members
 
-    /// 見かけた人の姿を覚える。**後から来たものが勝つ**
+    /// Remembers a member; later sightings win.
     pub fn remember_member(&mut self, guild: GuildId, user: UserId, member: Member) {
         self.members.insert((guild, user), member);
     }
 
-    /// その人の、そのギルドでの姿。**見かけていなければ `None`**
+    /// A member, if one has been seen.
     pub fn member(&self, guild: GuildId, user: UserId) -> Option<&Member> {
         self.members.get(&(guild, user))
     }
 
-    /// 発言に添えられていた姿を覚える。**REST の分には付いていない**
+    /// Remembers the member attached to a message.
     ///
-    /// ⚠️ **ギルドが分からない発言からは覚えない。** REST で取った分には
-    /// `guild_id` も入っていないので、どのギルドでの姿か決められない
+    /// Skipped when the message carries no guild, which REST history does not:
+    /// there would be no way to say which guild the member belongs to.
     pub fn remember_from_message(&mut self, message: &Message) {
         let (Some(guild), Some(member)) = (message.guild_id, message.member.as_ref()) else {
             return;
@@ -395,18 +345,16 @@ impl Store {
         self.remember_member(guild, message.author.id, member.clone());
     }
 
-    /// 新しい発言が来た。**チャンネルの一番新しい発言を進める**。
-    ///
-    /// `me` は自分。自分宛てなら名指しの数を増やす。
-    /// **変わったら真** (画面を描き直すかの判断に使う)
+    /// Records a new message and advances the channel's newest id, counting
+    /// a mention when it names us.
     pub fn note_arrival(&mut self, message: &Message, me: Option<UserId>) -> bool {
-        // 姿は発言ではなく (ギルド, 人) に属する。見かけたところで覚える
+        // A member belongs to a (guild, person), so remember it here.
         self.remember_from_message(message);
 
         let Some(channel) = self.channels.get_mut(&message.channel_id) else {
             return false;
         };
-        // ⚠️ **戻さない。** 遅れて届いた古いものが混ざることがある
+        // Never moves backwards; older messages can arrive late.
         if channel
             .last_message_id
             .is_some_and(|last| last >= message.id)
@@ -421,7 +369,7 @@ impl Store {
         true
     }
 
-    /// そのフォルダに利用者が付けた色。**無ければ `None`**
+    /// A folder's colour, if the user set one.
     pub fn folder_tint(&self, folder: u64) -> Option<u32> {
         self.sidebar
             .iter()
@@ -433,9 +381,7 @@ impl Store {
         self.channels.get(&id)
     }
 
-    /// そのギルドの、**開けるチャンネルだけ**。並び順つき。
-    ///
-    /// カテゴリは含まない。選択の対象になるものだけが要るときに使う
+    /// A guild's openable channels, in order. Categories are excluded.
     pub fn channels_of(&self, guild: GuildId) -> impl Iterator<Item = &Channel> {
         self.entries_of(guild).filter_map(|e| match e {
             ChannelEntry::Channel(c) => Some(c),
@@ -443,20 +389,18 @@ impl Store {
         })
     }
 
-    /// 一覧に出す順の、カテゴリとチャンネル。
-    ///
-    /// # 並び順は Discord の規則に従う
+    /// Categories and channels in display order, following Discord's rules.
     ///
     /// ```text
-    ///   カテゴリに属さないチャンネル   position 順
-    ///   カテゴリ A                      position 順
-    ///     └ その中のチャンネル          position 順
-    ///   カテゴリ B
+    ///   channels with no category    by position
+    ///   category A                   by position
+    ///     └ its channels             by position
+    ///   category B
     ///     └ …
     /// ```
     ///
-    /// ⚠️ **position は重複する。** 同じ値なら識別子順 — つまり作られた順に
-    /// 倒す。ここが崩れると並びが毎フレーム変わって読めない
+    /// Positions collide, and ties break by id, which is creation order.
+    /// Without that the list reorders every frame.
     pub fn entries_of(&self, guild: GuildId) -> impl Iterator<Item = ChannelEntry<'_>> {
         let ids = self.guild_channels.get(&guild).cloned().unwrap_or_default();
         let all: Vec<&Channel> = ids.iter().filter_map(|id| self.channels.get(id)).collect();
@@ -468,7 +412,7 @@ impl Store {
 
         let mut out: Vec<ChannelEntry<'_>> = Vec::with_capacity(all.len());
 
-        // [1] カテゴリの外にあるもの
+        // Channels outside any category.
         out.extend(
             sorted(
                 all.iter()
@@ -480,7 +424,7 @@ impl Store {
             .map(ChannelEntry::Channel),
         );
 
-        // [2] カテゴリと、その中身
+        // Categories and their contents.
         for cat in sorted(
             all.iter()
                 .copied()
@@ -493,20 +437,20 @@ impl Store {
                     .filter(|c| !c.kind.is_category() && c.parent_id == Some(cat.id))
                     .collect(),
             );
-            // ⚠️ **空のカテゴリも出す。** Discord がそうしている。
-            // 見えているのに一覧に無いと、設定を間違えたのかと思わせる
+            // Empty categories still appear, as in Discord: one visible there
+            // but missing here reads as a misconfiguration.
             out.push(ChannelEntry::Category(cat));
             out.extend(children.into_iter().map(ChannelEntry::Channel));
         }
         out.into_iter()
     }
 
-    /// そのチャンネルのメッセージ。**まだ読んでいなければ空**
+    /// A channel's messages, empty until fetched.
     pub fn messages(&self, channel: ChannelId) -> &[Message] {
         self.messages.get(&channel).map_or(&[], Vec::as_slice)
     }
 
-    /// 中身を持っているか。**「空」と「まだ読んでいない」の区別である**
+    /// Distinguishes "empty" from "not fetched".
     pub fn has_messages(&self, channel: ChannelId) -> bool {
         self.messages.contains_key(&channel)
     }
@@ -515,7 +459,7 @@ impl Store {
         self.guilds.is_empty()
     }
 
-    /// ギルドを丸ごと入れ替える。READY と、キャッシュからの読み込みで使う。
+    /// Replaces every guild; used by READY and by the cache.
     pub fn replace_guilds(&mut self, guilds: Vec<Guild>) {
         self.guilds.clear();
         self.guild_channels.clear();
@@ -526,27 +470,27 @@ impl Store {
         }
     }
 
-    /// ギルドを 1 つ入れる・更新する。
+    /// Inserts or updates one guild.
     ///
-    /// ⚠️ **殻だけのギルドは採らない。** 名前もチャンネルも無いので、
-    /// 一覧に中身の無い丸が並ぶだけになる。GUILD_CREATE で届いたら入る
+    /// Shells are rejected: with no name and no channels they would just be
+    /// empty circles in the list. They arrive properly in GUILD_CREATE.
     pub fn upsert_guild(&mut self, guild: Guild) {
         if guild.unavailable || guild.name.is_empty() {
             return;
         }
         let id = guild.id;
 
-        // ⚠️ **並び順は position、同じなら識別子順。** position が同じ
-        // チャンネルは実在するので、そこで崩れると並びが毎フレーム変わる
+        // By position, ties by id. Equal positions do occur, and without the
+        // tiebreak the list reorders every frame.
         let channels: Vec<Channel> = guild
             .channels
             .into_iter()
-            // ⚠️ **カテゴリも保つ。** 見出しに要る。並べ替えは entries_of が行う
+            // Categories are kept; they are the headings.
             .filter(|c| c.kind.is_text() || c.kind.is_category())
             .collect();
 
-        // ⚠️ 更新のときにチャンネルが空なら、**前のものを残す**。
-        // GUILD_UPDATE は名前だけを持ってくることがある
+        // An update with no channels keeps the previous ones: GUILD_UPDATE
+        // sometimes carries only the name.
         if !channels.is_empty() || !self.guild_channels.contains_key(&id) {
             let ids: Vec<ChannelId> = channels.iter().map(|c| c.id).collect();
             for c in channels {
@@ -555,12 +499,10 @@ impl Store {
             self.guild_channels.insert(id, ids);
         }
 
-        // ⚠️ **空の役職で上書きしない。** `GUILD_UPDATE` は名前だけを
-        // 持ってくることがあり、そのたびにメンバー一覧の見出しが
-        // 識別子に戻ってしまう
+        // Same for roles, or the member list headings fall back to ids.
         if !guild.roles.is_empty() {
-            // ⚠️ **数だけを出す。** 識別子も名前も、どのサーバに入って
-            // いるかを語ってしまう
+            // Counts only: ids and names would reveal which guilds the user
+            // is in.
             tracing::debug!(
                 roles = guild.roles.len(),
                 colored = guild.roles.iter().filter(|r| r.tint().is_some()).count(),
@@ -569,7 +511,7 @@ impl Store {
             self.roles.insert(id, guild.roles);
         }
 
-        // 届いた順を覚える。**並び順が分からないものはこの順に落とす**
+        // Arrival order, which anything unplaced falls back to.
         if !self.arrival.contains(&id) {
             self.arrival.push(id);
         }
@@ -584,27 +526,24 @@ impl Store {
         self.resort();
     }
 
-    /// 過去分を丸ごと置く。**REST から取ってきたもので上書きする**
+    /// Replaces the history with what REST returned.
     pub fn set_backlog(&mut self, channel: ChannelId, list: Vec<Message>) {
         self.messages.insert(channel, list);
     }
 
-    /// 一番古いもの。**続きを頼む起点である**
+    /// The oldest message, which is where paging starts.
     pub fn oldest_message(&self, channel: ChannelId) -> Option<MessageId> {
         self.messages.get(&channel)?.first().map(|m| m.id)
     }
 
-    /// 古いほうを前へ継ぎ足す。**足した件数を返す。**
+    /// Prepends older messages, returning how many were added.
     ///
-    /// `list` は**古い順**で渡すこと。Discord は新しい順で返すので、
-    /// 反転するのは呼び出し側の仕事である ([`gumicord_rest`] と同じ約束)。
+    /// `list` must be oldest first; Discord returns newest first and reversing
+    /// is the caller's job.
     ///
-    /// ⚠️ **既にあるものは足さない。** 遡っている最中に同じ範囲を二度
-    /// 頼むことはあり、そのとき重なった分をそのまま入れると**同じ行が
-    /// 二度出る**。
-    ///
-    /// ⚠️ **まだ開いていないチャンネルには足さない。** 途中だけある
-    /// 歯抜けの履歴になり、間に何があったのかを言えなくなる
+    /// Duplicates are skipped, since paging can request the same range twice.
+    /// Nothing is added to a channel that was never opened, which would leave
+    /// a history with a hole in it.
     pub fn prepend_messages(&mut self, channel: ChannelId, list: Vec<Message>) -> usize {
         let Some(existing) = self.messages.get_mut(&channel) else {
             return 0;
@@ -623,13 +562,11 @@ impl Store {
         added
     }
 
-    /// 新着を末尾に足す。**足したら真。**
+    /// Appends a new message.
     ///
-    /// ⚠️ 開いていないチャンネルの分は溜めない。開いたときに取り直すので、
-    /// ここで持つと二重になる。
-    ///
-    /// ⚠️ 同じものを二度足さない。送った直後は REST の応答と
-    /// `MESSAGE_CREATE` が競る
+    /// Nothing accumulates for unopened channels, which are refetched on open.
+    /// Duplicates are skipped: after sending, the REST reply races the gateway
+    /// echo.
     pub fn push_message(&mut self, message: Message) -> bool {
         let Some(list) = self.messages.get_mut(&message.channel_id) else {
             return false;
@@ -641,18 +578,15 @@ impl Store {
         true
     }
 
-    /// 書き換わった 1 件を差し替える (`FR-024`)。**変わったら真**。
+    /// Replaces an edited message.
     ///
-    /// # ⚠️ 知らない発言を足さない
+    /// Unknown messages are never added: updates arrive for unopened channels
+    /// and for history that was never paged in, and adding one would leave a
+    /// lone row with a gap around it.
     ///
-    /// `MESSAGE_UPDATE` は**開いていないチャンネルのぶんも来る**し、
-    /// 巻き戻して読んでいない古い発言のぶんも来る。手元に無いものを
-    /// ここで足すと、一覧の途中に 1 件だけ飛び地ができる。
-    ///
-    /// ⚠️ **中身が部分的にしか入っていないことがある。** 埋め込みが
-    /// 後から解決されたときの `MESSAGE_UPDATE` は本文を含まない。
-    /// だが Discord は完全な形で送ってくるのが普通なので、丸ごと
-    /// 差し替える。**足りない形が来たら、そこは次の取得で埋まる**
+    /// Replaced wholesale. An update from a late-resolving embed carries no
+    /// body, but Discord normally sends the complete message, and anything
+    /// missing fills in on the next fetch.
     pub fn update_message(&mut self, message: Message) -> bool {
         let Some(list) = self.messages.get_mut(&message.channel_id) else {
             return false;
@@ -664,7 +598,7 @@ impl Store {
         true
     }
 
-    /// 消えた 1 件を取り除く (`FR-024`)。**変わったら真**。
+    /// Removes a deleted message.
     pub fn remove_message(&mut self, channel: ChannelId, id: MessageId) -> bool {
         let Some(list) = self.messages.get_mut(&channel) else {
             return false;
@@ -674,25 +608,22 @@ impl Store {
         before != list.len()
     }
 
-    /// 利用者が Discord で並べ替えた順を教える。
+    /// Sets the order the user arranged in Discord.
     ///
-    /// ⚠️ **名前順ではない。** 自分で並べた順以外で出すと、
-    /// 「自分のサーバ一覧ではない」ものになる。
-    ///
-    /// ここに無いギルドは、届いた順で後ろに続く
+    /// Never by name: any other order stops being their guild list. Guilds not
+    /// listed follow in arrival order.
     pub fn set_preferred_order(&mut self, order: Vec<GuildId>) {
         self.preferred = order;
         self.resort();
     }
 
-    /// いまの並び順。**そのまま保存して次の起動で戻せる**
+    /// The current order, ready to persist.
     pub fn order(&self) -> &[GuildId] {
         &self.order
     }
 
-    /// 並べ直す。
-    ///
-    /// **利用者が並べた順が先、残りは届いた順。** どちらにも名前は使わない
+    /// Reorders: the user's arrangement first, arrival order after. Names are
+    /// never involved.
     fn resort(&mut self) {
         let rank: HashMap<GuildId, usize> = self
             .preferred
@@ -704,8 +635,7 @@ impl Store {
         let mut ids: Vec<GuildId> = self.arrival.to_vec();
         ids.retain(|id| self.guilds.contains_key(id));
 
-        // ⚠️ **安定な並べ替えを使う。** 順が決まっていないもの同士は
-        // 届いた順のままでいてほしい
+        // Stable, so anything unordered keeps its arrival order.
         ids.sort_by_key(|id| rank.get(id).copied().unwrap_or(usize::MAX));
         self.order = ids;
     }
@@ -766,22 +696,20 @@ mod tests {
         }
     }
 
-    /// ⚠️ **手元に無い発言を書き換えで足さない。**
-    ///
-    /// `MESSAGE_UPDATE` は開いていないチャンネルのぶんも、巻き戻して
-    /// 読んでいない古い発言のぶんも来る。足すと一覧の途中に飛び地ができる
+    /// An edit never adds an unknown message, which would leave a lone row
+    /// with a gap around it.
     #[test]
     fn an_edit_never_adds_an_unknown_message() {
         let mut s = Store::new();
         s.set_backlog(ChannelId::from(9u64), vec![message(1, 9)]);
 
-        // 同じチャンネルの、手元に無い発言
+        // An unknown message in the same channel.
         let mut other = message(2, 9);
         other.content = "後から来た".to_owned();
         assert!(!s.update_message(other));
         assert_eq!(s.messages(ChannelId::from(9u64)).len(), 1);
 
-        // そもそも開いていないチャンネル
+        // A channel that was never opened.
         assert!(!s.update_message(message(3, 8)));
         assert!(s.messages(ChannelId::from(8u64)).is_empty());
     }
@@ -796,9 +724,9 @@ mod tests {
         assert!(s.update_message(edited));
 
         let list = s.messages(ChannelId::from(9u64));
-        assert_eq!(list.len(), 2, "件数が変わった");
+        assert_eq!(list.len(), 2, "the count changed");
         assert_eq!(list[0].content, "直した");
-        assert_eq!(list[1].content, "その 2", "隣まで書き換わった");
+        assert_eq!(list[1].content, "その 2", "the neighbour was edited too");
     }
 
     #[test]
@@ -811,12 +739,11 @@ mod tests {
         assert_eq!(s.messages(ch).len(), 1);
         assert_eq!(s.messages(ch)[0].id, MessageId::from(2u64));
 
-        // 2 回消しても落ちない。**変わらなかったと言うだけ**
+        // Deleting twice just reports no change.
         assert!(!s.remove_message(ch, MessageId::from(1u64)));
     }
 
-    /// ⚠️ **ギルドは名前順ではない。** 届いた順のまま出す。
-    /// チャンネルは position 順
+    /// Guilds keep arrival order; channels sort by position.
     #[test]
     fn guilds_keep_their_arrival_order_and_channels_sort_by_position() {
         let mut s = Store::new();
@@ -826,16 +753,16 @@ mod tests {
         ]);
 
         let names: Vec<_> = s.guilds().map(|g| &*g.name).collect();
-        assert_eq!(names, vec!["ばなな", "あんず"], "勝手に名前で並べている");
+        assert_eq!(names, vec!["ばなな", "あんず"], "sorted by name");
 
         let chans: Vec<_> = s
             .channels_of(GuildId::from(2u64))
             .map(|c| c.name.as_deref().unwrap_or(""))
             .collect();
-        assert_eq!(chans, vec!["い", "ろ"], "position 順になっていない");
+        assert_eq!(chans, vec!["い", "ろ"], "not in position order");
     }
 
-    /// 利用者が並べた順が勝つ。**ここに無いものは届いた順で後ろに続く**
+    /// The user's order wins; the rest follow in arrival order.
     #[test]
     fn the_users_own_order_wins() {
         let mut s = Store::new();
@@ -845,15 +772,14 @@ mod tests {
             guild(3, "さん", &[]),
         ]);
 
-        // 3 と 1 だけを並べた。2 は指定が無い
+        // Only 3 and 1 are placed; 2 is unspecified.
         s.set_preferred_order(vec![GuildId::from(3u64), GuildId::from(1u64)]);
 
         let names: Vec<_> = s.guilds().map(|g| &*g.name).collect();
         assert_eq!(names, vec!["さん", "いち", "に"]);
     }
 
-    /// 並び順に、もう居ないギルドが混ざっていても壊れない。
-    /// **保存した順を次の起動で使うので、抜けたサーバが残りうる**
+    /// A saved order can name guilds that have since been left.
     #[test]
     fn a_stale_order_does_not_resurrect_guilds() {
         let mut s = Store::new();
@@ -865,7 +791,7 @@ mod tests {
         assert_eq!(s.order().len(), 1);
     }
 
-    /// カテゴリは見出しとして出て、その中身が続く
+    /// A category is a heading, followed by its contents.
     #[test]
     fn categories_come_out_as_headings_with_their_channels() {
         use gumicord_model::ChannelKind;
@@ -874,7 +800,7 @@ mod tests {
         g.channels.push(Channel {
             id: 20u64.into(),
             kind: ChannelKind::GuildCategory,
-            name: Some("カテゴリ".to_owned()),
+            name: Some("category".to_owned()),
             guild_id: Some(1u64.into()),
             parent_id: None,
             position: 1,
@@ -906,14 +832,13 @@ mod tests {
                 ChannelEntry::Channel(c) => c.display_name(),
             })
             .collect();
-        assert_eq!(got, vec!["そとがわ", "[カテゴリ]", "なかみ"]);
+        assert_eq!(got, vec!["そとがわ", "[category]", "なかみ"]);
 
-        // 見出しは開けるものではない
+        // A heading is not openable.
         assert_eq!(s.channels_of(GuildId::from(1u64)).count(), 2);
     }
 
-    /// ⚠️ **空のカテゴリも出す。** Discord がそうしている。
-    /// 見えているのに一覧に無いと、設定を間違えたのかと思わせる
+    /// Empty categories still appear, as in Discord.
     #[test]
     fn an_empty_category_is_still_shown() {
         use gumicord_model::ChannelKind;
@@ -938,23 +863,23 @@ mod tests {
         let got: Vec<_> = s.entries_of(GuildId::from(1u64)).collect();
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ChannelEntry::Category(_)));
-        // **見出しは開けるものではない**
+        // A heading is not openable.
         assert_eq!(s.channels_of(GuildId::from(1u64)).count(), 0);
     }
 
-    /// **チャンネルは 1 箇所にしかない。** 同じものが 2 つの形で存在すると、
-    /// 食い違ったときにどちらが正しいか決められなくなる
+    /// A channel exists once; two copies leave no way to resolve a
+    /// disagreement.
     #[test]
     fn a_channel_lives_in_exactly_one_place() {
         let mut s = Store::new();
         s.replace_guilds(vec![guild(1, "あ", &[(10, "い", 0)])]);
 
-        let c = s.channel(ChannelId::from(10u64)).expect("引けない");
+        let c = s.channel(ChannelId::from(10u64)).expect("not found");
         assert_eq!(c.name.as_deref(), Some("い"));
         assert_eq!(s.channels_of(GuildId::from(1u64)).count(), 1);
     }
 
-    /// GUILD_UPDATE がチャンネルを持ってこなくても、前のものを失わない
+    /// A GUILD_UPDATE without channels keeps the previous ones.
     #[test]
     fn an_update_without_channels_keeps_the_old_ones() {
         let mut s = Store::new();
@@ -969,7 +894,7 @@ mod tests {
         );
     }
 
-    /// 殻だけのギルドは採らない
+    /// Shells are rejected.
     #[test]
     fn a_shell_guild_is_not_shown() {
         let mut s = Store::new();
@@ -984,7 +909,7 @@ mod tests {
         assert_eq!(s.guilds().count(), 0);
     }
 
-    /// 「空」と「まだ読んでいない」は別のものである
+    /// "Empty" is not "not fetched".
     #[test]
     fn empty_and_unread_are_different() {
         let mut s = Store::new();
@@ -992,11 +917,11 @@ mod tests {
         assert!(!s.has_messages(ch));
 
         s.set_backlog(ch, Vec::new());
-        assert!(s.has_messages(ch), "取り終えたことが分からない");
+        assert!(s.has_messages(ch), "cannot tell it was fetched");
         assert!(s.messages(ch).is_empty());
     }
 
-    /// 開いていないチャンネルの新着は溜めない
+    /// Nothing accumulates for unopened channels.
     #[test]
     fn a_message_for_an_unopened_channel_is_dropped() {
         let mut s = Store::new();
@@ -1004,7 +929,7 @@ mod tests {
         assert!(s.messages(ChannelId::from(99u64)).is_empty());
     }
 
-    /// 同じものを二度足さない
+    /// Duplicates are skipped.
     #[test]
     fn the_same_message_is_not_added_twice() {
         let mut s = Store::new();
@@ -1016,7 +941,7 @@ mod tests {
         assert_eq!(s.messages(ch).len(), 1);
     }
 
-    /// 遡った分は**前へ**付く。順は古いままである
+    /// An older page prepends and keeps its order.
     #[test]
     fn older_messages_go_in_front() {
         let mut s = Store::new();
@@ -1034,8 +959,7 @@ mod tests {
         assert_eq!(s.oldest_message(ch), Some(MessageId::from(3u64)));
     }
 
-    /// ⚠️ **重なった分は捨てる。** 同じ範囲を二度頼むことはあり、
-    /// そのまま入れると同じ行が二度出る
+    /// Overlap is dropped: the same range can be requested twice.
     #[test]
     fn an_overlapping_page_does_not_duplicate_rows() {
         let mut s = Store::new();
@@ -1050,7 +974,7 @@ mod tests {
         assert_eq!(ids, vec![3, 4, 5]);
     }
 
-    /// ⚠️ **開いていないチャンネルには足さない。** 歯抜けの履歴になる
+    /// Nothing is added to a channel that was never opened.
     #[test]
     fn a_channel_that_was_never_opened_gets_nothing() {
         let mut s = Store::new();
@@ -1098,13 +1022,13 @@ mod folder_tests {
     fn folder(id: u64, guilds: &[u64]) -> FolderRow {
         FolderRow {
             id: Some(id),
-            name: Some(format!("フォルダ{id}")),
+            name: Some(format!("folder{id}")),
             color: None,
             guilds: guilds.iter().map(|g| GuildId::from(*g)).collect(),
         }
     }
 
-    /// フォルダに入れていないサーバ。**同じ列に入る**
+    /// An unfoldered guild, in the same list.
     fn bare(guild: u64) -> FolderRow {
         FolderRow {
             id: None,
@@ -1130,48 +1054,46 @@ mod folder_tests {
             .collect()
     }
 
-    /// 並びを知らないなら、届いた順のただの列である
+    /// With no known order, arrival order, flat.
     #[test]
     fn without_a_sidebar_it_is_a_flat_list() {
         let s = store();
         assert_eq!(shape(&s), vec!["いち", "に", "さん"]);
     }
 
-    /// ⚠️ **フォルダの位置が保たれる。**
-    ///
-    /// 単独のサーバを末尾へ寄せていたせいで、利用者が並べた位置が
-    /// 失われていた
+    /// Folder positions survive. Collecting lone guilds at the end used to
+    /// lose the order the user arranged.
     #[test]
     fn a_folder_keeps_its_place_in_the_list() {
         let mut s = store();
-        // 「いち」→ フォルダ →「さん」の順に並べてある
+        // Ordered: first guild, folder, third guild.
         s.set_sidebar(vec![bare(1), folder(10, &[2]), bare(3)]);
 
-        assert_eq!(shape(&s), vec!["いち", "[フォルダ10]", "  に", "さん"]);
+        assert_eq!(shape(&s), vec!["いち", "[folder10]", "  に", "さん"]);
     }
 
-    /// ⚠️ **閉じたら中身は出さない。** 出すと折り畳む意味がない
+    /// A folded folder emits no contents.
     #[test]
     fn a_collapsed_folder_hides_its_guilds() {
         let mut s = store();
         s.set_sidebar(vec![bare(1), folder(10, &[2, 3])]);
 
-        assert!(!s.toggle_folder(10), "閉じたはず");
-        assert_eq!(shape(&s), vec!["いち", "[フォルダ10]"]);
+        assert!(!s.toggle_folder(10), "should have folded");
+        assert_eq!(shape(&s), vec!["いち", "[folder10]"]);
 
-        assert!(s.toggle_folder(10), "開いたはず");
+        assert!(s.toggle_folder(10), "should have unfolded");
         assert_eq!(shape(&s).len(), 4);
     }
 
-    /// 抜けたサーバが並びに残っていても、一覧には出さない
+    /// A guild left behind in a saved order does not appear.
     #[test]
     fn a_sidebar_referring_to_a_missing_guild_skips_it() {
         let mut s = store();
         s.set_sidebar(vec![folder(10, &[2, 999]), bare(1), bare(3)]);
-        assert_eq!(shape(&s), vec!["[フォルダ10]", "  に", "いち", "さん"]);
+        assert_eq!(shape(&s), vec!["[folder10]", "  に", "いち", "さん"]);
     }
 
-    /// **新しく入ったサーバは末尾に出る。** 並びにはまだ載っていない
+    /// A newly joined guild lands at the end, being unplaced.
     #[test]
     fn a_guild_missing_from_the_sidebar_still_appears() {
         let mut s = store();
@@ -1179,7 +1101,7 @@ mod folder_tests {
         assert_eq!(shape(&s), vec!["いち", "に", "さん"]);
     }
 
-    /// 閉じている印は**保存して戻せる**
+    /// The folded state round-trips.
     #[test]
     fn the_collapsed_set_round_trips() {
         let mut s = store();
@@ -1223,30 +1145,27 @@ mod tint_tests {
         s
     }
 
-    /// ⚠️ **一番上の「色を付けている」役職が勝つ。**
-    ///
-    /// 色を付けていない役職が上にあっても、名前の色は下の色付き役職から
-    /// 来る。Discord もそうしている
+    /// The topmost coloured role wins; an uncoloured one above it does not
+    /// take the colour away.
     #[test]
     fn the_highest_coloured_role_wins_not_the_highest_role() {
         let s = store(vec![
             role(10, 1, 0x0000_ff00),
-            // 上にあるが色を付けていない
+            // Above, but uncoloured.
             role(20, 5, 0),
         ]);
         let mine = [RoleId::from(10u64), RoleId::from(20u64)];
         assert_eq!(s.member_tint(1u64.into(), &mine), Some(0x0000_ff00));
     }
 
-    /// ⚠️ **0 は黒ではない。** 黒く塗ると全員の名前が読めなくなる
+    /// Zero is not black; painting it black makes every name unreadable.
     #[test]
     fn a_role_without_a_colour_gives_nothing() {
         let s = store(vec![role(10, 1, 0)]);
         assert_eq!(s.member_tint(1u64.into(), &[RoleId::from(10u64)]), None);
     }
 
-    /// ⚠️ **知らない役職は飛ばす。** ギルドがまだ届いていないときに
-    /// 順を勝手に決めない
+    /// Unknown roles are skipped rather than guessed at.
     #[test]
     fn an_unknown_role_is_skipped() {
         let s = store(vec![role(10, 1, 0x0000_ff00)]);
@@ -1254,8 +1173,8 @@ mod tint_tests {
         assert_eq!(s.member_tint(2u64.into(), &[RoleId::from(10u64)]), None);
     }
 
-    /// ⚠️ **空の役職で上書きしない。** `GUILD_UPDATE` は名前だけを持って
-    /// くることがあり、そのたびに色と見出しが消えてしまう
+    /// An update with no roles keeps the previous ones, or colours and
+    /// headings vanish.
     #[test]
     fn an_update_without_roles_keeps_the_old_ones() {
         let mut s = store(vec![role(10, 1, 0x0000_ff00)]);
@@ -1273,7 +1192,7 @@ mod tint_tests {
         );
     }
 
-    /// フォルダの色は識別子で引ける
+    /// A folder's colour is looked up by id.
     #[test]
     fn a_folder_carries_its_colour() {
         let mut s = Store::new();
@@ -1359,7 +1278,7 @@ mod unread_tests {
         }
     }
 
-    /// 読んだ印より新しい発言があれば未読
+    /// Anything above the marker is unread.
     #[test]
     fn newer_than_the_mark_is_unread() {
         let mut s = store(vec![channel(10, Some(100))]);
@@ -1381,20 +1300,18 @@ mod unread_tests {
                 mentions: 0,
             },
         )]);
-        assert!(!s.is_unread(ch), "同じところまで読んでいる");
+        assert!(!s.is_unread(ch), "read up to the same point");
     }
 
-    /// ⚠️ **一度も読んでいないチャンネルを未読にしない。**
-    ///
-    /// 入ったばかりのサーバは全チャンネルが印なしで来る。未読にすると
-    /// **入った瞬間に全部が光る**
+    /// A never-read channel is not unread, or joining a guild lights up every
+    /// channel in it.
     #[test]
     fn a_channel_we_never_read_is_not_unread() {
         let s = store(vec![channel(10, Some(100))]);
         assert!(!s.is_unread(ChannelId::from(10u64)));
     }
 
-    /// サーバの印は**中のチャンネルを畳んだもの**である
+    /// A guild's state rolls up from its channels.
     #[test]
     fn a_guild_folds_up_its_channels() {
         let mut s = store(vec![channel(10, Some(100)), channel(11, Some(200))]);
@@ -1418,7 +1335,7 @@ mod unread_tests {
         assert_eq!(s.guild_unread(GuildId::from(1u64)), (true, 3));
     }
 
-    /// 開いたら既読になる。**名指しの数も消える**
+    /// Opening marks it read and clears the mention count.
     #[test]
     fn opening_a_channel_clears_it() {
         let mut s = store(vec![channel(10, Some(100))]);
@@ -1437,7 +1354,8 @@ mod unread_tests {
         assert!(!s.mark_read(ch), "2 度目は何も変わらない");
     }
 
-    /// 新しい発言が来たらチャンネルの先端が進み、自分宛てなら数が増える
+    /// A new message advances the newest id, and counts a mention when it
+    /// names us.
     #[test]
     fn an_arrival_moves_the_head_and_counts_mentions() {
         let mut s = store(vec![channel(10, Some(100))]);
@@ -1460,8 +1378,7 @@ mod unread_tests {
         assert_eq!(s.mentions(ch), 1);
     }
 
-    /// ⚠️ **自分の発言は自分宛てに数えない。**
-    /// 返信に自分を含めることはよくある
+    /// Our own messages never count; replies routinely include the sender.
     #[test]
     fn my_own_message_never_mentions_me() {
         let mut s = store(vec![channel(10, Some(100))]);
@@ -1471,7 +1388,7 @@ mod unread_tests {
         assert_eq!(s.mentions(ChannelId::from(10u64)), 0);
     }
 
-    /// ⚠️ **先端を戻さない。** 遅れて届いた古いものが混ざることがある
+    /// The newest id never moves backwards; older messages arrive late.
     #[test]
     fn a_late_old_message_does_not_move_the_head_back() {
         let mut s = store(vec![channel(10, Some(100))]);
