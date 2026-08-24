@@ -16,7 +16,7 @@ The fastest and customizable discord unofficial client
 ## Installing / Uninstalling
 
 > [!CAUTION]
-> That section is currently under preparation.
+> The section is currently under preparation.
 
 ## Build
 
