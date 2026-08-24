@@ -1,62 +1,51 @@
-//! メンバー一覧 (`GUILD_MEMBER_LIST_UPDATE`)。
+//! The member list.
 //!
-//! # ⚠️ 全員は来ない。**見えている範囲だけ**が来る
-//!
-//! 何万人も入っているサーバがある以上、全員を送るという設計にはなって
-//! いない。`op 14` で「何番目から何番目が要る」と頼み、Discord はその
-//! 範囲の**行**を送ってくる ([`crate::Subscriptions`])。
-//!
-//! ⚠️ **1 回に頼めるのは 3 範囲まで。** 公式クライアントもそうしており、
-//! それより多いと黙って無視される。100 人ずつなので 300 人までである。
+//! Never everyone: guilds run to tens of thousands, so the subscription asks
+//! for a range of rows and only those arrive. Three ranges at most, as the
+//! official client sends; more are silently ignored.
 //!
 //! ```text
-//!   [見出し] 管理者 (2)     ← group
-//!     ねんねこ              ← member
-//!     すぴき
-//!   [見出し] オンライン (5)
+//!   [heading] Admins (2)     group
+//!     someone                member
+//!     someone else
+//!   [heading] Online (5)
 //!     ...
 //! ```
 //!
-//! **見出しも 1 行として番号を持つ。** 差分の `index` は見出しを含めた
-//! 通し番号なので、見出しを別扱いにすると位置が全部ずれる。
+//! Headings are rows too: a diff's index counts them, so treating them
+//! separately shifts every position.
 //!
-//! # 差分で来る
+//! Updates arrive as diffs:
 //!
-//! | `op` | 意味 |
+//! | `op` | meaning |
 //! |---|---|
-//! | `SYNC` | その範囲を丸ごと置き換える。**最初に来るのはこれ** |
-//! | `INSERT` | その位置に 1 行入る |
-//! | `UPDATE` | その位置の 1 行が変わる |
-//! | `DELETE` | その位置の 1 行が消える |
-//! | `INVALIDATE` | もう信用できない。**頼み直すまで出さない** |
+//! | `SYNC` | replaces a whole range; the first thing to arrive |
+//! | `INSERT` | one row appears at a position |
+//! | `UPDATE` | one row changes |
+//! | `DELETE` | one row goes |
+//! | `INVALIDATE` | no longer trustworthy; show nothing until refetched |
 //!
-//! ⚠️ **`INSERT` を「足す」だけにしてはいけない。** 位置が指定されている
-//! のは、そこに入ることで**後ろが全部 1 つずつ下がる**からである。
+//! An insert is not an append: the position is given because everything after
+//! it shifts down.
 //!
-//! # 見出しの名前はここでは分からない
+//! A heading's id is `online`, `offline`, or a role id. Only the guild knows
+//! role names, so resolving them is the caller's job and ids pass through
+//! here.
 //!
-//! 見出しの識別子は `"online"` `"offline"` か、**役職の識別子**である。
-//! 役職の名前を持っているのはギルドのほうなので、名前に直すのは
-//! 呼び出し側の仕事である。ここは識別子のまま渡す。
-//!
-//! # まだできないこと
-//!
-//! | | いつ |
+//! Not possible yet:
 //! |---|---|
-//! | 300 番目より下を出す | 巻いた先を `op 14` で頼み直していない |
-//! | 一覧から人を押す | プロフィールが無い |
-//!
-//! 出典: <https://docs.discord.food/topics/gateway-events#guild-member-list-update>
+//! - showing past the requested ranges, which needs re-subscribing on scroll
+//! - pressing a person, which needs a profile view
 
 use gumicord_model::{GuildId, Member};
 use serde_json::Value;
 
 use crate::status::Status;
 
-/// メンバー一覧の 1 行。**見出しも 1 行である**
+/// One row; headings are rows too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberRow {
-    /// 見出し。`id` は `"online"` / `"offline"` か**役職の識別子**
+    /// A heading; the id is `online`, `offline`, or a role id.
     Group {
         id: String,
         count: u32,
@@ -64,21 +53,21 @@ pub enum MemberRow {
     Member(Box<MemberEntry>),
 }
 
-/// 一覧に出す人 1 人。
+/// One person in the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberEntry {
-    /// ⚠️ `user` は必ず入っている。**入っていない行は捨てる** —
-    /// 誰か分からない行を出しても、利用者にできることが増えない
+    /// Always present; rows without one are dropped, since a row for nobody
+    /// gives the reader nothing to act on.
     pub member: Member,
-    /// ⚠️ **居ないことと分からないことを混ぜない。** `presence` が
-    /// 無い行は、Discord が「オフラインの群」として送ってきたものである
+    /// Absent presence means offline, which Discord sends as its own group;
+    /// it does not mean unknown.
     pub status: Status,
 }
 
-/// 一覧への差分 1 つ。
+/// One diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListOp {
-    /// `start` 番目からを、この行で置き換える
+    /// Replaces from `start` with these rows.
     Sync {
         start: usize,
         rows: Vec<MemberRow>,
@@ -94,22 +83,22 @@ pub enum ListOp {
     Delete {
         at: usize,
     },
-    /// もう信用できない。**空にする**
+    /// No longer trustworthy; clear it.
     Invalidate,
 }
 
-/// 1 回の `GUILD_MEMBER_LIST_UPDATE`。
+/// One update event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberListUpdate {
     pub guild: GuildId,
-    /// いまオンラインの人数。**行の数ではない** — 見えている範囲の外も数える
+    /// How many are online, counting past the requested range.
     pub online: u32,
-    /// 入っている人数
+    /// How many are in the guild.
     pub total: u32,
     pub ops: Vec<ListOp>,
 }
 
-/// 保っている一覧。**差分を当てていく先**
+/// The list the diffs apply to.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberList {
     rows: Vec<MemberRow>,
@@ -118,12 +107,12 @@ pub struct MemberList {
 }
 
 impl MemberList {
-    /// 見えている行。**見出しも混ざる**
+    /// The rows held, headings included.
     pub fn rows(&self) -> &[MemberRow] {
         &self.rows
     }
 
-    /// いまオンラインの人数。**見えている範囲の外も数えた値である**
+    /// How many are online, counting past the requested range.
     pub fn online(&self) -> u32 {
         self.online
     }
@@ -136,11 +125,11 @@ impl MemberList {
         self.rows.is_empty()
     }
 
-    /// 差分を当てる。**変わったら真**。
+    /// Applies a diff.
     ///
-    /// ⚠️ **範囲の外を指す差分は捨てる。** 頼んだ範囲より下の出来事が
-    /// 混ざって来ることがあり、そのまま入れると**持っていない場所の
-    /// 続きとして行が生える**
+    /// Diffs pointing outside what is held are dropped: events from below the
+    /// requested range do arrive, and applying them grows rows as if they
+    /// continued from somewhere we never had.
     pub fn apply(&mut self, update: MemberListUpdate) -> bool {
         let mut changed = self.online != update.online || self.total != update.total;
         self.online = update.online;
@@ -154,8 +143,8 @@ impl MemberList {
                     had
                 }
                 ListOp::Sync { start, rows } => {
-                    // ⚠️ **飛び地を作らない。** 持っている行の続きでない
-                    // ところから同期が来たら、間が埋まらないまま繋がる
+                    // A sync that does not continue what is held would join
+                    // across a gap.
                     if start > self.rows.len() {
                         continue;
                     }
@@ -193,15 +182,14 @@ impl MemberList {
     }
 }
 
-/// `GUILD_MEMBER_LIST_UPDATE` を読む。**読めなければ `None`**
+/// Parses an update event.
 pub fn parse(data: &Value) -> Option<MemberListUpdate> {
     let guild = data.get("guild_id")?.as_str()?.parse::<u64>().ok()?;
 
-    // ⚠️ **人数は上の `groups` が持っていることがある。**
+    // The counts often live in the top-level groups.
     //
-    // 差分の中の見出しは `{"id": …}` だけで来ることがあり、そのまま
-    // 読むと**どの見出しも「0 人」になる**。実機でそうなった。
-    // 同じ知らせの中にある一覧のほうを先に見る
+    // A heading inside a diff can arrive as an id alone, and reading that
+    // directly reports every heading as empty. It did.
     let counts = group_counts(data);
 
     let ops = data
@@ -219,7 +207,7 @@ pub fn parse(data: &Value) -> Option<MemberListUpdate> {
     })
 }
 
-/// 上の `groups` から「見出しの識別子 → 人数」。**無ければ空**
+/// Heading ids to counts, from the top-level groups.
 fn group_counts(data: &Value) -> std::collections::HashMap<&str, u32> {
     let Some(groups) = data.get("groups").and_then(Value::as_array) else {
         return std::collections::HashMap::new();
@@ -243,8 +231,8 @@ fn op(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<List
 
     match raw.get("op")?.as_str()? {
         "SYNC" => {
-            // `range` は [開始, 終了]。**終了は使わない** — 実際に
-            // 来た行の数が本当のことである
+            // The end of the range is ignored; the rows that arrived are the
+            // truth.
             let start = raw
                 .get("range")
                 .and_then(Value::as_array)
@@ -269,8 +257,8 @@ fn op(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<List
         }),
         "DELETE" => Some(ListOp::Delete { at: index()? }),
         "INVALIDATE" => Some(ListOp::Invalidate),
-        // ⚠️ **知らない `op` を推測しない。** 位置をずらす種類のものだと
-        // 一覧全体が黙って狂う
+        // Unknown ops are never guessed at: one that shifts positions would
+        // silently corrupt the whole list.
         other => {
             tracing::debug!(op = other, "知らないメンバー一覧の差分。飛ばす");
             None
@@ -281,7 +269,7 @@ fn op(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<List
 fn row(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<MemberRow> {
     if let Some(group) = raw.get("group") {
         let id = group.get("id")?.as_str()?;
-        // 上の一覧が知っていればそちら。**同じ知らせの中の値である**
+        // Prefer the top-level count, from the same event.
         let count = counts
             .get(id)
             .copied()
@@ -294,11 +282,10 @@ fn row(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<Mem
 
     let raw = raw.get("member")?;
     let member: Member = serde_json::from_value(raw.clone()).ok()?;
-    // 誰か分からない行は出さない
+    // Rows for nobody are dropped.
     member.user.as_ref()?;
 
-    // ⚠️ **`presence` が無ければオフラインである。** Discord は
-    // オフラインの人に `presence` を付けない
+    // No presence means offline; Discord omits it for offline members.
     let status = raw
         .pointer("/presence/status")
         .and_then(Value::as_str)
@@ -343,7 +330,7 @@ mod tests {
             .collect()
     }
 
-    /// 見出しと人が**同じ列**として並ぶ
+    /// Headings and people share one list.
     #[test]
     fn headings_and_people_share_one_list() {
         let raw = sync(vec![
@@ -360,7 +347,7 @@ mod tests {
         assert_eq!(list.total(), 30);
     }
 
-    /// ⚠️ **`presence` が無ければオフライン。** 分からないことにしない
+    /// No presence means offline, not unknown.
     #[test]
     fn a_member_without_a_presence_is_offline() {
         let raw = sync(vec![member("ねんねこ", None)]);
@@ -373,7 +360,7 @@ mod tests {
         assert_eq!(m.status, Status::Offline);
     }
 
-    /// ⚠️ **`INSERT` は後ろを押し下げる。** 足すだけにすると順が狂う
+    /// An insert shifts everything after it.
     #[test]
     fn an_insert_pushes_the_rest_down() {
         let mut list = MemberList::default();
@@ -389,7 +376,7 @@ mod tests {
         assert_eq!(names(&list), vec!["いち", "に", "さん"]);
     }
 
-    /// `DELETE` は詰める。`UPDATE` はその場だけ差し替える
+    /// A delete closes the gap; an update replaces in place.
     #[test]
     fn delete_closes_the_gap_and_update_stays_put() {
         let mut list = MemberList::default();
@@ -417,8 +404,7 @@ mod tests {
         assert_eq!(names(&list), vec!["に", "さんかい"]);
     }
 
-    /// ⚠️ **範囲の外を指す差分は捨てる。** 持っていない場所の続きとして
-    /// 行が生えると、そこから下が全部ずれる
+    /// Diffs outside what is held are dropped, or everything below shifts.
     #[test]
     fn an_op_beyond_what_we_hold_is_dropped() {
         let mut list = MemberList::default();
@@ -438,10 +424,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ **見出しの人数は上の `groups` から拾う。**
-    ///
-    /// 差分の中の見出しが `{"id": …}` だけで来ると、そのまま読んだ人数は
-    /// 全部 0 になる。実機で**どの見出しも「0 人」と出た**
+    /// Counts come from the top-level groups; a heading inside a diff can
+    /// arrive as an id alone, and every heading then reads as empty.
     #[test]
     fn a_heading_without_a_count_borrows_it_from_the_summary() {
         let raw = json!({
@@ -461,7 +445,7 @@ mod tests {
         assert_eq!(names(&list), vec!["[55 2]", "ねんねこ", "[online 5]"]);
     }
 
-    /// 上の一覧に無い見出しは、**行が持っている人数をそのまま使う**
+    /// A heading absent from the top-level list keeps its own count.
     #[test]
     fn a_heading_missing_from_the_summary_keeps_its_own_count() {
         let raw = json!({
@@ -479,7 +463,7 @@ mod tests {
         assert_eq!(names(&list), vec!["[55 3]"]);
     }
 
-    /// `INVALIDATE` が来たら**空にする**。古いものを出し続けない
+    /// An invalidate clears the list rather than showing stale rows.
     #[test]
     fn invalidate_empties_the_list() {
         let mut list = MemberList::default();
@@ -493,7 +477,7 @@ mod tests {
         assert!(list.is_empty());
     }
 
-    /// ⚠️ **知らない `op` を推測しない。** 位置をずらす種類だと黙って狂う
+    /// Unknown ops are never guessed at.
     #[test]
     fn an_unknown_op_is_skipped_not_guessed() {
         let raw = json!({
@@ -504,7 +488,7 @@ mod tests {
         assert!(update.ops.is_empty());
     }
 
-    /// ⚠️ **壊れた入力で落ちない。** 設定と同じで、他人が作ったものである
+    /// Malformed input does not panic; this comes from elsewhere.
     #[test]
     fn rubbish_does_not_panic() {
         assert!(parse(&json!({})).is_none());
