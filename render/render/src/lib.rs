@@ -25,10 +25,10 @@ pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState};
 pub use motion::Motion;
 pub use text::ImageData;
 
-use gumicord_uitree::{Key, NodeId, UiNode};
+use gumicord_uitree::{Content, Key, NodeId, UiNode};
 
 use crate::gpu::Gpu;
-use crate::text::TextEngine;
+use crate::text::{RunRect, Shaper, TextEngine};
 
 /// What one frame drew, for watching performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,36 @@ pub struct Hit {
     pub rect: Rect,
     /// Anything outside this does not hit; a row scrolled out of view must
     /// not respond.
+    pub clip: Option<Rect>,
+}
+
+/// One pressable run of text.
+///
+/// A link lives inside a [`Content::Rich`] node and must not become a node of
+/// its own — siblings wrap independently, which would break the line. So the
+/// press target is recovered from shaping instead: one rect per line the run
+/// landed on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkHit {
+    pub url: String,
+    /// Logical px from the window's top left, over exactly what was drawn.
+    pub rect: Rect,
+    pub clip: Option<Rect>,
+}
+
+/// One covered spoiler run, which pressing opens.
+///
+/// The same shape problem as a link's, answered the same way. The run is
+/// named by its message and its place among that message's spoiler runs,
+/// because those are what survive a redraw — the rects do not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpoilerHit {
+    /// The `data` of the node carrying it; a message's id here.
+    pub owner: u64,
+    /// Which spoiler run of that message, counting every one whether open or
+    /// not.
+    pub no: usize,
+    pub rect: Rect,
     pub clip: Option<Rect>,
 }
 
@@ -84,6 +114,10 @@ pub struct Renderer {
     scroll: ScrollState,
     /// The previous frame's layout, for hit testing.
     hits: Vec<Hit>,
+    /// The previous frame's pressable runs, for link presses and hover.
+    links: Vec<LinkHit>,
+    /// The previous frame's covered spoiler runs, for opening one alone.
+    spoilers: Vec<SpoilerHit>,
     /// Overflow per scroll region.
     overflow: std::collections::HashMap<NodeId, f32>,
     /// Scrollbars placed last frame.
@@ -116,6 +150,8 @@ impl Renderer {
             scale,
             scroll: ScrollState::new(),
             hits: Vec::new(),
+            links: Vec::new(),
+            spoilers: Vec::new(),
             overflow: std::collections::HashMap::new(),
             scrollbars: Vec::new(),
             keep_place: None,
@@ -293,6 +329,13 @@ impl Renderer {
             rect: p.rect,
             clip: p.clip,
         }));
+        // Shaping already happened in layout; this only reads the cache.
+        self.links.clear();
+        self.spoilers.clear();
+        let shaper = self.text.shaper();
+        let (links, spoilers) = collect_pressables(&layout.placed, self.scale, shaper);
+        self.links.extend(links);
+        self.spoilers.extend(spoilers);
         self.overflow.clone_from(&layout.overflow);
         self.scrollbars.clone_from(&layout.scrollbars);
 
@@ -330,6 +373,124 @@ impl Renderer {
             .rev()
             .filter(move |h| h.rect.contains(x, y) && h.clip.is_none_or(|c| c.contains(x, y)))
     }
+
+    /// The link under a point, if any, against the last frame's layout.
+    ///
+    /// Whatever was drawn last wins, so an overlap answers with the front one.
+    pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+        link_hit(&self.links, x, y).map(|l| l.url.as_str())
+    }
+
+    /// The covered spoiler run under a point: which message and which of its
+    /// spoiler runs. An open one still answers here — pressing again covers
+    /// it — but its link, if any, answers to [`Self::link_at`] instead.
+    pub fn spoiler_at(&self, x: f32, y: f32) -> Option<(u64, usize)> {
+        spoiler_hit(&self.spoilers, x, y).map(|s| (s.owner, s.no))
+    }
+}
+
+/// Collects the pressable runs from one frame's layout.
+///
+/// Runs were already shaped during layout, so this is a cache lookup per text
+/// node that carries any. The rects land where drawing puts them: same wrap
+/// width, same vertical centring.
+///
+/// Spoiler runs are numbered while walking in draw order, which is the order
+/// the builder produced them in — that is what makes the numbers two sides
+/// agree on.
+fn collect_pressables(
+    placed: &[layout::Placed<'_>],
+    scale: f32,
+    shaper: &mut Shaper,
+) -> (Vec<LinkHit>, Vec<SpoilerHit>) {
+    let mut links = Vec::new();
+    let mut spoilers: Vec<SpoilerHit> = Vec::new();
+    // Spoiler runs numbered so far, per message. A run that wrapped has one
+    // rect per line but one number.
+    let mut numbered: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for p in placed {
+        let Content::Rich(spans) = &p.node.content else {
+            continue;
+        };
+        let owner = p.node.data.as_ref().map(|d| d.id);
+        if !spans.iter().any(|s| s.link.is_some() || s.hidden) {
+            continue;
+        }
+
+        // Numbered whether open or not, in span order, so an opened one
+        // cannot reshuffle its neighbours; and only where a name exists to
+        // hang the state on.
+        let mut numbers: Vec<(usize, usize)> = Vec::new();
+        if let Some(owner) = owner {
+            let next = numbered.entry(owner).or_default();
+            for (i, s) in spans.iter().enumerate() {
+                if s.hidden {
+                    numbers.push((i, *next));
+                    *next += 1;
+                }
+            }
+        }
+
+        let runs = draw::rich_runs(spans, &p.node.style);
+        // The same wrap width drawing used, or the lines differ.
+        let max_w = p.inner.w.is_finite().then_some(p.inner.w);
+        let (size, run_rects): (_, Vec<RunRect>) = {
+            let shaped = shaper.shape_rich(&runs, max_w);
+            (shaped.size, shaped.runs.clone())
+        };
+        // Drawing centres the block when the box is taller than the text.
+        let oy = p.inner.y + ((p.inner.h - size.h) * 0.5).max(0.0);
+        for r in run_rects {
+            let Some(sp) = spans.get(r.run as usize) else {
+                continue;
+            };
+            let rect = Rect {
+                x: p.inner.x + r.rect.x / scale,
+                y: oy + r.rect.y / scale,
+                w: r.rect.w / scale,
+                h: r.rect.h / scale,
+            };
+            // A covered run keeps its space but is not pressable as a link
+            // until it is open.
+            if let Some(url) = &sp.link
+                && !sp.concealed()
+            {
+                links.push(LinkHit {
+                    url: url.clone(),
+                    rect,
+                    clip: p.clip,
+                });
+            }
+            if sp.hidden
+                && let Some(owner) = owner
+                && let Some((_, no)) = numbers.iter().find(|(i, _)| *i == r.run as usize)
+            {
+                spoilers.push(SpoilerHit {
+                    owner,
+                    no: *no,
+                    rect,
+                    clip: p.clip,
+                });
+            }
+        }
+    }
+    (links, spoilers)
+}
+
+/// The frontmost link holding a point.
+fn link_hit(links: &[LinkHit], x: f32, y: f32) -> Option<&LinkHit> {
+    links
+        .iter()
+        .rev()
+        .find(|l| l.rect.contains(x, y) && l.clip.is_none_or(|c| c.contains(x, y)))
+}
+
+/// The frontmost covered spoiler run holding a point; same rules as links.
+fn spoiler_hit(spoilers: &[SpoilerHit], x: f32, y: f32) -> Option<&SpoilerHit> {
+    spoilers
+        .iter()
+        .rev()
+        .find(|s| s.rect.contains(x, y) && s.clip.is_none_or(|c| c.contains(x, y)))
 }
 
 /// The colour before the first frame; the theme covers it immediately.
@@ -388,4 +549,237 @@ pub fn layout_for_test(
     let mut shaper = crate::text::Shaper::new(1.0);
     let r = crate::layout::layout(tree, viewport, &mut shaper, &ScrollState::default());
     r.placed.iter().map(|p| (p.node.id, p.rect)).collect()
+}
+
+#[cfg(test)]
+mod press_tests {
+    use super::*;
+    use gumicord_uitree::{NodeId, Span};
+
+    fn span(text: &str, url: Option<&str>, hidden: bool) -> Span {
+        Span {
+            text: text.to_owned(),
+            link: url.map(str::to_owned),
+            hidden,
+            ..Span::default()
+        }
+    }
+
+    /// Marks a covered run as opened; pressing it again covers it back.
+    fn opened(mut s: Span) -> Span {
+        s.revealed = true;
+        s
+    }
+
+    fn pressables_for(tree: &UiNode, viewport: (f32, f32)) -> (Vec<LinkHit>, Vec<SpoilerHit>) {
+        let mut shaper = Shaper::new(1.0);
+        let l = layout::layout(
+            tree,
+            Size::new(viewport.0, viewport.1),
+            &mut shaper,
+            &ScrollState::default(),
+        );
+        collect_pressables(&l.placed, 1.0, &mut shaper)
+    }
+
+    fn links_for(tree: &UiNode, viewport: (f32, f32)) -> Vec<LinkHit> {
+        pressables_for(tree, viewport).0
+    }
+
+    fn spoilers_for(tree: &UiNode, viewport: (f32, f32)) -> Vec<SpoilerHit> {
+        pressables_for(tree, viewport).1
+    }
+
+    fn text_node(spans: Vec<Span>) -> UiNode {
+        UiNode::new(NodeId::PrimitiveText).with_content(Content::Rich(spans))
+    }
+
+    /// A message body: the only place a run has a message to hang state on.
+    fn message_node(id: u64, spans: Vec<Span>) -> UiNode {
+        UiNode::new(NodeId::ChatMessageContent)
+            .with_data(id)
+            .with_content(Content::Rich(spans))
+    }
+
+    /// A press lands on what was drawn, and nothing around it.
+    #[test]
+    fn a_link_answers_where_it_is_drawn() {
+        let tree = text_node(vec![
+            span("look at ", None, false),
+            span(
+                "https://example.com/a",
+                Some("https://example.com/a"),
+                false,
+            ),
+            span(" now", None, false),
+        ]);
+        let links = links_for(&tree, (600.0, 400.0));
+        assert_eq!(links.len(), 1, "{links:?}");
+
+        let r = links[0].rect;
+        assert!(
+            r.x > 0.0 && r.right() < 600.0,
+            "the run should sit after its prefix, at {r:?}"
+        );
+        let cx = r.x + r.w / 2.0;
+        assert!(link_hit(&links, cx, r.y + 2.0).is_some());
+        // Left of the whole node: plain text.
+        assert!(link_hit(&links, 1.0, r.y + 2.0).is_none());
+    }
+
+    /// Colour alone decorates; only a target is pressable.
+    #[test]
+    fn plain_text_yields_nothing_to_press() {
+        let tree = text_node(vec![span("just words", None, false)]);
+        assert!(links_for(&tree, (600.0, 400.0)).is_empty());
+    }
+
+    /// A hidden run keeps its space but must not open anything: what is
+    /// under there is not known yet.
+    #[test]
+    fn a_hidden_run_is_not_pressable() {
+        let tree = text_node(vec![span(
+            "https://example.com/s",
+            Some("https://example.com/s"),
+            true,
+        )]);
+        let links = links_for(&tree, (600.0, 400.0));
+        assert!(links.is_empty(), "{links:?}");
+    }
+
+    /// Revealing makes it pressable again.
+    #[test]
+    fn a_revealed_run_presses_normally() {
+        let tree = text_node(vec![span(
+            "https://example.com/s",
+            Some("https://example.com/s"),
+            false,
+        )]);
+        assert_eq!(links_for(&tree, (600.0, 400.0)).len(), 1);
+    }
+
+    /// One rect per line: both halves of a wrapped URL answer.
+    #[test]
+    fn a_wrapped_link_presses_on_every_line_it_lands_on() {
+        let long = format!("https://example.com/{}", "p".repeat(80));
+        let tree = text_node(vec![span(&long, Some(&long), false)]);
+        let links = links_for(&tree, (200.0, 400.0));
+        assert!(links.len() >= 2, "{links:?}");
+        for (i, l) in links.iter().enumerate() {
+            assert_eq!(l.url, long);
+            if i > 0 {
+                assert!(
+                    l.rect.y > links[i - 1].rect.y,
+                    "lines should stack downward"
+                );
+            }
+        }
+        // The middle of each line hits.
+        for l in &links {
+            let mid = (l.rect.x + l.rect.w / 2.0, l.rect.y + l.rect.h / 2.0);
+            assert_eq!(
+                link_hit(&links, mid.0, mid.1).map(|h| h.url.as_str()),
+                Some(long.as_str())
+            );
+        }
+    }
+
+    /// Whatever is drawn last wins an overlap.
+    #[test]
+    fn the_frontmost_layer_wins_an_overlap() {
+        use gumicord_uitree::NodeId as Id;
+        let under = text_node(vec![span("xxxx", Some("https://under.test"), false)]);
+        let over = text_node(vec![span("xxxx", Some("https://over.test"), false)]);
+        let tree = UiNode::new(Id::LayoutStack).child(under).child(over);
+        let links = links_for(&tree, (600.0, 400.0));
+        assert_eq!(links.len(), 2, "{links:?}");
+        let top = links.last().unwrap();
+        let mid = (top.rect.x + top.rect.w / 2.0, top.rect.y + top.rect.h / 2.0);
+        assert_eq!(
+            link_hit(&links, mid.0, mid.1).map(|h| h.url.as_str()),
+            Some("https://over.test")
+        );
+    }
+
+    /// A covered run answers where it landed, named by message and its place
+    /// among that message's runs; the plain text between answers nothing.
+    #[test]
+    fn a_covered_run_answers_where_it_lands() {
+        let tree = message_node(
+            42,
+            vec![
+                span("one", None, true),
+                span(" plain ", None, false),
+                span("two", None, true),
+            ],
+        );
+        let spoilers = spoilers_for(&tree, (600.0, 400.0));
+        assert_eq!(spoilers.len(), 2, "{spoilers:?}");
+        for (want_no, s) in spoilers.iter().enumerate() {
+            assert_eq!(s.owner, 42);
+            assert_eq!(s.no, want_no, "{spoilers:?}");
+            let mid = (s.rect.x + s.rect.w / 2.0, s.rect.y + s.rect.h / 2.0);
+            assert_eq!(
+                spoiler_hit(&spoilers, mid.0, mid.1).map(|h| h.no),
+                Some(want_no)
+            );
+        }
+        // Between the two runs: not covered, not pressable.
+        assert!(
+            spoiler_hit(
+                &spoilers,
+                spoilers[0].rect.right() + 5.0,
+                spoilers[0].rect.y + 2.0
+            )
+            .is_none()
+        );
+    }
+
+    /// A run without a message behind it has no name to keep state under, so
+    /// it never becomes a target.
+    #[test]
+    fn a_run_without_an_owner_is_not_a_target() {
+        let tree = text_node(vec![span("covered", None, true)]);
+        assert!(spoilers_for(&tree, (600.0, 400.0)).is_empty());
+    }
+
+    /// One run that wrapped keeps one number on every line it lands on; the
+    /// app would otherwise open one line and leave its own tail covered.
+    #[test]
+    fn a_wrapped_run_keeps_one_number_on_every_line() {
+        let long = "x".repeat(80);
+        let tree = message_node(7, vec![span(&format!("{long} {long}"), None, true)]);
+        let spoilers = spoilers_for(&tree, (200.0, 400.0));
+        assert!(spoilers.len() >= 2, "{spoilers:?}");
+        assert!(
+            spoilers.iter().all(|s| s.owner == 7 && s.no == 0),
+            "{spoilers:?}"
+        );
+    }
+
+    /// An opened run stays numbered where it was — pressing it again covers
+    /// it — while a link under it now answers to the link instead.
+    #[test]
+    fn an_opened_run_keeps_its_number_and_hands_presses_to_its_link() {
+        let tree = message_node(
+            9,
+            vec![
+                span("a", None, true),
+                opened(span("secret", Some("https://example.com/s"), true)),
+                span("c", None, true),
+            ],
+        );
+        let (links, spoilers) = pressables_for(&tree, (600.0, 400.0));
+
+        // Still three targets: an open one can be pressed back shut.
+        assert_eq!(spoilers.len(), 3, "{spoilers:?}");
+        // The middle run kept the number it was built with.
+        assert!(
+            spoilers.iter().any(|s| s.owner == 9 && s.no == 1),
+            "{spoilers:?}"
+        );
+        // And its contents are reachable as a link now.
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].url, "https://example.com/s");
+    }
 }

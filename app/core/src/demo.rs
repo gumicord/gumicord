@@ -216,6 +216,30 @@ pub static MESSAGES: &[Message] = &[
         body: Cow::Borrowed("次は通信 (C1〜C4) と日本語入力 (P2)。ここまでは全部ダミーデータ。"),
         mentioned: false,
     },
+    // A run with the link forms in it, so pressing a link can be tried
+    // without signing in. The long URL is there to watch it wrap and stay
+    // pressable on both lines.
+    Message {
+        id: 113,
+        author: Cow::Borrowed("みどり"),
+        time: Cow::Borrowed("今日 10:02"),
+        body: Cow::Borrowed(
+            "リンクも押せるようになったってね。https://github.com/gumicord/gumicord と[仕様書](https://github.com/gumicord/gumicord/blob/main/spec/README.md)と、折り返すほうは https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 。",
+        ),
+        mentioned: false,
+    },
+    // Spoilers, so pressing one open (and back shut) can be tried. One wraps
+    // across lines, which must open as a whole; one holds a link, which only
+    // becomes pressable once the spoiler is open.
+    Message {
+        id: 114,
+        author: Cow::Borrowed("ねんねこ"),
+        time: Cow::Borrowed("今日 10:05"),
+        body: Cow::Borrowed(
+            "スポイラーも走りごとだよ。||押して開いて、もう一度で閉じる||。折り返すのは ||ここがねじれやすいのであえて長く書いてある ねじれやすいのであえて長く書いてある|| そして ||[隠したリンク](https://github.com/gumicord/gumicord)|| も。",
+        ),
+        mentioned: false,
+    },
 ];
 
 /// The first letter of the name, standing in until avatars load.

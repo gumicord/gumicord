@@ -208,9 +208,8 @@ pub struct Gumicord {
     /// Inline decoration is spans rather than nodes, so it never reaches the
     /// resolver's walk; the theme has to be consulted while building.
     match_ctx: MatchContext,
-    /// Messages whose spoilers are revealed. Per message, since per-span
-    /// would require spans to be nodes.
-    revealed: std::collections::HashSet<u64>,
+    /// Which spoilers stand open, whole messages or single runs.
+    reveals: crate::markdown::Reveals,
     /// Whatever is floating; at most one.
     floating: Option<crate::menu::Floating>,
     /// What the composer is doing.
@@ -270,7 +269,7 @@ impl Gumicord {
             hovered_scroll: None,
             selected_guild: guild,
             match_ctx: MatchContext::new(0.0),
-            revealed: std::collections::HashSet::new(),
+            reveals: crate::markdown::Reveals::default(),
             floating: None,
             composing: Composing::New,
             selected_channel: channel,
@@ -539,9 +538,10 @@ impl Application for Gumicord {
                 (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
                     changed |= self.stop_composing();
                 }
-                // Per message: per-span would require spans to be nodes.
+                // A press anywhere else on the message still opens all of it:
+                // a single run is a small target.
                 (NodeId::ChatMessage, Some(Key::Id(id))) => {
-                    changed |= self.revealed.insert(*id);
+                    changed |= self.reveals.messages.insert(*id);
                 }
                 _ => continue,
             }
@@ -552,6 +552,33 @@ impl Application for Gumicord {
         // something else happens.
         changed |= self.sync_selection();
         changed
+    }
+
+    /// A link run was pressed; opening it is the whole answer.
+    ///
+    /// While something floats, the press belongs to it: dismissing a menu or
+    /// leaving a decision alone beats following what happened to sit
+    /// underneath.
+    fn link_pressed(&mut self, _url: &str) -> bool {
+        self.floating.is_none()
+    }
+
+    /// A spoiler run was pressed; it opens alone, or closes again if it was
+    /// already open.
+    ///
+    /// Same rule as links while something floats. The run's number is the
+    /// renderer's own count of that message's spoiler runs, which is why the
+    /// state can be a plain set.
+    fn spoiler_pressed(&mut self, owner: u64, run: usize) -> bool {
+        if self.floating.is_some() {
+            return false;
+        }
+        if self.reveals.is_open(owner, run) {
+            self.reveals.shut_run(owner, run);
+        } else {
+            self.reveals.open_run(owner, run);
+        }
+        true
     }
 
     /// Secondary press; what was hit decides the menu.
@@ -966,7 +993,7 @@ impl Gumicord {
         self.composing = Composing::New;
         self.input.take();
         self.input_focused = false;
-        self.revealed.clear();
+        self.reveals = crate::markdown::Reveals::default();
         true
     }
 
@@ -1607,7 +1634,8 @@ impl Gumicord {
         let ink = crate::markdown::Ink::new(
             self.theme.as_ref(),
             self.match_ctx,
-            self.revealed.contains(&m.id),
+            &self.reveals,
+            m.id,
             self.now,
         );
         let names = StoreNames {
@@ -2352,6 +2380,41 @@ mod tests {
         assert!(a.pressed(&hits), "閉じるという変化はある");
         assert!(a.floating.is_none(), "閉じていない");
         assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
+    }
+
+    /// A link under an open menu is dismissed with the menu, not opened:
+    /// declining hands the press back to the dismissal path.
+    #[test]
+    fn a_link_press_declines_while_something_floats() {
+        let mut a = with_menu();
+        assert!(!a.link_pressed("https://example.com/"));
+
+        let mut b = app();
+        assert!(b.link_pressed("https://example.com/"));
+    }
+
+    /// A covered run opens alone and closes again on the second press; under
+    /// an open menu it declines exactly like a link does.
+    #[test]
+    fn a_spoiler_press_toggles_and_declines_while_something_floats() {
+        let mut a = with_menu();
+        assert!(!a.spoiler_pressed(1, 0));
+        assert!(!a.reveals.is_open(1, 0), "断ったのに開いている");
+
+        // Toggle: open once, then cover again.
+        let mut b = app();
+        assert!(b.spoiler_pressed(5, 2));
+        assert!(b.reveals.is_open(5, 2));
+        assert!(b.spoiler_pressed(5, 2));
+        assert!(!b.reveals.is_open(5, 2), "もう一度押しても閉じない");
+
+        // The message-level reveal still counts as open for every run.
+        b.reveals.messages.insert(5);
+        assert!(b.spoiler_pressed(5, 2));
+        assert!(
+            b.reveals.is_open(5, 2),
+            "メッセージ全体が開いているのに閉じた"
+        );
     }
 
     /// Pressing an item runs it and closes the menu.

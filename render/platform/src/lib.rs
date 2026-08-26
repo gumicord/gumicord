@@ -18,10 +18,12 @@ pub mod clipboard;
 pub mod clock;
 pub mod secret;
 pub mod text_input;
+pub mod url;
 pub mod window;
 
 pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use secret::{SecretError, SecretStore};
 pub use text_input::{EditKey, TextDocument, TextInputHost};
+pub use url::{OpenUrlError, open_url};
 pub use window::{Application, FrameCx, PlatformError, Waker, run};

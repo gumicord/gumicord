@@ -28,6 +28,8 @@
 //! An unresolvable `<@123>` renders as a Japanese "unknown user" label rather
 //! than the raw id: the id is not what the author typed, and `@123` is a lie.
 
+use std::collections::HashSet;
+
 use gumicord_markdown::{Block, Deco, Inline, InlineKind, Item, Marker, Mention};
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::{Content, Key, Line, NodeId, Span, Style, UiNode};
@@ -42,12 +44,15 @@ const DEPTH: &[&str] = &["li0", "li1", "li2", "li3", "li4"];
 pub struct Ink<'a> {
     theme: Option<&'a Theme>,
     ctx: MatchContext,
-    /// Whether spoilers are revealed, per message.
+    /// Which spoilers stand open. Read here, owned elsewhere.
+    reveals: &'a Reveals,
+    /// The message being built, which reveal state hangs off.
+    owner: u64,
+    /// How many spoiler runs have been numbered so far.
     ///
-    /// Per-span revealing would need per-span hit testing, which would mean
-    /// making spans into nodes — which this module cannot do. For now,
-    /// pressing one spoiler reveals all of them in that message.
-    revealed: bool,
+    /// Every run that came from a spoiler is counted, open or not, so opening
+    /// one cannot reshuffle its neighbours.
+    spoiler_seen: std::cell::Cell<usize>,
     /// The time, in UTC seconds, read once at the head of the frame.
     ///
     /// Never read the clock here: time moving mid-build makes adjacent
@@ -60,6 +65,32 @@ pub struct Ink<'a> {
     holds: std::cell::Cell<Option<i64>>,
 }
 
+/// Which spoilers stand open. Owned by the app; the parser only reads it.
+#[derive(Default)]
+pub struct Reveals {
+    /// Messages opened whole.
+    pub messages: HashSet<u64>,
+    /// Single runs, keyed by (message, position among its spoiler runs).
+    pub runs: HashSet<(u64, usize)>,
+}
+
+impl Reveals {
+    /// Whether that run shows its text.
+    pub fn is_open(&self, message: u64, run: usize) -> bool {
+        self.messages.contains(&message) || self.runs.contains(&(message, run))
+    }
+
+    /// Opens one run.
+    pub fn open_run(&mut self, message: u64, run: usize) {
+        self.runs.insert((message, run));
+    }
+
+    /// Covers one run again, the way pressing an open spoiler does.
+    pub fn shut_run(&mut self, message: u64, run: usize) {
+        self.runs.remove(&(message, run));
+    }
+}
+
 /// Resolves ids to names. Only the caller knows the directories.
 pub trait Names {
     fn user(&self, id: u64) -> Option<String>;
@@ -68,11 +99,19 @@ pub trait Names {
 }
 
 impl<'a> Ink<'a> {
-    pub fn new(theme: Option<&'a Theme>, ctx: MatchContext, revealed: bool, now: i64) -> Self {
+    pub fn new(
+        theme: Option<&'a Theme>,
+        ctx: MatchContext,
+        reveals: &'a Reveals,
+        owner: u64,
+        now: i64,
+    ) -> Self {
         Ink {
             theme,
             ctx,
-            revealed,
+            reveals,
+            owner,
+            spoiler_seen: std::cell::Cell::new(0),
             now,
             holds: std::cell::Cell::new(None),
         }
@@ -201,7 +240,7 @@ impl<'a> Ink<'a> {
             InlineKind::Break => ("\n".to_owned(), None),
         };
 
-        let hidden = i.deco.contains(Deco::SPOILER) && !self.revealed;
+        let spoiler = i.deco.contains(Deco::SPOILER);
         let mut style = Style::default();
         for (flag, slot) in [
             (Deco::BOLD, "bold"),
@@ -219,7 +258,21 @@ impl<'a> Ink<'a> {
         if let Some(slot) = extra {
             style.overlay(&self.slot(slot));
         }
-        span_of(text, &style, hidden)
+        let mut s = span_of(text, &style, spoiler);
+        // The colour alone is not what makes it pressable; the target rides
+        // with the run.
+        if let InlineKind::Link { url, .. } = &i.kind {
+            s.link = Some(url.clone());
+        }
+        // Counting matches what drawing will see: `spans` drops empty runs,
+        // so they are not counted either. An open one stays counted, which is
+        // what keeps its neighbours' numbers still.
+        if spoiler && !s.text.is_empty() {
+            let n = self.spoiler_seen.get();
+            self.spoiler_seen.set(n + 1);
+            s.revealed = self.reveals.is_open(self.owner, n);
+        }
+        s
     }
 
     /// One standalone span, for cases with a single decoration such as a
@@ -240,6 +293,8 @@ fn span_of(text: String, style: &Style, hidden: bool) -> Span {
             through: d.strikethrough,
         },
         hidden,
+        revealed: false,
+        link: None,
     }
 }
 
@@ -434,7 +489,8 @@ mod tests {
     }
 
     fn spans_of(theme: Option<&Theme>, src: &str, names: &dyn Names) -> Vec<Span> {
-        let ink = Ink::new(theme, MatchContext::new(1000.0), false, NOW);
+        let reveals = Reveals::default();
+        let ink = Ink::new(theme, MatchContext::new(1000.0), &reveals, 7, NOW);
         let blocks = gumicord_markdown::parse(src);
         match blocks.first() {
             Some(gumicord_markdown::Block::Paragraph(c)) => ink.spans(c, names),
@@ -521,24 +577,91 @@ mod tests {
     /// line and make the text jump when it opens.
     #[test]
     fn a_spoiler_stays_hidden_until_revealed() {
-        let hidden = Ink::new(None, MatchContext::new(1000.0), false, NOW);
-        let shown = Ink::new(None, MatchContext::new(1000.0), true, NOW);
+        let shut = Reveals::default();
+        let mut open = Reveals::default();
+        open.open_run(7, 0);
         let blocks = gumicord_markdown::parse("||秘密||");
         let gumicord_markdown::Block::Paragraph(c) = &blocks[0] else {
             panic!("段落ではない");
         };
 
-        let h = hidden.spans(c, &NoNames);
-        assert!(h[0].hidden);
+        let h = Ink::new(None, MatchContext::new(1000.0), &shut, 7, NOW).spans(c, &NoNames);
+        assert!(h[0].hidden && !h[0].revealed);
         assert_eq!(h[0].text, "秘密", "隠しても場所は空けたままである");
 
-        assert!(!shown.spans(c, &NoNames)[0].hidden);
+        // Opened: the flag pair says "was one, showing now", not plain text.
+        let s = Ink::new(None, MatchContext::new(1000.0), &open, 7, NOW).spans(c, &NoNames);
+        assert!(!s[0].concealed());
+        assert!(s[0].hidden && s[0].revealed);
+
+        // A different message's state must not leak in.
+        let other = Ink::new(None, MatchContext::new(1000.0), &open, 8, NOW).spans(c, &NoNames);
+        assert!(other[0].concealed(), "他のメッセージの状態が漏れている");
+    }
+
+    /// Opening one spoiler says nothing about the next one; and after the
+    /// first is open, the third is still the third.
+    #[test]
+    fn opening_one_spoiler_leaves_its_neighbours_numbered() {
+        let blocks = gumicord_markdown::parse("||a|| そのまま ||b|| ||c||");
+        let gumicord_markdown::Block::Paragraph(c) = &blocks[0] else {
+            panic!("段落ではない");
+        };
+
+        let mut reveals = Reveals::default();
+        reveals.open_run(7, 1);
+        let spans = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW).spans(c, &NoNames);
+        let flags: Vec<_> = spans
+            .iter()
+            .filter(|s| s.hidden)
+            .map(|s| s.concealed())
+            .collect();
+        assert_eq!(
+            flags,
+            vec![true, false, true],
+            "番号がずれたか、隣まで開いた"
+        );
+    }
+
+    /// Pressing "reveal everything" opens runs that were never named singly.
+    #[test]
+    fn opening_the_message_opens_every_spoiler_in_it() {
+        let blocks = gumicord_markdown::parse("||a|| そのまま ||b||");
+        let gumicord_markdown::Block::Paragraph(c) = &blocks[0] else {
+            panic!("段落ではない");
+        };
+
+        let mut reveals = Reveals::default();
+        reveals.messages.insert(7);
+        let spans = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW).spans(c, &NoNames);
+        assert!(spans.iter().filter(|s| s.hidden).all(|s| !s.concealed()));
+    }
+
+    /// A link wrapped in a spoiler keeps its target; it just cannot be
+    /// pressed until the run is open.
+    #[test]
+    fn a_spoiler_keeps_the_link_underneath() {
+        let shut = Reveals::default();
+        let mut open = Reveals::default();
+        open.open_run(7, 0);
+        let blocks = gumicord_markdown::parse("||[表](https://example.com)||");
+        let gumicord_markdown::Block::Paragraph(c) = &blocks[0] else {
+            panic!("段落ではない");
+        };
+
+        let h = Ink::new(None, MatchContext::new(1000.0), &shut, 7, NOW).spans(c, &NoNames);
+        assert_eq!(h[0].link.as_deref(), Some("https://example.com"));
+        assert!(h[0].concealed());
+
+        let s = Ink::new(None, MatchContext::new(1000.0), &open, 7, NOW).spans(c, &NoNames);
+        assert!(!s[0].concealed(), "開いたのに押せないまま");
     }
 
     /// Fenced contents are not decorated.
     #[test]
     fn a_fenced_block_keeps_its_contents_verbatim() {
-        let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
+        let reveals = Reveals::default();
+        let ink = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW);
         let nodes = ink.blocks(&gumicord_markdown::parse("```rust\n**a**\n```"), &NoNames);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, NodeId::PrimitiveCodeBlock);
@@ -684,7 +807,8 @@ mod tests {
     /// One relative timestamp is enough for the tree to know its validity.
     #[test]
     fn a_relative_timestamp_asks_for_a_redraw() {
-        let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
+        let reveals = Reveals::default();
+        let ink = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW);
         assert_eq!(
             ink.holds_for(),
             None,
@@ -705,7 +829,8 @@ mod tests {
     /// Following the slower one would leave the faster one looking frozen.
     #[test]
     fn it_follows_whichever_changes_soonest() {
-        let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
+        let reveals = Reveals::default();
+        let ink = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW);
         ink.blocks(
             &gumicord_markdown::parse(&format!(
                 "<t:{}:R> と <t:{}:R>",
@@ -720,11 +845,61 @@ mod tests {
     /// Absolute timestamps alone give no reason to wake.
     #[test]
     fn absolute_timestamps_alone_never_wake_it() {
-        let ink = Ink::new(None, MatchContext::new(1000.0), false, NOW);
+        let reveals = Reveals::default();
+        let ink = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW);
         ink.blocks(
             &gumicord_markdown::parse(&format!("<t:{NOW}:f> と <t:{NOW}> と ふつうの文")),
             &NoNames,
         );
         assert_eq!(ink.holds_for(), None);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Link targets (`FR-021`)
+
+    /// The colour alone is not what makes a link pressable; the target has
+    /// to ride with the run.
+    #[test]
+    fn a_bare_url_carries_its_target() {
+        let spans = spans_of(None, "see https://example.com/a end", &NoNames);
+        assert_eq!(spans.len(), 3, "{spans:?}");
+        assert_eq!(spans[0].link, None, "plain text is not pressable");
+        assert_eq!(spans[1].text, "https://example.com/a");
+        assert_eq!(spans[1].link.as_deref(), Some("https://example.com/a"));
+        assert_eq!(spans[2].link, None);
+    }
+
+    /// A masked link shows the label and goes to the URL.
+    #[test]
+    fn a_masked_link_shows_the_label_and_keeps_the_target() {
+        let spans = spans_of(None, "[見出し](https://example.com/x)", &NoNames);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "見出し");
+        assert_eq!(spans[0].link.as_deref(), Some("https://example.com/x"));
+    }
+
+    /// The angle form only suppresses the embed; the target is the same.
+    #[test]
+    fn an_angle_bracket_url_still_carries_its_target() {
+        let spans = spans_of(None, "<https://example.com/y>", &NoNames);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "https://example.com/y");
+        assert_eq!(spans[0].link.as_deref(), Some("https://example.com/y"));
+    }
+
+    /// Decoration around a link must not lose the target.
+    #[test]
+    fn a_decorated_link_keeps_its_target() {
+        let spans = spans_of(None, "**[太い](https://example.com/b)**", &NoNames);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].link.as_deref(), Some("https://example.com/b"));
+    }
+
+    /// Mentions share the `mention` slot with links but go nowhere.
+    #[test]
+    fn a_mention_is_not_a_link() {
+        let spans = spans_of(None, "@everyone", &NoNames);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].link, None);
     }
 }

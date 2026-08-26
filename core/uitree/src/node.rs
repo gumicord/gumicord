@@ -76,6 +76,25 @@ pub struct Span {
     /// The space is kept: collapsing it would rewrap the line on reveal and
     /// make the body jump.
     pub hidden: bool,
+    /// A hidden run that has been opened.
+    ///
+    /// A separate flag rather than clearing [`Self::hidden`], so the runs
+    /// that came from spoilers stay tellable from plain text afterwards —
+    /// which is what lets one be opened without shuffling the others.
+    pub revealed: bool,
+    /// Where a press on this run goes.
+    ///
+    /// A target, not an action: what opening a `https` URL means is the
+    /// platform's, and anything else is refused there. Runs without one are
+    /// plain text no matter how they are coloured.
+    pub link: Option<String>,
+}
+
+impl Span {
+    /// Whether the contents are still covered.
+    pub fn concealed(&self) -> bool {
+        self.hidden && !self.revealed
+    }
 }
 
 /// Lines drawn through text. Stackable: `__~~a~~__` draws both.

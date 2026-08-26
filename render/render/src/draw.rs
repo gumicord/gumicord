@@ -841,7 +841,7 @@ fn draw_rich(
         let Some(sp) = spans.get(r.run as usize) else {
             continue;
         };
-        if !sp.hidden {
+        if !sp.concealed() {
             continue;
         }
         dl.push_rect(
@@ -856,7 +856,7 @@ fn draw_rich(
     for (rect, uv, is_color, page, which) in out {
         // Hidden glyphs are not added at all: painting over them leaks at the
         // rounded corners and through any transparency.
-        if spans.get(which as usize).is_some_and(|s| s.hidden) {
+        if spans.get(which as usize).is_some_and(|s| s.concealed()) {
             continue;
         }
         let c = colors.get(which as usize).copied().unwrap_or(base);
@@ -868,7 +868,7 @@ fn draw_rich(
         let Some(sp) = spans.get(r.run as usize) else {
             continue;
         };
-        if sp.hidden || !sp.line.any() {
+        if sp.concealed() || !sp.line.any() {
             continue;
         }
         let c = colors.get(r.run as usize).copied().unwrap_or(base);

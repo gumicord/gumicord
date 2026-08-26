@@ -69,6 +69,25 @@ pub trait Application {
     /// this.
     fn pressed(&mut self, hits: &[Hit]) -> bool;
 
+    /// A link run was pressed. Returning true opens it with the system
+    /// handler; returning false leaves the press to [`Application::pressed`],
+    /// which is how a press meant for an open menu declines the link.
+    ///
+    /// `url` is whatever the tree carried; only http and https reach the OS.
+    fn link_pressed(&mut self, _url: &str) -> bool {
+        false
+    }
+
+    /// A covered spoiler run was pressed, named by its message and which of
+    /// that message's spoiler runs it is. The app keeps that state; this
+    /// layer only knows where the run landed.
+    ///
+    /// Returning true takes the press whole, like [`Application::link_pressed`];
+    /// false hands it back down.
+    fn spoiler_pressed(&mut self, _owner: u64, _run: usize) -> bool {
+        false
+    }
+
     /// The secondary button was pressed.
     ///
     /// `at` is where the press happened, not where a menu should go: that
@@ -190,6 +209,8 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         renderer: None,
         cursor: (0.0, 0.0),
         zone: Zone::Client,
+        hovering_link: false,
+        hovering_spoiler: false,
         scroll_grab: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
@@ -221,6 +242,11 @@ struct Host {
     /// Pointer position.
     cursor: (f32, f32),
     zone: Zone,
+    /// Whether the pointer is over a link run; picks the hand cursor.
+    hovering_link: bool,
+    /// Whether the pointer is over a covered spoiler; the hand fits there
+    /// too, since an open one can be pressed back shut.
+    hovering_spoiler: bool,
     /// The scrollbar being dragged, while held.
     scroll_grab: Option<ScrollGrab>,
     /// Held modifiers.
@@ -265,6 +291,29 @@ impl Host {
             return Vec::new();
         };
         r.hit_test(self.cursor.0, self.cursor.1).cloned().collect()
+    }
+
+    /// The link run under the pointer, if any.
+    fn link_under_cursor(&self) -> Option<String> {
+        let r = self.renderer.as_ref()?;
+        r.link_at(self.cursor.0, self.cursor.1).map(str::to_owned)
+    }
+
+    /// The covered spoiler run under the pointer, if any.
+    fn spoiler_under_cursor(&self) -> Option<(u64, usize)> {
+        self.renderer
+            .as_ref()?
+            .spoiler_at(self.cursor.0, self.cursor.1)
+    }
+
+    /// Opens a link with the system handler; the scheme was already checked
+    /// on the way in, and is checked again there.
+    fn open_link(&self, url: &str) {
+        // Not logged: what someone pressed is theirs, and the error says
+        // enough to diagnose a refusal.
+        if let Err(e) = crate::url::open_url(url) {
+            tracing::warn!(%e, "could not open the link");
+        }
     }
 
     /// Whether the window is maximised. Asked, never remembered: it also
@@ -330,6 +379,9 @@ impl Host {
             Zone::Resize(ResizeDirection::NorthEast | ResizeDirection::SouthWest) => {
                 CursorIcon::NeswResize
             }
+            // A hand over a link run or a covered spoiler; the colour alone
+            // does not say it presses.
+            _ if self.hovering_link || self.hovering_spoiler => CursorIcon::Pointer,
             _ => CursorIcon::Default,
         };
         w.set_cursor(icon);
@@ -718,6 +770,15 @@ impl ApplicationHandler for Host {
                     self.zone = zone;
                     self.apply_cursor();
                 }
+                // Asked against the last frame's layout, so a run that just
+                // scrolled under the pointer is noticed one frame late.
+                let on_link = self.link_under_cursor().is_some();
+                let on_spoiler = self.spoiler_under_cursor().is_some();
+                if on_link != self.hovering_link || on_spoiler != self.hovering_spoiler {
+                    self.hovering_link = on_link;
+                    self.hovering_spoiler = on_spoiler;
+                    self.apply_cursor();
+                }
                 if self.app.hover_changed(&hits) {
                     self.request_redraw();
                 }
@@ -728,6 +789,11 @@ impl ApplicationHandler for Host {
                 // release makes the scrollbar vanish mid-drag.
                 if self.scroll_grab.is_some() {
                     return;
+                }
+                if self.hovering_link || self.hovering_spoiler {
+                    self.hovering_link = false;
+                    self.hovering_spoiler = false;
+                    self.apply_cursor();
                 }
                 if self.app.hover_changed(&[]) {
                     self.request_redraw();
@@ -800,6 +866,28 @@ impl ApplicationHandler for Host {
                         }
 
                         let hits = self.hits();
+
+                        // A link takes the press whole: opening it and
+                        // toggling whatever is underneath at the same time
+                        // would be two answers to one press. The app may
+                        // decline, which hands the press back below.
+                        if let Some(url) = self.link_under_cursor()
+                            && self.app.link_pressed(&url)
+                        {
+                            self.open_link(&url);
+                            return;
+                        }
+
+                        // A spoiler run likewise: covered text presses as a
+                        // whole, and the app may decline while a menu floats.
+                        // A run with a link under it already went to the link.
+                        if let Some((owner, run)) = self.spoiler_under_cursor()
+                            && self.app.spoiler_pressed(owner, run)
+                        {
+                            self.request_redraw();
+                            return;
+                        }
+
                         if self.app.pressed(&hits) {
                             // A dark caret right after pressing the field
                             // leaves it unclear whether the press landed.
