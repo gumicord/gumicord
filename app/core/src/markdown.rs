@@ -150,35 +150,18 @@ impl<'a> Ink<'a> {
         blocks.iter().map(|b| self.block(b, names)).collect()
     }
 
-    /// Whether the body is a single custom emoji with no other content.
-    ///
-    /// When true, [`Self::single_emoji`] returns the emoji id.
-    pub fn is_single_emoji(blocks: &[Block]) -> bool {
-        if blocks.len() != 1 {
-            return false;
-        }
-        let Block::Paragraph(inlines) = &blocks[0] else {
-            return false;
+    /// The emoji id when the body is a single custom emoji with no other
+    /// content, or `None` otherwise.
+    pub fn single_emoji_id(blocks: &[Block]) -> Option<u64> {
+        let Block::Paragraph(inlines) = blocks.first()? else {
+            return None;
         };
-        matches!(
-            inlines.as_slice(),
+        match inlines.as_slice() {
             [Inline {
                 deco,
-                kind: InlineKind::Emoji { .. },
-            }] if deco.is_none()
-        )
-    }
-
-    /// Extracts the emoji id when the body is a single custom emoji.
-    ///
-    /// Call after [`Self::is_single_emoji`].
-    pub fn single_emoji(blocks: &[Block]) -> u64 {
-        let Block::Paragraph(inlines) = &blocks[0] else {
-            unreachable!()
-        };
-        match &inlines[0].kind {
-            InlineKind::Emoji { id, .. } => *id,
-            _ => unreachable!(),
+                kind: InlineKind::Emoji { id, .. },
+            }] if deco.is_none() => Some(*id),
+            _ => None,
         }
     }
 
@@ -1007,44 +990,72 @@ mod tests {
     #[test]
     fn a_single_custom_emoji_is_detected() {
         let blocks = gumicord_markdown::parse("<:neko:123>");
-        assert!(Ink::is_single_emoji(&blocks));
-        assert_eq!(Ink::single_emoji(&blocks), 123);
+        assert_eq!(Ink::single_emoji_id(&blocks), Some(123));
     }
 
     #[test]
     fn an_animated_single_emoji_is_detected() {
         let blocks = gumicord_markdown::parse("<a:wave:456>");
-        assert!(Ink::is_single_emoji(&blocks));
-        assert_eq!(Ink::single_emoji(&blocks), 456);
+        assert_eq!(Ink::single_emoji_id(&blocks), Some(456));
     }
 
     #[test]
     fn text_next_to_an_emoji_is_not_single() {
         let blocks = gumicord_markdown::parse("hello <:neko:123>");
-        assert!(!Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
     }
 
     #[test]
     fn two_emojis_are_not_single() {
         let blocks = gumicord_markdown::parse("<:a:1> <:b:2>");
-        assert!(!Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
     }
 
     #[test]
     fn a_decorated_emoji_is_not_single() {
         let blocks = gumicord_markdown::parse("**<:neko:123>**");
-        assert!(!Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
     }
 
     #[test]
     fn plain_text_is_not_single_emoji() {
         let blocks = gumicord_markdown::parse("hello");
-        assert!(!Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
     }
 
     #[test]
     fn a_heading_is_not_single_emoji() {
         let blocks = gumicord_markdown::parse("# <:neko:123>");
-        assert!(!Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
+    }
+
+    #[test]
+    fn a_unicode_emoji_is_not_single_custom() {
+        let blocks = gumicord_markdown::parse("\u{1F389}");
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
+    }
+
+    #[test]
+    fn an_emoji_in_code_is_not_detected() {
+        let blocks = gumicord_markdown::parse("`<:neko:123>`");
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
+    }
+
+    #[test]
+    fn whitespace_around_emoji_prevents_large() {
+        let blocks = gumicord_markdown::parse("  <:neko:123>  ");
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
+    }
+
+    #[test]
+    fn an_emoji_in_a_list_is_not_single() {
+        let blocks = gumicord_markdown::parse("- <:neko:123>");
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
+    }
+
+    #[test]
+    fn an_emoji_in_a_quote_is_not_single() {
+        let blocks = gumicord_markdown::parse("> <:neko:123>");
+        assert_eq!(Ink::single_emoji_id(&blocks), None);
     }
 }

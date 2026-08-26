@@ -385,7 +385,7 @@ fn emoji(inner: &str) -> Option<InlineKind> {
         None => (false, inner.strip_prefix(':')?),
     };
     let (name, num) = rest.split_once(':')?;
-    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
     Some(InlineKind::Emoji {

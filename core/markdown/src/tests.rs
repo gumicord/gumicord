@@ -368,6 +368,20 @@ fn emoji() {
 }
 
 #[test]
+fn malformed_emoji() {
+    // Empty name.
+    assert_eq!(flat("<::1>"), "<::1>\n");
+    // Empty id.
+    assert_eq!(flat("<:neko:>"), "<:neko:>\n");
+    // Non-numeric id.
+    assert_eq!(flat("<:neko:abc>"), "<:neko:abc>\n");
+    // Hyphen in name — not ASCII alphanumeric nor underscore.
+    assert_eq!(flat("<:ne-ko:1>"), "<:ne-ko:1>\n");
+    // Unicode name — Discord only allows ASCII.
+    assert_eq!(flat("<:ネコ:1>"), "<:ネコ:1>\n");
+}
+
+#[test]
 fn timestamps() {
     assert_eq!(flat("<t:1700000000:R>"), "[time1700000000:R]\n");
     // No format suffix means the default.

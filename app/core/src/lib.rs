@@ -1680,8 +1680,7 @@ impl Gumicord {
         );
 
         // A single custom emoji is displayed larger, like Discord.
-        if crate::markdown::Ink::is_single_emoji(&m.blocks) {
-            let id = crate::markdown::Ink::single_emoji(&m.blocks);
+        if let Some(id) = crate::markdown::Ink::single_emoji_id(&m.blocks) {
             return UiNode::new(NodeId::ChatMessageContent)
                 .with_data(m.id)
                 .child(ink.large_emoji(id));
