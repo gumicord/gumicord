@@ -431,8 +431,11 @@ impl<'a> Cx<'a, '_, '_> {
             inner,
         });
 
-        // A node that draws something is a leaf; any children are ignored.
-        if node.content.is_leaf() || node.children.is_empty() {
+        // A node that draws something is a leaf — except an image, whose
+        // children ride on it: the presence dot sits on its avatar. They
+        // follow the stack rules over the whole rect and draw after it.
+        let riders = matches!(node.content, Content::Image(_)) && !node.children.is_empty();
+        if node.content.is_leaf() && !riders {
             return;
         }
 
@@ -1074,6 +1077,53 @@ mod tests {
                 NodeId::ChromeTitlebarTitle,
                 NodeId::AppScreen,
             ]
+        );
+    }
+
+    /// An image draws itself, yet its children ride on it: the presence dot
+    /// sits on its avatar, centred by the stack rules and drawn after.
+    #[test]
+    fn an_image_s_children_ride_on_it() {
+        let tree = UiNode::new(NodeId::AppWindow).child(
+            UiNode::image(NodeId::NavUserPanelAvatar, "https://example/a.png")
+                .child(UiNode::new(NodeId::NavUserPanelPresence)),
+        );
+        let r = layout(
+            &tree,
+            Size::new(200.0, 100.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+
+        let avatar = rect_of(&r, NodeId::NavUserPanelAvatar);
+        assert_eq!((avatar.w, avatar.h), (32.0, 32.0));
+        let dot = rect_of(&r, NodeId::NavUserPanelPresence);
+        assert_eq!((dot.w, dot.h), (12.0, 12.0));
+        // No theme, so the stack centres it.
+        assert_eq!((dot.x, dot.y), (avatar.x + 10.0, avatar.y + 10.0));
+
+        // After the avatar, so it paints over the image.
+        let at = |id| r.placed.iter().position(|p| p.node.id == id).unwrap();
+        assert!(at(NodeId::NavUserPanelPresence) > at(NodeId::NavUserPanelAvatar));
+    }
+
+    /// Any other drawing node stays a leaf: its children are ignored.
+    #[test]
+    fn other_drawing_nodes_stay_leaves() {
+        let tree = UiNode::new(NodeId::AppWindow).child(
+            UiNode::text(NodeId::ChatMessageContent, "hi")
+                .child(UiNode::new(NodeId::NavUserPanelPresence)),
+        );
+        let r = layout(
+            &tree,
+            Size::new(200.0, 100.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+        assert!(
+            !r.placed
+                .iter()
+                .any(|p| p.node.id == NodeId::NavUserPanelPresence)
         );
     }
 

@@ -303,13 +303,13 @@
     {
       "select": "nav.user_panel.presence",
       "style": {
-        "width": 12,
-        "height": 12,
-        "margin": [20, 0, 0, 20],
+        "width": 14,
+        "height": 14,
+        "margin": [22, 0, 0, 22],
         "radius": "$radius.full",
         "background": "$color.text.muted",
         "borderColor": "$color.bg.sunken",
-        "borderWidth": 3
+        "borderWidth": 2
       }
     },
     {
@@ -364,13 +364,13 @@
     {
       "select": "nav.member_list.item.presence",
       "style": {
-        "width": 12,
-        "height": 12,
-        "margin": [20, 0, 0, 20],
+        "width": 14,
+        "height": 14,
+        "margin": [22, 0, 0, 22],
         "radius": "$radius.full",
         "background": "$color.text.muted",
         "borderColor": "$color.bg.sunken",
-        "borderWidth": 3
+        "borderWidth": 2
       }
     },
     {
