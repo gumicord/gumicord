@@ -189,6 +189,11 @@ pub struct Live {
     /// start. Really it is per channel, since permissions decide who is
     /// visible, but only one channel per guild is subscribed today.
     members: std::collections::HashMap<GuildId, gumicord_gateway::MemberList>,
+    /// The member rows asked for, per guild.
+    ///
+    /// Widened on scroll: the gateway re-sends the subscription when the
+    /// ranges change and skips an identical one, so announcing again is free.
+    member_rows: std::collections::HashMap<GuildId, Vec<gumicord_gateway::MemberRange>>,
     /// Ourselves, so our own typing indicator is not shown.
     me: Option<UserId>,
     /// Our status. READY starts it; presences about us keep it current, so
@@ -259,6 +264,7 @@ impl Live {
             asked_members: HashSet::new(),
             typing: std::collections::HashMap::new(),
             members: std::collections::HashMap::new(),
+            member_rows: std::collections::HashMap::new(),
             me: None,
         }
     }
@@ -384,9 +390,14 @@ impl Live {
         self.mark_read(channel);
 
         // Sent every time: without it neither new messages nor typing
-        // indicators arrive for the new channel.
+        // indicators arrive for the new channel. Whatever rows were widened
+        // on scroll stay asked for: narrowing again would drop them.
         if let Some(subs) = &self.subs {
-            subs.watch(guild, channel, &MEMBER_ROWS);
+            let rows = self
+                .member_rows
+                .entry(guild)
+                .or_insert_with(|| MEMBER_ROWS.to_vec());
+            subs.watch(guild, channel, rows);
         }
 
         if !self.requested.insert(channel) {
@@ -521,6 +532,32 @@ impl Live {
         for part in want.chunks(CHUNK) {
             subs.request_members(guild, part.to_vec());
         }
+    }
+
+    /// Asks for the next page of the member list, once scrolled near its end.
+    ///
+    /// The subscription is widened rather than a second kind of request sent:
+    /// rows arrive as diffs over one list, so a page that does not continue
+    /// what is held would be dropped on arrival. The last page answers with
+    /// nothing, and the asking then stops by itself.
+    pub fn extend_members(&mut self, guild: GuildId) {
+        let Some(subs) = &self.subs else { return };
+        let Some(channel) = self.watching else { return };
+        if self.store.channel(channel).and_then(|c| c.guild_id) != Some(guild) {
+            return;
+        }
+        let held = self.members.get(&guild).map_or(0, |m| m.rows().len());
+
+        let asked = self
+            .member_rows
+            .entry(guild)
+            .or_insert_with(|| MEMBER_ROWS.to_vec());
+        let Some(next) = next_member_rows(held, asked) else {
+            return;
+        };
+        tracing::debug!(%guild, from = next[0], "asking for more member rows");
+        asked.push(next);
+        subs.watch(guild, channel, asked);
     }
 
     /// Marks a channel read locally, then tells the server.
@@ -1122,6 +1159,39 @@ fn settings_shape(data: &serde_json::Value) -> Option<String> {
     })
 }
 
+/// The next member range to ask for: the one continuing what is held.
+///
+/// Wire indices count headings too, so the next page starts at however many
+/// rows actually arrived, not at a round hundred.
+///
+/// - Nothing held means nothing subscribed; widening comes first from
+///   opening a channel.
+/// - The last ask reaching past what is held is still on its way — one
+///   scroll gesture fires many events, and each must not send another
+///   request. When nothing more exists, nothing arrives and it stops here
+///   for good.
+/// - Discord takes three ranges at most and silently ignores the rest.
+fn next_member_rows(
+    held: usize,
+    asked: &[gumicord_gateway::MemberRange],
+) -> Option<gumicord_gateway::MemberRange> {
+    /// Rows per page.
+    const PAGE: u32 = 100;
+    /// Discord silently ignores more.
+    const MAX_RANGES: usize = 3;
+
+    let last = *asked.last()?;
+    let held = u32::try_from(held).ok()?;
+    if last[1] >= held {
+        return None;
+    }
+    if asked.len() >= MAX_RANGES {
+        return None;
+    }
+    let start = held;
+    Some([start, start + PAGE - 1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,5 +1554,106 @@ mod tests {
             self_status_of(&serde_json::json!({ "settings": "base64 ではない" })),
             None
         );
+    }
+
+    /// Builds a member list holding `n` rows, the way a SYNC delivers them.
+    fn held_list(n: usize) -> gumicord_gateway::MemberList {
+        let items: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "member": {
+                        "user": { "id": i.to_string(), "username": format!("う{i}") },
+                        "roles": [],
+                    }
+                })
+            })
+            .collect();
+        let raw = serde_json::json!({
+            "guild_id": "7",
+            "member_count": n,
+            "online_count": 1,
+            "ops": [{ "op": "SYNC", "range": [0, 99], "items": items }],
+        });
+        let mut list = gumicord_gateway::MemberList::default();
+        assert!(list.apply(gumicord_gateway::member_list::parse(&raw).expect("読める")));
+        list
+    }
+
+    /// The next page starts at however many rows actually arrived: wire
+    /// indices count headings too, so a round hundred would join across a
+    /// gap.
+    #[test]
+    fn the_next_member_range_continues_what_is_held() {
+        let first = [0u32, 99];
+        assert_eq!(next_member_rows(100, &[first]), Some([100, 199]));
+
+        // Nothing asked yet: widening comes from opening a channel.
+        assert_eq!(next_member_rows(50, &[]), None);
+
+        // A short page means the range held everything there is; asking
+        // again would only wait forever.
+        assert_eq!(next_member_rows(98, &[first]), None);
+
+        // Still on its way, or already at what Discord takes.
+        assert_eq!(next_member_rows(150, &[first, [100, 199]]), None);
+        let three = [first, [100, 199], [200, 299]];
+        assert_eq!(next_member_rows(250, &three), None);
+    }
+
+    /// One scroll widens the ask once and then holds until the page lands.
+    #[test]
+    fn scrolling_the_member_list_widens_the_ask_once() {
+        use gumicord_model::{Channel, ChannelKind};
+
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        let (_gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.watching = Some(ch());
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: vec![Channel {
+                id: ch(),
+                kind: ChannelKind::GuildText,
+                name: Some("一般".to_owned()),
+                guild_id: Some(guild),
+                parent_id: None,
+                position: 0,
+                topic: None,
+                nsfw: false,
+                recipients: Vec::new(),
+                last_message_id: None,
+            }],
+            roles: Vec::new(),
+        });
+        live.members.insert(guild, held_list(100));
+
+        live.extend_members(guild);
+        assert_eq!(
+            live.member_rows[&guild],
+            vec![[0u32, 99], [100, 199]],
+            "the ask continues at the rows actually held"
+        );
+
+        // Every scroll event while the page is away asks again; only the
+        // first may reach the wire.
+        live.extend_members(guild);
+        assert_eq!(live.member_rows[&guild].len(), 2);
+    }
+
+    /// Another guild's scroll does not widen this one's ask.
+    #[test]
+    fn another_guild_s_scroll_changes_nothing_here() {
+        let mut live = live();
+        let (_gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.watching = Some(ch());
+        live.members.insert(GuildId::from(7u64), held_list(100));
+
+        live.extend_members(GuildId::from(9u64));
+        assert!(live.member_rows.is_empty(), "asked for someone else");
     }
 }

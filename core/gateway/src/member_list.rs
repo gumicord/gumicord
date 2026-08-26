@@ -34,7 +34,6 @@
 //!
 //! Not possible yet:
 //! |---|---|
-//! - showing past the requested ranges, which needs re-subscribing on scroll
 //! - pressing a person, which needs a profile view
 
 use gumicord_model::{GuildId, Member};

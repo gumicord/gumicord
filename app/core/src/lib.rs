@@ -395,22 +395,36 @@ impl Application for Gumicord {
         self.images.take()
     }
 
-    /// A list scrolled; fetches history when it nears the top.
+    /// A list scrolled; fetches more when it nears an end.
     ///
-    /// Not at the top exactly: asking on arrival means staring at nothing
+    /// Not at the edge exactly: asking on arrival means staring at nothing
     /// until it returns. Asking early usually has it there first.
     ///
     /// Never before anything is shown: a list that does not overflow is also
-    /// "at the top", which would fetch on every open.
+    /// "at the edge", which would fetch on every open.
     fn scrolled(&mut self, id: NodeId, at: f32, max: f32) {
-        /// Distance from the top that triggers the next page.
+        /// Distance from the edge that triggers the next page.
         const REACH: f32 = 400.0;
 
-        if id != NodeId::ChatMessageList || max <= 0.0 || at > REACH {
-            return;
+        match id {
+            // History grows upward, toward where the reader already is.
+            NodeId::ChatMessageList => {
+                if max <= 0.0 || at > REACH {
+                    return;
+                }
+                let channel = ChannelId::from(self.selected_channel);
+                self.live.load_older(channel);
+            }
+            // Members grow downward, at the far end of the scroll.
+            NodeId::NavMemberList => {
+                if max <= 0.0 || at < max - REACH {
+                    return;
+                }
+                let guild = GuildId::from(self.selected_guild);
+                self.live.extend_members(guild);
+            }
+            _ => {}
         }
-        let channel = ChannelId::from(self.selected_channel);
-        self.live.load_older(channel);
     }
 
     /// How long the time-dependent parts of the tree stay valid. `None`
