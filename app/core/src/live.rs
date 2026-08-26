@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use gumicord_gateway::{Event, Fatal, Gateway, Ready, Subscriptions, status::Status};
 use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, Token, UserId};
 use gumicord_platform::Waker;
-use gumicord_rest::RestClient;
+use gumicord_rest::{RestClient, RestError};
 use gumicord_store::{Db, GuildRow, Store};
 
 /// Messages fetched when a channel opens. The API allows 100; 50 is a little
@@ -391,6 +391,9 @@ impl Live {
                     let _ = tx.send(LiveEvent::Backlog { channel, list });
                 }
                 Err(e) => {
+                    if report_dead_token(&tx, Some(&waker), &e) {
+                        return;
+                    }
                     // The cache is already on screen; do not leave it stuck
                     // on "loading".
                     tracing::warn!(%e, channel = %channel, "could not fetch messages");
@@ -431,6 +434,10 @@ impl Live {
                     list
                 }
                 Err(e) => {
+                    if report_dead_token(&tx, Some(&waker), &e) {
+                        // Nothing else to send; signing out drops the page.
+                        return;
+                    }
                     // Sent even when empty, or `paging` never clears and the
                     // channel can never page again.
                     tracing::warn!(%e, channel = %channel, "could not page back");
@@ -505,9 +512,12 @@ impl Live {
         let (Some(rt), Some(rest)) = (&self.rt, &self.rest) else {
             return true;
         };
-        let rest = rest.clone();
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), self.waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.ack_message(channel, last).await {
+                if report_dead_token(&tx, waker.as_ref(), &e) {
+                    return;
+                }
                 tracing::warn!(%e, channel = %channel, "could not send the read marker");
             }
         });
@@ -522,9 +532,12 @@ impl Live {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
-        let (rest, waker) = (rest.clone(), waker.clone());
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.create_message(channel, &content, reply_to).await {
+                if report_dead_token(&tx, Some(&waker), &e) {
+                    return;
+                }
                 tracing::warn!(%e, channel = %channel, "could not send");
             }
             waker.wake();
@@ -539,9 +552,12 @@ impl Live {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
-        let (rest, waker) = (rest.clone(), waker.clone());
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.edit_message(channel, message, &content).await {
+                if report_dead_token(&tx, Some(&waker), &e) {
+                    return;
+                }
                 tracing::warn!(%e, channel = %channel, "could not edit");
             }
             waker.wake();
@@ -556,9 +572,12 @@ impl Live {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
-        let (rest, waker) = (rest.clone(), waker.clone());
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.delete_message(channel, message).await {
+                if report_dead_token(&tx, Some(&waker), &e) {
+                    return;
+                }
                 tracing::warn!(%e, channel = %channel, "could not delete");
             }
             waker.wake();
@@ -919,6 +938,23 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
             }
         }
     }
+}
+
+/// Reports a dead token through the same flag the gateway raises.
+///
+/// REST learns of a revoked token before the gateway's next reconnect does;
+/// leaving it to the log alone keeps the client failing every request while
+/// looking alive. True when the token was the problem and nothing else should
+/// be sent.
+fn report_dead_token(tx: &Sender<LiveEvent>, waker: Option<&Waker>, e: &RestError) -> bool {
+    if !e.is_unauthorized() {
+        return false;
+    }
+    let _ = tx.send(LiveEvent::TokenRejected);
+    if let Some(w) = waker {
+        w.wake();
+    }
+    true
 }
 
 /// Extracts who is typing where.

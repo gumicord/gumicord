@@ -101,6 +101,10 @@ pub enum LoginEvent {
     Approved,
     Done(Box<LoggedIn>),
     Failed(String),
+    /// No session remains: the stored token was refused outright and
+    /// discarded, or none was stored. What is on screen came from a cache
+    /// nothing can refresh anymore, so the receiver lets it go.
+    Ended,
     /// Restarted, usually after the QR expired.
     Restarted,
 }
@@ -112,6 +116,13 @@ pub struct Login {
     tx: Sender<LoginEvent>,
     /// Decided once at startup and never changes.
     skipped: bool,
+    /// Why the previous session ended, shown until the next sign-in. Set when
+    /// the client signs out on its own, which otherwise reads as a crash.
+    notice: Option<String>,
+    /// A [`LoginEvent::Ended`] arrived and nobody has read it yet. Not a
+    /// session state: the screen changes on the app side, which drops the
+    /// cache.
+    ended: bool,
 }
 
 impl Login {
@@ -138,11 +149,31 @@ impl Login {
             rx,
             tx,
             skipped,
+            notice: None,
+            ended: false,
         }
     }
 
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// The line shown on screen; the notice leads when there is one.
+    pub fn hint(&self) -> String {
+        match &self.notice {
+            Some(n) => format!("{n}。{}", self.session.hint()),
+            None => self.session.hint().clone(),
+        }
+    }
+
+    /// Says why the last session ended. Kept until signing in succeeds.
+    pub fn set_notice(&mut self, reason: &str) {
+        self.notice = Some(reason.to_owned());
+    }
+
+    /// Whether the session ended on its own since the last call.
+    pub fn take_ended(&mut self) -> bool {
+        std::mem::take(&mut self.ended)
     }
 
     /// The only thing that decides between the login and main screens.
@@ -202,8 +233,16 @@ impl Login {
                 }
             }
             LoginEvent::Approved => Session::Exchanging,
-            LoginEvent::Done(l) => Session::LoggedIn(l),
+            // In again; whatever ended the last session no longer matters.
+            LoginEvent::Done(l) => {
+                self.notice = None;
+                Session::LoggedIn(l)
+            }
             LoginEvent::Failed(e) => Session::Failed(e),
+            LoginEvent::Ended => {
+                self.ended = true;
+                self.session.clone()
+            }
             LoginEvent::Restarted => Session::Connecting,
         };
     }
@@ -225,20 +264,36 @@ const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// quietly replaced rather than left dead in front of someone who walked away.
 /// A failure retries with growing backoff too: stopping here would leave
 /// "failed" on screen with no way forward but restarting the app.
+///
+/// Every turn starts by trying the stored token again, so a start made
+/// offline comes alive by itself once the network is back.
 async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
     // Measure first: both REST and the gateway build their claim after this,
     // and measuring later would leave one of them stale. The screen is
     // already up from cache, so this wait is not felt.
     gumicord_rest::build_number::measure().await;
 
-    if let Some(l) = restore(store.as_ref()).await {
-        let _ = tx.send(LoginEvent::Done(Box::new(l)));
-        waker.wake();
-        return;
-    }
-
+    // Said once per run: after the first turn either the keychain holds no
+    // token anymore or it never did, and repeating it changes nothing.
+    let mut said_ended = false;
     let mut wait = RETRY_MIN;
     loop {
+        match restore(store.as_ref()).await {
+            RestoreOutcome::LoggedIn(l) => {
+                let _ = tx.send(LoginEvent::Done(l));
+                waker.wake();
+                return;
+            }
+            RestoreOutcome::Gone => {
+                if !said_ended {
+                    said_ended = true;
+                    let _ = tx.send(LoginEvent::Ended);
+                    waker.wake();
+                }
+            }
+            RestoreOutcome::Unchecked => {}
+        }
+
         match attempt(&tx, &waker, store.as_ref()).await {
             // In; stop looping.
             Ok(true) => return,
@@ -260,35 +315,65 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
     }
 }
 
-/// Signs in with the stored token, discarding it the moment it fails.
+/// What became of the stored token.
+enum RestoreOutcome {
+    /// It is still good.
+    LoggedIn(Box<LoggedIn>),
+    /// There is nothing left to restore: the token was refused outright and
+    /// discarded, or none was ever stored. Only a fresh sign-in can follow.
+    Gone,
+    /// It could not be checked just now, so nothing was decided. It stays
+    /// stored, and a later try settles it.
+    Unchecked,
+}
+
+/// Signs in with the stored token, discarding it the moment Discord refuses
+/// it.
 ///
 /// A changed password, a revoked device and an expired token are all
 /// ordinary; keeping a dead token repeats the failure on every later start.
-async fn restore(store: Option<&SecretStore>) -> Option<LoggedIn> {
-    let store = store?;
+/// Anything short of a refusal — the network, mostly — decides nothing, and
+/// the token stays for a later try.
+async fn restore(store: Option<&SecretStore>) -> RestoreOutcome {
+    let Some(store) = store else {
+        return RestoreOutcome::Gone;
+    };
     let raw = match store.load(TOKEN_KEY) {
         Ok(Some(raw)) => raw,
-        Ok(None) => return None,
+        // Nothing stored is the ordinary first start.
+        Ok(None) => return RestoreOutcome::Gone,
         Err(e) => {
-            // Not exceptional: a different OS user, for instance.
+            // Not exceptional: a different OS user, for instance. Unreadable
+            // from here on, so the entry goes rather than failing in
+            // silence every start.
             tracing::warn!(%e, "cannot read the stored token; discarding it");
             let _ = store.clear(TOKEN_KEY);
-            return None;
+            return RestoreOutcome::Gone;
         }
     };
 
-    let token = Token::new(String::from_utf8(raw).ok()?);
-    let rest = RestClient::anonymous().ok()?;
+    let token = Token::new(String::from_utf8_lossy(&raw).into_owned());
+    let rest = match RestClient::anonymous() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%e, "cannot build a client to check the stored token");
+            return RestoreOutcome::Unchecked;
+        }
+    };
 
     match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
             tracing::info!(user = %me.user.display_name(), "signed in with the stored token");
-            Some(LoggedIn { me, client, token })
+            RestoreOutcome::LoggedIn(Box::new(LoggedIn { me, client, token }))
         }
-        Err(e) => {
+        Err(e) if e.is_unauthorized() => {
             tracing::warn!(%e, "the stored token was rejected; discarding it");
             let _ = store.clear(TOKEN_KEY);
-            None
+            RestoreOutcome::Gone
+        }
+        Err(e) => {
+            tracing::warn!(%e, "could not check the stored token; keeping it for a later try");
+            RestoreOutcome::Unchecked
         }
     }
 }
@@ -451,5 +536,56 @@ mod tests {
         login.apply(LoginEvent::Failed("接続できない".to_owned()));
         assert!(login.session().hint().contains("接続できない"));
         assert!(login.session().qr().is_none());
+    }
+
+    /// Being signed out on its own must say why, or the QR screen reads as a
+    /// crash. The notice leads and leaves once signing in succeeds.
+    #[test]
+    fn a_notice_leads_until_signing_in_succeeds() {
+        let mut login = Login::fresh(false);
+        login.apply(LoginEvent::Qr("https://example/1".to_owned()));
+        login.set_notice("セッションが無効になったため、ログアウトしました");
+        assert!(login.hint().contains("セッションが無効"));
+        assert!(
+            login.hint().contains("QR を読み取ってください"),
+            "the how-to line must survive"
+        );
+
+        login.apply(LoginEvent::Done(Box::new(LoggedIn {
+            me: serde_json::from_str(r#"{"id":"1","username":"ねんねこ"}"#).unwrap(),
+            client: RestClient::anonymous().unwrap(),
+            token: Token::new("t"),
+        })));
+        assert_eq!(
+            login.hint(),
+            login.session().hint(),
+            "notice outlived login"
+        );
+    }
+
+    #[test]
+    fn without_a_notice_the_hint_is_unchanged() {
+        let mut login = Login::fresh(false);
+        login.apply(LoginEvent::Qr("https://example/1".to_owned()));
+        assert_eq!(login.hint(), login.session().hint());
+    }
+
+    /// The end is picked up exactly once, and it does not stop the QR flow:
+    /// a fresh sign-in is the only way forward after it.
+    #[test]
+    fn the_end_is_reported_once_and_the_qr_keeps_running() {
+        let mut login = Login::fresh_for_test();
+        assert!(!login.take_ended());
+
+        login.apply(LoginEvent::Ended);
+        login.apply(LoginEvent::Qr("https://example/1".to_owned()));
+
+        assert!(login.take_ended());
+        assert!(!login.take_ended(), "read twice");
+        assert_eq!(
+            login.session().qr(),
+            Some("https://example/1"),
+            "the QR flow stopped"
+        );
     }
 }

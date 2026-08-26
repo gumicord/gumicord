@@ -80,6 +80,10 @@ const FOLDER_TILES: usize = 4;
 /// match the press.
 const CANCEL_COMPOSING: &str = "cancel_composing";
 
+/// Leads the login screen after an involuntary sign-out. A silent kick back
+/// to the QR reads as a crash.
+const DEAD_SESSION_NOTICE: &str = "セッションが無効になったため、ログアウトしました";
+
 const INTERACTIVE: &[NodeId] = &[
     NodeId::NavGuildListHome,
     NodeId::NavGuildListItem,
@@ -449,10 +453,24 @@ impl Application for Gumicord {
                 .start(rt.handle(), l.client.clone(), waker.clone());
         }
 
-        // The gateway rejected the token. Same path as pressing "log out".
+        // The gateway rejected the token mid-run. Same path as pressing
+        // "log out".
         if self.live.take_rejection() {
             tracing::warn!("the token is no longer valid; signing out");
             changed |= self.sign_out();
+            self.login.set_notice(DEAD_SESSION_NOTICE);
+        } else if self.login.take_ended() {
+            // The session was already over at startup: the stored token was
+            // refused, or there was none. Cache-first would keep showing a
+            // chat nothing can refresh, so the cache goes instead. Only it —
+            // the login loop never stopped, and starting another one here
+            // would race the QR already being fetched.
+            tracing::warn!("no session could be restored; signing out");
+            let had_cache = !self.live.is_empty();
+            changed |= self.forget_account();
+            if had_cache {
+                self.login.set_notice(DEAD_SESSION_NOTICE);
+            }
         }
 
         changed |= self.sync_selection();
@@ -976,15 +994,23 @@ impl Gumicord {
     /// Reached both by pressing "log out" and by the gateway rejecting the
     /// token; the two must leave the same state behind, or one of them strands
     /// the app on a screen it cannot get out of.
-    ///
-    /// Nothing is kept: leaving the cache behind lets the next person on this
-    /// machine read the previous one's messages.
     fn sign_out(&mut self) -> bool {
         let (Some(rt), Some(waker)) = (&self.runtime, &self.waker) else {
             // No runtime means demo mode, where there is nothing to sign out of.
             return false;
         };
         self.login.forget(rt.handle(), waker.clone());
+        self.forget_account()
+    }
+
+    /// Drops everything belonging to the account that is leaving: the caches,
+    /// and whatever is still on screen.
+    ///
+    /// Nothing is kept: leaving the cache behind lets the next person on this
+    /// machine read the previous one's messages. Split from [`Self::sign_out`]
+    /// because a session already dead at startup reaches here while the login
+    /// loop is still running and must not be started again.
+    fn forget_account(&mut self) -> bool {
         self.live.forget_everything();
         self.images.forget_everything();
 
@@ -1045,7 +1071,7 @@ impl Gumicord {
             .child_if(s.qr().is_some(), || {
                 UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
             })
-            .child(UiNode::text(NodeId::AppScreenLoginHint, s.hint()))
+            .child(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()))
             .child(UiNode::new(NodeId::LayoutSpacer))
     }
 
@@ -3227,6 +3253,53 @@ mod login_tests {
         let a = Gumicord::demo();
         assert!(a.login.shows_main());
         assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::AppScreenMain));
+    }
+
+    /// A signed-out app with a cache left by an earlier run.
+    fn cached() -> Gumicord {
+        let mut a = pending();
+        a.live.store_mut().upsert_guild(gumicord_model::Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: Vec::new(),
+        });
+        a
+    }
+
+    /// A session already dead at startup must not strand the app behind its
+    /// own cache: nothing could ever refresh what is on screen.
+    #[test]
+    fn a_session_dead_at_startup_clears_the_cache() {
+        let mut a = cached();
+        assert!(!a.live.is_empty(), "the cache did not load");
+        assert!(a.shows_main(), "cache-first shows the main screen");
+
+        a.login.apply_for_test(LoginEvent::Ended);
+        assert!(a.wake(), "the end asked for a redraw");
+
+        assert!(a.live.is_empty(), "the cache survived");
+        assert!(!a.shows_main(), "the login screen never took over");
+        assert!(
+            a.login.hint().contains("セッションが無効"),
+            "no reason given: {}",
+            a.login.hint()
+        );
+    }
+
+    /// A first start has neither cache nor session; leading the QR with a
+    /// logout reason nobody earned would be a lie.
+    #[test]
+    fn a_session_dead_before_any_cache_blames_nothing() {
+        let mut a = pending();
+        assert!(a.live.is_empty());
+
+        a.login.apply_for_test(LoginEvent::Ended);
+        a.wake();
+
+        assert_eq!(a.login.hint(), a.login.session().hint());
     }
 
     /// Tests never reach the network.

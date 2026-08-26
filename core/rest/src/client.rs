@@ -53,6 +53,16 @@ pub enum RestError {
     CaptchaRequired(Box<CaptchaChallenge>),
 }
 
+impl RestError {
+    /// Whether Discord refused the credentials outright.
+    ///
+    /// Only this may end a session: network trouble or a 5xx says nothing
+    /// about whether the token is still good.
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, RestError::Api { status: 401, .. })
+    }
+}
+
 /// A captcha Discord asked us to solve.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct CaptchaChallenge {
@@ -335,5 +345,33 @@ mod tests {
     #[test]
     fn the_api_base_is_pinned() {
         assert_eq!(API_BASE, "https://discord.com/api/v10");
+    }
+
+    /// Ending the session on anything else would throw people offline for a
+    /// mere network outage.
+    #[test]
+    fn only_a_401_counts_as_a_dead_token() {
+        assert!(
+            RestError::Api {
+                status: 401,
+                body: String::new()
+            }
+            .is_unauthorized()
+        );
+        assert!(
+            !RestError::Api {
+                status: 403,
+                body: String::new()
+            }
+            .is_unauthorized()
+        );
+        assert!(!RestError::RateLimited.is_unauthorized());
+        assert!(
+            !RestError::Api {
+                status: 503,
+                body: String::new()
+            }
+            .is_unauthorized()
+        );
     }
 }
