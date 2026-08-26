@@ -110,6 +110,16 @@ pub enum LiveEvent {
         user: UserId,
         name: String,
     },
+    /// A presence changed on the wire.
+    ///
+    /// Arrives for anyone sharing a guild; only our own is kept, since
+    /// everyone else's comes with the member list.
+    Presence {
+        user: UserId,
+        /// `None` when absent or an unknown name; the last known value stays
+        /// showing rather than wiping the dot to unknown.
+        status: Option<Status>,
+    },
     Link(Link),
     /// The token was rejected; drop the keychain entry and the cache.
     TokenRejected,
@@ -164,8 +174,8 @@ pub struct Live {
     members: std::collections::HashMap<GuildId, gumicord_gateway::MemberList>,
     /// Ourselves, so our own typing indicator is not shown.
     me: Option<UserId>,
-    /// Our status as of READY. `PRESENCE_UPDATE` is not handled, so changing
-    /// it on a phone does not show here until the next connection.
+    /// Our status. READY starts it; presences about us keep it current, so
+    /// changing it on a phone shows up without reconnecting.
     status: Option<Status>,
 }
 
@@ -703,6 +713,20 @@ impl Live {
                 }
                 true
             }
+            LiveEvent::Presence { user, status } => {
+                if Some(user) != self.me {
+                    return false;
+                }
+                match status {
+                    // An unreadable update keeps the last known value showing
+                    // rather than erasing the dot.
+                    Some(s) if self.status != Some(s) => {
+                        self.status = Some(s);
+                        true
+                    }
+                    _ => false,
+                }
+            }
             LiveEvent::GuildChanged(g) => {
                 self.store.upsert_guild(*g);
                 self.save_guilds();
@@ -925,6 +949,12 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                         });
                     }
                 }
+                // Fired for anyone sharing a guild; ours moves the user
+                // panel's dot, the rest is dropped on arrival.
+                "PRESENCE_UPDATE" => match presence_of(&data) {
+                    Some((user, status)) => send(LiveEvent::Presence { user, status }),
+                    None => tracing::warn!("could not read PRESENCE_UPDATE"),
+                },
                 _ => {}
             },
             Event::Reconnecting { reason, .. } => send(LiveEvent::Link(Link::Reconnecting(reason))),
@@ -1006,6 +1036,20 @@ fn typing_event(data: &serde_json::Value) -> Option<LiveEvent> {
         user: UserId::from(user),
         name: name.to_owned(),
     })
+}
+
+/// Extracts whose presence changed and what it became.
+///
+/// `status` may be absent when nothing about it changed, and names this
+/// client does not know are dropped by [`Status::from_wire`] rather than
+/// guessed at.
+fn presence_of(data: &serde_json::Value) -> Option<(UserId, Option<Status>)> {
+    let id = data.pointer("/user/id")?.as_str()?.parse::<u64>().ok()?;
+    let status = data
+        .get("status")
+        .and_then(|s| s.as_str())
+        .and_then(Status::from_wire);
+    Some((UserId::from(id), status))
 }
 
 #[cfg(test)]
@@ -1250,5 +1294,62 @@ mod tests {
         assert!(!live.store().has_messages(ch()));
         assert!(live.is_empty());
         assert!(!live.is_loading(ch()));
+    }
+
+    /// A change made on another device moves our own dot. Other people's
+    /// presences belong to the member list, an unreadable one keeps the last
+    /// known value showing, and the same value twice is not news.
+    #[test]
+    fn only_our_own_presence_moves_the_dot() {
+        let mut live = live();
+        live.me = Some(UserId::from(1u64));
+        live.status = Some(Status::Online);
+
+        assert!(live.apply(LiveEvent::Presence {
+            user: UserId::from(1u64),
+            status: Some(Status::Dnd),
+        }));
+        assert_eq!(live.status, Some(Status::Dnd));
+
+        assert!(!live.apply(LiveEvent::Presence {
+            user: UserId::from(9u64),
+            status: Some(Status::Idle),
+        }));
+        assert_eq!(live.status, Some(Status::Dnd));
+
+        assert!(!live.apply(LiveEvent::Presence {
+            user: UserId::from(1u64),
+            status: None,
+        }));
+        assert_eq!(live.status, Some(Status::Dnd));
+
+        assert!(!live.apply(LiveEvent::Presence {
+            user: UserId::from(1u64),
+            status: Some(Status::Dnd),
+        }));
+    }
+
+    /// The shape arrives with the id nested under `user`; a name this client
+    /// does not know reads as no change rather than a guess.
+    #[test]
+    fn presence_extraction_reads_the_nested_id() {
+        let (user, status) = presence_of(&serde_json::json!({
+            "user": { "id": "42" },
+            "status": "dnd",
+            "activities": [],
+        }))
+        .expect("読める形");
+        assert_eq!(user, UserId::from(42u64));
+        assert_eq!(status, Some(Status::Dnd));
+
+        let (_, status) = presence_of(&serde_json::json!({
+            "user": { "id": "42" },
+            "status": "streaming",
+        }))
+        .expect("id だけでも読める");
+        assert_eq!(status, None);
+
+        // Without the user there is nothing to hang it on.
+        assert!(presence_of(&serde_json::json!({ "status": "online" })).is_none());
     }
 }

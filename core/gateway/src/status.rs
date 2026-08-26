@@ -13,10 +13,9 @@
 //! |---|---|
 //! - changing it
 //! - showing anyone else's
-//! - following a change made on another device, which needs `PRESENCE_UPDATE`
 //!
-//! So this is the value as of READY: changing it on a phone does not show
-//! here until the next connection.
+//! READY starts the value; a `PRESENCE_UPDATE` about ourselves keeps it
+//! current, so changing it on another device shows up without reconnecting.
 
 use base64::Engine as _;
 
