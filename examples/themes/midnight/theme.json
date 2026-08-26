@@ -305,7 +305,7 @@
       "style": {
         "width": 14,
         "height": 14,
-        "margin": [22, 0, 0, 22],
+        "margin": [20, 0, 0, 20],
         "radius": "$radius.full",
         "background": "$color.text.muted",
         "borderColor": "$color.bg.sunken",
@@ -366,7 +366,7 @@
       "style": {
         "width": 14,
         "height": 14,
-        "margin": [22, 0, 0, 22],
+        "margin": [20, 0, 0, 20],
         "radius": "$radius.full",
         "background": "$color.text.muted",
         "borderColor": "$color.bg.sunken",
