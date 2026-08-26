@@ -15,7 +15,10 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
-use gumicord_gateway::{Event, Fatal, Gateway, Ready, Subscriptions, status::Status};
+use gumicord_gateway::{
+    Event, Fatal, Gateway, Ready, Subscriptions,
+    status::{Status, from_settings_proto},
+};
 use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, Token, UserId};
 use gumicord_platform::Waker;
 use gumicord_rest::{RestClient, RestError};
@@ -120,6 +123,11 @@ pub enum LiveEvent {
         /// showing rather than wiping the dot to unknown.
         status: Option<Status>,
     },
+    /// Our status changed through the settings sync.
+    ///
+    /// Switching it on another device reaches every session as settings,
+    /// which arrive even where presence events do not.
+    SelfStatus(Status),
     Link(Link),
     /// The token was rejected; drop the keychain entry and the cache.
     TokenRejected,
@@ -717,6 +725,9 @@ impl Live {
                 if Some(user) != self.me {
                     return false;
                 }
+                // Whether our own presence is delivered at all is still an
+                // open question; the log answers it from a real session.
+                tracing::debug!(status = ?status, "our own presence arrived");
                 match status {
                     // An unreadable update keeps the last known value showing
                     // rather than erasing the dot.
@@ -725,6 +736,14 @@ impl Live {
                         true
                     }
                     _ => false,
+                }
+            }
+            LiveEvent::SelfStatus(s) => {
+                if self.status != Some(s) {
+                    self.status = Some(s);
+                    true
+                } else {
+                    false
                 }
             }
             LiveEvent::GuildChanged(g) => {
@@ -949,13 +968,28 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                         });
                     }
                 }
+                // A status switch made elsewhere arrives as settings; the
+                // payload carries the whole proto, status included.
+                "USER_SETTINGS_PROTO_UPDATE" => match self_status_of(&data) {
+                    Some(s) => send(LiveEvent::SelfStatus(s)),
+                    // Only the shape goes to the log, never the settings
+                    // themselves.
+                    None => tracing::debug!(
+                        keys = ?data.as_object().map(|o| o.keys().collect::<Vec<_>>()),
+                        settings = settings_shape(&data).as_deref(),
+                        partial = data.get("partial").and_then(|p| p.as_bool()),
+                        "no status in USER_SETTINGS_PROTO_UPDATE"
+                    ),
+                },
                 // Fired for anyone sharing a guild; ours moves the user
                 // panel's dot, the rest is dropped on arrival.
                 "PRESENCE_UPDATE" => match presence_of(&data) {
                     Some((user, status)) => send(LiveEvent::Presence { user, status }),
                     None => tracing::warn!("could not read PRESENCE_UPDATE"),
                 },
-                _ => {}
+                // What we drop is worth seeing at debug: an event that
+                // "never arrives" may arrive under a name dropped here.
+                _ => tracing::debug!(%kind, "unhandled dispatch"),
             },
             Event::Reconnecting { reason, .. } => send(LiveEvent::Link(Link::Reconnecting(reason))),
             Event::Fatal(Fatal::Unauthorized) => {
@@ -1050,6 +1084,33 @@ fn presence_of(data: &serde_json::Value) -> Option<(UserId, Option<Status>)> {
         .and_then(|s| s.as_str())
         .and_then(Status::from_wire);
     Some((UserId::from(id), status))
+}
+
+/// Extracts our status out of the settings sync.
+///
+/// The same proto READY carries, so the same reader answers. The proto
+/// arrives bare or wrapped with a type name; an unreadable one keeps the
+/// last known value showing.
+fn self_status_of(data: &serde_json::Value) -> Option<Status> {
+    let settings = data.get("settings")?;
+    let proto = settings
+        .as_str()
+        .or_else(|| settings.get("proto").and_then(|p| p.as_str()))?;
+    from_settings_proto(proto)
+}
+
+/// Describes the `settings` value's shape, for the log. The contents are the
+/// user's settings and never go out.
+fn settings_shape(data: &serde_json::Value) -> Option<String> {
+    Some(match data.get("settings")? {
+        serde_json::Value::String(s) => format!("string({})", s.len()),
+        serde_json::Value::Object(o) => {
+            format!("object keys={:?}", o.keys().collect::<Vec<_>>())
+        }
+        serde_json::Value::Array(a) => format!("array({})", a.len()),
+        serde_json::Value::Null => "null".to_owned(),
+        other => format!("{other:?}"),
+    })
 }
 
 #[cfg(test)]
@@ -1351,5 +1412,68 @@ mod tests {
 
         // Without the user there is nothing to hang it on.
         assert!(presence_of(&serde_json::json!({ "status": "online" })).is_none());
+    }
+
+    /// The settings sync speaks about us by definition, so its status moves
+    /// the dot without the membership check a wire presence needs; the same
+    /// value twice is not news.
+    #[test]
+    fn the_settings_sync_moves_our_own_dot() {
+        let mut live = live();
+        live.me = Some(UserId::from(1u64));
+
+        assert!(live.apply(LiveEvent::SelfStatus(Status::Dnd)));
+        assert_eq!(live.status, Some(Status::Dnd));
+        assert!(!live.apply(LiveEvent::SelfStatus(Status::Dnd)));
+    }
+
+    use base64::Engine as _;
+
+    /// Builds the settings proto by hand, the way the `status` tests do.
+    fn block(field: u64, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_varint(&mut out, field << 3 | 2);
+        put_varint(&mut out, body.len() as u64);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// The sync carries the whole proto under `settings`; one without a
+    /// readable status leaves the last value showing rather than a guess.
+    #[test]
+    fn the_status_is_read_out_of_the_settings_sync() {
+        let value = block(1, b"dnd");
+        let status_settings = block(1, &value);
+        let root = block(5, &status_settings);
+        let proto = base64::engine::general_purpose::STANDARD.encode(root);
+
+        let status = self_status_of(&serde_json::json!({ "settings": proto })).expect("読める形");
+        assert_eq!(status, Status::Dnd);
+
+        // The wire wraps it with a type name.
+        let wrapped = self_status_of(&serde_json::json!({
+            "partial": false,
+            "settings": { "proto": proto, "type": "user_settings" },
+        }))
+        .expect("包まれていても読める");
+        assert_eq!(wrapped, Status::Dnd);
+
+        assert_eq!(self_status_of(&serde_json::json!({ "other": 1 })), None);
+        assert_eq!(
+            self_status_of(&serde_json::json!({ "settings": "base64 ではない" })),
+            None
+        );
     }
 }
