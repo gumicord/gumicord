@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gumicord_gateway::{
-    Event, Fatal, Gateway, Ready, Subscriptions,
+    Event, Fatal, Gateway, GuildSettingsEntry, Ready, Subscriptions,
     status::{Status, from_settings_proto},
 };
 use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, Token, UserId};
@@ -140,6 +140,8 @@ pub enum LiveEvent {
     Link(Link),
     /// The token was rejected; drop the keychain entry and the cache.
     TokenRejected,
+    /// A per-guild notification setting changed on another device.
+    NotifSettings(serde_json::Value),
 }
 
 /// Real data and the background work that carries it.
@@ -741,7 +743,19 @@ impl Live {
                 tracing::debug!(marks = marks.len(), "received read markers");
                 self.store.set_read_marks(marks);
 
+                // Before guilds; replacing them moves `ready`.
+                let raw_notifs = ready.notification_settings();
+                tracing::debug!(notifs = raw_notifs.len(), "received notification settings");
+
                 self.store.replace_guilds(ready.guilds);
+                for &(guild, msg_notif, muted, ref overrides) in &raw_notifs {
+                    let default = to_notif_level(msg_notif, muted);
+                    let resolved: Vec<(ChannelId, gumicord_store::NotifLevel)> = overrides
+                        .iter()
+                        .map(|&(c, n, m)| (c, to_notif_level(n, m)))
+                        .collect();
+                    self.store.set_notifs(guild, default, &resolved);
+                }
                 if !order.is_empty() {
                     self.store.set_preferred_order(order);
                 }
@@ -925,6 +939,30 @@ impl Live {
                 self.link = Link::Down("トークンが無効になりました".to_owned());
                 true
             }
+            LiveEvent::NotifSettings(data) => {
+                match serde_json::from_value::<GuildSettingsEntry>(data) {
+                    Ok(entry) => {
+                        let default =
+                            to_notif_level(entry.message_notifications, entry.muted);
+                        let resolved: Vec<(ChannelId, gumicord_store::NotifLevel)> =
+                            entry
+                                .channel_overrides
+                                .iter()
+                                .map(|o| {
+                                    (o.channel_id, to_notif_level(o.message_notifications, o.muted))
+                                })
+                                .collect();
+                        self.store
+                            .set_notifs(entry.guild_id, default, &resolved);
+                        tracing::debug!(
+                            guild = %entry.guild_id,
+                            "notification settings updated"
+                        );
+                    }
+                    Err(e) => tracing::warn!(%e, "could not read USER_GUILD_SETTINGS_UPDATE"),
+                }
+                true
+            }
         }
     }
 
@@ -1033,6 +1071,10 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                     Some((user, status)) => send(LiveEvent::Presence { user, status }),
                     None => tracing::warn!("could not read PRESENCE_UPDATE"),
                 },
+                // A per-guild notification setting changed on another device.
+                "USER_GUILD_SETTINGS_UPDATE" => {
+                    send(LiveEvent::NotifSettings(data));
+                }
                 // What we drop is worth seeing at debug: an event that
                 // "never arrives" may arrive under a name dropped here.
                 _ => tracing::debug!(%kind, "unhandled dispatch"),
@@ -1190,6 +1232,21 @@ fn next_member_rows(
     }
     let start = held;
     Some([start, start + PAGE - 1])
+}
+
+/// Maps Discord's notification level integer to the store enum.
+///
+/// `message_notifications`: 0 = all, 1 = only @mentions, 2 = nothing.
+/// The `muted` flag overrides to nothing.
+fn to_notif_level(raw: u8, muted: bool) -> gumicord_store::NotifLevel {
+    use gumicord_store::NotifLevel;
+    if muted || raw >= 2 {
+        NotifLevel::Nothing
+    } else if raw == 1 {
+        NotifLevel::Mentions
+    } else {
+        NotifLevel::All
+    }
 }
 
 #[cfg(test)]

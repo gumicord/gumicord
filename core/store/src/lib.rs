@@ -4,9 +4,8 @@
 //! closer to a second, which does not fit the cold-start budget.
 //!
 //! Not here yet: full-text search, encryption of the cache (message bodies sit
-//! on disk in the clear), an offline send queue, and muted-channel handling —
-//! notification settings are not read, so muted channels still light up.
-//! Read markers are not persisted, since READY brings them every time.
+//! on disk in the clear), an offline send queue. Read markers are not
+//! persisted, since READY brings them every time.
 
 pub mod db;
 
@@ -56,6 +55,9 @@ pub struct Store {
     roles: HashMap<GuildId, Vec<Role>>,
     /// Read markers, per channel.
     read: HashMap<ChannelId, ReadMark>,
+    /// Notification level per channel. Derived from both guild-level and
+    /// channel-level overrides in `user_guild_settings`.
+    notif: HashMap<ChannelId, NotifLevel>,
     /// Members seen, per guild.
     ///
     /// Discord attaches `member` to gateway messages only, never to history
@@ -82,6 +84,18 @@ pub struct ReadMark {
     pub seen: Option<MessageId>,
     /// Unread mentions.
     pub mentions: u32,
+}
+
+/// Notification level for a channel, derived from guild and channel overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotifLevel {
+    /// Default: every message lights up the channel.
+    #[default]
+    All,
+    /// Only @mentions light it up.
+    Mentions,
+    /// Completely suppressed — even the unread dot is off.
+    Nothing,
 }
 
 /// One sidebar row: a folder or a guild.
@@ -281,20 +295,61 @@ impl Store {
         self.read = marks.into_iter().collect();
     }
 
+    /// Sets the effective notification level for a channel.
+    ///
+    /// The caller is responsible for resolving guild-level and channel-level
+    /// overrides before passing the result here.
+    pub fn set_notif(&mut self, channel: ChannelId, level: NotifLevel) {
+        if level == NotifLevel::default() {
+            self.notif.remove(&channel);
+        } else {
+            self.notif.insert(channel, level);
+        }
+    }
+
+    /// Bulk-replaces notification levels for every channel in a guild.
+    pub fn set_notifs(
+        &mut self,
+        guild: GuildId,
+        level: NotifLevel,
+        overrides: &[(ChannelId, NotifLevel)],
+    ) {
+        let channels: Vec<ChannelId> = self
+            .guild_channels
+            .get(&guild)
+            .cloned()
+            .unwrap_or_default();
+        for c in &channels {
+            // Start from the guild-level default.
+            self.set_notif(*c, level);
+        }
+        // Channel overrides take precedence.
+        for &(c, l) in overrides {
+            self.set_notif(c, l);
+        }
+    }
+
     /// Whether a channel has unread messages.
     ///
     /// A never-read channel is not unread: a freshly joined guild arrives with
     /// no markers at all, and treating that as unread lights up every channel
     /// the moment someone joins. Discord ignores anything from before joining.
-    ///
-    /// Mutes are not read yet, so muted channels still light up.
     pub fn is_unread(&self, channel: ChannelId) -> bool {
-        let Some(last) = self.channels.get(&channel).and_then(|c| c.last_message_id) else {
-            return false;
-        };
-        match self.read.get(&channel).and_then(|m| m.seen) {
-            Some(seen) => last > seen,
-            None => false,
+        let level = self.notif.get(&channel).copied().unwrap_or_default();
+        match level {
+            NotifLevel::Nothing => false,
+            NotifLevel::Mentions => self.mentions(channel) > 0,
+            NotifLevel::All => {
+                let Some(last) =
+                    self.channels.get(&channel).and_then(|c| c.last_message_id)
+                else {
+                    return false;
+                };
+                match self.read.get(&channel).and_then(|m| m.seen) {
+                    Some(seen) => last > seen,
+                    None => false,
+                }
+            }
         }
     }
 
@@ -1398,5 +1453,118 @@ mod unread_tests {
         let mut s = store(vec![channel(10, Some(100))]);
         assert!(!s.note_arrival(&message(50, 10, 8, &[]), None));
         assert!(!s.note_arrival(&message(100, 10, 8, &[]), None));
+    }
+
+    /// A channel muted at the guild level is not unread even with newer
+    /// messages.
+    #[test]
+    fn guild_level_mute_suppresses_unread() {
+        let mut s = store(vec![channel(10, Some(200))]);
+        let g = GuildId::from(1u64);
+        let ch = ChannelId::from(10u64);
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(100u64)),
+                mentions: 0,
+            },
+        )]);
+        assert!(s.is_unread(ch), "baseline");
+
+        s.set_notifs(g, NotifLevel::Nothing, &[]);
+        assert!(!s.is_unread(ch), "muted guild suppresses unread");
+    }
+
+    /// A channel-level override takes precedence over the guild default.
+    #[test]
+    fn channel_override_wins() {
+        let mut s = store(vec![channel(10, Some(200)), channel(11, Some(200))]);
+        let g = GuildId::from(1u64);
+        let ch1 = ChannelId::from(10u64);
+        let ch2 = ChannelId::from(11u64);
+        s.set_read_marks([
+            (
+                ch1,
+                ReadMark {
+                    seen: Some(MessageId::from(100u64)),
+                    mentions: 0,
+                },
+            ),
+            (
+                ch2,
+                ReadMark {
+                    seen: Some(MessageId::from(100u64)),
+                    mentions: 0,
+                },
+            ),
+        ]);
+
+        // Guild is muted; ch1 overrides to unmute.
+        s.set_notifs(
+            g,
+            NotifLevel::Nothing,
+            &[(ch1, NotifLevel::All)],
+        );
+        assert!(s.is_unread(ch1), "overridden channel is not muted");
+        assert!(!s.is_unread(ch2), "other channel stays muted");
+    }
+
+    /// Mentions-only level suppresses the unread dot but not the mention
+    /// count.
+    #[test]
+    fn mentions_only_level() {
+        let mut s = store(vec![channel(10, Some(200))]);
+        let g = GuildId::from(1u64);
+        let ch = ChannelId::from(10u64);
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(100u64)),
+                mentions: 2,
+            },
+        )]);
+
+        s.set_notifs(g, NotifLevel::Mentions, &[]);
+        assert!(s.is_unread(ch), "mentions present");
+        assert_eq!(s.mentions(ch), 2, "mention count is preserved");
+    }
+
+    /// Mentions-only level with zero mentions means not unread.
+    #[test]
+    fn mentions_only_without_mentions_is_not_unread() {
+        let mut s = store(vec![channel(10, Some(200))]);
+        let g = GuildId::from(1u64);
+        let ch = ChannelId::from(10u64);
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(100u64)),
+                mentions: 0,
+            },
+        )]);
+
+        s.set_notifs(g, NotifLevel::Mentions, &[]);
+        assert!(!s.is_unread(ch));
+    }
+
+    /// Setting a channel to the default level clears its override.
+    #[test]
+    fn default_level_removes_override() {
+        let mut s = store(vec![channel(10, Some(200))]);
+        let g = GuildId::from(1u64);
+        let ch = ChannelId::from(10u64);
+        s.set_read_marks([(
+            ch,
+            ReadMark {
+                seen: Some(MessageId::from(100u64)),
+                mentions: 0,
+            },
+        )]);
+
+        s.set_notifs(g, NotifLevel::Nothing, &[]);
+        assert!(!s.is_unread(ch));
+
+        s.set_notifs(g, NotifLevel::All, &[]);
+        assert!(s.is_unread(ch), "back to default");
     }
 }

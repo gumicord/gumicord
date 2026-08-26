@@ -114,6 +114,9 @@ pub struct Ready {
     /// wrapped in `entries`.
     #[serde(default)]
     pub read_state: Option<ReadStates>,
+    /// Per-guild and per-channel notification overrides.
+    #[serde(default)]
+    pub user_guild_settings: Option<UserGuildSettings>,
 }
 
 /// Accepts both shapes of `read_state`.
@@ -154,6 +157,41 @@ pub struct ReadState {
     pub mention_count: u32,
 }
 
+/// Per-guild and per-channel notification overrides from READY.
+///
+/// Discord sends this as `{ "entries": [...] }`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserGuildSettings {
+    #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
+    pub entries: Vec<GuildSettingsEntry>,
+}
+
+/// One guild's notification settings, including per-channel overrides.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GuildSettingsEntry {
+    pub guild_id: GuildId,
+    /// 0 = all messages, 1 = only @mentions, 2 = nothing.
+    #[serde(default)]
+    pub message_notifications: u8,
+    /// Whether the guild is fully muted.
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default, deserialize_with = "gumicord_model::de::lenient_vec")]
+    pub channel_overrides: Vec<ChannelOverride>,
+}
+
+/// A per-channel notification override within a guild.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelOverride {
+    pub channel_id: ChannelId,
+    /// 0 = all messages, 1 = only @mentions, 2 = nothing.
+    #[serde(default)]
+    pub message_notifications: u8,
+    /// Whether this channel is muted.
+    #[serde(default)]
+    pub muted: bool,
+}
+
 impl Ready {
     /// The order the user arranged in Discord.
     ///
@@ -178,6 +216,33 @@ impl Ready {
     /// "online": it would lie about anyone set to do not disturb.
     pub fn status(&self) -> Option<crate::status::Status> {
         crate::status::from_settings_proto(self.user_settings_proto.as_deref()?)
+    }
+
+    /// Resolved notification levels per guild:
+    /// (guild, default_notifications, default_muted, overrides).
+    pub fn notification_settings(
+        &self,
+    ) -> Vec<(GuildId, u8, bool, Vec<(ChannelId, u8, bool)>)> {
+        let Some(settings) = &self.user_guild_settings else {
+            return Vec::new();
+        };
+        settings
+            .entries
+            .iter()
+            .map(|entry| {
+                let overrides = entry
+                    .channel_overrides
+                    .iter()
+                    .map(|o| (o.channel_id, o.message_notifications, o.muted))
+                    .collect();
+                (
+                    entry.guild_id,
+                    entry.message_notifications,
+                    entry.muted,
+                    overrides,
+                )
+            })
+            .collect()
     }
 
     fn known_guilds(&self) -> std::collections::HashSet<u64> {
