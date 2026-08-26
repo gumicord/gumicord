@@ -32,6 +32,7 @@ use std::collections::HashSet;
 
 use gumicord_markdown::{Block, Deco, Inline, InlineKind, Item, Marker, Mention};
 use gumicord_theme::{MatchContext, Theme};
+use gumicord_uitree::value::Font;
 use gumicord_uitree::{Content, Key, Line, NodeId, Span, Style, UiNode};
 
 /// Slot per list depth.
@@ -147,6 +148,52 @@ impl<'a> Ink<'a> {
     /// Turns a body into vertically stacked nodes.
     pub fn blocks(&self, blocks: &[Block], names: &dyn Names) -> Vec<UiNode> {
         blocks.iter().map(|b| self.block(b, names)).collect()
+    }
+
+    /// Whether the body is a single custom emoji with no other content.
+    ///
+    /// When true, [`Self::single_emoji`] returns the emoji id.
+    pub fn is_single_emoji(blocks: &[Block]) -> bool {
+        if blocks.len() != 1 {
+            return false;
+        }
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            return false;
+        };
+        matches!(
+            inlines.as_slice(),
+            [Inline {
+                deco,
+                kind: InlineKind::Emoji { .. },
+            }] if deco.is_none()
+        )
+    }
+
+    /// Extracts the emoji id when the body is a single custom emoji.
+    ///
+    /// Call after [`Self::is_single_emoji`].
+    pub fn single_emoji(blocks: &[Block]) -> u64 {
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            unreachable!()
+        };
+        match &inlines[0].kind {
+            InlineKind::Emoji { id, .. } => *id,
+            _ => unreachable!(),
+        }
+    }
+
+    /// A single custom emoji, displayed at a larger size.
+    pub fn large_emoji(&self, id: u64) -> UiNode {
+        let span = Span {
+            text: LARGE_EMOJI_SPACE.to_owned(),
+            font: Some(Font {
+                size: Some(LARGE_EMOJI_SIZE),
+                ..Default::default()
+            }),
+            image: Some(emoji_url_large(id)),
+            ..Default::default()
+        };
+        UiNode::new(NodeId::PrimitiveText).with_content(Content::Rich(vec![span]))
     }
 
     fn block(&self, b: &Block, names: &dyn Names) -> UiNode {
@@ -315,6 +362,18 @@ const EM_SPACE: &str = "\u{2003}";
 fn emoji_url(id: u64) -> String {
     format!("https://cdn.discordapp.com/emojis/{id}.png?size=64")
 }
+
+/// Where a custom emoji's pixels come from, at a larger resolution.
+fn emoji_url_large(id: u64) -> String {
+    format!("https://cdn.discordapp.com/emojis/{id}.png?size=128")
+}
+
+/// Font size for a single-emoji message, matching Discord's layout.
+const LARGE_EMOJI_SIZE: f32 = 96.0;
+
+/// Space character for a large emoji run: the em space at the large font size
+/// gives a square wide enough for the picture.
+const LARGE_EMOJI_SPACE: &str = EM_SPACE;
 
 /// Maps a fence's info string to a slot.
 ///
@@ -940,5 +999,52 @@ mod tests {
         let spans = spans_of(None, "@everyone", &NoNames);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].link, None);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Single-emoji detection
+
+    #[test]
+    fn a_single_custom_emoji_is_detected() {
+        let blocks = gumicord_markdown::parse("<:neko:123>");
+        assert!(Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji(&blocks), 123);
+    }
+
+    #[test]
+    fn an_animated_single_emoji_is_detected() {
+        let blocks = gumicord_markdown::parse("<a:wave:456>");
+        assert!(Ink::is_single_emoji(&blocks));
+        assert_eq!(Ink::single_emoji(&blocks), 456);
+    }
+
+    #[test]
+    fn text_next_to_an_emoji_is_not_single() {
+        let blocks = gumicord_markdown::parse("hello <:neko:123>");
+        assert!(!Ink::is_single_emoji(&blocks));
+    }
+
+    #[test]
+    fn two_emojis_are_not_single() {
+        let blocks = gumicord_markdown::parse("<:a:1> <:b:2>");
+        assert!(!Ink::is_single_emoji(&blocks));
+    }
+
+    #[test]
+    fn a_decorated_emoji_is_not_single() {
+        let blocks = gumicord_markdown::parse("**<:neko:123>**");
+        assert!(!Ink::is_single_emoji(&blocks));
+    }
+
+    #[test]
+    fn plain_text_is_not_single_emoji() {
+        let blocks = gumicord_markdown::parse("hello");
+        assert!(!Ink::is_single_emoji(&blocks));
+    }
+
+    #[test]
+    fn a_heading_is_not_single_emoji() {
+        let blocks = gumicord_markdown::parse("# <:neko:123>");
+        assert!(!Ink::is_single_emoji(&blocks));
     }
 }
