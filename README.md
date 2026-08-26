@@ -1,5 +1,11 @@
 # Gumicord
 
+[![Discord](https://img.shields.io/discord/1541796411564105879.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/Eckrx4QveU)
+[![Commit status](https://img.shields.io/github/checks-status/gumicord/gumicord/main
+)](https://github.com/gumicord/gumicord/commits/main/)
+[![Downloads](https://img.shields.io/github/downloads/gumicord/gumicord/total
+)](https://github.com/gumicord/gumicord/releases)
+
 The fastest and customizable discord unofficial client
 
 > [!WARNING]
