@@ -213,7 +213,7 @@ fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
 
     // Oversized images are refused; the atlas is only 2048 square.
     if w == 0 || h == 0 || w > 4096 || h > 4096 {
-        tracing::debug!(url, w, h, "画像の大きさが扱える範囲を超えている");
+        tracing::debug!(url, w, h, "the image is larger than we can handle");
         return None;
     }
 
@@ -224,17 +224,21 @@ fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
     let rgba = match frame.color_type {
         png::ColorType::Rgba => raw.to_vec(),
         png::ColorType::Rgb => raw
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 0xff])
             .collect(),
         png::ColorType::GrayscaleAlpha => raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
         png::ColorType::Grayscale => raw.iter().flat_map(|v| [*v, *v, *v, 0xff]).collect(),
         // `normalize_to_color8` should have handled this; not assumed.
         other => {
-            tracing::debug!(url, ?other, "読めない色の形");
+            tracing::debug!(url, ?other, "unreadable color type");
             return None;
         }
     };
