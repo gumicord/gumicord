@@ -34,6 +34,15 @@ const BACKLOG: u8 = 50;
 /// than it does makes the indicator flicker mid-sentence.
 const TYPING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Which member-list rows the subscription asks for: exactly what the list
+/// shows.
+///
+/// The list stops at 100, so asking further used to fetch 200 people nobody
+/// saw — and asking wider than an official client does is itself a signal.
+/// Scrolling past these needs re-requesting, which does not exist yet
+/// (`NEXT.md` 4.).
+const MEMBER_ROWS: [gumicord_gateway::MemberRange; 1] = [[0, 99]];
+
 /// One person typing.
 #[derive(Debug, Clone)]
 struct Typist {
@@ -377,7 +386,7 @@ impl Live {
         // Sent every time: without it neither new messages nor typing
         // indicators arrive for the new channel.
         if let Some(subs) = &self.subs {
-            subs.watch(guild, channel);
+            subs.watch(guild, channel, &MEMBER_ROWS);
         }
 
         if !self.requested.insert(channel) {

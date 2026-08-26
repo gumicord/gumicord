@@ -194,17 +194,17 @@ pub struct Gateway {
     backoff: Duration,
     /// A pending `Reconnecting`, emitted at the top of `next`.
     pending_notice: Option<Event>,
-    /// What is being watched. Resent on every reconnect: subscriptions belong
-    /// to a connection.
-    wanted: std::collections::HashMap<GuildId, ChannelId>,
+    /// What is being watched, member rows included. Resent on every
+    /// reconnect: subscriptions belong to a connection.
+    wanted: std::collections::HashMap<GuildId, (ChannelId, Vec<MemberRange>)>,
     requests: tokio::sync::mpsc::UnboundedReceiver<Request>,
 }
 
 /// A request to send to the gateway.
 #[derive(Debug, Clone)]
 enum Request {
-    /// We are watching this channel.
-    Watch(GuildId, ChannelId),
+    /// We are watching this channel, and which rows of its member list.
+    Watch(GuildId, ChannelId, Vec<MemberRange>),
     /// We need these members in this guild.
     Members(GuildId, Vec<UserId>),
 }
@@ -221,9 +221,17 @@ pub struct Subscriptions {
 }
 
 impl Subscriptions {
-    /// Announces the watched channel. Safe to call repeatedly.
-    pub fn watch(&self, guild: GuildId, channel: ChannelId) {
-        let _ = self.tx.send(Request::Watch(guild, channel));
+    /// Announces the watched channel and which rows of the member list to
+    /// receive. Safe to call repeatedly.
+    ///
+    /// The ranges are compared too: a change re-sends the subscription, so
+    /// widening or narrowing the list reaches the wire. An empty slice asks
+    /// for no rows at all, and a subscription without any was never seen to
+    /// work — the caller supplies at least one.
+    pub fn watch(&self, guild: GuildId, channel: ChannelId, ranges: &[MemberRange]) {
+        let _ = self
+            .tx
+            .send(Request::Watch(guild, channel, ranges.to_vec()));
     }
 
     /// Requests members by id.
@@ -263,10 +271,10 @@ fn connect_url(resume_host: Option<&str>) -> String {
 
 /// Announces what is being watched.
 ///
-/// The ranges say which rows of the member list are wanted. The subscription
-/// does not work without them, so they are sent even with no list on screen.
-/// Only the requested rows arrive.
-fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
+/// The ranges say which rows of the member list are wanted; only those rows
+/// arrive. The subscription does not work without them, so the caller always
+/// supplies at least one.
+fn subscribe(guild: GuildId, channel: ChannelId, ranges: &[MemberRange]) -> serde_json::Value {
     json!({
         "op": OP_GUILD_SUBSCRIBE,
         "d": {
@@ -274,18 +282,13 @@ fn subscribe(guild: GuildId, channel: ChannelId) -> serde_json::Value {
             "typing": true,
             "threads": false,
             "activities": true,
-            "channels": { channel.get().to_string(): MEMBER_RANGES },
+            "channels": { channel.get().to_string(): ranges },
         },
     })
 }
 
-/// Which rows of the member list to ask for.
-///
-/// Three ranges at most: the official client sends three, and Discord
-/// silently ignores the rest. Anything below needs re-requesting on scroll,
-/// which does not exist yet.
-/// ([`crate::member_list`])
-const MEMBER_RANGES: [[u32; 2]; 3] = [[0, 99], [100, 199], [200, 299]];
+/// One row span of the member list: start and end, both inclusive.
+pub type MemberRange = [u32; 2];
 
 /// Requests members by id, 100 at a time.
 ///
@@ -342,8 +345,8 @@ impl Gateway {
         let Some(conn) = self.conn.as_mut() else {
             return Ok(());
         };
-        for (guild, channel) in self.wanted.clone() {
-            conn.send(subscribe(guild, channel)).await?;
+        for (guild, (channel, ranges)) in self.wanted.clone() {
+            conn.send(subscribe(guild, channel, &ranges)).await?;
         }
         Ok(())
     }
@@ -609,7 +612,7 @@ impl Connection {
         &mut self,
         session: &mut Option<SessionInfo>,
         requests: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
-        wanted: &mut std::collections::HashMap<GuildId, ChannelId>,
+        wanted: &mut std::collections::HashMap<GuildId, (ChannelId, Vec<MemberRange>)>,
     ) -> Result<Option<Event>, GatewayError> {
         if let Some(payload) = self.queued.pop_front() {
             return self.handle(payload, session).await;
@@ -647,7 +650,7 @@ impl Connection {
                 self.send(request_members(guild, &users)).await?;
                 Ok(None)
             }
-            Step::Watch(Some(Request::Watch(guild, channel))) => {
+            Step::Watch(Some(Request::Watch(guild, channel, ranges))) => {
                 // Never resend an identical subscription.
                 //
                 // Callers announce every time, since missing a change is
@@ -655,12 +658,15 @@ impl Connection {
                 // one channel open this sent hundreds of times and Discord
                 // closed the connection, which reconnected and resent, and so
                 // on. Reconnects resend everything anyway.
-                if wanted.get(&guild) == Some(&channel) {
+                let watching = (channel, ranges);
+                if wanted.get(&guild) == Some(&watching) {
                     return Ok(None);
                 }
-                wanted.insert(guild, channel);
-                tracing::debug!(%guild, %channel, "subscribing");
-                self.send(subscribe(guild, channel)).await?;
+                tracing::debug!(%guild, %channel, rows = ?watching.1, "subscribing");
+                // Stored first, so the reconnect that follows a failed send
+                // still carries it.
+                wanted.insert(guild, watching.clone());
+                self.send(subscribe(guild, watching.0, &watching.1)).await?;
                 Ok(None)
             }
             // No requesters left, which is not a reason to disconnect.
@@ -908,6 +914,26 @@ mod tests {
     #[test]
     fn an_invalid_token_is_fatal() {
         assert_eq!(fatal_of(&closed(4004)), Some(Fatal::Unauthorized));
+    }
+
+    /// The subscription carries exactly the rows it was given, under the
+    /// channel's id as text: asking wider than intended would show in this
+    /// one place.
+    #[test]
+    fn the_subscription_asks_only_for_the_given_rows() {
+        let payload = subscribe(GuildId::from(2), ChannelId::from(3), &[[0, 99]]);
+        assert_eq!(payload["op"], OP_GUILD_SUBSCRIBE);
+        assert_eq!(payload["d"]["guild_id"], "2");
+        assert_eq!(payload["d"]["typing"], true);
+        assert_eq!(payload["d"]["channels"]["3"], serde_json::json!([[0, 99]]));
+
+        // Several ranges survive as several spans; scrolling will widen the
+        // ask through this same shape.
+        let wide = subscribe(GuildId::from(2), ChannelId::from(3), &[[0, 99], [100, 199]]);
+        assert_eq!(
+            wide["d"]["channels"]["3"],
+            serde_json::json!([[0, 99], [100, 199]])
+        );
     }
 
     /// Unknown codes are retried; Discord adds them without notice.
