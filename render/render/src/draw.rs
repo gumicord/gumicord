@@ -787,6 +787,19 @@ fn draw_image(
 /// One glyph before it is added.
 type RichGlyph = ([f32; 4], [f32; 4], bool, u32, u32);
 
+/// The square a picture fills, centred in the run it replaces. Physical
+/// pixels; the run is one em wide, so a wide emoji box would leave the line
+/// ragged.
+fn picture_in(x: f32, y: f32, w: f32, h: f32, ox: f32, oy: f32) -> [f32; 4] {
+    let side = w.min(h);
+    [
+        ox + x + (w - side) * 0.5,
+        oy + y + (h - side) * 0.5,
+        side,
+        side,
+    ]
+}
+
 /// Draws text with mixed decoration.
 ///
 /// Never per run: passing each to `draw_text` and offsetting them wraps each
@@ -850,6 +863,34 @@ fn draw_rich(
             SPOILER_RADIUS * scale,
             0.0,
             scissor,
+        );
+    }
+
+    // A run carrying a picture draws the picture instead of its text, which
+    // is only the space it occupies. Until the pixels arrive the run stays
+    // blank, and the URL goes out so they get fetched.
+    for r in &rects {
+        let Some(sp) = spans.get(r.run as usize) else {
+            continue;
+        };
+        let Some(url) = &sp.image else {
+            continue;
+        };
+        if sp.concealed() {
+            continue;
+        }
+        let Some(e) = text.image(url) else {
+            dl.missing_images.push(url.clone());
+            continue;
+        };
+        dl.push_glyph(
+            picture_in(r.rect.x, r.rect.y, r.rect.w, r.rect.h, ox, oy),
+            e.uv,
+            [1.0, 1.0, 1.0, opacity],
+            true,
+            0.0,
+            scissor,
+            e.page,
         );
     }
 
@@ -937,6 +978,19 @@ fn merge_font(base: Option<Font>, over: Font) -> Font {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The picture fills the narrower side of the run and sits in the
+    /// middle of the other: a square in a box one em wide and one line tall.
+    #[test]
+    fn a_picture_fits_its_run_as_a_centred_square() {
+        let square = picture_in(100.0, 50.0, 16.0, 16.0, 10.0, 20.0);
+        assert_eq!(square, [110.0, 70.0, 16.0, 16.0]);
+
+        // A taller line centres it horizontally.
+        let tall = picture_in(100.0, 50.0, 16.0, 22.0, 0.0, 0.0);
+        assert_eq!(tall, [100.0, 53.0, 16.0, 16.0]);
+    }
+
     /// Readable even with no colour written. A dark theme's inherited text
     /// colour is light, and on white that produced a visible but unscannable
     /// QR.

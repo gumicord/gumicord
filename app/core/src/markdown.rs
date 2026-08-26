@@ -219,25 +219,29 @@ impl<'a> Ink<'a> {
     }
 
     fn span(&self, i: &Inline, names: &dyn Names) -> Span {
-        let (text, extra) = match &i.kind {
-            InlineKind::Text(t) => (t.clone(), None),
-            InlineKind::Code(t) => (t.clone(), Some("code")),
-            InlineKind::Link { url, label } => {
-                (label.clone().unwrap_or_else(|| url.clone()), Some("link"))
-            }
-            InlineKind::Mention(m) => (mention_text(*m, names), Some("mention")),
-            // Emoji are images, but until one is fetched the name stands in;
-            // showing nothing would empty an emoji-only message.
-            InlineKind::Emoji { name, .. } => (format!(":{name}:"), Some("mention")),
+        // The slot dresses the text; the picture, when there is one, rides
+        // with the run and the text is only the space it occupies.
+        let (text, extra, image) = match &i.kind {
+            InlineKind::Text(t) => (t.clone(), None, None),
+            InlineKind::Code(t) => (t.clone(), Some("code"), None),
+            InlineKind::Link { url, label } => (
+                label.clone().unwrap_or_else(|| url.clone()),
+                Some("link"),
+                None,
+            ),
+            InlineKind::Mention(m) => (mention_text(*m, names), Some("mention"), None),
+            // An animated one arrives as a still, the same as animated
+            // avatars do.
+            InlineKind::Emoji { id, .. } => (EM_SPACE.to_owned(), None, Some(emoji_url(*id))),
             InlineKind::Timestamp { at, format } => {
                 let (text, holds) = stamp(self.now, *at, *format);
                 // Anything that changes with time schedules a redraw.
                 if let Some(secs) = holds {
                     self.hold(secs);
                 }
-                (text, Some("mention"))
+                (text, Some("mention"), None)
             }
-            InlineKind::Break => ("\n".to_owned(), None),
+            InlineKind::Break => ("\n".to_owned(), None, None),
         };
 
         let spoiler = i.deco.contains(Deco::SPOILER);
@@ -264,6 +268,7 @@ impl<'a> Ink<'a> {
         if let InlineKind::Link { url, .. } = &i.kind {
             s.link = Some(url.clone());
         }
+        s.image = image;
         // Counting matches what drawing will see: `spans` drops empty runs,
         // so they are not counted either. An open one stays counted, which is
         // what keeps its neighbours' numbers still.
@@ -295,7 +300,20 @@ fn span_of(text: String, style: &Style, hidden: bool) -> Span {
         hidden,
         revealed: false,
         link: None,
+        image: None,
     }
+}
+
+/// The character a custom emoji's run is shaped as: one square of space.
+///
+/// An em space, so the run's advance is the font's em; the picture is drawn
+/// into it once the pixels are in the atlas.
+const EM_SPACE: &str = "\u{2003}";
+
+/// Where a custom emoji's pixels come from. Asked for as `.png`, which the
+/// CDN answers with a still even for an animated one.
+fn emoji_url(id: u64) -> String {
+    format!("https://cdn.discordapp.com/emojis/{id}.png?size=64")
 }
 
 /// Maps a fence's info string to a slot.
@@ -507,6 +525,27 @@ mod tests {
         assert_eq!(spans[0].font, None, "クライアントが書体を決めている");
         assert_eq!(spans[0].color, None);
         assert!(!spans[0].line.any());
+    }
+
+    /// A custom emoji rides with its run as a picture URL; the text is only
+    /// the space it occupies, so the line keeps its shape while pixels load.
+    #[test]
+    fn a_custom_emoji_rides_with_its_run() {
+        let spans = spans_of(None, "こんにちは <:neko:123> こんにちは", &NoNames);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[1].text, EM_SPACE);
+        assert_eq!(
+            spans[1].image.as_deref(),
+            Some("https://cdn.discordapp.com/emojis/123.png?size=64")
+        );
+        // The neighbours keep their text.
+        assert_eq!(spans[0].text, "こんにちは ");
+        assert_eq!(spans[2].text, " こんにちは");
+
+        // Animated too: the CDN answers `.png` with a still.
+        let spans = spans_of(None, "<a:neko:456>", &NoNames);
+        assert_eq!(spans[0].text, EM_SPACE);
+        assert!(spans[0].image.is_some(), "アニメでも絵にはなる");
     }
 
     /// The theme decides the weight.

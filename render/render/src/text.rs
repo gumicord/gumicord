@@ -1268,6 +1268,21 @@ mod tests {
         assert!(two.w <= narrow.ceil(), "exceeded the wrap width {two:?}");
     }
 
+    /// The em space a custom emoji's run is shaped as must carry real
+    /// advance: a font without it would collapse the run to nothing and the
+    /// picture would have nowhere to sit.
+    #[test]
+    fn an_em_space_holds_a_square_of_advance() {
+        let mut sh = Shaper::new(1.0);
+        let runs = [("\u{2003}".to_owned(), plain(16.0))];
+
+        let shaped = sh.shape_rich(&runs, None);
+        assert!(
+            shaped.runs.len() == 1 && shaped.runs[0].rect.w >= 16.0,
+            "the em space has no advance: {shaped:?}"
+        );
+    }
+
     /// The run index reaches the glyphs, which is what colours them.
     #[test]
     fn each_glyph_remembers_its_span() {

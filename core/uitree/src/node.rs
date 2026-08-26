@@ -88,6 +88,12 @@ pub struct Span {
     /// platform's, and anything else is refused there. Runs without one are
     /// plain text no matter how they are coloured.
     pub link: Option<String>,
+    /// A picture drawn in place of the text: a custom emoji.
+    ///
+    /// The text is the stand-in while the picture loads, and shapes as its
+    /// own advance — an em space, so the run is one square wide. A run with
+    /// neither pixels nor a readable shape would collapse the line.
+    pub image: Option<String>,
 }
 
 impl Span {
