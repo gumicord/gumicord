@@ -212,7 +212,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         hovering_link: false,
         hovering_spoiler: false,
         scroll_grab: None,
-        close_pending: false,
+        control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
         first_frame: true,
@@ -250,12 +250,15 @@ struct Host {
     hovering_spoiler: bool,
     /// The scrollbar being dragged, while held.
     scroll_grab: Option<ScrollGrab>,
-    /// The close button was pressed; the window closes on release.
+    /// A title-bar control button armed on press; acted on on release.
     ///
-    /// Closing on press makes Windows deliver the release to the window now
-    /// underneath, which presses that window's close button too. Waiting for
-    /// the release keeps that window from ever seeing a press.
-    close_pending: bool,
+    /// Acting on press lets Windows hand the release to whatever is now under
+    /// the pointer, so a disappearing window, a losing focus (minimize) or a
+    /// moving layout (maximize) all triggered the window underneath or a
+    /// stray point. Waiting for the release keeps the action and its release
+    /// in this window. The stored slot is the armed button, so a press that
+    /// drags away and releases elsewhere is cancelled like any button.
+    control_pending: Option<&'static str>,
     /// Held modifiers.
     modifiers: ModifiersState,
     /// Whether IME is allowed; only changes are told to the OS.
@@ -853,12 +856,11 @@ impl ApplicationHandler for Host {
                             tracing::warn!(%e, "could not resize the window");
                         }
                     }
-                    Zone::Control("minimize") => w.set_minimized(true),
-                    Zone::Control("maximize") => w.set_maximized(!w.is_maximized()),
-                    // Not closed yet: the window closes on release, so Windows
-                    // does not hand the release to the window underneath and
-                    // that window's close button stays untouched.
-                    Zone::Control("close") => self.close_pending = true,
+                    // Acted on release, not press: see `control_pending`. The
+                    // unknown-slot path is still logged here, on press.
+                    Zone::Control(slot @ ("minimize" | "maximize" | "close")) => {
+                        self.control_pending = Some(slot);
+                    }
                     Zone::Control(other) => {
                         tracing::debug!(slot = other, "unknown title bar button");
                     }
@@ -914,14 +916,19 @@ impl ApplicationHandler for Host {
                 ..
             } => {
                 self.scroll_grab = None;
-                // The window closes here, not on press, so the release is
+                // The action runs here, not on press, so the release is
                 // consumed by this window and the one underneath is spared.
-                // Only if the pointer is still over the button does it count,
-                // matching how a dragged-off button press is cancelled.
-                if self.close_pending {
-                    self.close_pending = false;
-                    if matches!(self.zone, Zone::Control("close")) {
-                        event_loop.exit();
+                // Only if the pointer is still over the armed button does it
+                // count, matching how a dragged-off button press is cancelled.
+                if let Some(slot) = self.control_pending.take()
+                    && matches!(self.zone, Zone::Control(s) if s == slot)
+                {
+                    let Some(w) = self.window.clone() else { return };
+                    match slot {
+                        "minimize" => w.set_minimized(true),
+                        "maximize" => w.set_maximized(!w.is_maximized()),
+                        "close" => event_loop.exit(),
+                        other => tracing::debug!(slot = other, "unknown title bar button"),
                     }
                 }
             }
