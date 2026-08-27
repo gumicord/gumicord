@@ -86,12 +86,19 @@ impl Images {
     /// Whether the renderer already holds it is not known here; the caller
     /// checks with `has_image` first.
     pub fn request(&mut self, url: &str) {
-        if url.is_empty() || !self.requested.insert(url.to_owned()) {
+        if url.is_empty() {
             return;
         }
+        // Mark the URL as asked only once we can actually fetch it. Asking
+        // before `start` would leave it recorded with no task and, since the
+        // renderer reports it missing again every frame, remembered forever
+        // without ever being fetched.
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
+        if !self.requested.insert(url.to_owned()) {
+            return;
+        }
 
         let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         let (url, dir) = (url.to_owned(), self.dir.clone());
