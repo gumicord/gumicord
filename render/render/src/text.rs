@@ -651,6 +651,10 @@ impl TextEngine {
     pub fn system_fonts(&mut self, device: &wgpu::Device) -> bool {
         if self.shaper.bring_system_fonts() {
             self.atlas = Atlas::new(device);
+            // The old atlas's image entries are gone with it, so the fetcher
+            // must be told to re-read them or they never come back. The flag
+            // rides the same `took_recycle` path as an eviction for that.
+            self.atlas.recycled = true;
             true
         } else {
             false
