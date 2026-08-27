@@ -236,6 +236,6 @@ gumicord-platform/{windows,android,ios,macos,linux}/text_input.rs
 | ~~GPU バックエンドの選択方針~~ | S1 の実測 | ✅ **確定** (OS ごとに明示指定 + プローブ) |
 | モバイル IME をどう橋渡しするか | S2 の結果 | 🔬 |
 | `accesskit` を採用するか OS を直接叩くか | S2 の iOS 対応状況 | 🔬 |
-| Windows のスナップレイアウト (`PLT-022`) に Win32 のウィンドウプロシージャ差し込みが必要か | S1 で未検証。`winit` の `with_decorations(false)` では `HTMAXBUTTON` を返せない | 🔬 |
+| ~~Windows のスナップレイアウト (`PLT-022`) に Win32 のウィンドウプロシージャ差し込みが必要か~~ | S1 で未検証。`winit` の `with_decorations(false)` では `HTMAXBUTTON` を返せない | ✅ **調査完了**: [ADR-0008](adr/0008-snap-layout-via-wndproc-subclass.md)。端スナップは `winit` が処理済み。フライアウト (Win11 専用) は親 HWND の `WM_NCHITTEST` サブクラス化で対応可 |
 | プラグインを別スレッドに置くコストが許容範囲か | S3 の実測 | 🔬 |
 | M1 のスコープを維持するか縮小するか | 全スパイクの工数実績 | 🔬 |

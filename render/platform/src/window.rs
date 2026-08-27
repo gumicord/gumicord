@@ -212,6 +212,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         hovering_link: false,
         hovering_spoiler: false,
         scroll_grab: None,
+        close_pending: false,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
         first_frame: true,
@@ -249,6 +250,12 @@ struct Host {
     hovering_spoiler: bool,
     /// The scrollbar being dragged, while held.
     scroll_grab: Option<ScrollGrab>,
+    /// The close button was pressed; the window closes on release.
+    ///
+    /// Closing on press makes Windows deliver the release to the window now
+    /// underneath, which presses that window's close button too. Waiting for
+    /// the release keeps that window from ever seeing a press.
+    close_pending: bool,
     /// Held modifiers.
     modifiers: ModifiersState,
     /// Whether IME is allowed; only changes are told to the OS.
@@ -848,7 +855,10 @@ impl ApplicationHandler for Host {
                     }
                     Zone::Control("minimize") => w.set_minimized(true),
                     Zone::Control("maximize") => w.set_maximized(!w.is_maximized()),
-                    Zone::Control("close") => event_loop.exit(),
+                    // Not closed yet: the window closes on release, so Windows
+                    // does not hand the release to the window underneath and
+                    // that window's close button stays untouched.
+                    Zone::Control("close") => self.close_pending = true,
                     Zone::Control(other) => {
                         tracing::debug!(slot = other, "unknown title bar button");
                     }
@@ -904,6 +914,16 @@ impl ApplicationHandler for Host {
                 ..
             } => {
                 self.scroll_grab = None;
+                // The window closes here, not on press, so the release is
+                // consumed by this window and the one underneath is spared.
+                // Only if the pointer is still over the button does it count,
+                // matching how a dragged-off button press is cancelled.
+                if self.close_pending {
+                    self.close_pending = false;
+                    if matches!(self.zone, Zone::Control("close")) {
+                        event_loop.exit();
+                    }
+                }
             }
 
             // Secondary press. Not over window chrome: right-clicking a title
