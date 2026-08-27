@@ -24,6 +24,8 @@ use cosmic_text::{
     Attrs, Buffer, CacheKey, Fallback, Family, FontSystem, Metrics, PlatformFallback, Shaping,
     Style as FontStyle, SwashCache, SwashContent, Weight, Wrap,
 };
+use std::sync::atomic::AtomicBool;
+
 use gumicord_uitree::Style;
 use gumicord_uitree::value::Font;
 use unicode_script::Script;
@@ -346,37 +348,115 @@ pub struct Shaper {
     swash: SwashCache,
     shaped: HashMap<ShapeKey, Shaped>,
     scale: f32,
+    /// Normalised once and reused when the font set is extended.
+    locale: String,
+    /// System fonts waiting to be folded in; `None` when they load eagerly.
+    fonts_rx: Option<std::sync::mpsc::Receiver<fontdb::Database>>,
+    /// Set by the background thread once fonts are waiting; read without
+    /// consuming to wake a sleeping loop.
+    fonts_ready: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Shaper {
-    /// Constructing the font system enumerates system fonts, measured at
-    /// 360ms on a cold start, which is most of the startup budget.
-    ///
-    /// The fix is to shape from the bundled font, enumerate in the background,
-    /// and reshape only the text that needed a fallback. Until then this
-    /// waits, because CJK fallback depends on system fonts and Japanese would
-    /// not render at all.
-    pub fn new(scale: f32) -> Self {
+    fn locale() -> String {
         let raw = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned());
         let locale = normalize_locale(&raw);
         tracing::debug!(%raw, %locale, "font locale");
+        locale
+    }
 
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
+    /// A font system from a given database, with the bundled body font on top
+    /// and the default family pointing at it.
+    fn font_system(locale: &str, mut db: fontdb::Database) -> FontSystem {
         db.load_font_data(BUNDLED_SANS.to_vec());
         // A theme that writes no family gets sans-serif, so pointing that at
         // the bundled font means themes need say nothing.
         db.set_sans_serif_family(BUNDLED_SANS_FAMILY);
+        FontSystem::new_with_locale_and_db_and_fallback(locale.to_owned(), db, GumicordFallback)
+    }
 
-        let font_system =
-            FontSystem::new_with_locale_and_db_and_fallback(locale, db, GumicordFallback);
-
+    /// System fonts and the bundled font, both ready now.
+    ///
+    /// Enumerating system fonts measures at 360ms on a cold start, so this is
+    /// for tests and non-window callers only. The window goes through
+    /// [`Shaper::new_fast`] and folds fonts in later, off the startup path.
+    pub fn new(scale: f32) -> Self {
+        let locale = Self::locale();
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        let font_system = Self::font_system(&locale, db);
         Shaper {
             font_system,
             swash: SwashCache::new(),
             shaped: HashMap::new(),
             scale,
+            locale,
+            fonts_rx: None,
+            fonts_ready: None,
         }
+    }
+
+    /// The bundled font only, immediately, with system fonts enumerated on a
+    /// background thread and folded in later.
+    ///
+    /// `wake` is called once the system fonts are ready, so the event loop
+    /// does not sleep through the update. The window starts drawing with the
+    /// bundled font alone, and Japanese (which falls back to a system font)
+    /// becomes correct only after the background thread reports in.
+    pub fn new_fast(
+        scale: f32,
+        wake: Box<dyn Fn() + Send + Sync + 'static>,
+    ) -> Self {
+        let locale = Self::locale();
+        let ready = std::sync::Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let th_ready = ready.clone();
+        std::thread::spawn(move || {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            // Ready before the send is observed, so a poll right after the
+            // wake always finds the fonts.
+            th_ready.store(true, std::sync::atomic::Ordering::Release);
+            let _ = tx.send(db);
+            wake();
+        });
+        let font_system = Self::font_system(&locale, fontdb::Database::new());
+        Shaper {
+            font_system,
+            swash: SwashCache::new(),
+            shaped: HashMap::new(),
+            scale,
+            locale,
+            fonts_rx: Some(rx),
+            fonts_ready: Some(ready),
+        }
+    }
+
+    /// Whether system fonts are waiting to be folded in. Read without
+    /// consuming, so a sleeping loop can be woken to apply them.
+    pub fn fonts_pending(&self) -> bool {
+        self.fonts_ready
+            .as_ref()
+            .is_some_and(|r| r.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Folds in the system fonts the background thread collected, if they have
+    /// arrived, and clears everything shaped with the old font set.
+    ///
+    /// A true result means the glyph atlas is now stale and the caller must
+    /// rebuild it.
+    pub fn bring_system_fonts(&mut self) -> bool {
+        let Some(rx) = &self.fonts_rx else { return false };
+        let Ok(system) = rx.try_recv() else { return false };
+        self.font_system = Self::font_system(&self.locale, system);
+        // New font ids mean old swash and shape results are unreachable or
+        // wrong; drop both so the next draw starts clean.
+        self.swash = SwashCache::new();
+        self.shaped.clear();
+        if let Some(ready) = &self.fonts_ready {
+            ready.store(false, std::sync::atomic::Ordering::Release);
+        }
+        true
     }
 
     pub fn scale(&self) -> f32 {
@@ -550,10 +630,30 @@ pub struct TextEngine {
 }
 
 impl TextEngine {
-    pub fn new(device: &wgpu::Device, scale: f32) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        scale: f32,
+        wake: Box<dyn Fn() + Send + Sync + 'static>,
+    ) -> Self {
         TextEngine {
-            shaper: Shaper::new(scale),
+            shaper: Shaper::new_fast(scale, wake),
             atlas: Atlas::new(device),
+        }
+    }
+
+    /// Whether system fonts are waiting, without consuming them.
+    pub fn fonts_pending(&self) -> bool {
+        self.shaper.fonts_pending()
+    }
+
+    /// Folds in system fonts and rebuilds the atlas; true means the layout
+    /// has changed and the caller must rebind the atlas.
+    pub fn system_fonts(&mut self, device: &wgpu::Device) -> bool {
+        if self.shaper.bring_system_fonts() {
+            self.atlas = Atlas::new(device);
+            true
+        } else {
+            false
         }
     }
 
@@ -1416,6 +1516,54 @@ mod tests {
         });
         let b = ResolvedFont::from_style(&Style::default());
         assert_eq!(a, b);
+    }
+
+    /// The lazy constructor draws from the bundled font first and folds system
+    /// fonts in once the background thread reports, waking the loop. Exercises
+    /// the thread, the channel and the rebuild without a GPU.
+    #[test]
+    fn lazy_fonts_arrive_from_the_background_thread() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let woke = Arc::new(AtomicBool::new(false));
+        let th_woke = woke.clone();
+        let wake = Box::new(move || {
+            th_woke.store(true, Ordering::Release);
+        }) as Box<dyn Fn() + Send + Sync + 'static>;
+
+        let mut sh = Shaper::new_fast(1.0, wake);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+        // Enumerating system fonts can take seconds without a parity of speed,
+        // so wait, bounded, rather than assume it has happened.
+        while !sh.fonts_pending() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            sh.fonts_pending(),
+            "the background thread never reported the fonts"
+        );
+
+        assert!(sh.bring_system_fonts(), "fonts should fold in once");
+        assert!(
+            !sh.fonts_pending(),
+            "pending stays cleared after folding in"
+        );
+        assert!(
+            !sh.bring_system_fonts(),
+            "nothing left to fold in after the first"
+        );
+
+        while !woke.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(woke.load(Ordering::Acquire), "the wake never fired");
+
+        // Shaping still works on the rebuilt font system.
+        let f = plain(16.0);
+        assert!(sh.measure("hello", &f, None).w > 0.0);
     }
 }
 

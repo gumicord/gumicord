@@ -201,10 +201,12 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
 
     // Before the window exists: login may start early, and earlier means the
     // QR appears sooner.
-    app.start(Waker(event_loop.create_proxy()));
+    let waker = Waker(event_loop.create_proxy());
+    app.start(waker.clone());
 
     let mut host = Host {
         app: Box::new(app),
+        waker,
         window: None,
         renderer: None,
         cursor: (0.0, 0.0),
@@ -238,6 +240,9 @@ enum Zone {
 
 struct Host {
     app: Box<dyn Application>,
+    /// Wakes the loop from another thread; handed to the renderer so system
+    /// fonts can ask for a redraw once the background thread has them.
+    waker: Waker,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     /// Pointer position.
@@ -532,6 +537,15 @@ impl Host {
             r.resize(size.width, size.height);
         }
 
+        // Fold in the system fonts the background thread collected before
+        // building the tree, so the redraw they woke shows them. The result
+        // is not needed: whatever the draw below re-shapes will use the new
+        // set either way.
+        let _ = self
+            .renderer
+            .as_mut()
+            .is_some_and(Renderer::process_font_update);
+
         let caret_on = self.caret_on;
         // Before drawing, so this frame can use them.
         // Report evictions first, or the replacements miss this frame.
@@ -681,7 +695,10 @@ impl ApplicationHandler for Host {
     /// Woken by [`Waker::wake`]; the payload comes over the app's own
     /// channel.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        if self.app.wake() {
+        // Fonts arriving from their background thread also wake the loop; a
+        // redraw folds them in if the app has nothing to draw.
+        let fonts = self.renderer.as_ref().is_some_and(Renderer::fonts_pending);
+        if self.app.wake() || fonts {
             self.request_redraw();
         }
     }
@@ -709,7 +726,14 @@ impl ApplicationHandler for Host {
 
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        match Renderer::new(window.clone().into(), size.width, size.height, scale) {
+        // The renderer starts with the bundled font and unfolds system fonts
+        // on a background thread; a wake lets a sleeping loop know they are
+        // ready. The window must exist before the first frame measures text.
+        let wake = {
+            let w = self.waker.clone();
+            Box::new(move || w.wake()) as Box<dyn Fn() + Send + Sync + 'static>
+        };
+        match Renderer::new(window.clone().into(), size.width, size.height, scale, wake) {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
                 tracing::error!(%e, "could not initialise the GPU");

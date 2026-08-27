@@ -139,9 +139,10 @@ impl Renderer {
         width: u32,
         height: u32,
         scale: f32,
+        wake: Box<dyn Fn() + Send + Sync + 'static>,
     ) -> Result<Self, GpuError> {
         let gpu = Gpu::new(target, width, height)?;
-        let text = TextEngine::new(&gpu.device, scale);
+        let text = TextEngine::new(&gpu.device, scale, wake);
         let atlas_binds = bind_pages(&gpu, &text);
         Ok(Renderer {
             gpu,
@@ -191,6 +192,25 @@ impl Renderer {
 
     pub fn adapter_name(&self) -> &str {
         &self.gpu.adapter_name
+    }
+
+    /// Whether system fonts are waiting to be folded in. A true result means
+    /// a redraw should be requested so [`Renderer::process_font_update`] can
+    /// apply them.
+    pub fn fonts_pending(&self) -> bool {
+        self.text.fonts_pending()
+    }
+
+    /// Folds in the system fonts the background thread enumerated, if they
+    /// have arrived, and rebuilds the glyph atlas. True means the layout has
+    /// changed and the following draw will re-shape with the full font set.
+    pub fn process_font_update(&mut self) -> bool {
+        if self.text.system_fonts(&self.gpu.device) {
+            self.atlas_binds = bind_pages(&self.gpu, &self.text);
+            true
+        } else {
+            false
+        }
     }
 
     /// Scrolls, and reports whether a redraw is needed.
