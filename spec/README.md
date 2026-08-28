@@ -16,6 +16,7 @@
 | [07-roadmap.md](07-roadmap.md) | マイルストーン | **ドラフト** — M1 のスコープを提案 |
 | [08-spike-plan.md](08-spike-plan.md) | 技術検証計画 | **完了** |
 | [09-discord-protocol.md](09-discord-protocol.md) | Discord プロトコル仕様 | **ドラフト** — S4 で実測した範囲 |
+| [10-login-screen-ui.md](10-login-screen-ui.md) | ログイン画面 UI (現状記録・問題点・制約) | **ドラフト** — 手戻り用引き継ぎ |
 
 スパイクフェーズは完了し、仕様書は一通り揃った ([08-spike-plan.md](08-spike-plan.md))。次は M1 の実装に入る前に、07-roadmap.md 5.1 の「M1 実装前に決めること」を確定させる。
 
