@@ -47,7 +47,7 @@ use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::value::Color;
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 use live::Live;
-use session::Login;
+use session::{Login, Session};
 
 /// The default theme, embedded rather than loaded: the app has to run even
 /// when no theme file can be read.
@@ -188,6 +188,15 @@ impl Composing {
     }
 }
 
+/// Which login-form field, if any, has focus. Only one at a time, and only
+/// while a form is on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginField {
+    Email,
+    Password,
+    Totp,
+}
+
 /// The app state, and building the UITree from it.
 pub struct Gumicord {
     theme: Option<Theme>,
@@ -197,6 +206,10 @@ pub struct Gumicord {
     waker: Option<Waker>,
     /// Login progress; decides which screen is shown.
     login: Login,
+    /// The captcha challenge awaiting a solution, kept on the app side so the
+    /// platform's modal can hand back a bare token while the challenge's own
+    /// `rqtoken`/`session_id` are still available to echo on the retry.
+    pending: Option<gumicord_rest::CaptchaChallenge>,
     /// Real data. Whether this is empty is what separates demo from live.
     live: Live,
     /// Scale factor, needed to size CDN requests.
@@ -223,6 +236,12 @@ pub struct Gumicord {
     input_focused: bool,
     /// The composer's contents.
     input: TextDocument,
+    /// Which login-form field has focus, if any.
+    login_field: Option<LoginField>,
+    /// The login form's email contents. Kept across password retries.
+    login_email: TextDocument,
+    /// The login form's password or TOTP code, whichever step is shown.
+    login_input: TextDocument,
     /// Messages sent in demo mode; unused when live.
     sent: Vec<demo::Message>,
     /// Fetches images.
@@ -267,6 +286,7 @@ impl Gumicord {
             runtime: None,
             waker: None,
             login,
+            pending: None,
             live,
             scale: 1.0,
             hovered: None,
@@ -279,6 +299,9 @@ impl Gumicord {
             selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),
+            login_field: None,
+            login_email: TextDocument::new(),
+            login_input: TextDocument::new(),
             sent: Vec::new(),
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
@@ -546,9 +569,33 @@ impl Application for Gumicord {
             changed = true;
         }
 
+        // A login-form field takes focus; the composer and the login form
+        // never share it.
+        if let Some(field) = hits.iter().find_map(|h| match (h.id, &h.key) {
+            (
+                NodeId::AppScreenLoginField,
+                Some(Key::Slot(s @ ("email" | "password" | "totp"))),
+            ) => Some(match *s {
+                "email" => LoginField::Email,
+                "password" => LoginField::Password,
+                _ => LoginField::Totp,
+            }),
+            _ => None,
+        }) {
+            if self.login_field != Some(field) || self.input_focused {
+                self.login_field = Some(field);
+                self.input_focused = false;
+                changed = true;
+            }
+        }
+
         // Only the frontmost selectable hit.
         for h in hits {
             match (h.id, &h.key) {
+                // The way into the password form (or its submit / back).
+                (NodeId::PrimitiveButton, Some(Key::Slot(slot @ ("login_submit" | "login_back" | "login_password")))) => {
+                    changed |= self.login_button(slot);
+                }
                 // Folders only fold; they do not change the selected guild.
                 (NodeId::NavGuildListFolder, Some(Key::Id(id))) => {
                     self.live.toggle_folder(*id);
@@ -633,14 +680,27 @@ impl Application for Gumicord {
         }
     }
 
-    /// Only a focused field receives input.
+    /// Only a focused field receives input: a login-form field, or the
+    /// composer. Never more than one holds focus at once.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
-        self.input_focused.then_some(&mut self.input)
+        match self.login_field {
+            Some(LoginField::Email) => Some(&mut self.login_email),
+            Some(LoginField::Password | LoginField::Totp) => Some(&mut self.login_input),
+            None => self.input_focused.then_some(&mut self.input),
+        }
     }
 
     /// Sends, edits or replies, depending on [`Composing`]. Missing that
     /// turns an intended edit into a new message.
+    ///
+    /// On the login form it instead submits that step: the whole form on the
+    /// password screen, or the TOTP code. Enter means the same thing in both
+    /// places.
     fn submit(&mut self) -> bool {
+        if self.login_field.is_some() {
+            return self.submit_login();
+        }
+
         let body = self.input.text().trim().to_owned();
         let mode = self.composing;
 
@@ -685,6 +745,11 @@ impl Application for Gumicord {
         if self.close_menu() {
             return true;
         }
+        // Escape on a login field abandons the whole password login.
+        if self.login_field.is_some() {
+            self.leave_login_form();
+            return true;
+        }
         // Cancel the reply or edit before discarding the draft; doing both at
         // once leaves it unclear which was lost.
         if self.stop_composing() {
@@ -695,6 +760,42 @@ impl Application for Gumicord {
         }
         self.input_focused = false;
         true
+    }
+
+    /// A captcha question came back from the API. Forward it to the platform,
+    /// which shows the modal. The password form stays up underneath.
+    fn pending_captcha(&mut self) -> Option<gumicord_platform::CaptchaChallenge> {
+        let pending = self.login.take_pending()?;
+        let platform = gumicord_platform::CaptchaChallenge {
+            site_key: pending.sitekey.clone()?,
+            rqdata: pending.rqdata.clone(),
+        };
+        // Remember the challenge for the retry: the token comes back alone, but
+        // `rqtoken` and `session_id` must be echoed alongside it.
+        self.pending = Some(pending);
+        Some(platform)
+    }
+
+    /// The modal produced a token; retry the challenged login with it.
+    fn captcha_solved(&mut self, solved: gumicord_platform::SolvedCaptcha) {
+        let Some(pending) = self.pending.take() else {
+            tracing::error!("a captcha was solved but no challenge is pending");
+            return;
+        };
+        self.login.submit_captcha(gumicord_rest::SolvedCaptcha {
+            key: solved.solution,
+            rqtoken: pending.rqtoken,
+            session_id: pending.session_id,
+        });
+    }
+
+    /// The modal was cancelled; abandon the password login and go back.
+    fn captcha_cancelled(&mut self) {
+        self.pending = None;
+        self.login.cancel_password();
+        self.login_field = None;
+        self.input_focused = false;
+        self.login_input.take();
     }
 
     /// Pipeline stages [3] and [5]. The plugin passes will go between them.
@@ -727,6 +828,43 @@ impl Application for Gumicord {
 }
 
 impl Gumicord {
+    /// Submits the active login step. Runs the password flow or hands off the
+    /// TOTP code; nothing to send stays put.
+    fn submit_login(&mut self) -> bool {
+        match self.login_field {
+            Some(LoginField::Email) | Some(LoginField::Password) | None => {
+                let email = self.login_email.text().trim().to_owned();
+                let password = self.login_input.text().to_owned();
+                if email.is_empty() || password.is_empty() {
+                    return false;
+                }
+                self.login.submit_password(email, password);
+                // Keep the email for a retry; the password is a secret that
+                // has done its job.
+                self.login_input.take();
+                self.login_field = None;
+                true
+            }
+            Some(LoginField::Totp) => {
+                let code = self.login_input.text().trim().to_owned();
+                if code.is_empty() {
+                    return false;
+                }
+                self.login.submit_totp(code);
+                self.login_input.take();
+                self.login_field = None;
+                true
+            }
+        }
+    }
+
+    /// Drops the login form and returns to the QR screen.
+    fn leave_login_form(&mut self) {
+        self.login.cancel_password();
+        self.login_field = None;
+        self.login_input.take();
+    }
+
     /// Rebuilds the whole tree every frame; diffing waits until the renderer's
     /// requirements settle.
     fn build_tree(&self, panes: Panes) -> UiNode {
@@ -1070,23 +1208,129 @@ impl Gumicord {
         items
     }
 
-    /// The login screen: a QR and nothing else to press, since scanning it is
-    /// the only thing to do here. Spacers above and below centre it.
+    /// The login screen. Shows a QR by default, the password form when that
+    /// was chosen, or the TOTP step when a second factor is needed. Spacers
+    /// above and below centre it.
     fn login_screen(&self) -> UiNode {
         let s = self.login.session();
+        let mut screen = UiNode::new(NodeId::AppScreenLogin);
 
-        UiNode::new(NodeId::AppScreenLogin)
-            .child(UiNode::new(NodeId::LayoutSpacer))
-            .child(UiNode::text(
-                NodeId::AppScreenLoginTitle,
-                "QR コードでログイン",
-            ))
-            // Nothing while connecting: an empty frame is an unscannable QR.
-            .child_if(s.qr().is_some(), || {
-                UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
-            })
-            .child(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()))
-            .child(UiNode::new(NodeId::LayoutSpacer))
+        match s {
+            Session::Password => {
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(UiNode::text(
+                        NodeId::AppScreenLoginTitle,
+                        "パスワードでログイン",
+                    ))
+                    .child(self.login_field("email", "メールアドレス", &self.login_email))
+                    .child(self.login_field("password", "パスワード", &self.login_input))
+                    .child(self.login_submit("ログイン"))
+                    .child(self.login_secondary("戻る", "login_back"));
+            }
+            Session::PasswordTotp => {
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(UiNode::text(
+                        NodeId::AppScreenLoginTitle,
+                        "認証コードを入力",
+                    ))
+                    .child(self.login_field("totp", "認証コード", &self.login_input))
+                    .child(self.login_submit("ログイン"))
+                    .child(self.login_secondary("戻る", "login_back"));
+            }
+            _ => {
+                // Default: a QR and a way into the password form. Nothing else
+                // to press, since scanning is the only thing to do here.
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(UiNode::text(
+                        NodeId::AppScreenLoginTitle,
+                        "QR コードでログイン",
+                    ))
+                    .child_if(s.qr().is_some(), || {
+                        UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
+                    })
+                    .child(UiNode::text(
+                        NodeId::AppScreenLoginHint,
+                        self.login.hint(),
+                    ))
+                    .child(self.login_secondary("パスワードでログイン", "login_password"));
+            }
+        }
+
+        screen.child(UiNode::new(NodeId::LayoutSpacer))
+    }
+
+    /// One editable box on the login form. `slot` picks email/password/totp;
+    /// a focused field carries the focus state.
+    fn login_field(&self, slot: &'static str, placeholder: &str, doc: &TextDocument) -> UiNode {
+        UiNode::editable(
+            NodeId::AppScreenLoginField,
+            Editable {
+                text: doc.text().to_owned(),
+                caret: doc.caret(),
+                selection: doc.selection(),
+                composing: doc.composing(),
+                placeholder: placeholder.to_owned(),
+            },
+        )
+        .with_key(Key::Slot(slot))
+        .with_state_if(self.login_field_slot(slot), State::Focus)
+    }
+
+    /// Whether the given slot is the currently focused login field.
+    fn login_field_slot(&self, slot: &'static str) -> bool {
+        matches!(
+            (self.login_field, slot),
+            (Some(LoginField::Email), "email")
+                | (Some(LoginField::Password), "password")
+                | (Some(LoginField::Totp), "totp")
+        )
+    }
+
+    /// The primary login form button (submit).
+    fn login_submit(&self, label: &str) -> UiNode {
+        UiNode::new(NodeId::PrimitiveButton)
+            .with_key(Key::Slot("login_submit"))
+            .with_state_if(
+                self.is_hovered(
+                    NodeId::PrimitiveButton,
+                    Some(&Key::Slot("login_submit")),
+                ),
+                State::Hover,
+            )
+            .child(UiNode::text(NodeId::PrimitiveText, label))
+    }
+
+    /// A quiet, secondary login form button (entry or back).
+    fn login_secondary(&self, label: &str, slot: &'static str) -> UiNode {
+        UiNode::new(NodeId::PrimitiveButton)
+            .with_key(Key::Slot(slot))
+            .with_state_if(
+                self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot(slot))),
+                State::Hover,
+            )
+            .child(UiNode::text(NodeId::PrimitiveText, label))
+    }
+
+    /// Acts on a login-form button press. `false` keeps the UI as it was.
+    fn login_button(&mut self, slot: &str) -> bool {
+        match slot {
+            // From the QR screen into the password form.
+            "login_password" => {
+                self.login.start_password();
+                self.login_field = None;
+                true
+            }
+            "login_submit" => self.submit_login(),
+            // Back to the QR screen, abandoning the password login.
+            "login_back" => {
+                self.leave_login_form();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The custom title bar. Buttons are told apart by their slot, which is
@@ -3330,6 +3574,120 @@ mod login_tests {
         let login = Login::fresh_for_test();
         assert!(!login.shows_main());
         assert!(login.session().qr().is_none());
+    }
+
+    /// A hit for the login form, where the node already carries its slot.
+    fn login_hit_of(id: NodeId, key: Key) -> Hit {
+        Hit {
+            id,
+            key: Some(key),
+            rect: gumicord_render::Rect::ZERO,
+            clip: None,
+        }
+    }
+
+    /// The QR screen has a way into the password form, and reaching it swaps
+    /// the screen over: the QR must not linger behind the form.
+    #[test]
+    fn the_password_form_is_reached_from_the_qr() {
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::PrimitiveQr));
+
+        let entry = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_password"));
+        assert!(a.pressed(std::slice::from_ref(&entry)), "フォームへの入口が効かない");
+
+        assert!(matches!(a.login.session(), Session::Password));
+        let mut seen = ids(&a.build_tree(Panes::Three));
+        assert!(seen.contains(&NodeId::AppScreenLoginField), "入力欄が無い");
+        seen.retain(|id| *id == NodeId::PrimitiveQr);
+        assert!(seen.is_empty(), "パスワード画面なのに QR が残る");
+    }
+
+    /// Clicking a login field focuses exactly that one, and typing lands in the
+    /// right box; switching to another keeps the first's contents.
+    #[test]
+    fn clicking_a_login_field_focuses_it_for_typing() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        assert!(matches!(a.login_field, Some(LoginField::Email)));
+        a.focused_document().unwrap().insert("a@b.c");
+
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        assert!(matches!(a.login_field, Some(LoginField::Password)));
+        a.focused_document().unwrap().insert("secret");
+
+        assert_eq!(a.login_email.text(), "a@b.c", "email 欄の内容が消えた");
+        assert_eq!(a.login_input.text(), "secret", "password 欄に書かれていない");
+    }
+
+    /// Submitting the password form hands the credentials to the background
+    /// login and drops the form's focus.
+    #[test]
+    fn submitting_the_password_form_hands_off_credentials() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        a.focused_document().unwrap().insert("a@b.c");
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+
+        assert!(a.submit_login(), "パスワードログインが送信されなかった");
+        assert_eq!(a.login_field, None, "送信後もフォーカスが残っている");
+    }
+
+    /// A captcha challenge is handed to the platform, and its solution comes
+    /// back as a submit.
+    #[test]
+    fn a_pending_captcha_is_forwarded_and_solved() {
+        let mut a = pending();
+        a.login.apply_for_test(LoginEvent::CaptchaNeeded(
+            gumicord_rest::CaptchaChallenge {
+                sitekey: Some("site123".to_owned()),
+                service: Some("hcaptcha".to_owned()),
+                rqdata: Some("rqdata".to_owned()),
+                rqtoken: Some("rqtoken".to_owned()),
+                session_id: Some("sess".to_owned()),
+            },
+        ));
+
+        let challenge = a
+            .pending_captcha()
+            .expect("pending_captcha がプラットフォームへ渡さない");
+        assert_eq!(challenge.site_key, "site123");
+        assert_eq!(challenge.rqdata.as_deref(), Some("rqdata"));
+
+        // Nothing left to forward: it moved to the app side for the retry.
+        assert!(
+            a.pending_captcha().is_none(),
+            "同一の captcha が二度渡される"
+        );
+
+        a.captcha_solved(gumicord_platform::SolvedCaptcha {
+            solution: "tok".to_owned(),
+        });
+        assert!(a.pending.is_none(), "解けた captcha が残っている");
     }
 }
 

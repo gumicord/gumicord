@@ -78,6 +78,24 @@ pub struct CaptchaChallenge {
     /// Sent back with the retry.
     #[serde(default)]
     pub rqtoken: Option<String>,
+    /// Binds a solved token to this challenge.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// A solved captcha, sent back to Discord on the retry.
+///
+/// Discord reads the solution from request headers, so these never touch the
+/// body. Keeping them out of `RestError::Api` bodies matters: the solution is
+/// a capability, not a secret, but there is no reason to log it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SolvedCaptcha {
+    /// The token hCaptcha produced.
+    pub key: String,
+    /// Echoed back when the challenge carried it.
+    pub rqtoken: Option<String>,
+    /// Echoed back in `X-Captcha-Session-Id`.
+    pub session_id: Option<String>,
 }
 
 /// Calls the Discord REST API.
@@ -158,6 +176,17 @@ impl RestClient {
         route: Route,
         body: Option<&impl Serialize>,
     ) -> Result<String, RestError> {
+        self.send_raw_h(route, body, &[]).await
+    }
+
+    /// Like [`Self::send_raw`], with extra headers. The captcha retry is the
+    /// only caller: it is where the solution lives.
+    pub(crate) async fn send_raw_h(
+        &self,
+        route: Route,
+        body: Option<&impl Serialize>,
+        extra: &[(&str, &str)],
+    ) -> Result<String, RestError> {
         for attempt in 0..=MAX_RETRIES {
             if let Some(wait) = self
                 .limiter
@@ -175,7 +204,7 @@ impl RestClient {
                 tokio::time::sleep(wait).await;
             }
 
-            let response = self.build(&route, body).send().await?;
+            let response = self.build(&route, body, extra).send().await?;
             let status = response.status();
             let headers = read_rate_limit(&response, status.as_u16());
 
@@ -204,7 +233,12 @@ impl RestClient {
         Err(RestError::RateLimited)
     }
 
-    fn build(&self, route: &Route, body: Option<&impl Serialize>) -> reqwest::RequestBuilder {
+    fn build(
+        &self,
+        route: &Route,
+        body: Option<&impl Serialize>,
+        extra: &[(&str, &str)],
+    ) -> reqwest::RequestBuilder {
         let url = format!("{API_BASE}{}", route.path);
         let mut req = match route.method {
             Method::Get => self.http.get(url),
@@ -227,6 +261,9 @@ impl RestClient {
         }
         if let Some(b) = body {
             req = req.json(b);
+        }
+        for (k, v) in extra {
+            req = req.header(*k, *v);
         }
         req
     }
@@ -286,6 +323,7 @@ fn parse_captcha(body: &str) -> Option<CaptchaChallenge> {
         captcha_service: Option<String>,
         captcha_rqdata: Option<String>,
         captcha_rqtoken: Option<String>,
+        captcha_session_id: Option<String>,
     }
 
     let raw: Raw = serde_json::from_str(body).ok()?;
@@ -297,6 +335,7 @@ fn parse_captcha(body: &str) -> Option<CaptchaChallenge> {
         service: raw.captcha_service,
         rqdata: raw.captcha_rqdata,
         rqtoken: raw.captcha_rqtoken,
+        session_id: raw.captcha_session_id,
     })
 }
 
@@ -321,13 +360,15 @@ mod tests {
             "captcha_key": ["captcha-required"],
             "captcha_sitekey": "4c672d35-0701-42b2-88c3-78380b0db560",
             "captcha_service": "hcaptcha",
-            "captcha_rqtoken": "abc"
+            "captcha_rqtoken": "abc",
+            "captcha_session_id": "sess-1"
         }"#;
 
         let c = parse_captcha(body).expect("should read as a captcha");
         assert_eq!(c.service.as_deref(), Some("hcaptcha"));
         assert!(c.sitekey.is_some());
         assert_eq!(c.rqtoken.as_deref(), Some("abc"));
+        assert_eq!(c.session_id.as_deref(), Some("sess-1"));
         assert_eq!(c.rqdata, None, "only enterprise carries rqdata");
     }
 

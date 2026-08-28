@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use gumicord_gateway::{RemoteAuth, RemoteAuthEvent, ScannedUser};
 use gumicord_model::{CurrentUser, Token};
 use gumicord_platform::{SecretStore, Waker};
-use gumicord_rest::RestClient;
+use gumicord_rest::{CaptchaChallenge, LoginOutcome, RestClient, RestError, SolvedCaptcha};
 
 /// Skips login to look at the UI. Shows fixed demo data, never real data.
 const SKIP_ENV: &str = "GUMICORD_SKIP_LOGIN";
@@ -38,6 +38,10 @@ pub enum Session {
         /// Who scanned it. Scanned is not yet approved.
         scanned: Option<ScannedUser>,
     },
+    /// Asking for email and password.
+    Password,
+    /// Asking for a TOTP code to finish a password login.
+    PasswordTotp,
     /// Approved; exchanging the ticket for a token.
     Exchanging,
     LoggedIn(Box<LoggedIn>),
@@ -67,6 +71,8 @@ impl Session {
             Session::WaitingForScan {
                 scanned: Some(u), ..
             } => format!("{} として続けますか？ スマホで承認してください", u.username),
+            Session::Password => "メールアドレスとパスワードでログインします".to_owned(),
+            Session::PasswordTotp => "認証コードを入力してください".to_owned(),
             Session::Exchanging => "承認されました。ログインしています…".to_owned(),
             Session::LoggedIn(l) => format!("{} でログインしました", l.me.user.display_name()),
             Session::Failed(e) => format!("失敗しました: {e}"),
@@ -107,6 +113,24 @@ pub enum LoginEvent {
     Ended,
     /// Restarted, usually after the QR expired.
     Restarted,
+    /// The background needs a second factor to finish a login.
+    TotpNeeded { email: String },
+    /// The background needs a captcha solved before login can continue.
+    CaptchaNeeded(CaptchaChallenge),
+}
+
+/// A user-driven instruction, sent from the UI thread into the background
+/// login loop. These are what turn the QR screen into a password login.
+#[derive(Debug)]
+pub enum LoginCommand {
+    /// Start a password login with these credentials.
+    Password { email: String, password: String },
+    /// Supply the TOTP (or backup) code for an ongoing login.
+    Totp { code: String },
+    /// A solved captcha, retrying the call Discord challenged.
+    Captcha(SolvedCaptcha),
+    /// Abandon the password login and go back to the QR.
+    CancelPassword,
 }
 
 /// Drives login. The app holds one and drains it with [`Self::poll`].
@@ -114,6 +138,9 @@ pub struct Login {
     session: Session,
     rx: Receiver<LoginEvent>,
     tx: Sender<LoginEvent>,
+    /// Commands run by the background login loop. Unbounded, and the loop is
+    /// the only receiver.
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<LoginCommand>,
     /// Decided once at startup and never changes.
     skipped: bool,
     /// Why the previous session ended, shown until the next sign-in. Set when
@@ -123,6 +150,10 @@ pub struct Login {
     /// session state: the screen changes on the app side, which drops the
     /// cache.
     ended: bool,
+    /// A captcha awaiting a solution, if the API challenged a login. The app
+    /// hands it to the platform, which shows the modal, then reads it back as
+    /// the solved token.
+    pending: Option<gumicord_rest::CaptchaChallenge>,
 }
 
 impl Login {
@@ -144,13 +175,16 @@ impl Login {
 
     fn fresh(skipped: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         Login {
             session: Session::Connecting,
             rx,
             tx,
+            cmd_tx,
             skipped,
             notice: None,
             ended: false,
+            pending: None,
         }
     }
 
@@ -198,9 +232,43 @@ impl Login {
         };
 
         let tx = self.tx.clone();
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.cmd_tx = cmd_tx;
         rt.spawn(async move {
-            run(tx, waker, store).await;
+            run(tx, waker, store, cmd_rx).await;
         });
+    }
+
+    /// Switches the screen to the password form.
+    pub fn start_password(&mut self) {
+        self.notice = None;
+        self.session = Session::Password;
+    }
+
+    /// Asks the background to log in with these credentials.
+    pub fn submit_password(&self, email: String, password: String) {
+        let _ = self.cmd_tx.send(LoginCommand::Password { email, password });
+    }
+
+    /// Asks the background to finish login with a TOTP code.
+    pub fn submit_totp(&self, code: String) {
+        let _ = self.cmd_tx.send(LoginCommand::Totp { code });
+    }
+
+    /// Hands a solved captcha to the background login.
+    pub fn submit_captcha(&self, solved: SolvedCaptcha) {
+        let _ = self.cmd_tx.send(LoginCommand::Captcha(solved));
+    }
+
+    /// Goes back to the QR screen, abandoning a password login.
+    pub fn cancel_password(&self) {
+        let _ = self.cmd_tx.send(LoginCommand::CancelPassword);
+    }
+
+    /// The challenge awaiting a solution, if the login is captcha-blocked.
+    /// Consumed once: the app hands it to the platform's modal.
+    pub fn take_pending(&mut self) -> Option<gumicord_rest::CaptchaChallenge> {
+        self.pending.take()
     }
 
     /// Drains every pending event. One wake can carry several.
@@ -236,9 +304,16 @@ impl Login {
             // In again; whatever ended the last session no longer matters.
             LoginEvent::Done(l) => {
                 self.notice = None;
+                self.pending = None;
                 Session::LoggedIn(l)
             }
             LoginEvent::Failed(e) => Session::Failed(e),
+            LoginEvent::TotpNeeded { .. } => Session::PasswordTotp,
+            // The form stays put while the challenge is solved elsewhere.
+            LoginEvent::CaptchaNeeded(ch) => {
+                self.pending = Some(ch);
+                Session::Password
+            }
             LoginEvent::Ended => {
                 self.ended = true;
                 self.session.clone()
@@ -258,7 +333,7 @@ impl Default for Login {
 const RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(2);
 const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Logs in: stored token first, QR otherwise.
+/// Logs in: stored token first, QR by default, password when asked.
 ///
 /// Never gives up. A QR expires after about two minutes, so an expired one is
 /// quietly replaced rather than left dead in front of someone who walked away.
@@ -267,7 +342,17 @@ const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 ///
 /// Every turn starts by trying the stored token again, so a start made
 /// offline comes alive by itself once the network is back.
-async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
+///
+/// The QR and a password login share the loop. The QR runs in the background
+/// and a `Password` command supersedes it; once that login finishes, is
+/// cancelled or fails, the QR comes back. Whatever eventually succeeds ends
+/// the run.
+async fn run(
+    tx: Sender<LoginEvent>,
+    waker: Waker,
+    store: Option<SecretStore>,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<LoginCommand>,
+) {
     // Measure first: both REST and the gateway build their claim after this,
     // and measuring later would leave one of them stale. The screen is
     // already up from cache, so this wait is not felt.
@@ -294,17 +379,61 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
             RestoreOutcome::Unchecked => {}
         }
 
-        match attempt(&tx, &waker, store.as_ref()).await {
-            // In; stop looping.
-            Ok(true) => return,
-            // Expired; reissue at once.
-            Ok(false) => {
-                tracing::debug!("the QR expired; reissuing");
-                wait = RETRY_MIN;
+        // The QR runs in the background so a password command can interrupt
+        // its wait.
+        let mut qr = tokio::spawn(attempt(tx.clone(), waker.clone(), store.clone()));
+
+        let outcome = tokio::select! {
+            r = &mut qr => match r {
+                // In; the attempt already sent Done.
+                Ok(Ok(true)) => return,
+                // Expired; reissue at once.
+                Ok(Ok(false)) => {
+                    tracing::debug!("the QR expired; reissuing");
+                    QrOutcome::Reset
+                }
+                Ok(Err(e)) => QrOutcome::Failed(e),
+                Err(e) => {
+                    tracing::error!(%e, "the QR task panicked");
+                    QrOutcome::Reset
+                }
+            },
+            cmd = cmd_rx.recv() => match cmd {
+                Some(LoginCommand::Password { email, password }) => {
+                    qr.abort();
+                    let rest = match RestClient::anonymous() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = tx.send(LoginEvent::Failed(e.to_string()));
+                            waker.wake();
+                            continue;
+                        }
+                    };
+                    match run_password(&tx, &waker, store.as_ref(), rest, email, password, &mut cmd_rx).await {
+                        // In; the password path already sent Done.
+                        PasswordRun::LoggedIn => return,
+                        PasswordRun::Error(e) => {
+                            let _ = tx.send(LoginEvent::Failed(e));
+                            waker.wake();
+                        }
+                        PasswordRun::Cancelled => {}
+                    }
+                    wait = RETRY_MIN;
+                    let _ = tx.send(LoginEvent::Restarted);
+                    waker.wake();
+                    continue;
+                }
+                // A stray captcha or totp command with no password in flight.
+                Some(_) | None => continue,
+            }
+        };
+
+        match outcome {
+            QrOutcome::Reset => {
                 let _ = tx.send(LoginEvent::Restarted);
                 waker.wake();
             }
-            Err(e) => {
+            QrOutcome::Failed(e) => {
                 tracing::warn!(error = %e, wait_s = wait.as_secs(), "remote auth failed");
                 let _ = tx.send(LoginEvent::Failed(e));
                 waker.wake();
@@ -313,6 +442,142 @@ async fn run(tx: Sender<LoginEvent>, waker: Waker, store: Option<SecretStore>) {
             }
         }
     }
+}
+
+/// What happened to the QR attempt.
+enum QrOutcome {
+    /// Expired, or otherwise needs a fresh round.
+    Reset,
+    /// The attempt failed; back off and try again.
+    Failed(String),
+}
+
+/// What became of a password login.
+enum PasswordRun {
+    /// Signed in. [`LoginEvent::Done`] was already sent.
+    LoggedIn,
+    /// The user abandoned it; go back to the QR.
+    Cancelled,
+    /// It failed; show the reason and return to the QR.
+    Error(String),
+}
+
+/// Drives a password login to completion, interrupting the QR.
+///
+/// Walks the steps: password check, a captcha if Discord challenges it, then
+/// a TOTP code if the account uses a second factor. Each wait reads commands
+/// off `cmd_rx` (the UI sends the code or the solved captcha), and a
+/// `CancelPassword` at any point abandons the whole thing.
+async fn run_password(
+    tx: &Sender<LoginEvent>,
+    waker: &Waker,
+    store: Option<&SecretStore>,
+    rest: RestClient,
+    email: String,
+    password: String,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LoginCommand>,
+) -> PasswordRun {
+    let mut password = Some(password);
+    let mut solved: Option<SolvedCaptcha> = None;
+    let mut ticket: Option<String> = None;
+
+    loop {
+        let token = if let Some(t) = ticket.take() {
+            // A second factor finishes the account the password opened.
+            let code = match await_totp(cmd_rx).await {
+                Some(c) => c,
+                None => return PasswordRun::Cancelled,
+            };
+            match rest.mfa_totp(&t, &code).await {
+                Ok(tok) => Some(tok),
+                // A wrong code is just another chance to ask.
+                Err(e) => {
+                    let _ = tx.send(LoginEvent::TotpNeeded {
+                        email: email.clone(),
+                    });
+                    waker.wake();
+                    tracing::debug!(%e, "totp rejected; asking again");
+                    continue;
+                }
+            }
+        } else {
+            let pass = password.as_deref().unwrap_or_default();
+            match rest.login(&email, pass, solved.as_ref()).await {
+                Ok(gumicord_rest::LoginOutcome::Token(tok)) => {
+                    password = None;
+                    solved = None;
+                    Some(tok)
+                }
+                Ok(LoginOutcome::MfaRequired { ticket: t }) => {
+                    let _ = tx.send(LoginEvent::TotpNeeded {
+                        email: email.clone(),
+                    });
+                    waker.wake();
+                    ticket = Some(t);
+                    continue;
+                }
+                Err(RestError::CaptchaRequired(ch)) => {
+                    let _ = tx.send(LoginEvent::CaptchaNeeded(*ch));
+                    waker.wake();
+                    match await_captcha(cmd_rx).await {
+                        Some(s) => {
+                            solved = Some(s);
+                            continue;
+                        }
+                        None => return PasswordRun::Cancelled,
+                    }
+                }
+                Err(e) => return PasswordRun::Error(e.to_string()),
+            }
+        };
+
+        if let Some(tok) = token {
+            // A returned token is not yet proof; only `GET /users/@me` counts.
+            match rest.authenticate(tok.clone()).await {
+                Ok((client, me)) => {
+                    tracing::info!(user = %me.user.display_name(), "signed in with password");
+                    if let Some(store) = store
+                        && let Err(e) = store.store(TOKEN_KEY, tok.expose().as_bytes())
+                    {
+                        tracing::warn!(%e, "could not store the token; the next start will ask again");
+                    }
+                    let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token: tok })));
+                    waker.wake();
+                    return PasswordRun::LoggedIn;
+                }
+                Err(e) => return PasswordRun::Error(e.to_string()),
+            }
+        }
+    }
+}
+
+/// Reads commands until a TOTP code arrives, or a cancel/close ends the flow.
+async fn await_totp(
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LoginCommand>,
+) -> Option<String> {
+    while let Some(c) = cmd_rx.recv().await {
+        match c {
+            LoginCommand::Totp { code } => return Some(code),
+            LoginCommand::CancelPassword => return None,
+            // A captcha or a fresh password is out of place while we wait.
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Reads commands until a solved captcha arrives, or a cancel/close ends it.
+async fn await_captcha(
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<LoginCommand>,
+) -> Option<SolvedCaptcha> {
+    while let Some(c) = cmd_rx.recv().await {
+        match c {
+            LoginCommand::Captcha(s) => return Some(s),
+            LoginCommand::CancelPassword => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// What became of the stored token.
@@ -379,10 +644,13 @@ async fn restore(store: Option<&SecretStore>) -> RestoreOutcome {
 }
 
 /// One exchange. `Ok(true)` on success, `Ok(false)` if the QR expired.
+///
+/// Takes ownership so it can run behind `tokio::spawn`; the run loop holds
+/// shared clones. Never panics: QR expiry and cancellation are ordinary.
 async fn attempt(
-    tx: &Sender<LoginEvent>,
-    waker: &Waker,
-    store: Option<&SecretStore>,
+    tx: Sender<LoginEvent>,
+    waker: Waker,
+    store: Option<SecretStore>,
 ) -> Result<bool, String> {
     let mut auth = RemoteAuth::connect().await.map_err(|e| e.to_string())?;
     let rest = RestClient::anonymous().map_err(|e| e.to_string())?;
@@ -426,7 +694,7 @@ async fn attempt(
 
                 // Stored only after it is known to work. A failure to store
                 // does not fail the login; the next start just asks again.
-                if let Some(store) = store
+                if let Some(store) = store.as_ref()
                     && let Err(e) = store.store(TOKEN_KEY, token.expose().as_bytes())
                 {
                     tracing::warn!(%e, "could not store the token; the next start will ask again");
@@ -587,5 +855,73 @@ mod tests {
             Some("https://example/1"),
             "the QR flow stopped"
         );
+    }
+
+    /// Starting the password form puts the session in the password state.
+    #[test]
+    fn starting_the_password_form_switches_to_it() {
+        let mut login = Login::fresh_for_test();
+        login.start_password();
+        assert!(matches!(login.session(), Session::Password));
+        assert!(login.session().hint().contains("パスワード"));
+    }
+
+    /// A captcha challenge keeps the password form up and is captured for the
+    /// platform, once.
+    #[test]
+    fn a_captcha_challenge_keeps_the_password_form() {
+        let mut login = Login::fresh_for_test();
+        login.apply(LoginEvent::CaptchaNeeded(gumicord_rest::CaptchaChallenge {
+            sitekey: Some("abc".to_owned()),
+            service: None,
+            rqdata: Some("def".to_owned()),
+            rqtoken: Some("ghi".to_owned()),
+            session_id: Some("s".to_owned()),
+        }));
+        assert!(matches!(login.session(), Session::Password));
+
+        let pending = login.take_pending().expect("the challenge is captured");
+        assert_eq!(pending.sitekey.as_deref(), Some("abc"));
+        assert_eq!(pending.rqtoken.as_deref(), Some("ghi"));
+        assert!(login.take_pending().is_none(), "read once");
+    }
+
+    /// Needing a TOTP code advances the session to the second factor step.
+    #[test]
+    fn needing_a_totp_code_advances_to_it() {
+        let mut login = Login::fresh_for_test();
+        login.apply(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+        });
+        assert!(matches!(login.session(), Session::PasswordTotp));
+        assert!(login.session().hint().contains("コード"));
+    }
+
+    /// The password command senders place exactly one command on the channel.
+    #[test]
+    fn password_commands_reach_the_background() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let login = Login {
+            cmd_tx: tx,
+            ..Login::fresh_for_test()
+        };
+
+        login.submit_password("a@b.c".to_owned(), "secret".to_owned());
+        login.submit_totp("123456".to_owned());
+        login.submit_captcha(SolvedCaptcha {
+            key: "k".to_owned(),
+            rqtoken: Some("r".to_owned()),
+            session_id: None,
+        });
+        login.cancel_password();
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(LoginCommand::Password { .. })
+        ));
+        assert!(matches!(rx.try_recv(), Ok(LoginCommand::Totp { .. })));
+        assert!(matches!(rx.try_recv(), Ok(LoginCommand::Captcha(_))));
+        assert!(matches!(rx.try_recv(), Ok(LoginCommand::CancelPassword)));
+        assert!(rx.try_recv().is_err(), "an extra command leaked");
     }
 }

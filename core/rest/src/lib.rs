@@ -14,6 +14,7 @@ pub mod client;
 pub mod ratelimit;
 pub mod route;
 
-pub use client::{CaptchaChallenge, RestClient, RestError};
+pub use auth::LoginOutcome;
+pub use client::{CaptchaChallenge, RestClient, RestError, SolvedCaptcha};
 pub use ratelimit::{RateLimitHeaders, RateLimiter};
 pub use route::{Method, Route};

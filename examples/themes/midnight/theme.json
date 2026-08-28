@@ -70,6 +70,20 @@
       "style": { "color": "$color.text.secondary", "font": "$font.body" }
     },
     {
+      "select": "app.screen.login.field",
+      "style": {
+        "background": "$color.bg.raised",
+        "radius": "$radius.md",
+        "padding": "$space.3",
+        "minHeight": 44
+      }
+    },
+    {
+      "select": "app.screen.login.field",
+      "when": { "state": "focus" },
+      "style": { "borderColor": "$color.accent", "borderWidth": 1 }
+    },
+    {
       "select": "primitive.qr",
       "style": {
         "background": "#ffffff",

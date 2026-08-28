@@ -129,6 +129,9 @@ define_node_ids! {
     AppScreenLogin,           "app.screen.login",                None,    Core,   "ログイン画面 (FR-001)";
     AppScreenLoginTitle,      "app.screen.login.title",          None,    Core,   "ログイン画面の見出し";
     AppScreenLoginHint,       "app.screen.login.hint",           None,    Core,   "ログイン画面の説明文・状態表示";
+    // A text box on the login form, told apart by key (email / password /
+    // totp). The TOTP step reuses it so IME positioning stays the same.
+    AppScreenLoginField,      "app.screen.login.field",          None,    Core,   "ログインフォームの入力欄 (FR-001)";
     AppScreenMain,            "app.screen.main",                 None,    Core,   "メイン画面";
 
     // ─────────────────────────── chrome.* — window chrome, desktop only

@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use crate::captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, WebView2Captcha};
 use crate::text_input::{EditKey, TextDocument};
 use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
@@ -140,6 +141,22 @@ pub trait Application {
         false
     }
 
+    /// A captcha challenge waiting to be solved, if any.
+    ///
+    /// Checked by the platform layer after a wake: when this returns a
+    /// challenge it opens the captcha modal, and either hands the solution
+    /// back through [`Application::captcha_solved`] or abandons the pending
+    /// login through [`Application::captcha_cancelled`].
+    fn pending_captcha(&mut self) -> Option<CaptchaChallenge> {
+        None
+    }
+
+    /// The token produced by a solved captcha, to forward to the login API.
+    fn captcha_solved(&mut self, _solved: SolvedCaptcha) {}
+
+    /// The captcha was cancelled; drop the pending login and go back.
+    fn captcha_cancelled(&mut self) {}
+
     /// Called once before the window opens; background work starts here. The
     /// [`Waker`] is the only way another thread can wake the loop.
     fn start(&mut self, _waker: Waker) {}
@@ -209,6 +226,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         waker,
         window: None,
         renderer: None,
+        captcha: WebView2Captcha,
         cursor: (0.0, 0.0),
         zone: Zone::Client,
         hovering_link: false,
@@ -245,6 +263,8 @@ struct Host {
     waker: Waker,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    /// Presents a captcha challenge as a modal over the window (ADR-0007).
+    captcha: WebView2Captcha,
     /// Pointer position.
     cursor: (f32, f32),
     zone: Zone,
@@ -640,6 +660,30 @@ impl Host {
             );
         }
     }
+
+    /// Open the captcha modal if the app is asking for one, and route its
+    /// outcome back to the app. The solve blocks this thread while the OS
+    /// message queue is pumped, like a native dialog.
+    fn pump_captcha(&mut self) {
+        let Some(challenge) = self.app.pending_captcha() else {
+            return;
+        };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        match self.captcha.solve(&window, challenge) {
+            Ok(solved) => self.app.captcha_solved(solved),
+            // A failed or cancelled solve leaves the flow mid-login; abandon
+            // it rather than leave a stuck form, and let the app go back.
+            Err(e) => {
+                if !matches!(e, CaptchaError::Cancelled) {
+                    tracing::error!(%e, "captcha could not be solved");
+                }
+                self.app.captcha_cancelled();
+            }
+        }
+        self.request_redraw();
+    }
 }
 
 impl ApplicationHandler for Host {
@@ -698,7 +742,11 @@ impl ApplicationHandler for Host {
         // Fonts arriving from their background thread also wake the loop; a
         // redraw folds them in if the app has nothing to draw.
         let fonts = self.renderer.as_ref().is_some_and(Renderer::fonts_pending);
-        if self.app.wake() || fonts {
+        let woke = self.app.wake() || fonts;
+        // A wake may be the login flow asking for a captcha; the modal runs
+        // here, on the thread with the window handle.
+        self.pump_captcha();
+        if woke {
             self.request_redraw();
         }
     }

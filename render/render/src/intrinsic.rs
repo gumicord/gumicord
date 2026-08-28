@@ -289,6 +289,8 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         ChatTypingIndicator => Intrinsic::row().h(24.0).cross(Cross::Center).one_line(),
         ChatInput => Intrinsic::column().cross(Cross::Stretch),
         ChatInputField => Intrinsic::column().cross(Cross::Stretch),
+        // A login form box; stretches across the form, like the composer.
+        AppScreenLoginField => Intrinsic::column().cross(Cross::Stretch),
         ChatInputToolbar => Intrinsic::row().cross(Cross::Center),
         ChatInputActions => Intrinsic::row().cross(Cross::Center),
 
