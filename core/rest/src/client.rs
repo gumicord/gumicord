@@ -12,7 +12,7 @@
 //! confirming that is cheaper than assuming it.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gumicord_model::Token;
 use gumicord_model::identity::Identity;
@@ -292,10 +292,17 @@ impl RestClient {
 }
 
 fn build_http(identity: &Identity) -> Result<reqwest::Client, RestError> {
+    // Read, not a whole-request deadline: a hung request otherwise leaves its
+    // channel on "loading" forever, while a slow CDN download still arrives.
+    const CONNECT: Duration = Duration::from_secs(10);
+    const READ: Duration = Duration::from_secs(15);
+
     Ok(reqwest::Client::builder()
         // Must equal `browser_user_agent` in the claim; a difference is
         // itself a mismatch.
         .user_agent(identity.user_agent())
+        .connect_timeout(CONNECT)
+        .read_timeout(READ)
         .build()?)
 }
 
