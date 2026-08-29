@@ -140,7 +140,13 @@ impl Db {
             })
             .map_err(|_| DbError::NoHome)?;
 
-        Ok((Db { tx: Some(tx), handle: Some(handle) }, snapshot))
+        Ok((
+            Db {
+                tx: Some(tx),
+                handle: Some(handle),
+            },
+            snapshot,
+        ))
     }
 
     fn send(&self, job: Job) {
