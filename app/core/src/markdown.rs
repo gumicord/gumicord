@@ -157,10 +157,12 @@ impl<'a> Ink<'a> {
             return None;
         };
         match inlines.as_slice() {
-            [Inline {
-                deco,
-                kind: InlineKind::Emoji { id, .. },
-            }] if deco.is_none() => Some(*id),
+            [
+                Inline {
+                    deco,
+                    kind: InlineKind::Emoji { id, .. },
+                },
+            ] if deco.is_none() => Some(*id),
             _ => None,
         }
     }
@@ -191,7 +193,7 @@ impl<'a> Ink<'a> {
                 self.rich(self.spans(content, names), Some(slot))
             }
             Block::Subtext(c) => self.rich(self.spans(c, names), Some("subtext")),
-            Block::Quote(inner) => UiNode::new(NodeId::LayoutRow)
+            Block::Quote(inner) => UiNode::new(NodeId::ChatMessageQuoteRow)
                 .child(UiNode::new(NodeId::PrimitiveDivider).with_key(Key::Slot("quote_bar")))
                 .child(
                     UiNode::new(NodeId::LayoutColumn)

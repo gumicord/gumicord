@@ -202,6 +202,7 @@ M1 で公開するフィールド。
 | `app.screen.login` | — | ログイン画面 (FR-001) |
 | `app.screen.login.title` | — | ログイン画面の見出し |
 | `app.screen.login.hint` | — | ログイン画面の説明文・状態表示 |
+| `app.screen.login.field` | — | ログインフォームの入力欄 (FR-001) |
 | `app.screen.main` | — | メイン画面 |
 
 ### `chrome.*`
@@ -265,6 +266,7 @@ M1 で公開するフィールド。
 | `chat.message.header.timestamp` | `MessageData` | 時刻 |
 | `chat.message.reply_ref` | `MessageData` | 返信元の参照表示 (FR-028) |
 | `chat.message.content` | `MessageData` | 本文 (FR-021) |
+| `chat.message.content.quote` | — | 引用ブロックの行。中身の高さにだけ合わせる |
 | `chat.message.attachments` | `MessageData` | 添付一覧 (FR-025) |
 | `chat.message.attachment` | `AttachmentData` | 添付 1 件 (FR-025) |
 | `chat.message.embeds` | `MessageData` | 埋め込み一覧 (FR-026) |
@@ -329,7 +331,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 103 個** (中核 65 / プラグインも生成可 38)。
+**合計 105 個** (中核 67 / プラグインも生成可 38)。
 
 <!-- END GENERATED: node-ids -->
 

@@ -821,6 +821,57 @@ mod tests {
         );
     }
 
+    /// A quote hugs its content: it must not grow to fill the leftover height
+    /// of a tall message and drift the body text after it (regression).
+    #[test]
+    fn quote_does_not_grow_into_leftover() {
+        let quote_body = UiNode::new(NodeId::LayoutColumn)
+            .child(UiNode::text(
+                NodeId::PrimitiveText,
+                "quote first line".to_owned(),
+            ))
+            .child(UiNode::text(
+                NodeId::PrimitiveText,
+                "quote second line".to_owned(),
+            ));
+        let quote = UiNode::new(NodeId::ChatMessageQuoteRow)
+            .child(styled(NodeId::PrimitiveDivider, |s| s.width = Some(4.0)))
+            .child(quote_body);
+        let after = UiNode::text(NodeId::PrimitiveText, "after".to_owned())
+            .with_key(gumicord_uitree::Key::Slot("after"));
+        let content = UiNode::new(NodeId::ChatMessageContent)
+            .child(UiNode::text(NodeId::PrimitiveText, "before".to_owned()))
+            .child(quote)
+            .child(after);
+        let body = styled(NodeId::LayoutColumn, |s| s.height = Some(200.0)).child(content);
+        let message = UiNode::new(NodeId::ChatMessage)
+            .child(styled(NodeId::ChatMessageAvatar, |s| {
+                s.width = Some(40.0);
+                s.height = Some(40.0);
+            }))
+            .child(body);
+        let tree = UiNode::new(NodeId::ChatView)
+            .child(UiNode::new(NodeId::ChatMessageList).child(message));
+
+        let r = layout(
+            &tree,
+            Size::new(400.0, 600.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+
+        let quote_rect = rect_of(&r, NodeId::ChatMessageQuoteRow);
+        assert_eq!(quote_rect.h, 44.0, "引用は中身の高さだけに収まる");
+
+        let after_rect = r
+            .placed
+            .iter()
+            .find(|p| p.node.key == Some(gumicord_uitree::Key::Slot("after")))
+            .expect("after が配置されている")
+            .rect;
+        assert_eq!(after_rect.y, quote_rect.y + 44.0, "引用の直後に本文が来る");
+    }
+
     /// Padding and gaps come out of the main axis.
     ///
     /// The root always gets the whole viewport regardless of its own size, so

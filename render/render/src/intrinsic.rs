@@ -283,6 +283,9 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         ChatMessageHeaderBadges => Intrinsic::row(),
         ChatMessageReplyRef => Intrinsic::row().cross(Cross::Center),
         ChatMessageContent => Intrinsic::column().cross(Cross::Stretch),
+        // A quote hugs its content: with `LayoutRow` it would grow and soak
+        // up the leftover height of a tall message, drifting what follows it.
+        ChatMessageQuoteRow => Intrinsic::row().cross(Cross::Center),
         ChatMessageAttachments | ChatMessageEmbeds => Intrinsic::column().cross(Cross::Stretch),
         ChatMessageAttachment | ChatMessageEmbed => Intrinsic::column().cross(Cross::Stretch),
         ChatMessageActions => Intrinsic::row(),

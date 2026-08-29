@@ -186,6 +186,7 @@ define_node_ids! {
     ChatMessageHeaderTime,    "chat.message.header.timestamp",   Message, Core,   "時刻";
     ChatMessageReplyRef,      "chat.message.reply_ref",          Message, Core,   "返信元の参照表示 (FR-028)";
     ChatMessageContent,       "chat.message.content",            Message, Core,   "本文 (FR-021)";
+    ChatMessageQuoteRow,      "chat.message.content.quote",      None,    Core,   "引用ブロックの行。中身の高さにだけ合わせる";
     ChatMessageAttachments,   "chat.message.attachments",        Message, Core,   "添付一覧 (FR-025)";
     ChatMessageAttachment,    "chat.message.attachment",         Attachment, Core, "添付 1 件 (FR-025)";
     ChatMessageEmbeds,        "chat.message.embeds",             Message, Core,   "埋め込み一覧 (FR-026)";
