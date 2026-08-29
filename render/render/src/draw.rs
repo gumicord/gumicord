@@ -895,12 +895,22 @@ fn draw_rich(
     }
 
     for (rect, uv, is_color, page, which) in out {
+        let Some(sp) = spans.get(which as usize) else {
+            continue;
+        };
         // Hidden glyphs are not added at all: painting over them leaks at the
         // rounded corners and through any transparency.
-        if spans.get(which as usize).is_some_and(|s| s.concealed()) {
+        if sp.concealed() {
             continue;
         }
-        let c = colors.get(which as usize).copied().unwrap_or(base);
+        // An opened spoiler reads as normal text: its slot colour was there
+        // only to paint the cover, and keeping it would wash the reveal
+        // out. A run that carries its own colour (a link) still keeps it.
+        let c = if sp.hidden && sp.revealed && sp.link.is_none() {
+            base
+        } else {
+            colors.get(which as usize).copied().unwrap_or(base)
+        };
         dl.push_glyph(rect, uv, c, is_color, 0.0, scissor, page);
     }
 

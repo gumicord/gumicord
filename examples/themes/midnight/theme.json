@@ -498,7 +498,7 @@
     {
       "select": "primitive.text",
       "when": { "slot": "spoiler" },
-      "style": { "color": "$color.bg.hover" }
+      "style": { "color": "$color.bg.selected" }
     },
     {
       "select": "primitive.text",
