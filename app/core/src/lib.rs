@@ -1822,11 +1822,7 @@ impl Gumicord {
             Composing::Edit(_) => ("編集", "edit"),
             Composing::New => ("", "none"),
         };
-        let who = self
-            .composing
-            .target()
-            .and_then(|id| self.message_rows().into_iter().find(|m| m.id == id))
-            .map(|m| m.author);
+        let who = self.composing.target().and_then(|id| self.author_of(id));
 
         let text = match (&self.composing, who) {
             (Composing::Reply(_), Some(a)) => format!("{a} に{verb}中"),
@@ -1854,6 +1850,38 @@ impl Gumicord {
                     )
                     .child(UiNode::icon(NodeId::PrimitiveIcon, "close")),
             )
+    }
+
+    /// One message's author display name, straight from the store: going
+    /// through `message_rows` here would re-parse every message's Markdown
+    /// each frame while the bar is up. `None` once the target has scrolled
+    /// out of the backlog.
+    fn author_of(&self, id: u64) -> Option<String> {
+        if !self.uses_live() {
+            return demo::MESSAGES
+                .iter()
+                .chain(&self.sent)
+                .find(|m| m.id == id)
+                .map(|m| m.author.to_string());
+        }
+        let guild = GuildId::from(self.selected_guild);
+        self.live
+            .store()
+            .messages(ChannelId::from(self.selected_channel))
+            .iter()
+            .find(|m| m.id.get() == id)
+            .map(|m| {
+                // REST messages carry no `member`; fall back to whatever was
+                // seen and remembered. The per-guild name wins.
+                match m
+                    .member
+                    .as_ref()
+                    .or_else(|| self.live.store().member(guild, m.author.id))
+                {
+                    Some(x) => x.display_name(&m.author).to_owned(),
+                    None => m.author.display_name().to_owned(),
+                }
+            })
     }
 
     /// The line below the list. Silent while connected; announcing the normal
@@ -2563,6 +2591,21 @@ mod tests {
         a.input.insert("やあ");
         assert!(a.submit());
         assert_eq!(a.composing, Composing::New);
+    }
+
+    /// The direct lookup must name the same author the rows would, and stay
+    /// quiet for a target that has scrolled out of the backlog.
+    #[test]
+    fn the_composing_bar_names_the_reply_target() {
+        let a = app();
+        let expect = a
+            .message_rows()
+            .into_iter()
+            .find(|m| m.id == 100)
+            .expect("デモに 100 が無い")
+            .author;
+        assert_eq!(a.author_of(100), Some(expect));
+        assert_eq!(a.author_of(u64::MAX), None);
     }
 
     /// The server would return 403 anyway, but not offering it comes first.
