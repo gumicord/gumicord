@@ -316,6 +316,9 @@ impl Renderer {
 
     /// Draws one frame. The tree must already have its style resolved.
     pub fn render(&mut self, root: &UiNode) -> FrameStats {
+        // Drop shapes no frame uses any more, or a resize drag leaves one
+        // copy of every text behind per wrap width it passed through.
+        self.text.shaper().sweep();
         let viewport = self.viewport();
         let mut layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
 

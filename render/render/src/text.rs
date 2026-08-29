@@ -207,6 +207,13 @@ struct ShapeKey {
     scale_q: u32,
 }
 
+/// A shaping result plus the sweep that last used it, so [`Shaper::sweep`]
+/// can drop what no frame asks for any more.
+struct CachedShape {
+    seen: u64,
+    shaped: Shaped,
+}
+
 /// One glyph, positioned from the origin in physical pixels.
 #[derive(Debug, Clone, Copy)]
 pub struct PlacedGlyph {
@@ -346,7 +353,10 @@ pub struct GlyphEntry {
 pub struct Shaper {
     font_system: FontSystem,
     swash: SwashCache,
-    shaped: HashMap<ShapeKey, Shaped>,
+    shaped: HashMap<ShapeKey, CachedShape>,
+    /// Counts [`Shaper::sweep`] calls; entries remember the count they were
+    /// last used at, which is what lets a sweep spot the unused ones.
+    sweeps: u64,
     scale: f32,
     /// Normalised once and reused when the font set is extended.
     locale: String,
@@ -389,6 +399,7 @@ impl Shaper {
             font_system,
             swash: SwashCache::new(),
             shaped: HashMap::new(),
+            sweeps: 0,
             scale,
             locale,
             fonts_rx: None,
@@ -422,6 +433,7 @@ impl Shaper {
             font_system,
             swash: SwashCache::new(),
             shaped: HashMap::new(),
+            sweeps: 0,
             scale,
             locale,
             fonts_rx: Some(rx),
@@ -490,17 +502,34 @@ impl Shaper {
     fn ensure(&mut self, key: &ShapeKey, max_w: Option<f32>) {
         // `entry` would clone the key every time; hits vastly outnumber
         // misses, so hits stay cheap.
-        if !self.shaped.contains_key(key) {
-            let shaped = self.shape_uncached(&key.runs, max_w);
-            self.shaped.insert(key.clone(), shaped);
+        if let Some(hit) = self.shaped.get_mut(key) {
+            hit.seen = self.sweeps;
+            return;
         }
+        let shaped = self.shape_uncached(&key.runs, max_w);
+        self.shaped.insert(
+            key.clone(),
+            CachedShape {
+                seen: self.sweeps,
+                shaped,
+            },
+        );
+    }
+
+    /// Drops the entries nothing used since the previous sweep. Called once
+    /// per frame: without it, every wrap width a resize drag passes through
+    /// keeps a copy of everything shaped for the life of the process.
+    pub fn sweep(&mut self) {
+        let sweeps = self.sweeps;
+        self.shaped.retain(|_, s| s.seen == sweeps);
+        self.sweeps = self.sweeps.wrapping_add(1);
     }
 
     /// Shapes a string. `None` means no wrapping.
     pub fn shape(&mut self, text: &str, font: &ResolvedFont, max_w: Option<f32>) -> &Shaped {
         let key = self.key(text, font, max_w);
         self.ensure(&key, max_w);
-        &self.shaped[&key]
+        &self.shaped[&key].shaped
     }
 
     /// Shapes mixed decoration in one pass.
@@ -510,7 +539,7 @@ impl Shaper {
     pub fn shape_rich(&mut self, runs: &[(String, ResolvedFont)], max_w: Option<f32>) -> &Shaped {
         let key = self.key_rich(runs, max_w);
         self.ensure(&key, max_w);
-        &self.shaped[&key]
+        &self.shaped[&key].shaped
     }
 
     /// Shapes and returns only the size, for layout measurement.
@@ -708,7 +737,7 @@ impl TextEngine {
         } = &mut self.shaper;
         let atlas = &mut self.atlas;
 
-        let s = &shaped[&key];
+        let s = &shaped[&key].shaped;
         for g in &s.glyphs {
             if let Some(e) = atlas.glyph(device, queue, font_system, swash, g.cache_key)
                 && e.w != 0
@@ -741,7 +770,7 @@ impl TextEngine {
         } = &mut self.shaper;
         let atlas = &mut self.atlas;
 
-        let s = &shaped[&key];
+        let s = &shaped[&key].shaped;
         for g in &s.glyphs {
             if let Some(e) = atlas.glyph(device, queue, font_system, swash, g.cache_key)
                 && e.w != 0
@@ -1569,6 +1598,45 @@ mod tests {
         // Shaping still works on the rebuilt font system.
         let f = plain(16.0);
         assert!(sh.measure("hello", &f, None).w > 0.0);
+    }
+
+    /// A resize drag shapes everything once per wrap width it passes
+    /// through. What the next frame does not ask for must go, or the pile
+    /// outlives the drag by the length of the session.
+    #[test]
+    fn sweep_drops_widths_no_frame_asks_for() {
+        let mut sh = Shaper::new(1.0);
+        let f = plain(16.0);
+        for w in 0..300 {
+            sh.measure("hello world", &f, Some(200.0 + w as f32));
+        }
+        assert_eq!(sh.shaped.len(), 300, "each width should shape once");
+
+        // The next frame uses one width; the sweep after it drops the rest.
+        sh.sweep();
+        sh.measure("hello world", &f, Some(200.0));
+        sh.sweep();
+        assert_eq!(sh.shaped.len(), 1, "only the width still in use stays");
+    }
+
+    /// An entry lives exactly as long as frames keep touching it: reuse must
+    /// not grow the cache, and one untouched frame is the end.
+    #[test]
+    fn sweep_keeps_what_frames_still_use() {
+        let mut sh = Shaper::new(1.0);
+        let f = plain(16.0);
+        let first = sh.measure("hello world", &f, Some(200.0));
+        for _ in 0..3 {
+            sh.sweep();
+            assert_eq!(sh.measure("hello world", &f, Some(200.0)), first);
+            assert_eq!(sh.shaped.len(), 1, "reuse should not grow the cache");
+        }
+
+        // Two sweeps with no use in between: the frame between them went by
+        // without the entry, so it goes.
+        sh.sweep();
+        sh.sweep();
+        assert!(sh.shaped.is_empty(), "an unused frame should end the entry");
     }
 }
 
