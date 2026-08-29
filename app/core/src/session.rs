@@ -114,7 +114,9 @@ pub enum LoginEvent {
     /// Restarted, usually after the QR expired.
     Restarted,
     /// The background needs a second factor to finish a login.
-    TotpNeeded { email: String },
+    TotpNeeded {
+        email: String,
+    },
     /// The background needs a captcha solved before login can continue.
     CaptchaNeeded(CaptchaChallenge),
 }
@@ -541,7 +543,11 @@ async fn run_password(
                     {
                         tracing::warn!(%e, "could not store the token; the next start will ask again");
                     }
-                    let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token: tok })));
+                    let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn {
+                        me,
+                        client,
+                        token: tok,
+                    })));
                     waker.wake();
                     return PasswordRun::LoggedIn;
                 }
@@ -915,10 +921,7 @@ mod tests {
         });
         login.cancel_password();
 
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(LoginCommand::Password { .. })
-        ));
+        assert!(matches!(rx.try_recv(), Ok(LoginCommand::Password { .. })));
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::Totp { .. })));
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::Captcha(_))));
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::CancelPassword)));

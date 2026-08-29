@@ -314,11 +314,7 @@ impl Store {
         level: NotifLevel,
         overrides: &[(ChannelId, NotifLevel)],
     ) {
-        let channels: Vec<ChannelId> = self
-            .guild_channels
-            .get(&guild)
-            .cloned()
-            .unwrap_or_default();
+        let channels: Vec<ChannelId> = self.guild_channels.get(&guild).cloned().unwrap_or_default();
         for c in &channels {
             // Start from the guild-level default.
             self.set_notif(*c, level);
@@ -340,9 +336,7 @@ impl Store {
             NotifLevel::Nothing => false,
             NotifLevel::Mentions => self.mentions(channel) > 0,
             NotifLevel::All => {
-                let Some(last) =
-                    self.channels.get(&channel).and_then(|c| c.last_message_id)
-                else {
+                let Some(last) = self.channels.get(&channel).and_then(|c| c.last_message_id) else {
                     return false;
                 };
                 match self.read.get(&channel).and_then(|m| m.seen) {
@@ -1500,11 +1494,7 @@ mod unread_tests {
         ]);
 
         // Guild is muted; ch1 overrides to unmute.
-        s.set_notifs(
-            g,
-            NotifLevel::Nothing,
-            &[(ch1, NotifLevel::All)],
-        );
+        s.set_notifs(g, NotifLevel::Nothing, &[(ch1, NotifLevel::All)]);
         assert!(s.is_unread(ch1), "overridden channel is not muted");
         assert!(!s.is_unread(ch2), "other channel stays muted");
     }

@@ -572,28 +572,29 @@ impl Application for Gumicord {
         // A login-form field takes focus; the composer and the login form
         // never share it.
         if let Some(field) = hits.iter().find_map(|h| match (h.id, &h.key) {
-            (
-                NodeId::AppScreenLoginField,
-                Some(Key::Slot(s @ ("email" | "password" | "totp"))),
-            ) => Some(match *s {
-                "email" => LoginField::Email,
-                "password" => LoginField::Password,
-                _ => LoginField::Totp,
-            }),
-            _ => None,
-        }) {
-            if self.login_field != Some(field) || self.input_focused {
-                self.login_field = Some(field);
-                self.input_focused = false;
-                changed = true;
+            (NodeId::AppScreenLoginField, Some(Key::Slot(s @ ("email" | "password" | "totp")))) => {
+                Some(match *s {
+                    "email" => LoginField::Email,
+                    "password" => LoginField::Password,
+                    _ => LoginField::Totp,
+                })
             }
+            _ => None,
+        }) && (self.login_field != Some(field) || self.input_focused)
+        {
+            self.login_field = Some(field);
+            self.input_focused = false;
+            changed = true;
         }
 
         // Only the frontmost selectable hit.
         for h in hits {
             match (h.id, &h.key) {
                 // The way into the password form (or its submit / back).
-                (NodeId::PrimitiveButton, Some(Key::Slot(slot @ ("login_submit" | "login_back" | "login_password")))) => {
+                (
+                    NodeId::PrimitiveButton,
+                    Some(Key::Slot(slot @ ("login_submit" | "login_back" | "login_password"))),
+                ) => {
                     changed |= self.login_button(slot);
                 }
                 // Folders only fold; they do not change the selected guild.
@@ -1251,10 +1252,7 @@ impl Gumicord {
                     .child_if(s.qr().is_some(), || {
                         UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
                     })
-                    .child(UiNode::text(
-                        NodeId::AppScreenLoginHint,
-                        self.login.hint(),
-                    ))
+                    .child(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()))
                     .child(self.login_secondary("パスワードでログイン", "login_password"));
             }
         }
@@ -1294,10 +1292,7 @@ impl Gumicord {
         UiNode::new(NodeId::PrimitiveButton)
             .with_key(Key::Slot("login_submit"))
             .with_state_if(
-                self.is_hovered(
-                    NodeId::PrimitiveButton,
-                    Some(&Key::Slot("login_submit")),
-                ),
+                self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot("login_submit"))),
                 State::Hover,
             )
             .child(UiNode::text(NodeId::PrimitiveText, label))
@@ -3596,7 +3591,10 @@ mod login_tests {
         assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::PrimitiveQr));
 
         let entry = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_password"));
-        assert!(a.pressed(std::slice::from_ref(&entry)), "フォームへの入口が効かない");
+        assert!(
+            a.pressed(std::slice::from_ref(&entry)),
+            "フォームへの入口が効かない"
+        );
 
         assert!(matches!(a.login.session(), Session::Password));
         let mut seen = ids(&a.build_tree(Panes::Three));
@@ -3630,7 +3628,11 @@ mod login_tests {
         a.focused_document().unwrap().insert("secret");
 
         assert_eq!(a.login_email.text(), "a@b.c", "email 欄の内容が消えた");
-        assert_eq!(a.login_input.text(), "secret", "password 欄に書かれていない");
+        assert_eq!(
+            a.login_input.text(),
+            "secret",
+            "password 欄に書かれていない"
+        );
     }
 
     /// Submitting the password form hands the credentials to the background
@@ -3662,15 +3664,14 @@ mod login_tests {
     #[test]
     fn a_pending_captcha_is_forwarded_and_solved() {
         let mut a = pending();
-        a.login.apply_for_test(LoginEvent::CaptchaNeeded(
-            gumicord_rest::CaptchaChallenge {
+        a.login
+            .apply_for_test(LoginEvent::CaptchaNeeded(gumicord_rest::CaptchaChallenge {
                 sitekey: Some("site123".to_owned()),
                 service: Some("hcaptcha".to_owned()),
                 rqdata: Some("rqdata".to_owned()),
                 rqtoken: Some("rqtoken".to_owned()),
                 session_id: Some("sess".to_owned()),
-            },
-        ));
+            }));
 
         let challenge = a
             .pending_captcha()

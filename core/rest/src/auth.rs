@@ -68,13 +68,22 @@ impl RestClient {
         }
 
         let text = self
-            .send_raw_h(Route::login(), Some(&Body { login: email, password }), &extra)
+            .send_raw_h(
+                Route::login(),
+                Some(&Body {
+                    login: email,
+                    password,
+                }),
+                &extra,
+            )
             .await?;
         let r: LoginResponse = serde_json::from_str(&text).map_err(RestError::Decode)?;
         match (r.token, r.ticket) {
             (Some(t), _) => Ok(LoginOutcome::Token(Token::new(t))),
             (None, Some(ticket)) => Ok(LoginOutcome::MfaRequired { ticket }),
-            (None, None) => Err(RestError::Decode(serde_json::from_str::<LoginResponse>("{}").unwrap_err())),
+            (None, None) => Err(RestError::Decode(
+                serde_json::from_str::<LoginResponse>("{}").unwrap_err(),
+            )),
         }
     }
 
@@ -93,9 +102,9 @@ impl RestClient {
             .send_raw(Route::mfa_totp(), Some(&Body { ticket, code }))
             .await?;
         let r: MfaResponse = serde_json::from_str(&text).map_err(RestError::Decode)?;
-        r.token
-            .map(Token::new)
-            .ok_or_else(|| RestError::Decode(serde_json::from_str::<MfaResponse>("{}").unwrap_err()))
+        r.token.map(Token::new).ok_or_else(|| {
+            RestError::Decode(serde_json::from_str::<MfaResponse>("{}").unwrap_err())
+        })
     }
 
     /// Exchanges a QR login ticket for a token.

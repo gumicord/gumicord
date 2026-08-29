@@ -51,6 +51,10 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// One resolved notification-setings row:
+/// (guild, default message-notification level, default muted, channel overrides).
+pub type NotificationSetting = (GuildId, u8, bool, Vec<(ChannelId, u8, bool)>);
+
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
     #[error("接続できない: {0}")]
@@ -220,9 +224,7 @@ impl Ready {
 
     /// Resolved notification levels per guild:
     /// (guild, default_notifications, default_muted, overrides).
-    pub fn notification_settings(
-        &self,
-    ) -> Vec<(GuildId, u8, bool, Vec<(ChannelId, u8, bool)>)> {
+    pub fn notification_settings(&self) -> Vec<NotificationSetting> {
         let Some(settings) = &self.user_guild_settings else {
             return Vec::new();
         };

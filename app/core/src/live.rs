@@ -942,18 +942,18 @@ impl Live {
             LiveEvent::NotifSettings(data) => {
                 match serde_json::from_value::<GuildSettingsEntry>(data) {
                     Ok(entry) => {
-                        let default =
-                            to_notif_level(entry.message_notifications, entry.muted);
-                        let resolved: Vec<(ChannelId, gumicord_store::NotifLevel)> =
-                            entry
-                                .channel_overrides
-                                .iter()
-                                .map(|o| {
-                                    (o.channel_id, to_notif_level(o.message_notifications, o.muted))
-                                })
-                                .collect();
-                        self.store
-                            .set_notifs(entry.guild_id, default, &resolved);
+                        let default = to_notif_level(entry.message_notifications, entry.muted);
+                        let resolved: Vec<(ChannelId, gumicord_store::NotifLevel)> = entry
+                            .channel_overrides
+                            .iter()
+                            .map(|o| {
+                                (
+                                    o.channel_id,
+                                    to_notif_level(o.message_notifications, o.muted),
+                                )
+                            })
+                            .collect();
+                        self.store.set_notifs(entry.guild_id, default, &resolved);
                         tracing::debug!(
                             guild = %entry.guild_id,
                             "notification settings updated"

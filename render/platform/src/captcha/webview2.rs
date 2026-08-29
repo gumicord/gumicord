@@ -111,7 +111,7 @@ impl CaptchaHost for WebView2Captcha {
         challenge: CaptchaChallenge,
     ) -> Result<SolvedCaptcha, CaptchaError> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+            DispatchMessageW, GetMessageW, MSG, TranslateMessage,
         };
 
         let (tx, rx): (Sender<Outcome>, Receiver<Outcome>) = mpsc::channel();
@@ -155,7 +155,9 @@ impl CaptchaHost for WebView2Captcha {
                     let _ = webview.evaluate_script("hcaptcha.reset(0);");
                 }
                 Ok(Outcome::Failed) => {
-                    return Err(CaptchaError::Open("the challenge could not be completed".to_string()))
+                    return Err(CaptchaError::Open(
+                        "the challenge could not be completed".to_string(),
+                    ));
                 }
                 Err(_) => continue,
             }

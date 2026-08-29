@@ -403,10 +403,7 @@ impl Shaper {
     /// does not sleep through the update. The window starts drawing with the
     /// bundled font alone, and Japanese (which falls back to a system font)
     /// becomes correct only after the background thread reports in.
-    pub fn new_fast(
-        scale: f32,
-        wake: Box<dyn Fn() + Send + Sync + 'static>,
-    ) -> Self {
+    pub fn new_fast(scale: f32, wake: Box<dyn Fn() + Send + Sync + 'static>) -> Self {
         let locale = Self::locale();
         let ready = std::sync::Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -446,8 +443,12 @@ impl Shaper {
     /// A true result means the glyph atlas is now stale and the caller must
     /// rebuild it.
     pub fn bring_system_fonts(&mut self) -> bool {
-        let Some(rx) = &self.fonts_rx else { return false };
-        let Ok(system) = rx.try_recv() else { return false };
+        let Some(rx) = &self.fonts_rx else {
+            return false;
+        };
+        let Ok(system) = rx.try_recv() else {
+            return false;
+        };
         self.font_system = Self::font_system(&self.locale, system);
         // New font ids mean old swash and shape results are unreachable or
         // wrong; drop both so the next draw starts clean.
@@ -1528,8 +1529,8 @@ mod tests {
     #[test]
     fn lazy_fonts_arrive_from_the_background_thread() {
         use std::sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         };
         let woke = Arc::new(AtomicBool::new(false));
         let th_woke = woke.clone();
