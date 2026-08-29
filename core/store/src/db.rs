@@ -79,15 +79,31 @@ enum Job {
     Barrier(SyncSender<()>),
 }
 
-/// The local cache. Cloneable.
-#[derive(Clone)]
+/// The local cache.
 pub struct Db {
-    tx: SyncSender<Job>,
+    tx: Option<SyncSender<Job>>,
+    /// The writer thread, owned so that dropping the handle can stop it.
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl core::fmt::Debug for Db {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Db")
+    }
+}
+
+impl Drop for Db {
+    fn drop(&mut self) {
+        // Taking the sender out closes the channel; the writer thread then
+        // sees the disconnect and stops by itself. Joining right after makes
+        // that deterministic: the SQLite connection is guaranteed closed
+        // before anything opens the same file again. On POSIX a connection
+        // left open by a leaked writer thread can hang a second write to the
+        // file, and a detached thread would keep the process from exiting.
+        drop(self.tx.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -101,12 +117,17 @@ impl Db {
             let _ = std::fs::create_dir_all(dir);
         }
         let conn = rusqlite::Connection::open(path)?;
+        // Bound any SQLite lock wait so a stalled peer cannot block the writer
+        // (or a flush) forever; on POSIX two connections to one file can wait
+        // on each other's locks. A few seconds is a generous budget for a
+        // cache write, and an error is logged rather than hanging the caller.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         init(&conn)?;
         let snapshot = read_snapshot(&conn)?;
 
         // Overflow is dropped; the main thread never waits.
         let (tx, rx) = sync_channel::<Job>(QUEUE);
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("gumicord-cache".to_owned())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
@@ -119,12 +140,12 @@ impl Db {
             })
             .map_err(|_| DbError::NoHome)?;
 
-        Ok((Db { tx }, snapshot))
+        Ok((Db { tx: Some(tx), handle: Some(handle) }, snapshot))
     }
 
     fn send(&self, job: Job) {
         // Never waits; drops on overflow.
-        if self.tx.try_send(job).is_err() {
+        if self.tx.as_ref().is_none_or(|tx| tx.try_send(job).is_err()) {
             tracing::debug!("cache queue is full; dropping this write");
         }
     }
@@ -574,7 +595,9 @@ impl Db {
     /// waiting is the point of this layer.
     pub fn flush(&self) {
         let (tx, rx) = sync_channel(1);
-        if self.tx.send(Job::Barrier(tx)).is_ok() {
+        if let Some(send) = &self.tx
+            && send.send(Job::Barrier(tx)).is_ok()
+        {
             let _ = rx.recv();
         }
     }
