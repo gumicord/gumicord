@@ -88,10 +88,10 @@
        "style": {
          "background": "$color.bg.raised",
          "radius": "$radius.lg",
-         "padding": [24, 24, 24, 24],
+         "padding": [16, 24, 16, 24],
          "shadow": "$shadow.raised",
          "gap": "$space.3",
-         "maxWidth": 480
+         "maxWidth": 560
        }
     },
     {
