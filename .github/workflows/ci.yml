@@ -105,16 +105,26 @@ jobs:
   # a downloadable build always available shortens both reviews and bug
   # reports.
   #
-  # Windows only, because that is the current target; the rust job builds on
-  # ubuntu, which covers portability.
+  # Windows is the current target, but a runnable build on macOS and Linux is
+  # the point of the porting work, so all three are produced.
   #
   # PRs use thin LTO for speed; pushes to main and manual runs use the same
   # fat LTO profile as releases, which is what the recorded binary size and
   # startup figures were measured with.
   # ────────────────────────────────────────────────────────────
   dist:
-    name: Build (Windows)
-    runs-on: windows-latest
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: windows-latest
+            bin: gumicord.exe
+          - os: ubuntu-latest
+            bin: gumicord
+          - os: macos-latest
+            bin: gumicord
     env:
       PROFILE: ${{ github.event_name == 'pull_request' && 'release' || 'dist' }}
     steps:
@@ -136,17 +146,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/$PROFILE/gumicord.exe" dist/
+          cp "target/$PROFILE/${{ matrix.bin }}" dist/
           cp -r examples/themes dist/themes
           cp LICENSE dist/
           # The first thing anyone reads; lead with what does not work yet.
           cat > dist/README.txt <<'TXT'
           Gumicord (development build)
 
-            gumicord.exe    run it directly
-            themes/         themes; to swap one in:
-                              set GUMICORD_THEME=themes\midnight\theme.json
-                              gumicord.exe
+            ${{ matrix.bin }}    run it directly
+            themes/             themes; to swap one in:
+                                  set GUMICORD_THEME=themes/midnight/theme.json
+                                  ${{ matrix.bin }}
 
           Signing in needs the Discord app on your phone to scan a QR code:
           there is no password login yet, and no voice, no reactions, no
@@ -157,11 +167,11 @@ jobs:
 
           Progress: https://github.com/gumicord/gumicord/blob/main/spec/07-roadmap.md
           TXT
-          ls -l dist/gumicord.exe
+          ls -l "dist/${{ matrix.bin }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gumicord-windows-${{ github.sha }}
+          name: gumicord-${{ matrix.os }}-${{ github.sha }}
           path: dist/
           retention-days: 14
 
