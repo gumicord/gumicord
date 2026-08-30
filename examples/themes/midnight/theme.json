@@ -99,8 +99,8 @@
       "style": { "font": "$font.small", "color": "$color.text.secondary", "margin": [16, 0, 4, 0] }
     },
     {
-      "select": "app.screen.login.forgot",
-      "style": { "font": "$font.small", "color": "$color.brand", "textAlign": "right" }
+"select": "app.screen.login.forgot",
+       "style": { "font": "$font.small", "color": "$color.brand" }
     },
     {
       "select": "app.screen.login.forgot",
@@ -122,21 +122,20 @@
       "style": { "background": "$color.brand", "opacity": 0.9 }
     },
     {
-      "select": "app.screen.login.divider",
-      "style": {
-        "font": "$font.small",
-        "color": "$color.text.muted",
-        "textAlign": "center",
-        "margin": [16, 0, 16, 0]
-      }
+"select": "app.screen.login.divider",
+       "style": {
+         "font": "$font.small",
+         "color": "$color.text.muted",
+         "margin": [16, 0, 16, 0]
+       }
     },
     {
       "select": "app.screen.login.qr_button",
       "style": { "gap": "$space.2", "padding": [10, 16, 10, 16] }
     },
     {
-      "select": "app.screen.login.register",
-      "style": { "font": "$font.small", "color": "$color.brand", "textAlign": "center", "margin": [16, 0, 0, 0] }
+"select": "app.screen.login.register",
+       "style": { "font": "$font.small", "color": "$color.brand", "margin": [16, 0, 0, 0] }
     },
     {
       "select": "app.screen.login.register",
