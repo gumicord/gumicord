@@ -205,6 +205,11 @@ M1 で公開するフィールド。
 | `app.screen.login.field` | — | ログインフォームの入力欄 (FR-001) |
 | `app.screen.login.label` | — | ログインフォームの欄名 |
 | `app.screen.login.error` | — | ログインフォーム上のエラー表示 |
+| `app.screen.login.card` | — | ログインフォームのカードコンテナ |
+| `app.screen.login.forgot` | — | パスワードを忘れた場合リンク |
+| `app.screen.login.divider` | — | または 区切り |
+| `app.screen.login.qr_button` | — | QRコードログインボタン |
+| `app.screen.login.register` | — | アカウント作成リンク |
 | `app.screen.main` | — | メイン画面 |
 
 ### `chrome.*`
@@ -333,7 +338,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 107 個** (中核 69 / プラグインも生成可 38)。
+**合計 112 個** (中核 74 / プラグインも生成可 38)。
 
 <!-- END GENERATED: node-ids -->
 

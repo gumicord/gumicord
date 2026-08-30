@@ -134,6 +134,11 @@ define_node_ids! {
     AppScreenLoginField,      "app.screen.login.field",          None,    Core,   "ログインフォームの入力欄 (FR-001)";
     AppScreenLoginLabel,      "app.screen.login.label",          None,    Core,   "ログインフォームの欄名";
     AppScreenLoginError,      "app.screen.login.error",          None,    Core,   "ログインフォーム上のエラー表示";
+    AppScreenLoginCard,       "app.screen.login.card",           None,    Core,   "ログインフォームのカードコンテナ";
+    AppScreenLoginForgot,     "app.screen.login.forgot",         None,    Core,   "パスワードを忘れた場合リンク";
+    AppScreenLoginDivider,    "app.screen.login.divider",        None,    Core,   "または 区切り";
+    AppScreenLoginQrButton,   "app.screen.login.qr_button",      None,    Core,   "QRコードログインボタン";
+    AppScreenLoginRegister,   "app.screen.login.register",       None,    Core,   "アカウント作成リンク";
     AppScreenMain,            "app.screen.main",                 None,    Core,   "メイン画面";
 
     // ─────────────────────────── chrome.* — window chrome, desktop only

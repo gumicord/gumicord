@@ -45,7 +45,7 @@ use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::value::Color;
-use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
+use gumicord_uitree::{Content, Editable, Key, NodeId, State, UiNode};
 use live::Live;
 use session::{Login, Session};
 
@@ -1332,8 +1332,7 @@ impl Gumicord {
     }
 
     /// The login screen. Shows a QR by default, the password form when that
-    /// was chosen, or the TOTP step when a second factor is needed. Spacers
-    /// above and below centre it.
+    /// was chosen, or the TOTP step when a second factor is needed.
     fn login_screen(&self) -> UiNode {
         let s = self.login.session();
         let mut screen = UiNode::new(NodeId::AppScreenLogin);
@@ -1349,49 +1348,59 @@ impl Gumicord {
 
         match form {
             Some(LoginField::Email | LoginField::Password) => {
-                screen = screen
-                    .child(UiNode::new(NodeId::LayoutSpacer))
-                    .child(UiNode::text(
-                        NodeId::AppScreenLoginTitle,
-                        "パスワードでログイン",
-                    ))
-                    .child(self.login_label("メールアドレス"))
-                    .child(self.login_field("email", "メールアドレス", &self.login_email, false))
-                    .child(self.login_label("パスワード"))
-                    .child(self.login_field("password", "パスワード", &self.login_input, true))
-                    .child_if(self.login_error.is_some(), || self.login_error_node())
-                    .child(self.login_submit("ログイン"))
-                    .child(self.login_secondary("戻る", "login_back"));
+                screen = screen.child(self.login_card(|screen| {
+                    screen
+                        .child(UiNode::text(
+                            NodeId::AppScreenLoginTitle,
+                            "Discordにログイン",
+                        ))
+                        .child(self.login_label("メールアドレス"))
+                        .child(self.login_field(
+                            "email",
+                            "メールアドレス",
+                            &self.login_email,
+                            false,
+                        ))
+                        .child(self.login_label("パスワード"))
+                        .child(self.login_field("password", "パスワード", &self.login_input, true))
+                        .child(self.login_forgot_password())
+                        .child_if(self.login_error.is_some(), || self.login_error_node())
+                        .child(self.login_submit("ログイン"))
+                        .child(self.login_divider())
+                        .child(self.login_qr_button())
+                        .child(self.login_register_link())
+                }))
             }
             Some(LoginField::Totp) => {
-                screen = screen
-                    .child(UiNode::new(NodeId::LayoutSpacer))
-                    .child(UiNode::text(
-                        NodeId::AppScreenLoginTitle,
-                        "認証コードを入力",
-                    ))
-                    .child(self.login_label("認証コード"))
-                    .child(self.login_field("totp", "認証コード", &self.login_input, false))
-                    .child_if(self.login_error.is_some(), || self.login_error_node())
-                    .child(self.login_submit("ログイン"))
-                    .child(self.login_secondary("戻る", "login_back"));
+                screen = screen.child(self.login_card(|screen| {
+                    screen
+                        .child(UiNode::text(
+                            NodeId::AppScreenLoginTitle,
+                            "認証コードを入力",
+                        ))
+                        .child(self.login_label("認証コード"))
+                        .child(self.login_field("totp", "認証コード", &self.login_input, false))
+                        .child_if(self.login_error.is_some(), || self.login_error_node())
+                        .child(self.login_submit("ログイン"))
+                        .child(self.login_secondary("戻る", "login_back"))
+                }))
             }
             Some(LoginField::Token) => {
-                screen = screen
-                    .child(UiNode::new(NodeId::LayoutSpacer))
-                    .child(UiNode::text(
-                        NodeId::AppScreenLoginTitle,
-                        "ボットトークンでログイン",
-                    ))
-                    .child(self.login_label("トークン"))
-                    .child(self.login_field("token", "トークン", &self.login_input, false))
-                    .child_if(self.login_error.is_some(), || self.login_error_node())
-                    .child(self.login_submit("ログイン"))
-                    .child(self.login_secondary("戻る", "login_back"));
+                screen = screen.child(self.login_card(|screen| {
+                    screen
+                        .child(UiNode::text(
+                            NodeId::AppScreenLoginTitle,
+                            "ボットトークンでログイン",
+                        ))
+                        .child(self.login_label("トークン"))
+                        .child(self.login_field("token", "トークン", &self.login_input, false))
+                        .child_if(self.login_error.is_some(), || self.login_error_node())
+                        .child(self.login_submit("ログイン"))
+                        .child(self.login_secondary("戻る", "login_back"))
+                }))
             }
             None => {
-                // Default: a QR and a way into the password form. Nothing else
-                // to press, since scanning is the only thing to do here.
+                // Default: QR code screen with option to use password login
                 screen = screen
                     .child(UiNode::new(NodeId::LayoutSpacer))
                     .child(UiNode::text(
@@ -1406,12 +1415,24 @@ impl Gumicord {
             }
         }
 
-        screen.child(UiNode::new(NodeId::LayoutSpacer))
+        screen
+    }
+
+    /// Wraps children in a centered login card container.
+    fn login_card(&self, build: impl FnOnce(UiNode) -> UiNode) -> UiNode {
+        UiNode::new(NodeId::AppScreenLoginCard).child(build(UiNode::new(NodeId::LayoutSpacer)))
     }
 
     /// A small label above a login-field box.
     fn login_label(&self, text: &str) -> UiNode {
         UiNode::text(NodeId::AppScreenLoginLabel, text)
+    }
+
+    /// "パスワードを忘れた場合" link under the password field.
+    fn login_forgot_password(&self) -> UiNode {
+        UiNode::new(NodeId::AppScreenLoginForgot)
+            .with_content(Content::Text("パスワードを忘れた場合".into()))
+            .with_key(Key::Slot("login_forgot_password"))
     }
 
     /// An error line below a login form. The message is always present when
@@ -1421,6 +1442,25 @@ impl Gumicord {
             NodeId::AppScreenLoginError,
             self.login_error.as_deref().unwrap_or_default(),
         )
+    }
+
+    /// "または" divider with lines on both sides.
+    fn login_divider(&self) -> UiNode {
+        UiNode::text(NodeId::AppScreenLoginDivider, "または")
+    }
+
+    /// QR code login button.
+    fn login_qr_button(&self) -> UiNode {
+        UiNode::new(NodeId::AppScreenLoginQrButton)
+            .with_key(Key::Slot("login_qr"))
+            .child(UiNode::text(NodeId::PrimitiveText, "QRコードでログイン"))
+    }
+
+    /// "アカウントを作成" link at the bottom.
+    fn login_register_link(&self) -> UiNode {
+        UiNode::new(NodeId::AppScreenLoginRegister)
+            .with_content(Content::Text("アカウントを作成".into()))
+            .with_key(Key::Slot("login_register"))
     }
 
     /// One editable box on the login form. `slot` picks email/password/totp/
@@ -1511,6 +1551,15 @@ impl Gumicord {
                 self.leave_login_form();
                 true
             }
+            // "パスワードを忘れた場合" - for now just acknowledge, could open a flow later
+            "login_forgot_password" => true,
+            // QRコードでログイン button - go back to QR screen
+            "login_qr" => {
+                self.leave_login_form();
+                true
+            }
+            // アカウントを作成 - for now just acknowledge
+            "login_register" => true,
             _ => false,
         }
     }

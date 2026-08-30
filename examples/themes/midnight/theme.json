@@ -84,6 +84,66 @@
       "style": { "borderColor": "$color.accent", "borderWidth": 1 }
     },
     {
+      "select": "app.screen.login.card",
+      "style": {
+        "background": "$color.bg.raised",
+        "radius": "$radius.lg",
+        "padding": [24, 24, 24, 24],
+        "shadow": "$shadow.raised",
+        "gap": "$space.3",
+        "maxWidth": 400
+      }
+    },
+    {
+      "select": "app.screen.login.label",
+      "style": { "font": "$font.small", "color": "$color.text.secondary", "margin": [16, 0, 4, 0] }
+    },
+    {
+      "select": "app.screen.login.forgot",
+      "style": { "font": "$font.small", "color": "$color.brand", "textAlign": "right" }
+    },
+    {
+      "select": "app.screen.login.forgot",
+      "when": { "state": "hover" },
+      "style": { "decoration": "underline" }
+    },
+    {
+      "select": "app.screen.login.error",
+      "style": { "font": "$font.small", "color": "$color.danger", "margin": [8, 0, 8, 0] }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_submit" },
+      "style": { "background": "$color.brand", "color": "#ffffff", "font": { "weight": 600 } }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_submit", "state": "hover" },
+      "style": { "background": "$color.brand", "opacity": 0.9 }
+    },
+    {
+      "select": "app.screen.login.divider",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.muted",
+        "textAlign": "center",
+        "margin": [16, 0, 16, 0]
+      }
+    },
+    {
+      "select": "app.screen.login.qr_button",
+      "style": { "gap": "$space.2", "padding": [10, 16, 10, 16] }
+    },
+    {
+      "select": "app.screen.login.register",
+      "style": { "font": "$font.small", "color": "$color.brand", "textAlign": "center", "margin": [16, 0, 0, 0] }
+    },
+    {
+      "select": "app.screen.login.register",
+      "when": { "state": "hover" },
+      "style": { "decoration": "underline" }
+    },
+    {
       "select": "primitive.qr",
       "style": {
         "background": "#ffffff",
