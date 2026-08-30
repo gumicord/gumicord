@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use crate::captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, WebView2Captcha};
-use crate::text_input::{EditKey, TextDocument};
+use crate::text_input::{EditKey, HiddenKey, TextDocument};
 use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
 use winit::application::ApplicationHandler;
@@ -138,6 +138,13 @@ pub trait Application {
 
     /// Leaves text input, on escape.
     fn cancel_input(&mut self) -> bool {
+        false
+    }
+
+    /// A hidden-code key on the login screen (the konami sequence on the QR
+    /// screen). Nothing else uses the arrows or B/A once no field is focused,
+    /// so these are the only keys handed here. Returning true takes the press.
+    fn hidden_key(&mut self, _key: HiddenKey) -> bool {
         false
     }
 
@@ -449,6 +456,23 @@ impl Host {
 
         let shift = self.modifiers.shift_key();
         let ctrl = self.modifiers.control_key();
+
+        // With no field focused there is nothing to edit, so the arrows and
+        // the B/A keys are free for the QR screen's hidden login code.
+        if self.app.focused_document().is_none() {
+            let hidden = match &event.logical_key {
+                Key::Named(NamedKey::ArrowUp) => Some(HiddenKey::Up),
+                Key::Named(NamedKey::ArrowDown) => Some(HiddenKey::Down),
+                Key::Named(NamedKey::ArrowLeft) => Some(HiddenKey::Left),
+                Key::Named(NamedKey::ArrowRight) => Some(HiddenKey::Right),
+                Key::Character(c) if c.eq_ignore_ascii_case("b") => Some(HiddenKey::B),
+                Key::Character(c) if c.eq_ignore_ascii_case("a") => Some(HiddenKey::A),
+                _ => None,
+            };
+            if let Some(key) = hidden {
+                return self.app.hidden_key(key);
+            }
+        }
 
         // Enter and escape mean different things while composing.
         let composing = self

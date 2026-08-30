@@ -40,7 +40,7 @@ pub mod session;
 use std::borrow::Cow;
 
 use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
-use gumicord_platform::{Application, FrameCx, TextDocument, Waker};
+use gumicord_platform::{Application, FrameCx, HiddenKey, TextDocument, Waker};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
@@ -195,6 +195,8 @@ enum LoginField {
     Email,
     Password,
     Totp,
+    /// The bot-token form's single field.
+    Token,
 }
 
 /// The app state, and building the UITree from it.
@@ -242,6 +244,9 @@ pub struct Gumicord {
     login_email: TextDocument,
     /// The login form's password or TOTP code, whichever step is shown.
     login_input: TextDocument,
+    /// The hidden code (konami) typed on the QR screen so far. Completed
+    /// sequences open the bot-token form; anything else resets it.
+    hidden_code: Vec<HiddenKey>,
     /// Messages sent in demo mode; unused when live.
     sent: Vec<demo::Message>,
     /// Fetches images.
@@ -302,6 +307,7 @@ impl Gumicord {
             login_field: None,
             login_email: TextDocument::new(),
             login_input: TextDocument::new(),
+            hidden_code: Vec::new(),
             sent: Vec::new(),
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
@@ -572,13 +578,15 @@ impl Application for Gumicord {
         // A login-form field takes focus; the composer and the login form
         // never share it.
         if let Some(field) = hits.iter().find_map(|h| match (h.id, &h.key) {
-            (NodeId::AppScreenLoginField, Some(Key::Slot(s @ ("email" | "password" | "totp")))) => {
-                Some(match *s {
-                    "email" => LoginField::Email,
-                    "password" => LoginField::Password,
-                    _ => LoginField::Totp,
-                })
-            }
+            (
+                NodeId::AppScreenLoginField,
+                Some(Key::Slot(s @ ("email" | "password" | "totp" | "token"))),
+            ) => Some(match *s {
+                "email" => LoginField::Email,
+                "password" => LoginField::Password,
+                "token" => LoginField::Token,
+                _ => LoginField::Totp,
+            }),
             _ => None,
         }) && (self.login_field != Some(field) || self.input_focused)
         {
@@ -686,7 +694,9 @@ impl Application for Gumicord {
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
         match self.login_field {
             Some(LoginField::Email) => Some(&mut self.login_email),
-            Some(LoginField::Password | LoginField::Totp) => Some(&mut self.login_input),
+            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => {
+                Some(&mut self.login_input)
+            }
             None => self.input_focused.then_some(&mut self.input),
         }
     }
@@ -763,6 +773,34 @@ impl Application for Gumicord {
         true
     }
 
+    /// The hidden login code on the QR screen: the konami sequence. Completed
+    /// sequences open the bot-token form; any wrong key resets the buffer.
+    fn hidden_key(&mut self, key: HiddenKey) -> bool {
+        use HiddenKey::{A, B, Down, Left, Right, Up};
+
+        const SEQUENCE: [HiddenKey; 10] = [Up, Up, Down, Down, Left, Right, Left, Right, B, A];
+
+        // Only the QR screen listens; elsewhere the arrows and B/A mean
+        // nothing to the app.
+        if self.login.session().qr().is_none() {
+            self.hidden_code.clear();
+            return true;
+        }
+
+        self.hidden_code.push(key);
+        let len = self.hidden_code.len();
+        if self.hidden_code[..] != SEQUENCE[..len] {
+            self.hidden_code.clear();
+            return true;
+        }
+        if len == SEQUENCE.len() {
+            self.hidden_code.clear();
+            self.login.start_token();
+            self.login_field = Some(LoginField::Token);
+        }
+        true
+    }
+
     /// A captcha question came back from the API. Forward it to the platform,
     /// which shows the modal. The password form stays up underneath.
     fn pending_captcha(&mut self) -> Option<gumicord_platform::CaptchaChallenge> {
@@ -829,13 +867,24 @@ impl Application for Gumicord {
 }
 
 impl Gumicord {
-    /// Submits the active login step. Runs the password flow or hands off the
-    /// TOTP code; nothing to send stays put.
+    /// Submits the active login step. Runs the password flow, hands off a TOTP
+    /// code, or logs in with a bot token; nothing to send stays put.
     fn submit_login(&mut self) -> bool {
         match self.login_field {
+            Some(LoginField::Token) => {
+                let token = self.login_input.text().trim().to_owned();
+                if token.is_empty() {
+                    return false;
+                }
+                self.login.submit_bot_token(token);
+                self.login_input.take();
+                self.login_field = None;
+                true
+            }
             Some(LoginField::Email) | Some(LoginField::Password) | None => {
                 let email = self.login_email.text().trim().to_owned();
                 let password = self.login_input.text().to_owned();
+
                 if email.is_empty() || password.is_empty() {
                     return false;
                 }
@@ -1240,6 +1289,17 @@ impl Gumicord {
                     .child(self.login_submit("ログイン"))
                     .child(self.login_secondary("戻る", "login_back"));
             }
+            Session::Token => {
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(UiNode::text(
+                        NodeId::AppScreenLoginTitle,
+                        "ボットトークンでログイン",
+                    ))
+                    .child(self.login_field("token", "トークン", &self.login_input))
+                    .child(self.login_submit("ログイン"))
+                    .child(self.login_secondary("戻る", "login_back"));
+            }
             _ => {
                 // Default: a QR and a way into the password form. Nothing else
                 // to press, since scanning is the only thing to do here.
@@ -1260,8 +1320,8 @@ impl Gumicord {
         screen.child(UiNode::new(NodeId::LayoutSpacer))
     }
 
-    /// One editable box on the login form. `slot` picks email/password/totp;
-    /// a focused field carries the focus state.
+    /// One editable box on the login form. `slot` picks email/password/totp/
+    /// token; a focused field carries the focus state.
     fn login_field(&self, slot: &'static str, placeholder: &str, doc: &TextDocument) -> UiNode {
         UiNode::editable(
             NodeId::AppScreenLoginField,
@@ -1284,6 +1344,7 @@ impl Gumicord {
             (Some(LoginField::Email), "email")
                 | (Some(LoginField::Password), "password")
                 | (Some(LoginField::Totp), "totp")
+                | (Some(LoginField::Token), "token")
         )
     }
 
@@ -3656,6 +3717,81 @@ mod login_tests {
         a.focused_document().unwrap().insert("secret");
 
         assert!(a.submit_login(), "パスワードログインが送信されなかった");
+        assert_eq!(a.login_field, None, "送信後もフォーカスが残っている");
+    }
+
+    /// The konami code on the QR screen opens the bot-token form.
+    #[test]
+    fn the_konami_code_opens_the_bot_token_form() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            assert!(a.hidden_key(key), "QR 画面上のキーは消費されるはず");
+        }
+
+        assert!(
+            matches!(a.login.session(), Session::Token),
+            "コンバットコードでトークン画面に入っていない"
+        );
+        assert_eq!(
+            a.login_field,
+            Some(LoginField::Token),
+            "入力欄にフォーカスが無い"
+        );
+    }
+
+    /// A stray key breaks the sequence; nothing opens and the buffer resets.
+    #[test]
+    fn a_stray_key_breaks_the_konami_code() {
+        use gumicord_platform::HiddenKey::{Down, Left, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+
+        // Up Up Down Down Left, then a Left where a Right belongs.
+        for key in [Up, Up, Down, Down, Left, Left] {
+            a.hidden_key(key);
+        }
+
+        assert!(!matches!(a.login.session(), Session::Token));
+        assert_eq!(a.login_field, None);
+    }
+
+    /// Off the QR screen the hidden code does nothing.
+    #[test]
+    fn the_konami_code_does_nothing_off_the_qr_screen() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        // `pending` starts at Connecting, not the QR screen.
+        let mut a = pending();
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            a.hidden_key(key);
+        }
+
+        assert!(!matches!(a.login.session(), Session::Token));
+        assert_eq!(a.login_field, None);
+    }
+
+    /// Submitting the token form hands the bot token to the background and
+    /// drops the form's focus.
+    #[test]
+    fn submitting_the_token_form_hands_off_the_bot_token() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            a.hidden_key(key);
+        }
+        a.focused_document().unwrap().insert("bot-token");
+        assert!(a.submit_login(), "トークンログインが送信されなかった");
         assert_eq!(a.login_field, None, "送信後もフォーカスが残っている");
     }
 

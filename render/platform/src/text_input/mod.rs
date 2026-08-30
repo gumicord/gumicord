@@ -78,6 +78,19 @@ impl EditKey {
     }
 }
 
+/// Keys that drive the hidden login code only (the QR screen's konami
+/// sequence). A deliberately tiny set: the arrows and B/A do nothing else
+/// once no field is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenKey {
+    Up,
+    Down,
+    Left,
+    Right,
+    A,
+    B,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
