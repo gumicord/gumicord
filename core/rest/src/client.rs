@@ -24,7 +24,7 @@ use crate::ratelimit::{RateLimitHeaders, RateLimiter};
 use crate::route::{Method, Route};
 
 /// The one place the API version appears.
-const API_BASE: &str = "https://discord.com/api/v10";
+const API_BASE: &str = "https://discord.com/api/v9";
 
 /// Retries after a 429. Bounded, so a fault on our side cannot hammer Discord
 /// forever.
