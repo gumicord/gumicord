@@ -13,7 +13,7 @@
 
 | 用途 | URL |
 |---|---|
-| REST | `https://discord.com/api/v10` |
+| REST | `https://discord.com/api/v9` |
 | Gateway (初回) | `wss://gateway.discord.gg/?v=10&encoding=json&compress=zstd-stream` ✅ |
 | Gateway (resume) | READY で受け取る `resume_gateway_url` ✅ |
 

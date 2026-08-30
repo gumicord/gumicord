@@ -44,7 +44,7 @@ impl fmt::Display for Method {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
     pub method: Method,
-    /// The path actually requested, without the `/api/v10` prefix.
+    /// The path actually requested, without the `/api/v9` prefix.
     pub path: String,
     /// The rate limit key. Major parameters only.
     pub bucket_key: String,

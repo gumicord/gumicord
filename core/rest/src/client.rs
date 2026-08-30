@@ -385,7 +385,7 @@ mod tests {
     /// Pins the version so a bump is deliberate.
     #[test]
     fn the_api_base_is_pinned() {
-        assert_eq!(API_BASE, "https://discord.com/api/v10");
+        assert_eq!(API_BASE, "https://discord.com/api/v9");
     }
 
     /// Ending the session on anything else would throw people offline for a

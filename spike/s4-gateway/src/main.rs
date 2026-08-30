@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 const GATEWAY_VERSION: u8 = 10;
-const API_BASE: &str = "https://discord.com/api/v10";
+const API_BASE: &str = "https://discord.com/api/v9";
 
 // ============================================================ The token
 
