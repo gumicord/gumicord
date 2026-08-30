@@ -33,7 +33,30 @@ fn allowed(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod imp {
+    use super::OpenUrlError;
+
+    /// The system's "open this with the default program" command. Linux has
+    /// `xdg-open`; macOS has `open`.
+    #[cfg(target_os = "macos")]
+    const OPEN: &str = "open";
+    #[cfg(not(target_os = "macos"))]
+    const OPEN: &str = "xdg-open";
+
+    pub fn open_url(url: &str) -> Result<(), OpenUrlError> {
+        // `Command::new` uses the PATH lookup.
+        match std::process::Command::new(OPEN).arg(url).status() {
+            Ok(status) if status.success() => Ok(()),
+            // A missing command means no handler is installed at all.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(OpenUrlError::Unsupported),
+            // A non-zero exit or another failure means the browser refused.
+            _ => Err(OpenUrlError::Refused),
+        }
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 mod imp {
     use super::OpenUrlError;
 
