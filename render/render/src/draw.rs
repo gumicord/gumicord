@@ -17,7 +17,7 @@
 //! where there is no background colour to sit under.
 
 use gumicord_uitree::value::{Color, Font};
-use gumicord_uitree::{Content, Span, Style};
+use gumicord_uitree::{Content, Span, State, Style};
 
 use crate::geom::Rect;
 use crate::intrinsic::{Axis, intrinsic};
@@ -483,8 +483,10 @@ fn draw_editable(
         }
     }
 
-    // The caret, skipped on a dark blink.
-    if caret_visible {
+    // The caret only belongs to the focused field: with several boxes on
+    // screen, the others must not draw one of their own. Skipped on a dark
+    // blink.
+    if caret_visible && placed.node.states.contains(State::Focus) {
         mark(
             shaped.caret(e.caret, (CARET_WIDTH * scale).max(1.0)),
             linear(fg, opacity),
