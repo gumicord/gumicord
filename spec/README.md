@@ -31,6 +31,8 @@
 | [0005](adr/0005-ime-strategy.md) | ~~IME テキスト入力層を自前実装する~~ | ❌ 廃止 (0006 が置換) |
 | [0006](adr/0006-windows-ime-via-winit.md) | Windows のテキスト入力は `winit` の IME 経路で足りる | 承認 |
 | [0007](adr/0007-login-paths-and-captcha.md) | ログイン経路を 2 本持ち、captcha は OS に出させる | 承認 |
+| [0008](adr/0008-snap-layout-via-wndproc-subclass.md) | Windows のスナップレイアウトは親 HWND のサブクラス化で対応する | 承認 |
+| [0009](adr/0009-macos-linux-into-m1.md) | macOS / Linux デスクトップを M1 へ前倒しする | 承認 |
 
 ## ルール
 
