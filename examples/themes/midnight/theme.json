@@ -83,17 +83,16 @@
       "when": { "state": "focus" },
       "style": { "borderColor": "$color.accent", "borderWidth": 1 }
     },
-    {
-"select": "app.screen.login.card",
-       "style": {
-         "background": "#ff0000",
-         "radius": "$radius.lg",
-         "padding": [16, 24, 16, 24],
-         "shadow": "$shadow.raised",
-         "gap": "$space.3",
-         "maxWidth": 560
-       }
-    },
+{
+  "select": "app.screen.login.card",
+  "style": {
+    "background": "$color.bg.raised",
+    "radius": "$radius.lg",
+    "padding": [16, 24, 16, 24],
+    "shadow": "$shadow.raised",
+    "gap": "$space.3"
+  }
+},
     {
       "select": "app.screen.login.label",
       "style": { "font": "$font.small", "color": "$color.text.secondary", "margin": [16, 0, 4, 0] }
