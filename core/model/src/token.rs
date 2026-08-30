@@ -11,6 +11,17 @@
 
 use core::fmt;
 
+/// Whether the token authenticates a user account or a bot application.
+///
+/// The two differ on the wire: a bot sends `Bot <token>` and identifies with
+/// `intents`, a user sends the bare token and `capabilities`. The kind travels
+/// with the token so REST and the Gateway can agree without a second source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    User,
+    Bot,
+}
+
 /// A Discord authentication token.
 ///
 /// ```
@@ -21,21 +32,41 @@ use core::fmt;
 /// assert_eq!(t.expose(), "very-secret-token");
 /// ```
 #[derive(Clone, PartialEq, Eq)]
-pub struct Token(String);
+pub struct Token {
+    secret: String,
+    kind: TokenKind,
+}
 
 impl Token {
+    /// A user-account token, the ordinary case.
     pub fn new(s: impl Into<String>) -> Self {
-        Token(s.into())
+        Token {
+            secret: s.into(),
+            kind: TokenKind::User,
+        }
+    }
+
+    /// A bot-application token.
+    pub fn bot(s: impl Into<String>) -> Self {
+        Token {
+            secret: s.into(),
+            kind: TokenKind::Bot,
+        }
+    }
+
+    /// What kind of account this token belongs to.
+    pub fn kind(&self) -> TokenKind {
+        self.kind
     }
 
     /// Yields the secret. Named to be greppable; a bland name like `as_str`
     /// would slip through review.
     pub fn expose(&self) -> &str {
-        &self.0
+        &self.secret
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.secret.is_empty()
     }
 
     /// Checks that output does not contain the token.
@@ -45,7 +76,7 @@ impl Token {
     ///
     /// Always true below 8 characters, where matches would be coincidental.
     pub fn is_absent_from(&self, haystack: &str) -> bool {
-        self.0.len() < 8 || !haystack.contains(&self.0)
+        self.secret.len() < 8 || !haystack.contains(&self.secret)
     }
 }
 

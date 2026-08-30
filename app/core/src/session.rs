@@ -42,6 +42,8 @@ pub enum Session {
     Password,
     /// Asking for a TOTP code to finish a password login.
     PasswordTotp,
+    /// Asking for a bot token, opened by a hidden code on the QR screen.
+    Token,
     /// Approved; exchanging the ticket for a token.
     Exchanging,
     LoggedIn(Box<LoggedIn>),
@@ -72,6 +74,7 @@ impl Session {
                 scanned: Some(u), ..
             } => format!("{} として続けますか？ スマホで承認してください", u.username),
             Session::Password => "メールアドレスとパスワードでログインします".to_owned(),
+            Session::Token => "ボットトークンでログインします".to_owned(),
             Session::PasswordTotp => "認証コードを入力してください".to_owned(),
             Session::Exchanging => "承認されました。ログインしています…".to_owned(),
             Session::LoggedIn(l) => format!("{} でログインしました", l.me.user.display_name()),
@@ -131,6 +134,9 @@ pub enum LoginCommand {
     Totp { code: String },
     /// A solved captcha, retrying the call Discord challenged.
     Captcha(SolvedCaptcha),
+    /// Start a bot-token login with this token. Hidden path for development:
+    /// the token is not stored, so it must be pasted each run.
+    BotToken { token: String },
     /// Abandon the password login and go back to the QR.
     CancelPassword,
 }
@@ -247,6 +253,12 @@ impl Login {
         self.session = Session::Password;
     }
 
+    /// Switches the screen to the bot-token form.
+    pub fn start_token(&mut self) {
+        self.notice = None;
+        self.session = Session::Token;
+    }
+
     /// Asks the background to log in with these credentials.
     pub fn submit_password(&self, email: String, password: String) {
         let _ = self.cmd_tx.send(LoginCommand::Password { email, password });
@@ -260,6 +272,11 @@ impl Login {
     /// Hands a solved captcha to the background login.
     pub fn submit_captcha(&self, solved: SolvedCaptcha) {
         let _ = self.cmd_tx.send(LoginCommand::Captcha(solved));
+    }
+
+    /// Asks the background to log in with a bot token.
+    pub fn submit_bot_token(&self, token: String) {
+        let _ = self.cmd_tx.send(LoginCommand::BotToken { token });
     }
 
     /// Goes back to the QR screen, abandoning a password login.
@@ -425,6 +442,18 @@ async fn run(
                     waker.wake();
                     continue;
                 }
+                Some(LoginCommand::BotToken { token }) => {
+                    qr.abort();
+                    match run_bot_token(&tx, &waker, token).await {
+                        // In; the bot path already sent Done.
+                        true => return,
+                        false => {
+                            let _ = tx.send(LoginEvent::Restarted);
+                            waker.wake();
+                            continue;
+                        }
+                    }
+                }
                 // A stray captcha or totp command with no password in flight.
                 Some(_) | None => continue,
             }
@@ -553,6 +582,40 @@ async fn run_password(
                 }
                 Err(e) => return PasswordRun::Error(e.to_string()),
             }
+        }
+    }
+}
+
+/// Logs in with a bot token.
+///
+/// Hidden, development-only path: the token rides straight into REST with a
+/// `Bot ` prefix and is validated by `GET /users/@me`. It is deliberately not
+/// stored — a dev bot token is not worth the keychain entry or the ambiguity
+/// of restoring a kind the raw string does not carry.
+///
+/// Returns `true` on success; [`LoginEvent::Done`] was already sent.
+async fn run_bot_token(tx: &Sender<LoginEvent>, waker: &Waker, token: String) -> bool {
+    let token = Token::bot(token);
+    let rest = match RestClient::anonymous() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(LoginEvent::Failed(e.to_string()));
+            waker.wake();
+            return false;
+        }
+    };
+
+    match rest.authenticate(token.clone()).await {
+        Ok((client, me)) => {
+            tracing::info!(user = %me.user.display_name(), "signed in with a bot token");
+            let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
+            waker.wake();
+            true
+        }
+        Err(e) => {
+            let _ = tx.send(LoginEvent::Failed(e.to_string()));
+            waker.wake();
+            false
         }
     }
 }
@@ -919,11 +982,15 @@ mod tests {
             rqtoken: Some("r".to_owned()),
             session_id: None,
         });
+        login.submit_bot_token("bot-token".to_owned());
         login.cancel_password();
 
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::Password { .. })));
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::Totp { .. })));
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::Captcha(_))));
+        assert!(
+            matches!(rx.try_recv(), Ok(LoginCommand::BotToken { token }) if token == "bot-token")
+        );
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::CancelPassword)));
         assert!(rx.try_recv().is_err(), "an extra command leaked");
     }

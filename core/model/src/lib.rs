@@ -19,7 +19,7 @@ pub use asset::{Asset, Format};
 pub use snowflake::{
     AttachmentId, ChannelId, EmojiId, GuildId, MessageId, RoleId, Snowflake, UserId,
 };
-pub use token::Token;
+pub use token::{Token, TokenKind};
 
 use serde::{Deserialize, Serialize};
 

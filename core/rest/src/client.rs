@@ -105,6 +105,8 @@ pub struct SolvedCaptcha {
 pub struct RestClient {
     http: reqwest::Client,
     token: Option<Token>,
+    /// A bot sends `Bot <token>`; a user sends the bare token.
+    is_bot: bool,
     limiter: Arc<Mutex<RateLimiter>>,
     /// What we claim to be. Identical to what the Gateway claims.
     identity: Arc<Identity>,
@@ -125,6 +127,7 @@ impl RestClient {
         Ok(RestClient {
             http: build_http(&identity)?,
             token: None,
+            is_bot: false,
             limiter: Arc::new(Mutex::new(RateLimiter::new())),
             identity,
         })
@@ -134,6 +137,7 @@ impl RestClient {
     pub fn with_token(&self, token: Token) -> Self {
         RestClient {
             http: self.http.clone(),
+            is_bot: token.kind() == gumicord_model::TokenKind::Bot,
             token: Some(token),
             limiter: Arc::clone(&self.limiter),
             identity: Arc::clone(&self.identity),
@@ -255,9 +259,16 @@ impl RestClient {
             .header("X-Discord-Locale", &self.identity.system_locale)
             .header("X-Debug-Options", "bugReporterEnabled");
 
-        // User tokens take no `Bot ` prefix; adding one is rejected.
+        // User tokens take no `Bot ` prefix; a bot needs it. A token stored
+        // from an earlier login carries its kind, so this never drifts from
+        // the Gateway's identify.
         if let Some(t) = &self.token {
-            req = req.header("Authorization", t.expose());
+            let header = if self.is_bot {
+                format!("Bot {}", t.expose())
+            } else {
+                t.expose().to_owned()
+            };
+            req = req.header("Authorization", header);
         }
         if let Some(b) = body {
             req = req.json(b);
@@ -352,6 +363,30 @@ mod tests {
         let printed = format!("{c:?}");
         assert!(!printed.contains("secret"), "token leaked: {printed}");
         assert!(printed.contains("authenticated"));
+    }
+
+    /// A bot token becomes a `Bot <token>` Authorization header, a user token
+    /// stays bare. The fork must come from the token's kind alone.
+    #[test]
+    fn auth_header_prefix_sticks_to_the_token_kind() {
+        let base = RestClient::anonymous().unwrap();
+
+        let bot = base.with_token(Token::bot("b-secret"));
+        let bot_req = bot
+            .build(&Route::current_user(), None::<&()>, &[])
+            .build()
+            .unwrap();
+        assert_eq!(bot_req.headers()["authorization"], "Bot b-secret");
+
+        let user = base.with_token(Token::new("u-secret"));
+        let user_req = user
+            .build(&Route::current_user(), None::<&()>, &[])
+            .build()
+            .unwrap();
+        assert_eq!(user_req.headers()["authorization"], "u-secret");
+
+        assert!(bot.is_bot);
+        assert!(!user.is_bot);
     }
 
     #[test]

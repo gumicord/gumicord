@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use gumicord_model::identity::Identity;
-use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, MessageId, Token, UserId};
+use gumicord_model::{ChannelId, CurrentUser, Guild, GuildId, MessageId, Token, TokenKind, UserId};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
@@ -408,7 +408,13 @@ impl Gateway {
 
     /// Resends every subscription. They belong to a connection and survive
     /// neither identify nor resume.
+    ///
+    /// A bot does not need them: user tokens require `OP_GUILD_SUBSCRIBE` for
+    /// `MESSAGE_CREATE`, bots receive what their intents cover already.
     async fn resend_subscriptions(&mut self) -> Result<(), GatewayError> {
+        if self.token.kind() == TokenKind::Bot {
+            return Ok(());
+        }
         let Some(conn) = self.conn.as_mut() else {
             return Ok(());
         };
@@ -455,8 +461,14 @@ impl Gateway {
             }
 
             let conn = self.conn.as_mut().expect("just opened");
+            let is_bot = self.token.kind() == TokenKind::Bot;
             match conn
-                .pump(&mut self.session, &mut self.requests, &mut self.wanted)
+                .pump(
+                    &mut self.session,
+                    &mut self.requests,
+                    &mut self.wanted,
+                    is_bot,
+                )
                 .await
             {
                 Ok(Some(event)) => {
@@ -566,33 +578,49 @@ struct Payload {
 /// The identify payload.
 ///
 /// The claim comes from one place; rebuilding it here would let it drift from
-/// the REST header, and the disagreement is itself a signal.
+/// the REST header, and the disagreement is itself a signal. A bot sends
+/// `intents`, a user sends `capabilities` — the two shapes differ on the wire.
 fn identify(token: &Token) -> serde_json::Value {
-    json!({
-        "op": OP_IDENTIFY,
-        "d": {
-            "token": token.expose(),
-            "capabilities": CAPABILITIES,
-            "properties": Identity::detect().properties(),
-            "presence": {
-                "status": "unknown",
-                "since": 0,
-                "activities": [],
-                "afk": false,
+    match token.kind() {
+        TokenKind::Bot => json!({
+            "op": OP_IDENTIFY,
+            "d": {
+                "token": token.expose(),
+                "intents": BOT_INTENTS,
+                "properties": Identity::detect().properties(),
+                "compress": false,
             },
-            "compress": false,
-            "client_state": {
-                "guild_versions": {},
-                "highest_last_message_id": "0",
-                "read_state_version": 0,
-                "user_guild_settings_version": -1,
-                "user_settings_version": -1,
-                "private_channels_version": "0",
-                "api_code_version": 0,
+        }),
+        TokenKind::User => json!({
+            "op": OP_IDENTIFY,
+            "d": {
+                "token": token.expose(),
+                "capabilities": CAPABILITIES,
+                "properties": Identity::detect().properties(),
+                "presence": {
+                    "status": "unknown",
+                    "since": 0,
+                    "activities": [],
+                    "afk": false,
+                },
+                "compress": false,
+                "client_state": {
+                    "guild_versions": {},
+                    "highest_last_message_id": "0",
+                    "read_state_version": 0,
+                    "user_guild_settings_version": -1,
+                    "user_settings_version": -1,
+                    "private_channels_version": "0",
+                    "api_code_version": 0,
+                },
             },
-        },
-    })
+        }),
+    }
 }
+
+/// Intents a bot identifies with. GUILDS | GUILD_MESSAGES; neither is
+/// privileged, so a hidden-dev bot logs in without Developer Portal setup.
+const BOT_INTENTS: u64 = (1 << 0) | (1 << 9);
 
 /// Capabilities requested with a user token.
 ///
@@ -675,11 +703,15 @@ impl Connection {
     /// Everything awaited here must be cancel-safe: `select!` drops the losing
     /// future, and dropping mid-send would truncate a WebSocket write. So
     /// sending only happens after winning.
+    ///
+    /// `is_bot` gates the user-token subscribe and member-request opcodes,
+    /// which a bot would send in error.
     async fn pump(
         &mut self,
         session: &mut Option<SessionInfo>,
         requests: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
         wanted: &mut std::collections::HashMap<GuildId, (ChannelId, Vec<MemberRange>)>,
+        is_bot: bool,
     ) -> Result<Option<Event>, GatewayError> {
         if let Some(payload) = self.queued.pop_front() {
             return self.handle(payload, session).await;
@@ -713,11 +745,19 @@ impl Connection {
             Step::Received(Some(())) => Ok(None),
             Step::Received(None) => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
             Step::Watch(Some(Request::Members(guild, users))) => {
+                // Bots have no use for the user-token member request.
+                if is_bot {
+                    return Ok(None);
+                }
                 tracing::debug!(%guild, users = users.len(), "requesting members by id");
                 self.send(request_members(guild, &users)).await?;
                 Ok(None)
             }
             Step::Watch(Some(Request::Watch(guild, channel, ranges))) => {
+                // Bots receive what their intents cover without subscribing.
+                if is_bot {
+                    return Ok(None);
+                }
                 // Never resend an identical subscription.
                 //
                 // Callers announce every time, since missing a change is
@@ -1073,6 +1113,17 @@ mod tests {
         // The user-token shape; `intents` would be the bot one.
         assert!(payload["d"]["capabilities"].is_number());
         assert!(payload["d"].get("intents").is_none());
+    }
+
+    /// A bot identifies with `intents`, not `capabilities`, and skips the
+    /// user-token subscribe fields.
+    #[test]
+    fn a_bot_identifies_with_intents() {
+        let payload = identify(&Token::bot("t"));
+        assert_eq!(payload["d"]["token"], "t");
+        assert_eq!(payload["d"]["intents"], (1 << 0) | (1 << 9));
+        assert!(payload["d"].get("capabilities").is_none());
+        assert!(payload["d"].get("client_state").is_none());
     }
 
     /// READY parses, and unknown fields do not break it.
