@@ -13,6 +13,8 @@ export type NodeId =
   | "app.screen.login.title"
   | "app.screen.login.hint"
   | "app.screen.login.field"
+  | "app.screen.login.label"
+  | "app.screen.login.error"
   | "app.screen.main"
   | "chrome.titlebar"
   | "chrome.titlebar.title"

@@ -203,6 +203,8 @@ M1 で公開するフィールド。
 | `app.screen.login.title` | — | ログイン画面の見出し |
 | `app.screen.login.hint` | — | ログイン画面の説明文・状態表示 |
 | `app.screen.login.field` | — | ログインフォームの入力欄 (FR-001) |
+| `app.screen.login.label` | — | ログインフォームの欄名 |
+| `app.screen.login.error` | — | ログインフォーム上のエラー表示 |
 | `app.screen.main` | — | メイン画面 |
 
 ### `chrome.*`
@@ -331,7 +333,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 105 個** (中核 67 / プラグインも生成可 38)。
+**合計 107 個** (中核 69 / プラグインも生成可 38)。
 
 <!-- END GENERATED: node-ids -->
 
