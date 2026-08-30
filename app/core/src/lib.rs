@@ -1347,58 +1347,61 @@ impl Gumicord {
         });
 
         match form {
-            Some(LoginField::Email | LoginField::Password) => {
-                screen = screen.child(self.login_card(|screen| {
-                    screen
-                        .child(UiNode::text(
-                            NodeId::AppScreenLoginTitle,
-                            "Discordにログイン",
-                        ))
-                        .child(self.login_label("メールアドレス"))
-                        .child(self.login_field(
-                            "email",
-                            "メールアドレス",
-                            &self.login_email,
-                            false,
-                        ))
-                        .child(self.login_label("パスワード"))
-                        .child(self.login_field("password", "パスワード", &self.login_input, true))
-                        .child(self.login_forgot_password())
-                        .child_if(self.login_error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン"))
-                        .child(self.login_divider())
-                        .child(self.login_qr_button())
-                        .child(self.login_register_link())
-                }))
-            }
-            Some(LoginField::Totp) => {
-                screen = screen.child(self.login_card(|screen| {
-                    screen
-                        .child(UiNode::text(
-                            NodeId::AppScreenLoginTitle,
-                            "認証コードを入力",
-                        ))
-                        .child(self.login_label("認証コード"))
-                        .child(self.login_field("totp", "認証コード", &self.login_input, false))
-                        .child_if(self.login_error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン"))
-                        .child(self.login_secondary("戻る", "login_back"))
-                }))
-            }
-            Some(LoginField::Token) => {
-                screen = screen.child(self.login_card(|screen| {
-                    screen
-                        .child(UiNode::text(
-                            NodeId::AppScreenLoginTitle,
-                            "ボットトークンでログイン",
-                        ))
-                        .child(self.login_label("トークン"))
-                        .child(self.login_field("token", "トークン", &self.login_input, false))
-                        .child_if(self.login_error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン"))
-                        .child(self.login_secondary("戻る", "login_back"))
-                }))
-            }
+Some(LoginField::Email | LoginField::Password) => {
+                 screen = screen.child(self.login_card(|_| {
+                     UiNode::new(NodeId::LayoutColumn)
+                         .with_key(Key::Slot("list"))
+                         .child(UiNode::text(
+                             NodeId::AppScreenLoginTitle,
+                             "Discordにログイン",
+                         ))
+                         .child(self.login_label("メールアドレス"))
+                         .child(self.login_field(
+                             "email",
+                             "メールアドレス",
+                             &self.login_email,
+                             false,
+                         ))
+                         .child(self.login_label("パスワード"))
+                         .child(self.login_field("password", "パスワード", &self.login_input, true))
+                         .child(self.login_forgot_password())
+                         .child_if(self.login_error.is_some(), || self.login_error_node())
+                         .child(self.login_submit("ログイン"))
+                         .child(self.login_divider())
+                         .child(self.login_qr_button())
+                         .child(self.login_register_link())
+                 }))
+             }
+Some(LoginField::Totp) => {
+                 screen = screen.child(self.login_card(|_| {
+                     UiNode::new(NodeId::LayoutColumn)
+                         .with_key(Key::Slot("list"))
+                         .child(UiNode::text(
+                             NodeId::AppScreenLoginTitle,
+                             "認証コードを入力",
+                         ))
+                         .child(self.login_label("認証コード"))
+                         .child(self.login_field("totp", "認証コード", &self.login_input, false))
+                         .child_if(self.login_error.is_some(), || self.login_error_node())
+                         .child(self.login_submit("ログイン"))
+                         .child(self.login_secondary("戻る", "login_back"))
+                 }))
+             }
+Some(LoginField::Token) => {
+                 screen = screen.child(self.login_card(|_| {
+                     UiNode::new(NodeId::LayoutColumn)
+                         .with_key(Key::Slot("list"))
+                         .child(UiNode::text(
+                             NodeId::AppScreenLoginTitle,
+                             "ボットトークンでログイン",
+                         ))
+                         .child(self.login_label("トークン"))
+                         .child(self.login_field("token", "トークン", &self.login_input, false))
+                         .child_if(self.login_error.is_some(), || self.login_error_node())
+                         .child(self.login_submit("ログイン"))
+                         .child(self.login_secondary("戻る", "login_back"))
+                 }))
+             }
             None => {
                 // Default: QR code screen with option to use password login
                 screen = screen
