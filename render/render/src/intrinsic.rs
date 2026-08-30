@@ -180,7 +180,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // is a column of title bar and screen.
         AppRoot => Intrinsic::stack().grow(1.0).cross(Cross::Stretch),
         AppWindow | AppScreen => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
-        AppScreenLoading | AppScreenLogin => Intrinsic::column().grow(1.0).cross(Cross::Center),
+        AppScreenLoading | AppScreenLogin => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
         AppScreenLoginTitle | AppScreenLoginHint => Intrinsic::row().cross(Cross::Center),
         // Only the main screen is three columns.
         AppScreenMain => Intrinsic::row().grow(1.0).cross(Cross::Stretch),
