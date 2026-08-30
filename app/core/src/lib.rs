@@ -1405,28 +1405,29 @@ impl Gumicord {
                 }))
             }
 
-None => {
-                 // Default: QR code screen with option to use password login
-                 screen = screen
-                     .child(
-                         UiNode::new(NodeId::LayoutRow)
-                             .child(UiNode::new(NodeId::LayoutSpacer))
-                             .child(
-                                 UiNode::new(NodeId::LayoutColumn)
-                                     .with_key(Key::Slot("qr_column"))
-                                     .child(UiNode::text(
-                                         NodeId::AppScreenLoginTitle,
-                                         "QR コードでログイン",
-                                     ))
-                                     .child_if(s.qr().is_some(), || {
-                                         UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
-                                     })
-                                     .child(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()))
-                                     .child(self.login_secondary("パスワードでログイン", "login_password"))
-                             )
-                             .child(UiNode::new(NodeId::LayoutSpacer))
-                     )
-             }
+            None => {
+                // Default: QR code screen with option to use password login
+                screen = screen.child(
+                    UiNode::new(NodeId::LayoutRow)
+                        .child(UiNode::new(NodeId::LayoutSpacer))
+                        .child(
+                            UiNode::new(NodeId::LayoutColumn)
+                                .with_key(Key::Slot("qr_column"))
+                                .child(UiNode::text(
+                                    NodeId::AppScreenLoginTitle,
+                                    "QR コードでログイン",
+                                ))
+                                .child_if(s.qr().is_some(), || {
+                                    UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
+                                })
+                                .child(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()))
+                                .child(
+                                    self.login_secondary("パスワードでログイン", "login_password"),
+                                ),
+                        )
+                        .child(UiNode::new(NodeId::LayoutSpacer)),
+                )
+            }
         }
 
         screen
