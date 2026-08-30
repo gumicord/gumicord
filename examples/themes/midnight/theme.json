@@ -86,7 +86,7 @@
     {
 "select": "app.screen.login.card",
        "style": {
-         "background": "$color.bg.raised",
+         "background": "#ff0000",
          "radius": "$radius.lg",
          "padding": [16, 24, 16, 24],
          "shadow": "$shadow.raised",
