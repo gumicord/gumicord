@@ -154,6 +154,11 @@ pub struct Login {
     /// Why the previous session ended, shown until the next sign-in. Set when
     /// the client signs out on its own, which otherwise reads as a crash.
     notice: Option<String>,
+    /// The last login failure, which the app shows on the login form. Set
+    /// when a `Failed` event applies; cleared by a successful [`Done`].
+    ///
+    /// [`Done`]: LoginEvent::Done
+    last_error: Option<String>,
     /// A [`LoginEvent::Ended`] arrived and nobody has read it yet. Not a
     /// session state: the screen changes on the app side, which drops the
     /// cache.
@@ -191,6 +196,7 @@ impl Login {
             cmd_tx,
             skipped,
             notice: None,
+            last_error: None,
             ended: false,
             pending: None,
         }
@@ -324,9 +330,13 @@ impl Login {
             LoginEvent::Done(l) => {
                 self.notice = None;
                 self.pending = None;
+                self.last_error = None;
                 Session::LoggedIn(l)
             }
-            LoginEvent::Failed(e) => Session::Failed(e),
+            LoginEvent::Failed(e) => {
+                self.last_error = Some(e.clone());
+                Session::Failed(e)
+            }
             LoginEvent::TotpNeeded { .. } => Session::PasswordTotp,
             // The form stays put while the challenge is solved elsewhere.
             LoginEvent::CaptchaNeeded(ch) => {
@@ -788,6 +798,15 @@ impl Login {
 
     pub(crate) fn apply_for_test(&mut self, event: LoginEvent) {
         self.apply(event);
+    }
+}
+
+impl Login {
+    /// The last login failure, cleared as it is handed over. The app shows it
+    /// on the form; a failure that reaches the screen must reach the user, not
+    /// vanish when the background restarts.
+    pub(crate) fn take_last_error(&mut self) -> Option<String> {
+        self.last_error.take()
     }
 }
 

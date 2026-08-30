@@ -132,6 +132,8 @@ define_node_ids! {
     // A text box on the login form, told apart by key (email / password /
     // totp). The TOTP step reuses it so IME positioning stays the same.
     AppScreenLoginField,      "app.screen.login.field",          None,    Core,   "ログインフォームの入力欄 (FR-001)";
+    AppScreenLoginLabel,      "app.screen.login.label",          None,    Core,   "ログインフォームの欄名";
+    AppScreenLoginError,      "app.screen.login.error",          None,    Core,   "ログインフォーム上のエラー表示";
     AppScreenMain,            "app.screen.main",                 None,    Core,   "メイン画面";
 
     // ─────────────────────────── chrome.* — window chrome, desktop only

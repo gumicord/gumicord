@@ -91,6 +91,16 @@ pub enum HiddenKey {
     B,
 }
 
+/// A clipboard operation on the focused text field, from a Ctrl shortcut or a
+/// context-menu item. The app decides which field it lands on and where the
+/// text comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardOp {
+    Copy,
+    Cut,
+    Paste,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use crate::captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, WebView2Captcha};
-use crate::text_input::{EditKey, HiddenKey, TextDocument};
+use crate::text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument};
 use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
 use winit::application::ApplicationHandler;
@@ -145,6 +145,13 @@ pub trait Application {
     /// screen). Nothing else uses the arrows or B/A once no field is focused,
     /// so these are the only keys handed here. Returning true takes the press.
     fn hidden_key(&mut self, _key: HiddenKey) -> bool {
+        false
+    }
+
+    /// A clipboard operation against the focused field: the Ctrl+C/X/V
+    /// shortcuts, and the cut/copy/paste items on a field's menu. Returning
+    /// true means the shortcut was consumed.
+    fn clipboard(&mut self, _op: ClipboardOp) -> bool {
         false
     }
 
@@ -515,6 +522,19 @@ impl Host {
 
         // Composing text arrives as preedit; taking it here duplicates it.
         if composing || ctrl {
+            if ctrl {
+                let op = match &event.logical_key {
+                    Key::Character(c) if c.eq_ignore_ascii_case("c") => Some(ClipboardOp::Copy),
+                    Key::Character(c) if c.eq_ignore_ascii_case("x") => Some(ClipboardOp::Cut),
+                    Key::Character(c) if c.eq_ignore_ascii_case("v") => Some(ClipboardOp::Paste),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    // Only a focused field takes clipboard input; the app
+                    // decides and returns true when the shortcut is consumed.
+                    return self.app.clipboard(op);
+                }
+            }
             return false;
         }
         // Tab and newline can arrive as literal characters.

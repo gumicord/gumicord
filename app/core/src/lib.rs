@@ -240,6 +240,12 @@ pub struct Gumicord {
     input: TextDocument,
     /// Which login-form field has focus, if any.
     login_field: Option<LoginField>,
+    /// The form the user is on: it stays put while login runs or fails, so an
+    /// error lands back on the same form instead of bouncing to the QR.
+    login_form: Option<LoginField>,
+    /// The last login failure, shown on the form so the user knows why and can
+    /// retry. Cleared by the next attempt or by leaving the form.
+    login_error: Option<String>,
     /// The login form's email contents. Kept across password retries.
     login_email: TextDocument,
     /// The login form's password or TOTP code, whichever step is shown.
@@ -305,6 +311,8 @@ impl Gumicord {
             input_focused: false,
             input: TextDocument::new(),
             login_field: None,
+            login_form: None,
+            login_error: None,
             login_email: TextDocument::new(),
             login_input: TextDocument::new(),
             hidden_code: Vec::new(),
@@ -474,6 +482,10 @@ impl Application for Gumicord {
     /// Drains background events. The only entry point for them.
     fn wake(&mut self) -> bool {
         let mut changed = self.login.poll();
+        if let Some(msg) = self.login.take_last_error() {
+            self.login_error = Some(msg);
+            changed = true;
+        }
         changed |= self.live.poll();
         // An arrived image counts as a change, or it never gets drawn.
         changed |= self.images.poll();
@@ -674,8 +686,28 @@ impl Application for Gumicord {
         // Reopens rather than closing, or opening the next message's menu
         // would take two presses.
         let items = hits.iter().find_map(|h| match (h.id, &h.key) {
-            // The composer first: it overlaps the message list.
-            (NodeId::ChatInputField, _) => Some(self.field_menu()),
+            // The composer first: it overlaps the message list. Focusing it
+            // makes the menu and its items act on the composer.
+            (NodeId::ChatInputField, _) => {
+                self.input_focused = true;
+                self.login_field = None;
+                Some(self.field_menu())
+            }
+            // A login-form field: focusing it makes the menu and its items
+            // act on that field.
+            (
+                NodeId::AppScreenLoginField,
+                Some(Key::Slot(s @ ("email" | "password" | "totp" | "token"))),
+            ) => {
+                self.login_field = Some(match *s {
+                    "email" => LoginField::Email,
+                    "password" => LoginField::Password,
+                    "token" => LoginField::Token,
+                    _ => LoginField::Totp,
+                });
+                self.input_focused = false;
+                Some(self.field_menu())
+            }
             (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
             (NodeId::NavChannelListItem, Some(Key::Id(id))) => Some(self.channel_menu(*id)),
             (NodeId::NavGuildListItem, Some(Key::Id(id))) => Some(self.guild_menu(*id)),
@@ -796,9 +828,49 @@ impl Application for Gumicord {
         if len == SEQUENCE.len() {
             self.hidden_code.clear();
             self.login.start_token();
+            self.login_form = Some(LoginField::Token);
             self.login_field = Some(LoginField::Token);
         }
         true
+    }
+
+    /// A clipboard operation on the focused field, from a Ctrl shortcut or a
+    /// field-menu item. Without a focused field every operation does nothing.
+    fn clipboard(&mut self, op: gumicord_platform::ClipboardOp) -> bool {
+        use gumicord_platform::ClipboardOp::{Copy, Cut, Paste};
+        let Some(doc) = self.focused_document() else {
+            return false;
+        };
+        match op {
+            Copy | Cut => {
+                let sel = doc.selection();
+                if sel.is_empty() {
+                    return false;
+                }
+                let text = doc.text()[sel].to_owned();
+                if let Err(e) = gumicord_platform::clipboard::set_text(&text) {
+                    tracing::warn!(%e, "could not write to the clipboard");
+                    return false;
+                }
+                if op == Cut {
+                    doc.insert("");
+                }
+                true
+            }
+            Paste => match gumicord_platform::clipboard::text() {
+                // The field is one line, so newlines would hide text. Discord
+                // collapses them on paste too.
+                Ok(Some(text)) => {
+                    doc.insert(&text.replace(['\r', '\n'], " "));
+                    true
+                }
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(%e, "could not read the clipboard");
+                    false
+                }
+            },
+        }
     }
 
     /// A captcha question came back from the API. Forward it to the platform,
@@ -870,6 +942,7 @@ impl Gumicord {
     /// Submits the active login step. Runs the password flow, hands off a TOTP
     /// code, or logs in with a bot token; nothing to send stays put.
     fn submit_login(&mut self) -> bool {
+        self.login_error = None;
         match self.login_field {
             Some(LoginField::Token) => {
                 let token = self.login_input.text().trim().to_owned();
@@ -912,6 +985,8 @@ impl Gumicord {
     fn leave_login_form(&mut self) {
         self.login.cancel_password();
         self.login_field = None;
+        self.login_form = None;
+        self.login_error = None;
         self.login_input.take();
     }
 
@@ -1170,23 +1245,19 @@ impl Gumicord {
             }
 
             crate::menu::Action::Cut => {
-                if self.copy_selection() {
-                    self.input.insert("");
-                }
+                self.clipboard(gumicord_platform::ClipboardOp::Cut);
             }
             crate::menu::Action::CopySelection => {
-                self.copy_selection();
+                self.clipboard(gumicord_platform::ClipboardOp::Copy);
             }
             crate::menu::Action::Paste => {
-                match gumicord_platform::clipboard::text() {
-                    // The field is one line, so newlines would hide text.
-                    // Discord collapses them on paste too.
-                    Ok(Some(text)) => self.input.insert(&text.replace(['\r', '\n'], " ")),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(%e, "could not read the clipboard"),
+                self.clipboard(gumicord_platform::ClipboardOp::Paste);
+            }
+            crate::menu::Action::SelectAll => {
+                if let Some(doc) = self.focused_document() {
+                    doc.select_all();
                 }
             }
-            crate::menu::Action::SelectAll => self.input.select_all(),
         }
         true
     }
@@ -1202,6 +1273,8 @@ impl Gumicord {
             return false;
         };
         self.login.forget(rt.handle(), waker.clone());
+        self.login_form = None;
+        self.login_error = None;
         self.forget_account()
     }
 
@@ -1225,26 +1298,26 @@ impl Gumicord {
         true
     }
 
-    /// Copies the selection, if any.
-    fn copy_selection(&mut self) -> bool {
-        let sel = self.input.selection();
-        if sel.is_empty() {
-            return false;
+    /// The document a field menu and its items act on: the focused login field
+    /// if any, else the composer. Read-only; [`focused_document`] is the
+    /// mutable twin used to actually edit it.
+    ///
+    /// [`focused_document`]: crate::Application::focused_document
+    fn field_doc(&self) -> &TextDocument {
+        match self.login_field {
+            Some(LoginField::Email) => &self.login_email,
+            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => &self.login_input,
+            None => &self.input,
         }
-        let text = self.input.text()[sel].to_owned();
-        if let Err(e) = gumicord_platform::clipboard::set_text(&text) {
-            tracing::warn!(%e, "could not write to the clipboard");
-            return false;
-        }
-        true
     }
 
-    /// The composer's menu, desktop only. Lists only what would do something.
+    /// A field's menu, desktop only. Lists only what would do something.
     fn field_menu(&self) -> Vec<crate::menu::Item> {
         use crate::menu::{Action, Item};
+        let doc = self.field_doc();
         let mut items = Vec::new();
 
-        if !self.input.selection().is_empty() {
+        if !doc.selection().is_empty() {
             items.push(Item::new(Action::Cut, "切り取り").icon("cut"));
             items.push(Item::new(Action::CopySelection, "コピー").icon("copy"));
         }
@@ -1252,7 +1325,7 @@ impl Gumicord {
         // is not something to do every time a menu opens.
         items.push(Item::new(Action::Paste, "貼り付け").icon("paste"));
 
-        if !self.input.is_empty() {
+        if !doc.is_empty() {
             items.push(Item::new(Action::SelectAll, "すべて選択").icon("select_all"));
         }
         items
@@ -1265,42 +1338,58 @@ impl Gumicord {
         let s = self.login.session();
         let mut screen = UiNode::new(NodeId::AppScreenLogin);
 
-        match s {
-            Session::Password => {
+        // A form the user chose stays up while the login runs or even fails, so
+        // its error is shown on the form, not bounced to the QR.
+        let form = self.login_form.or(match s {
+            Session::Password => Some(LoginField::Password),
+            Session::PasswordTotp => Some(LoginField::Totp),
+            Session::Token => Some(LoginField::Token),
+            _ => None,
+        });
+
+        match form {
+            Some(LoginField::Email | LoginField::Password) => {
                 screen = screen
                     .child(UiNode::new(NodeId::LayoutSpacer))
                     .child(UiNode::text(
                         NodeId::AppScreenLoginTitle,
                         "パスワードでログイン",
                     ))
-                    .child(self.login_field("email", "メールアドレス", &self.login_email))
-                    .child(self.login_field("password", "パスワード", &self.login_input))
+                    .child(self.login_label("メールアドレス"))
+                    .child(self.login_field("email", "メールアドレス", &self.login_email, false))
+                    .child(self.login_label("パスワード"))
+                    .child(self.login_field("password", "パスワード", &self.login_input, true))
+                    .child_if(self.login_error.is_some(), || self.login_error_node())
                     .child(self.login_submit("ログイン"))
                     .child(self.login_secondary("戻る", "login_back"));
             }
-            Session::PasswordTotp => {
+            Some(LoginField::Totp) => {
                 screen = screen
                     .child(UiNode::new(NodeId::LayoutSpacer))
                     .child(UiNode::text(
                         NodeId::AppScreenLoginTitle,
                         "認証コードを入力",
                     ))
-                    .child(self.login_field("totp", "認証コード", &self.login_input))
+                    .child(self.login_label("認証コード"))
+                    .child(self.login_field("totp", "認証コード", &self.login_input, false))
+                    .child_if(self.login_error.is_some(), || self.login_error_node())
                     .child(self.login_submit("ログイン"))
                     .child(self.login_secondary("戻る", "login_back"));
             }
-            Session::Token => {
+            Some(LoginField::Token) => {
                 screen = screen
                     .child(UiNode::new(NodeId::LayoutSpacer))
                     .child(UiNode::text(
                         NodeId::AppScreenLoginTitle,
                         "ボットトークンでログイン",
                     ))
-                    .child(self.login_field("token", "トークン", &self.login_input))
+                    .child(self.login_label("トークン"))
+                    .child(self.login_field("token", "トークン", &self.login_input, false))
+                    .child_if(self.login_error.is_some(), || self.login_error_node())
                     .child(self.login_submit("ログイン"))
                     .child(self.login_secondary("戻る", "login_back"));
             }
-            _ => {
+            None => {
                 // Default: a QR and a way into the password form. Nothing else
                 // to press, since scanning is the only thing to do here.
                 screen = screen
@@ -1320,21 +1409,57 @@ impl Gumicord {
         screen.child(UiNode::new(NodeId::LayoutSpacer))
     }
 
+    /// A small label above a login-field box.
+    fn login_label(&self, text: &str) -> UiNode {
+        UiNode::text(NodeId::AppScreenLoginLabel, text)
+    }
+
+    /// An error line below a login form. The message is always present when
+    /// this is called.
+    fn login_error_node(&self) -> UiNode {
+        UiNode::text(
+            NodeId::AppScreenLoginError,
+            self.login_error.as_deref().unwrap_or_default(),
+        )
+    }
+
     /// One editable box on the login form. `slot` picks email/password/totp/
-    /// token; a focused field carries the focus state.
-    fn login_field(&self, slot: &'static str, placeholder: &str, doc: &TextDocument) -> UiNode {
+    /// token; a focused field carries the focus state. When `mask` is true the
+    /// text is replaced by bullets while the real content stays in `doc`.
+    fn login_field(
+        &self,
+        slot: &'static str,
+        placeholder: &str,
+        doc: &TextDocument,
+        mask: bool,
+    ) -> UiNode {
+        let (text, caret, selection) = if mask {
+            Self::masked(doc)
+        } else {
+            (doc.text().to_owned(), doc.caret(), doc.selection())
+        };
         UiNode::editable(
             NodeId::AppScreenLoginField,
             Editable {
-                text: doc.text().to_owned(),
-                caret: doc.caret(),
-                selection: doc.selection(),
-                composing: doc.composing(),
+                text,
+                caret,
+                selection,
+                composing: if mask { None } else { doc.composing() },
                 placeholder: placeholder.to_owned(),
             },
         )
         .with_key(Key::Slot(slot))
         .with_state_if(self.login_field_slot(slot), State::Focus)
+    }
+
+    /// A bullet-substituted view of a secret field: one `•` per character,
+    /// with caret and selection remapped so the caret sits in the right place.
+    fn masked(doc: &TextDocument) -> (String, usize, std::ops::Range<usize>) {
+        const BULLET: &str = "•";
+        let text = BULLET.repeat(doc.text().chars().count());
+        let map = |byte: usize| doc.text()[..byte].chars().count() * 3;
+        let sel = doc.selection();
+        (text, map(doc.caret()), map(sel.start)..map(sel.end))
     }
 
     /// Whether the given slot is the currently focused login field.
@@ -1377,6 +1502,7 @@ impl Gumicord {
             "login_password" => {
                 self.login.start_password();
                 self.login_field = None;
+                self.login_form = Some(LoginField::Password);
                 true
             }
             "login_submit" => self.submit_login(),
@@ -3793,6 +3919,66 @@ mod login_tests {
         a.focused_document().unwrap().insert("bot-token");
         assert!(a.submit_login(), "トークンログインが送信されなかった");
         assert_eq!(a.login_field, None, "送信後もフォーカスが残っている");
+    }
+
+    /// Right-clicking a login field focuses it and shows the input menu for
+    /// that field's contents, not the composer's.
+    #[test]
+    fn right_clicking_a_login_field_opens_its_menu() {
+        use crate::menu::Action;
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+
+        // Focus the email field and select its content.
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        a.focused_document().unwrap().insert("a@b.c");
+        a.focused_document().unwrap().select_all();
+
+        let field = login_hit_of(NodeId::AppScreenLoginField, Key::Slot("email"));
+        assert!(a.context_menu(&[field], (0.0, 0.0)));
+        assert!(matches!(a.login_field, Some(LoginField::Email)));
+
+        let has = |want: &Action| {
+            a.floating
+                .as_ref()
+                .expect("開いていない")
+                .items()
+                .iter()
+                .any(|i| &i.action == want)
+        };
+        assert!(has(&Action::Cut), "選んだ欄に切り取りが出ていない");
+        assert!(has(&Action::CopySelection), "選んだ欄にコピーが出ていない");
+        assert!(has(&Action::Paste), "貼り付けが出ていない");
+    }
+
+    /// The "select all" menu item targets the focused login field, leaving
+    /// the composer untouched.
+    #[test]
+    fn select_all_targets_the_focused_login_field() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+
+        a.perform(crate::menu::Action::SelectAll);
+
+        assert!(
+            a.login_input.has_selection(),
+            "ログイン欄が選択されていない"
+        );
+        assert!(!a.input.has_selection(), "コンポーザーが触られた");
     }
 
     /// A captcha challenge is handed to the platform, and its solution comes

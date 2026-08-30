@@ -26,6 +26,6 @@ pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, We
 pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use secret::{SecretError, SecretStore};
-pub use text_input::{EditKey, HiddenKey, TextDocument, TextInputHost};
+pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
 pub use url::{OpenUrlError, open_url};
 pub use window::{Application, FrameCx, PlatformError, Waker, run};
