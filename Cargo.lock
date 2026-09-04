@@ -1718,6 +1718,7 @@ dependencies = [
 name = "gumicord-app"
 version = "0.0.0"
 dependencies = [
+ "accesskit",
  "base64",
  "gumicord-gateway",
  "gumicord-markdown",

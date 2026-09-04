@@ -31,6 +31,7 @@
 //! `uses_live()` is the single place that distinguishes demo data from real
 //! data. The row types absorb the difference so the tree builder never asks.
 
+pub mod a11y;
 pub mod account;
 pub mod assets;
 pub mod demo;
@@ -550,6 +551,22 @@ impl Gumicord {
         tracing::info!(?path, "reloaded the theme");
         true
     }
+
+    /// Which node the screen reader follows. Dialogs and menus grab it;
+    /// otherwise the focused field does.
+    fn a11y_focus(&self) -> Option<&'static str> {
+        if matches!(self.floating, Some(crate::menu::Floating::Confirm(_))) {
+            Some("overlay.modal")
+        } else if matches!(self.floating, Some(crate::menu::Floating::Menu(_))) {
+            Some("overlay.menu")
+        } else if self.input_focused {
+            Some("chat.input.field")
+        } else if self.login_field.is_some() {
+            Some("app.screen.login.field")
+        } else {
+            None
+        }
+    }
 }
 
 impl Application for Gumicord {
@@ -603,6 +620,17 @@ impl Application for Gumicord {
         let mut out = self.images.take();
         out.extend(self.assets.take());
         out
+    }
+
+    fn accesskit_update(
+        &mut self,
+        tree: &gumicord_uitree::UiNode,
+    ) -> Option<accesskit::TreeUpdate> {
+        Some(crate::a11y::tree_update(
+            tree,
+            self.a11y_focus(),
+            &self.title(),
+        ))
     }
 
     fn request_backgrounds(&mut self, keys: &[String]) {

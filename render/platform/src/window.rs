@@ -203,6 +203,14 @@ pub trait Application {
         Vec::new()
     }
 
+    /// Builds the screen-reader tree from the just-built UITree.
+    fn accesskit_update(
+        &mut self,
+        _tree: &gumicord_uitree::UiNode,
+    ) -> Option<accesskit::TreeUpdate> {
+        None
+    }
+
     /// Woken by [`Waker::wake`]; drain everything pending. Wakes coalesce, so
     /// the count is not meaningful.
     fn wake(&mut self) -> bool {
@@ -218,26 +226,40 @@ pub trait Application {
 /// Carries no payload, only "something happened": the app moves the contents
 /// over its own channel. Putting them here would mix winit's types into the
 /// app's.
-#[derive(Clone)]
-pub struct Waker(winit::event_loop::EventLoopProxy<()>);
+#[derive(Clone, Debug)]
+pub struct Waker(winit::event_loop::EventLoopProxy<LoopEvent>);
+
+/// The loop's user events: wakes from other threads, and screen-reader
+/// requests delivered through the accesskit adapter.
+#[derive(Debug)]
+enum LoopEvent {
+    Wake,
+    AccessKit(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for LoopEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        LoopEvent::AccessKit(event)
+    }
+}
 
 impl Waker {
     /// Wakes the main thread, from any thread. A no-op once the loop has
     /// ended, which happens normally during shutdown.
     pub fn wake(&self) {
-        let _ = self.0.send_event(());
+        let _ = self.0.send_event(LoopEvent::Wake);
     }
-}
 
-impl core::fmt::Debug for Waker {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Waker")
+    /// A second sender for the screen-reader adapter. The adapter needs its
+    /// own because each proxy delivers one event type mapping.
+    fn proxy(&self) -> winit::event_loop::EventLoopProxy<LoopEvent> {
+        self.0.clone()
     }
 }
 
 /// Opens the window and runs until exit.
 pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<LoopEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     // Before the window exists: login may start early, and earlier means the
@@ -250,6 +272,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         waker,
         window: None,
         renderer: None,
+        adapter: None,
         captcha: WebView2Captcha,
         cursor: (0.0, 0.0),
         zone: Zone::Client,
@@ -287,6 +310,9 @@ struct Host {
     waker: Waker,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    /// Speaks to the OS screen reader. Created before the window first
+    /// shows; without it Narrator never connects.
+    adapter: Option<accesskit_winit::Adapter>,
     /// Presents a captcha challenge as a modal over the window (ADR-0007).
     captcha: WebView2Captcha,
     /// Pointer position.
@@ -669,6 +695,12 @@ impl Host {
             // ([`gumicord_render::motion`])
             moving = self.motion.apply(&mut tree, std::time::Instant::now());
 
+            if let Some(adapter) = self.adapter.as_mut()
+                && let Some(update) = self.app.accesskit_update(&tree)
+            {
+                adapter.update_if_active(|| update);
+            }
+
             (r.render(&tree), r.backend())
         };
 
@@ -745,7 +777,7 @@ impl Host {
     }
 }
 
-impl ApplicationHandler for Host {
+impl ApplicationHandler<LoopEvent> for Host {
     /// Decides what to wait for; the caret blink is driven from here.
     ///
     /// Nothing wakes for a blink when no field has focus, since there is
@@ -796,17 +828,33 @@ impl ApplicationHandler for Host {
     }
 
     /// Woken by [`Waker::wake`]; the payload comes over the app's own
-    /// channel.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        // Fonts arriving from their background thread also wake the loop; a
-        // redraw folds them in if the app has nothing to draw.
-        let fonts = self.renderer.as_ref().is_some_and(Renderer::fonts_pending);
-        let woke = self.app.wake() || fonts;
-        // A wake may be the login flow asking for a captcha; the modal runs
-        // here, on the thread with the window handle.
-        self.pump_captcha();
-        if woke {
-            self.request_redraw();
+    /// channel. Screen-reader requests arrive here too, through the adapter.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: LoopEvent) {
+        match event {
+            LoopEvent::Wake => {
+                // Fonts arriving from their background thread also wake the loop; a
+                // redraw folds them in if the app has nothing to draw.
+                let fonts = self.renderer.as_ref().is_some_and(Renderer::fonts_pending);
+                let woke = self.app.wake() || fonts;
+                // A wake may be the login flow asking for a captcha; the modal runs
+                // here, on the thread with the window handle.
+                self.pump_captcha();
+                if woke {
+                    self.request_redraw();
+                }
+            }
+            LoopEvent::AccessKit(event) => {
+                use accesskit_winit::WindowEvent as AccessKitEvent;
+                match event.window_event {
+                    // The tree goes out on the next redraw, which this asks
+                    // for; building it anywhere else would split the frame.
+                    AccessKitEvent::InitialTreeRequested => self.request_redraw(),
+                    AccessKitEvent::ActionRequested(request) => {
+                        tracing::debug!(?request, "screen-reader actions are not handled yet");
+                    }
+                    AccessKitEvent::AccessibilityDeactivated => {}
+                }
+            }
         }
     }
 
@@ -820,7 +868,9 @@ impl ApplicationHandler for Host {
             .with_title(self.app.title())
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(480.0, 320.0))
-            .with_decorations(false);
+            .with_decorations(false)
+            // The screen-reader adapter must exist before the first show.
+            .with_visible(false);
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -830,6 +880,12 @@ impl ApplicationHandler for Host {
                 return;
             }
         };
+        self.adapter = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.waker.proxy(),
+        ));
+        window.set_visible(true);
 
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;

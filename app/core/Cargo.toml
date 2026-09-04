@@ -8,6 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+accesskit.workspace = true
 gumicord-model.workspace = true
 gumicord-gateway.workspace = true
 gumicord-rest.workspace = true
