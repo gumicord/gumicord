@@ -128,6 +128,11 @@ pub struct Renderer {
     /// Images the last frame wanted and did not have. Only drawing reveals
     /// them, since visibility comes from layout and clipping.
     missing_images: Vec<String>,
+    /// Theme background images the last frame wanted and did not have.
+    missing_backgrounds: Vec<String>,
+    /// Which theme background images belong to. The app sets it on every
+    /// theme load; drawing needs it to key bundled paths and data URIs.
+    theme_namespace: Option<String>,
     /// Whether the caret is lit. The blink is timed by the platform layer,
     /// since the rate is an OS setting and can be off entirely.
     caret_visible: bool,
@@ -157,6 +162,8 @@ impl Renderer {
             scrollbars: Vec::new(),
             keep_place: None,
             missing_images: Vec::new(),
+            missing_backgrounds: Vec::new(),
+            theme_namespace: None,
             caret_visible: true,
         })
     }
@@ -370,9 +377,11 @@ impl Renderer {
             self.scale,
             self.gpu.size(),
             self.caret_visible,
+            self.theme_namespace.as_deref(),
         );
 
         self.missing_images.clone_from(&dl.missing_images);
+        self.missing_backgrounds.clone_from(&dl.missing_backgrounds);
 
         FrameStats {
             nodes: layout.placed.len(),
@@ -538,6 +547,18 @@ impl Renderer {
     /// Only what survived clipping.
     pub fn missing_images(&self) -> &[String] {
         &self.missing_images
+    }
+
+    /// Theme background images that were about to draw and were missing.
+    pub fn missing_backgrounds(&self) -> &[String] {
+        &self.missing_backgrounds
+    }
+
+    /// Which theme the background images currently drawing belong to.
+    pub fn set_theme_namespace(&mut self, namespace: Option<&str>) {
+        if self.theme_namespace.as_deref() != namespace {
+            self.theme_namespace = namespace.map(str::to_owned);
+        }
     }
 
     /// Whether images were forgotten; true once.

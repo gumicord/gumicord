@@ -32,6 +32,7 @@
 //! data. The row types absorb the difference so the tree builder never asks.
 
 pub mod account;
+pub mod assets;
 pub mod demo;
 pub mod images;
 pub mod live;
@@ -82,6 +83,7 @@ struct PendingApproval {
 /// gone: with no settings screen to revisit it, dismissal denies.
 enum Showing {
     Approval(String),
+    ThemeHosts(Vec<String>),
     Notice,
 }
 
@@ -236,6 +238,11 @@ pub struct Gumicord {
     /// What the watched file looked like when last loaded. Compared every
     /// frame; the file itself is only read when this moves.
     theme_mtime: Option<std::time::SystemTime>,
+    /// Background images of the current theme, resolving.
+    assets: crate::assets::ThemeAssets,
+    /// Which theme the backgrounds currently drawing belong to. Read by the
+    /// renderer every frame; the app sets it on every theme load.
+    theme_namespace: Option<String>,
     /// Dropping this stops everything running on it.
     runtime: Option<tokio::runtime::Runtime>,
     /// Wakes the event loop; handed to the gateway after login.
@@ -371,10 +378,12 @@ impl Gumicord {
         let theme_path = theme_file();
         let theme_mtime = theme_path.as_ref().and_then(|p| mtime_of(p));
 
-        Gumicord {
+        let mut app = Gumicord {
             theme: load_theme(),
             theme_path,
             theme_mtime,
+            assets: crate::assets::ThemeAssets::new(),
+            theme_namespace: None,
             runtime: None,
             waker: None,
             login,
@@ -408,7 +417,9 @@ impl Gumicord {
             approval_queue: VecDeque::new(),
             dialogs: VecDeque::new(),
             showing: None,
-        }
+        };
+        app.refresh_theme_assets();
+        app
     }
 
     fn is_hovered(&self, id: NodeId, key: Option<&Key>) -> bool {
@@ -483,6 +494,35 @@ fn mtime_of(path: &std::path::Path) -> Option<std::time::SystemTime> {
 }
 
 impl Gumicord {
+    /// Re-points the background resolver at the current theme.
+    fn refresh_theme_assets(&mut self) {
+        let Some(theme) = &self.theme else {
+            self.theme_namespace = None;
+            self.assets
+                .set_theme(String::new(), None, String::new(), Vec::new(), Vec::new());
+            return;
+        };
+        let dir = self
+            .theme_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(std::path::Path::to_path_buf);
+        let at = self
+            .theme_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "bundled".to_owned());
+        let namespace = format!("{}:{at}", theme.manifest.id);
+        self.theme_namespace = Some(namespace.clone());
+        self.assets.set_theme(
+            namespace,
+            dir,
+            theme.manifest.name.clone(),
+            theme.background_images(),
+            theme.manifest.remote_assets.clone(),
+        );
+    }
+
     /// Re-reads the theme file when it changed. Runs on the frame boundary,
     /// never mid-build. A file that cannot be read or parsed leaves the
     /// last good theme up: editors write broken JSON halfway through a save.
@@ -506,6 +546,7 @@ impl Gumicord {
         };
         self.theme = Some(theme);
         self.theme_mtime = mtime_of(&path);
+        self.refresh_theme_assets();
         tracing::info!(?path, "reloaded the theme");
         true
     }
@@ -533,6 +574,7 @@ impl Application for Gumicord {
 
         self.login.start(runtime.handle(), waker.clone());
         self.live.attach_waker(waker.clone());
+        self.assets.start(runtime.handle(), waker.clone());
         self.waker = Some(waker);
         self.runtime = Some(runtime);
     }
@@ -543,6 +585,7 @@ impl Application for Gumicord {
     fn images_dropped(&mut self) {
         tracing::debug!("the atlas evicted images; re-reading them");
         self.images.forget_requested();
+        self.assets.forget_requested();
     }
 
     /// Requests images that were about to draw and were missing.
@@ -557,7 +600,17 @@ impl Application for Gumicord {
     }
 
     fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
-        self.images.take()
+        let mut out = self.images.take();
+        out.extend(self.assets.take());
+        out
+    }
+
+    fn request_backgrounds(&mut self, keys: &[String]) {
+        self.assets.request(keys);
+    }
+
+    fn theme_namespace(&self) -> Option<&str> {
+        self.theme_namespace.as_deref()
     }
 
     /// A list scrolled; fetches more when it nears an end.
@@ -618,6 +671,11 @@ impl Application for Gumicord {
         // An arrived image counts as a change, or it never gets drawn.
         changed |= self.images.poll();
         changed |= self.maybe_reload_theme();
+        changed |= self.assets.poll();
+        if let Some(ask) = self.assets.poll_ask() {
+            changed = true;
+            self.dialogs.push_back(PendingDialog::theme_hosts(ask));
+        }
 
         while let Ok(res) = self.account_switch_rx.try_recv() {
             changed = true;
@@ -1142,6 +1200,31 @@ impl PendingDialog {
             showing: Showing::Notice,
         }
     }
+
+    /// What a theme asking for remote hosts says. The hosts and the privacy
+    /// cost are the whole question; the rest of the theme applies either way.
+    fn theme_hosts(ask: crate::assets::HostAsk) -> Self {
+        let mut body = ask
+            .hosts
+            .iter()
+            .map(|h| format!("・{h}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        body.push_str("\nこれらのサイトには、あなたが Gumicord を起動したことが伝わります。");
+        PendingDialog {
+            confirm: crate::menu::Confirm {
+                title: format!("「{}」の画像取得", ask.theme),
+                body,
+                preview: None,
+                action: crate::menu::Action::ApproveThemeHosts {
+                    hosts: ask.hosts.clone(),
+                },
+                confirm: "許可する".to_owned(),
+                danger: false,
+            },
+            showing: Showing::ThemeHosts(ask.hosts),
+        }
+    }
 }
 
 impl PendingApproval {
@@ -1507,6 +1590,10 @@ impl Gumicord {
             crate::menu::Action::ApprovePlugin { id, granted } => {
                 self.showing = None;
                 self.plugins.approve(id, granted);
+            }
+            crate::menu::Action::ApproveThemeHosts { hosts } => {
+                self.showing = None;
+                self.assets.approve_hosts(hosts);
             }
             crate::menu::Action::Acknowledge => {
                 self.showing = None;
@@ -2536,6 +2623,9 @@ impl Gumicord {
             (Some(crate::menu::Floating::Confirm(c)), Some(Showing::Approval(id))) => {
                 matches!(&c.action, crate::menu::Action::ApprovePlugin { id: aid, .. } if aid == id)
             }
+            (Some(crate::menu::Floating::Confirm(c)), Some(Showing::ThemeHosts(_))) => {
+                matches!(&c.action, crate::menu::Action::ApproveThemeHosts { .. })
+            }
             (Some(crate::menu::Floating::Confirm(c)), Some(Showing::Notice)) => {
                 matches!(&c.action, crate::menu::Action::Acknowledge)
             }
@@ -2545,8 +2635,14 @@ impl Gumicord {
             return;
         }
         // Notices and nothing showing need no farewell.
-        if let Some(Showing::Approval(id)) = self.showing.take() {
-            self.plugins.deny(&id);
+        match self.showing.take() {
+            Some(Showing::Approval(id)) => {
+                self.plugins.deny(&id);
+            }
+            Some(Showing::ThemeHosts(hosts)) => {
+                self.assets.deny_hosts(&hosts);
+            }
+            _ => {}
         }
     }
 

@@ -9,20 +9,20 @@
 //!
 //! ```text
 //! [1] color   rounded rect
-//! [2] image   textured quad (not implemented)
+//! [2] image   textured quad, from the atlas like avatars
 //! [3] tint    rounded rect
 //! ```
 //!
 //! A border is a slightly larger rect under the colour, or four thin rects
 //! where there is no background colour to sit under.
 
-use gumicord_uitree::value::{Color, Font};
+use gumicord_uitree::value::{Background, Color, Font};
 use gumicord_uitree::{Content, Span, State, Style};
 
 use crate::geom::Rect;
 use crate::intrinsic::{Axis, intrinsic};
 use crate::layout::LayoutResult;
-use crate::text::{ResolvedFont, TextEngine};
+use crate::text::{GlyphEntry, ResolvedFont, TextEngine};
 
 /// Floats per rounded rect.
 pub const FLOATS_PER_RECT: usize = 12;
@@ -86,6 +86,10 @@ pub struct DrawList {
     /// Only what survived clipping reaches here, so a 300-row list asks for
     /// the dozen or so actually visible.
     pub missing_images: Vec<String>,
+    /// Theme background images that were about to draw and were missing.
+    /// Kept apart from `missing_images`: those go to the CDN fetcher, these
+    /// to the theme asset resolver.
+    pub missing_backgrounds: Vec<String>,
 }
 
 impl DrawList {
@@ -219,6 +223,7 @@ fn scissor_of(clip: Option<Rect>, scale: f32, viewport: (u32, u32)) -> Option<[u
 }
 
 /// Turns a layout into draw commands.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     layout: &LayoutResult<'_>,
     text: &mut TextEngine,
@@ -228,6 +233,8 @@ pub fn build(
     viewport: (u32, u32),
     // Whether the caret is lit; the blink is timed by the platform layer.
     caret_visible: bool,
+    // Which theme background images belong to; without it none draw.
+    theme_namespace: Option<&str>,
 ) -> DrawList {
     let mut dl = DrawList::default();
 
@@ -252,7 +259,17 @@ pub fn build(
         let rect = snap(placed.rect, scale);
         let radius_px = radius * scale;
 
-        draw_background(&mut dl, style, rect, radius_px, opacity, scale, scissor);
+        draw_background(
+            &mut dl,
+            text,
+            theme_namespace,
+            style,
+            rect,
+            radius_px,
+            opacity,
+            scale,
+            scissor,
+        );
 
         match &node.content {
             Content::Text(s) if !s.is_empty() => {
@@ -340,8 +357,11 @@ fn draw_icon(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_background(
     dl: &mut DrawList,
+    text: &TextEngine,
+    namespace: Option<&str>,
     style: &Style,
     rect: [f32; 4],
     radius_px: f32,
@@ -360,8 +380,19 @@ fn draw_background(
         dl.push_rect(rect, linear(bg, opacity), radius_px, 0.0, scissor);
     }
 
-    // Background images are not implemented; the colour is the documented
-    // fallback.
+    // [2] image, drawn over the colour so a missing one degrades to it.
+    if let (Some(ns), Some(bg)) = (
+        namespace,
+        style.background.as_ref().filter(|b| b.image.is_some()),
+    ) && let Some(image) = bg.image.as_ref()
+    {
+        let key = image.cache_key(ns);
+        if let Some(e) = text.image(&key) {
+            draw_background_image(dl, &e, bg, rect, radius_px, opacity, scale, scissor);
+        } else {
+            dl.missing_backgrounds.push(key);
+        }
+    }
 
     // [3] tint
     if let Some(tint) = style.background.as_ref().and_then(|b| b.tint) {
@@ -372,6 +403,147 @@ fn draw_background(
     // background does not show through it.
     if let Some((bc, bw)) = border {
         dl.push_rect(rect, linear(bc, opacity), radius_px, bw * scale, scissor);
+    }
+}
+
+/// Draws one theme background image over its colour.
+///
+/// The pixels arrive through the same atlas as avatars; what differs is the
+/// key. Until they do, the colour underneath is the documented fallback.
+#[allow(clippy::too_many_arguments)]
+fn draw_background_image(
+    dl: &mut DrawList,
+    e: &GlyphEntry,
+    bg: &Background,
+    rect: [f32; 4],
+    radius_px: f32,
+    opacity: f32,
+    scale: f32,
+    scissor: Option<[u32; 4]>,
+) {
+    use gumicord_uitree::value::Fit;
+
+    let box_px = snap(
+        Rect {
+            x: rect[0] / scale,
+            y: rect[1] / scale,
+            w: rect[2] / scale,
+            h: rect[3] / scale,
+        },
+        scale,
+    );
+    if box_px[2] <= 0.0 || box_px[3] <= 0.0 || e.w == 0 || e.h == 0 {
+        return;
+    }
+    let alpha = (bg.opacity.clamp(0.0, 1.0) * opacity).clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return;
+    }
+    let colour = [1.0, 1.0, 1.0, alpha];
+    let pos = [
+        bg.position[0].clamp(0.0, 1.0),
+        bg.position[1].clamp(0.0, 1.0),
+    ];
+
+    // Tiles repeat on the CPU; the atlas sampler cannot.
+    if bg.fit == Fit::Tile {
+        let tw = (e.w as f32).min(box_px[2]).max(1.0);
+        let th = (e.h as f32).min(box_px[3]).max(1.0);
+        let (cols, rows) = (
+            (box_px[2] / tw).ceil() as u32,
+            (box_px[3] / th).ceil() as u32,
+        );
+        // A tiny tile over a large area is thousands of quads; the colour
+        // underneath already drew, so stopping early only thins the pattern.
+        for ty in 0..rows.min(32) {
+            for tx in 0..cols.min(32) {
+                let (dx, dy) = (box_px[0] + tx as f32 * tw, box_px[1] + ty as f32 * th);
+                let (dw, dh) = (
+                    tw.min(box_px[0] + box_px[2] - dx),
+                    th.min(box_px[1] + box_px[3] - dy),
+                );
+                if dw <= 0.0 || dh <= 0.0 {
+                    continue;
+                }
+                let (uw, uh) = (e.uv[2] - e.uv[0], e.uv[3] - e.uv[1]);
+                dl.push_glyph(
+                    [dx, dy, dw, dh],
+                    [
+                        e.uv[0],
+                        e.uv[1],
+                        e.uv[0] + uw * (dw / e.w as f32),
+                        e.uv[1] + uh * (dh / e.h as f32),
+                    ],
+                    colour,
+                    true,
+                    0.0,
+                    scissor,
+                    e.page,
+                );
+            }
+        }
+        return;
+    }
+
+    let (dest, uv) = background_quad(box_px, e, bg.fit, pos);
+    dl.push_glyph(dest, uv, colour, true, radius_px, scissor, e.page);
+}
+
+/// Destination rect and UV for a background image. Cover crops the overflow
+/// around `position`, contain letterboxes, stretch fills, native places once.
+fn background_quad(
+    box_px: [f32; 4],
+    e: &GlyphEntry,
+    fit: gumicord_uitree::value::Fit,
+    position: [f32; 2],
+) -> ([f32; 4], [f32; 4]) {
+    use gumicord_uitree::value::Fit;
+
+    let (uw, uh) = (e.uv[2] - e.uv[0], e.uv[3] - e.uv[1]);
+    let (iw, ih) = (e.w as f32, e.h as f32);
+    match fit {
+        Fit::Cover => {
+            let (mut u0, mut v0, mut u1, mut v1) = (e.uv[0], e.uv[1], e.uv[2], e.uv[3]);
+            let (want, have) = (box_px[2] / box_px[3], iw / ih);
+            if have > want {
+                let cut = uw * (1.0 - want / have);
+                u0 += cut * position[0];
+                u1 -= cut * (1.0 - position[0]);
+            } else if have < want {
+                let cut = uh * (1.0 - have / want);
+                v0 += cut * position[1];
+                v1 -= cut * (1.0 - position[1]);
+            }
+            (box_px, [u0, v0, u1, v1])
+        }
+        Fit::Contain => {
+            let s = (box_px[2] / iw).min(box_px[3] / ih);
+            let (dw, dh) = (iw * s, ih * s);
+            (
+                [
+                    box_px[0] + (box_px[2] - dw) * position[0],
+                    box_px[1] + (box_px[3] - dh) * position[1],
+                    dw,
+                    dh,
+                ],
+                [e.uv[0], e.uv[1], e.uv[2], e.uv[3]],
+            )
+        }
+        Fit::Stretch => (box_px, [e.uv[0], e.uv[1], e.uv[2], e.uv[3]]),
+        Fit::None => {
+            let (dw, dh) = (iw.min(box_px[2]), ih.min(box_px[3]));
+            (
+                [
+                    box_px[0] + (box_px[2] - dw) * position[0],
+                    box_px[1] + (box_px[3] - dh) * position[1],
+                    dw,
+                    dh,
+                ],
+                [e.uv[0], e.uv[1], e.uv[2], e.uv[3]],
+            )
+        }
+        // Handled by the caller.
+        Fit::Tile => (box_px, [e.uv[0], e.uv[1], e.uv[2], e.uv[3]]),
     }
 }
 

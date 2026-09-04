@@ -215,6 +215,29 @@ impl Theme {
         self.style_for_tinted(node, ctx, None)
     }
 
+    /// Every background image the rules name, with its fit and blur. The
+    /// fetcher resolves these; the renderer only ever sees lookup keys.
+    pub fn background_images(
+        &self,
+    ) -> Vec<(
+        gumicord_uitree::value::AssetRef,
+        gumicord_uitree::value::Fit,
+        f32,
+    )> {
+        let mut out = Vec::new();
+        for rule in &self.rules {
+            if let Some(bg) = rule.style.background.as_ref()
+                && let Some(image) = bg.image.clone()
+            {
+                let entry = (image, bg.fit, bg.blur);
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+        }
+        out
+    }
+
     /// A node's style, with any data-supplied colour substituted in.
     ///
     /// The tint marker says "use that colour here"; it is not a value. A later
@@ -805,5 +828,24 @@ mod tests {
                 .is_none(),
             "chat.message_list に背景を置くと app.window の画像が透けなくなる"
         );
+    }
+
+    /// The fetcher sees every background image once, with fit and blur.
+    #[test]
+    fn background_images_are_collected_once_each() {
+        let (theme, _) = parse_ok(&wrap(
+            r##" "rules": [
+              { "select": "app.window", "style": { "background": { "image": "assets/a.png" } } },
+              { "select": "app.window", "style": { "background": { "image": "assets/a.png", "fit": "contain", "blur": 4 } } },
+              { "select": "chat.header", "style": { "background": "#111" } }
+            ]"##,
+        ));
+        let got = theme.background_images();
+        assert_eq!(got.len(), 2);
+        assert!(matches!(
+            got[0].0,
+            gumicord_uitree::value::AssetRef::Bundled(_)
+        ));
+        assert_eq!(got[1].2, 4.0);
     }
 }

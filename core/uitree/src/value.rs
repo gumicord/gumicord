@@ -172,6 +172,26 @@ pub enum AssetRef {
     Remote { url: String, host: String },
 }
 
+impl AssetRef {
+    /// The renderer's lookup key for this asset. Stable for the same theme:
+    /// bundled paths join the theme's namespace, remote URLs stand alone,
+    /// and data URIs hash their contents instead of copying megabytes into
+    /// every frame that draws them.
+    pub fn cache_key(&self, namespace: &str) -> String {
+        match self {
+            AssetRef::Bundled(rel) => format!("{namespace}/{rel}"),
+            AssetRef::Remote { url, .. } => url.clone(),
+            AssetRef::Data { mime, base64 } => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                mime.hash(&mut h);
+                base64.hash(&mut h);
+                format!("{namespace}/data#{:016x}", h.finish())
+            }
+        }
+    }
+}
+
 /// Why [`AssetRef::parse`] refused a reference.
 ///
 /// Callers turn these into diagnostics. None is a reason to discard the whole
@@ -381,6 +401,24 @@ impl Background {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_keys_are_stable_and_namespaced() {
+        let bundled = AssetRef::Bundled("assets/bg.png".to_owned());
+        assert_eq!(bundled.cache_key("one"), "one/assets/bg.png");
+        assert_ne!(bundled.cache_key("one"), bundled.cache_key("two"));
+        let remote = AssetRef::Remote {
+            url: "https://cdn.example.com/bg.png".to_owned(),
+            host: "cdn.example.com".to_owned(),
+        };
+        assert_eq!(remote.cache_key("one"), "https://cdn.example.com/bg.png");
+        let data = AssetRef::Data {
+            mime: "image/png".to_owned(),
+            base64: "aGk=".to_owned(),
+        };
+        assert!(data.cache_key("one").starts_with("one/data#"));
+        assert_ne!(data.cache_key("one"), data.cache_key("two"));
+    }
 
     #[test]
     fn color_formats() {

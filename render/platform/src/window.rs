@@ -185,6 +185,16 @@ pub trait Application {
     /// dozen or so actually on screen.
     fn request_images(&mut self, _urls: &[String]) {}
 
+    /// Requests theme background images that were about to draw and were
+    /// missing. Separate from `request_images`: those go to the CDN fetcher,
+    /// these to the theme asset resolver.
+    fn request_backgrounds(&mut self, _keys: &[String]) {}
+
+    /// Which theme the background images currently drawing belong to.
+    fn theme_namespace(&self) -> Option<&str> {
+        None
+    }
+
     /// Takes fetched images.
     ///
     /// The renderer never touches the network: fetching and decoding are the
@@ -626,6 +636,10 @@ impl Host {
             if !want.is_empty() {
                 self.app.request_images(&want);
             }
+            let want: Vec<String> = r.missing_backgrounds().to_vec();
+            if !want.is_empty() {
+                self.app.request_backgrounds(&want);
+            }
         }
         let images = self.app.take_images();
         // Holds the scroll position for one frame after a prepend.
@@ -635,6 +649,7 @@ impl Host {
         let (stats, backend) = {
             let Some(r) = &mut self.renderer else { return };
             r.set_caret_visible(caret_on);
+            r.set_theme_namespace(self.app.theme_namespace());
             if let Some(id) = keep_place {
                 r.keep_place(id);
             }

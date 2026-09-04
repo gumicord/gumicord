@@ -210,6 +210,12 @@ fn write_cached(dir: Option<&std::path::Path>, url: &str, bytes: &[u8]) {
 /// Decodes a PNG to RGBA8. These files are someone else's, so a broken one
 /// must not panic.
 fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
+    decode_png_capped(url, bytes, MAX_SIDE)
+}
+
+/// Decodes a PNG to RGBA8, shrinking the longest side to `max_side`.
+/// Backgrounds are larger than avatars, so the cap is the caller's call.
+pub(crate) fn decode_png_capped(url: &str, bytes: &[u8], max_side: u32) -> Option<ImageData> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     // Flattened to 8-bit RGBA; palettes and 16-bit collapse here.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -257,7 +263,7 @@ fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
             height: h,
             rgba,
         },
-        MAX_SIDE,
+        max_side,
     ))
 }
 

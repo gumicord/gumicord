@@ -170,6 +170,11 @@ pub enum Action {
         /// The capabilities being granted.
         granted: Vec<String>,
     },
+    /// Allow a theme to fetch images from these hosts.
+    ApproveThemeHosts {
+        /// The hosts the dialog showed.
+        hosts: Vec<String>,
+    },
     /// Close a notification dialog.
     Acknowledge,
 
