@@ -896,7 +896,14 @@ impl ApplicationHandler<LoopEvent> for Host {
             let w = self.waker.clone();
             Box::new(move || w.wake()) as Box<dyn Fn() + Send + Sync + 'static>
         };
-        match Renderer::new(window.clone().into(), size.width, size.height, scale, wake) {
+        match Renderer::new(
+            window.clone().into(),
+            size.width,
+            size.height,
+            scale,
+            wake,
+            crate::app_data_dir().map(|d| d.join("fonts")),
+        ) {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
                 tracing::error!(%e, "could not initialise the GPU");

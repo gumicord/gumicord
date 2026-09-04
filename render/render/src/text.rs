@@ -414,14 +414,21 @@ impl Shaper {
     /// does not sleep through the update. The window starts drawing with the
     /// bundled font alone, and Japanese (which falls back to a system font)
     /// becomes correct only after the background thread reports in.
-    pub fn new_fast(scale: f32, wake: Box<dyn Fn() + Send + Sync + 'static>) -> Self {
+    ///
+    /// `cache_dir` holds the enumeration cache; without it every start scans
+    /// every file.
+    pub fn new_fast(
+        scale: f32,
+        wake: Box<dyn Fn() + Send + Sync + 'static>,
+        cache_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         let locale = Self::locale();
         let ready = std::sync::Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let th_ready = ready.clone();
         std::thread::spawn(move || {
             let mut db = fontdb::Database::new();
-            db.load_system_fonts();
+            crate::font_cache::populate(&mut db, cache_dir.as_deref());
             // Ready before the send is observed, so a poll right after the
             // wake always finds the fonts.
             th_ready.store(true, std::sync::atomic::Ordering::Release);
@@ -664,9 +671,10 @@ impl TextEngine {
         device: &wgpu::Device,
         scale: f32,
         wake: Box<dyn Fn() + Send + Sync + 'static>,
+        font_cache_dir: Option<std::path::PathBuf>,
     ) -> Self {
         TextEngine {
-            shaper: Shaper::new_fast(scale, wake),
+            shaper: Shaper::new_fast(scale, wake, font_cache_dir),
             atlas: Atlas::new(device),
         }
     }
@@ -1567,7 +1575,7 @@ mod tests {
             th_woke.store(true, Ordering::Release);
         }) as Box<dyn Fn() + Send + Sync + 'static>;
 
-        let mut sh = Shaper::new_fast(1.0, wake);
+        let mut sh = Shaper::new_fast(1.0, wake, None);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
         // Enumerating system fonts can take seconds without a parity of speed,

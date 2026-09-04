@@ -16,5 +16,7 @@ sys-locale.workspace = true
 qrcode.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

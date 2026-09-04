@@ -10,6 +10,7 @@
 //! GL did.
 
 pub mod draw;
+pub mod font_cache;
 pub mod geom;
 pub mod gpu;
 pub mod icon;
@@ -145,9 +146,10 @@ impl Renderer {
         height: u32,
         scale: f32,
         wake: Box<dyn Fn() + Send + Sync + 'static>,
+        font_cache_dir: Option<std::path::PathBuf>,
     ) -> Result<Self, GpuError> {
         let gpu = Gpu::new(target, width, height)?;
-        let text = TextEngine::new(&gpu.device, scale, wake);
+        let text = TextEngine::new(&gpu.device, scale, wake, font_cache_dir);
         let atlas_binds = bind_pages(&gpu, &text);
         Ok(Renderer {
             gpu,

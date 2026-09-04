@@ -1819,6 +1819,8 @@ dependencies = [
  "gumicord-uitree",
  "pollster",
  "qrcode",
+ "serde",
+ "serde_json",
  "sys-locale",
  "thiserror 2.0.20",
  "tracing",
