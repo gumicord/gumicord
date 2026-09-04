@@ -17,9 +17,10 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use gumicord_gateway::{
     Event, Fatal, Gateway, GuildSettingsEntry, Ready, Subscriptions,
+    member_list::{ListOp, MemberEntry, MemberRow},
     status::{Status, from_settings_proto},
 };
-use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, Token, UserId};
+use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, RoleId, Token, UserId};
 use gumicord_platform::Waker;
 use gumicord_rest::{RestClient, RestError};
 use gumicord_store::{Db, GuildRow, Store};
@@ -42,6 +43,12 @@ const TYPING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 /// Scrolling past these needs re-requesting, which does not exist yet
 /// (`NEXT.md` 4.).
 const MEMBER_ROWS: [gumicord_gateway::MemberRange; 1] = [[0, 99]];
+
+/// How long a bot roster ask covers. OP 8 answers can be lost without
+/// closing the session, and asking every frame instead gets rate-limited;
+///
+/// this throttles repeats while still healing a dropped ask.
+const BOT_ROSTER_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One person typing.
 #[derive(Debug, Clone)]
@@ -115,6 +122,12 @@ pub enum LiveEvent {
     MemberChunk {
         guild: GuildId,
         members: Vec<gumicord_model::Member>,
+        /// Present for bot OP 8 responses; absent for targeted user requests.
+        index: Option<usize>,
+        count: Option<usize>,
+        /// Who is online, from the chunk's own `presences`. Empty for
+        /// targeted user requests, which never carry any.
+        presences: Vec<(UserId, Status)>,
     },
     /// Someone started typing.
     Typing {
@@ -197,6 +210,17 @@ pub struct Live {
     /// Widened on scroll: the gateway re-sends the subscription when the
     /// ranges change and skips an identical one, so announcing again is free.
     member_rows: std::collections::HashMap<GuildId, Vec<gumicord_gateway::MemberRange>>,
+    /// A bot's roster, accumulated across OP 8 chunks keyed by user. Chunks
+    /// carry no grouping, so the rows are rebuilt from this on every chunk.
+    bot_roster: std::collections::HashMap<
+        GuildId,
+        std::collections::HashMap<UserId, (gumicord_model::Member, Status)>,
+    >,
+    /// Guilds whose roster was asked for, with when. OP 8 is rate-limited
+    /// per session; asking every frame gets the connection closed.
+    bot_asked: std::collections::HashMap<GuildId, std::time::Instant>,
+    /// Guilds whose chunks all arrived. Only those skip asking again.
+    bot_complete: HashSet<GuildId>,
     /// Ourselves, so our own typing indicator is not shown.
     me: Option<UserId>,
     /// Our status. READY starts it; presences about us keep it current, so
@@ -239,6 +263,9 @@ impl Live {
             typing: std::collections::HashMap::new(),
             members: std::collections::HashMap::new(),
             member_rows: std::collections::HashMap::new(),
+            bot_roster: std::collections::HashMap::new(),
+            bot_asked: std::collections::HashMap::new(),
+            bot_complete: HashSet::new(),
             me: None,
             current_account_cache: None,
         }
@@ -268,6 +295,9 @@ impl Live {
         self.asked_members.clear();
         self.members.clear();
         self.member_rows.clear();
+        self.bot_roster.clear();
+        self.bot_asked.clear();
+        self.bot_complete.clear();
         self.typing.clear();
         self.last_channel = None;
         self.started = false;
@@ -459,7 +489,12 @@ impl Live {
         // Sent every time: without it neither new messages nor typing
         // indicators arrive for the new channel. Whatever rows were widened
         // on scroll stay asked for: narrowing again would drop them.
-        if let Some(subs) = &self.subs {
+        if self.rest.as_ref().is_some_and(RestClient::is_bot) {
+            // Bots do not support the user-client member-list
+            // subscription. Their list comes through OP 8 chunks, asked
+            // once: OP 8 is rate-limited per session.
+            self.request_bot_roster(guild);
+        } else if let Some(subs) = &self.subs {
             let rows = self
                 .member_rows
                 .entry(guild)
@@ -595,6 +630,12 @@ impl Live {
         if want.is_empty() {
             return;
         }
+        // Bot member lists are requested as OP 8 chunks when a guild opens;
+        // targeted member requests would only update the cache, not the
+        // visible member-list model.
+        if self.rest.as_ref().is_some_and(RestClient::is_bot) {
+            return;
+        }
         tracing::debug!(users = want.len(), "requesting unknown members");
         for part in want.chunks(CHUNK) {
             subs.request_members(guild, part.to_vec());
@@ -627,6 +668,70 @@ impl Live {
         subs.watch(guild, channel, asked);
     }
 
+    /// Asks for a bot guild's roster. OP 8 answers in chunks, which
+    /// accumulate in `bot_roster`.
+    ///
+    /// Sent only over a live session: an ask leaving before READY is
+    /// dropped by the server, and asking every frame instead gets the
+    /// session rate-limited. A recent ask covers repeats; an old one
+    /// without a completed roster is sent again, in case its answer was
+    /// lost without closing the session.
+    fn request_bot_roster(&mut self, guild: GuildId) {
+        if self.bot_complete.contains(&guild) {
+            return;
+        }
+        if self.link != Link::Up {
+            return;
+        }
+        let Some(subs) = &self.subs else { return };
+        if self
+            .bot_asked
+            .get(&guild)
+            .is_some_and(|at| at.elapsed() < BOT_ROSTER_RETRY)
+        {
+            return;
+        }
+        self.bot_asked.insert(guild, std::time::Instant::now());
+        tracing::debug!(%guild, "requesting bot member list");
+        subs.request_all_members(guild);
+    }
+
+    /// Re-asks for the watched bot guild's roster after a reconnect. Chunks
+    /// in flight belong to the old connection; the kept roster merges any
+    /// repeats by user, so asking again is safe.
+    fn refresh_bot_roster(&mut self) {
+        if !self.rest.as_ref().is_some_and(RestClient::is_bot) {
+            return;
+        }
+        let Some(channel) = self.watching else { return };
+        let Some(guild) = self.store.channel(channel).and_then(|c| c.guild_id) else {
+            return;
+        };
+        if self.bot_complete.contains(&guild) {
+            return;
+        }
+        self.bot_asked.remove(&guild);
+        self.request_bot_roster(guild);
+    }
+
+    /// Rebuilds one bot guild's rows from its roster: chunks and roles
+    /// arrive separately, so either one regroups what is held.
+    fn rebuild_bot_rows(&mut self, guild: GuildId) -> bool {
+        let (rows, online, total) = bot_rows(
+            self.bot_roster.get(&guild),
+            self.store.guild_roles(guild),
+            guild,
+        );
+        self.members.entry(guild).or_default().apply(
+            gumicord_gateway::member_list::MemberListUpdate {
+                guild,
+                online,
+                total,
+                ops: vec![ListOp::Sync { start: 0, rows }],
+            },
+        )
+    }
+
     /// Marks a channel read locally, then tells the server.
     ///
     /// Waiting for the round trip would leave something already being read
@@ -643,6 +748,13 @@ impl Live {
         let (Some(rt), Some(rest)) = (&self.rt, &self.rest) else {
             return true;
         };
+        // MESSAGE_ACK is a user-account endpoint. A bot can read and write
+        // channel messages, but it has no user read-state to update. Sending
+        // this anyway returns an auth error, which used to be mistaken for a
+        // revoked token and signed the newly logged-in bot out immediately.
+        if rest.is_bot() {
+            return true;
+        }
         let (rest, tx, waker) = (rest.clone(), self.tx.clone(), self.waker.clone());
         rt.spawn(async move {
             if let Err(e) = rest.ack_message(channel, last).await {
@@ -816,6 +928,14 @@ impl Live {
                 }
                 self.apply_sidebar(folders);
                 self.save_guilds();
+                // A fresh session drops OP 8 answers in flight and may
+                // carry a different intent set; ask the roster anew. The
+                // kept roster merges repeats by user.
+                if self.rest.as_ref().is_some_and(RestClient::is_bot) {
+                    self.bot_asked.clear();
+                    self.bot_complete.clear();
+                }
+                self.refresh_bot_roster();
                 true
             }
             LiveEvent::Typing {
@@ -862,8 +982,13 @@ impl Live {
                 }
             }
             LiveEvent::GuildChanged(g) => {
+                let id = g.id;
                 self.store.upsert_guild(*g);
                 self.save_guilds();
+                // Roles arrive apart from chunks; regroup what is held.
+                if self.bot_roster.contains_key(&id) {
+                    return self.rebuild_bot_rows(id);
+                }
                 true
             }
             LiveEvent::Posted(m) => {
@@ -972,7 +1097,43 @@ impl Live {
                 }
                 changed
             }
-            LiveEvent::MemberChunk { guild, members } => {
+            LiveEvent::MemberChunk {
+                guild,
+                members,
+                index,
+                count,
+                presences,
+            } => {
+                if let Some(index) = index {
+                    // Bot roster chunks: accumulate by user and regroup.
+                    // Chunks arrive flat and in any order, so offsets are
+                    // never trusted and counts are the roster held.
+                    if members.is_empty() {
+                        tracing::warn!(%guild, "empty member chunk; the bot may lack the Server Members intent");
+                    }
+                    let table: std::collections::HashMap<UserId, Status> =
+                        presences.into_iter().collect();
+                    let roster = self.bot_roster.entry(guild).or_default();
+                    for member in members {
+                        let Some(user) = member.user.as_ref().map(|u| u.id) else {
+                            continue;
+                        };
+                        let status = table.get(&user).copied().unwrap_or(Status::Offline);
+                        roster.insert(user, (member.clone(), status));
+                        self.store.remember_member(guild, user, member);
+                    }
+                    if count.is_some_and(|c| index + 1 >= c) {
+                        self.bot_complete.insert(guild);
+                    }
+                    tracing::debug!(
+                        %guild,
+                        roster = self.bot_roster.get(&guild).map_or(0, |r| r.len()),
+                        index,
+                        count,
+                        "bot roster merged"
+                    );
+                    return self.rebuild_bot_rows(guild);
+                }
                 let mut changed = false;
                 for m in members {
                     // Skip entries with no user.
@@ -986,7 +1147,13 @@ impl Live {
             }
             LiveEvent::Link(link) => {
                 let changed = self.link != link;
+                let resumed = matches!(link, Link::Up) && self.link != Link::Up;
                 self.link = link;
+                // A resume can drop OP 8 answers in flight; ask again
+                // unless the roster already completed.
+                if resumed {
+                    self.refresh_bot_roster();
+                }
                 changed
             }
             LiveEvent::TokenRejected => {
@@ -1188,11 +1355,153 @@ fn members_chunk(data: &serde_json::Value) -> Option<LiveEvent> {
         .filter_map(|m| serde_json::from_value(m.clone()).ok())
         .collect();
 
-    tracing::debug!(members = members.len(), "requested members arrived");
+    // OP 8 answers carry presences apart from members; without them every
+    // bot roster would read as offline.
+    let presences: Vec<(UserId, Status)> = data
+        .get("presences")
+        .and_then(|p| p.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|p| presence_of(p).and_then(|(user, status)| status.map(|s| (user, s))))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    tracing::debug!(
+        members = members.len(),
+        index = data.get("chunk_index").and_then(serde_json::Value::as_u64),
+        count = data.get("chunk_count").and_then(serde_json::Value::as_u64),
+        "requested members arrived"
+    );
+    let index = data
+        .get("chunk_index")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as usize);
+    let count = data
+        .get("chunk_count")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as usize);
     Some(LiveEvent::MemberChunk {
         guild: GuildId::from(guild),
         members,
+        index,
+        count,
+        presences,
     })
+}
+
+/// Groups a bot roster the way the official list groups: hoisted roles by
+/// position, then online, then offline. OP 8 chunks arrive flat, so the
+/// headings are built here from the guild's roles and the counts are the
+/// roster actually held. Offline members always land under "offline",
+/// whatever roles they hold.
+fn bot_rows(
+    roster: Option<&std::collections::HashMap<UserId, (gumicord_model::Member, Status)>>,
+    roles: Option<&[gumicord_model::Role]>,
+    guild: GuildId,
+) -> (Vec<MemberRow>, u32, u32) {
+    struct Person<'a> {
+        user: UserId,
+        member: &'a gumicord_model::Member,
+        status: Status,
+    }
+
+    fn name_key(p: &Person) -> String {
+        p.member
+            .nick
+            .clone()
+            .or_else(|| {
+                p.member
+                    .user
+                    .as_ref()
+                    .map(|u| u.global_name.clone().unwrap_or_else(|| u.username.clone()))
+            })
+            .unwrap_or_default()
+            .to_lowercase()
+    }
+
+    let Some(roster) = roster else {
+        return (Vec::new(), 0, 0);
+    };
+    let mut people: Vec<Person> = roster
+        .iter()
+        .filter_map(|(user, (member, status))| {
+            member.user.as_ref()?;
+            Some(Person {
+                user: *user,
+                member,
+                status: *status,
+            })
+        })
+        .collect();
+    people.sort_by_key(|p| p.user.get());
+
+    // Hoisted roles, highest position first. @everyone shares the guild's
+    // id and is never a heading.
+    let mut hoisted: Vec<&gumicord_model::Role> = roles
+        .unwrap_or(&[])
+        .iter()
+        .filter(|r| r.hoist && r.id.get() != guild.get())
+        .collect();
+    hoisted.sort_by(|a, b| {
+        b.position
+            .cmp(&a.position)
+            .then(a.id.get().cmp(&b.id.get()))
+    });
+    let slot: std::collections::HashMap<RoleId, usize> =
+        hoisted.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
+
+    // One bucket per role, then online, then offline.
+    let mut buckets: Vec<Vec<Person>> = Vec::new();
+    buckets.resize_with(hoisted.len() + 2, Vec::new);
+    let (online_at, offline_at) = (hoisted.len(), hoisted.len() + 1);
+    let mut online = 0u32;
+    for p in people {
+        if matches!(p.status, Status::Online | Status::Idle | Status::Dnd) {
+            online += 1;
+            match p.member.roles.iter().filter_map(|r| slot.get(r)).max() {
+                Some(i) => buckets[*i].push(p),
+                None => buckets[online_at].push(p),
+            }
+        } else {
+            buckets[offline_at].push(p);
+        }
+    }
+    for bucket in buckets.iter_mut() {
+        bucket.sort_by(|a, b| {
+            name_key(a)
+                .cmp(&name_key(b))
+                .then(a.user.get().cmp(&b.user.get()))
+        });
+    }
+
+    let mut rows = Vec::new();
+    let push_bucket = |id: String, people: &mut Vec<Person>, rows: &mut Vec<MemberRow>| {
+        if people.is_empty() {
+            return;
+        }
+        rows.push(MemberRow::Group {
+            id,
+            count: people.len() as u32,
+        });
+        rows.extend(people.drain(..).map(|p| {
+            MemberRow::Member(Box::new(MemberEntry {
+                member: p.member.clone(),
+                status: p.status,
+            }))
+        }));
+    };
+    for (i, role) in hoisted.iter().enumerate() {
+        push_bucket(role.id.get().to_string(), &mut buckets[i], &mut rows);
+    }
+    push_bucket("online".to_owned(), &mut buckets[online_at], &mut rows);
+    push_bucket("offline".to_owned(), &mut buckets[offline_at], &mut rows);
+
+    let total = rows
+        .iter()
+        .filter(|r| matches!(r, MemberRow::Member(_)))
+        .count() as u32;
+    (rows, online, total)
 }
 
 /// A delete carries only ids.
@@ -1351,6 +1660,11 @@ mod tests {
         });
         live.requested.insert(ch());
         live.member_rows.insert(GuildId::from(5u64), vec![[0, 99]]);
+        live.bot_roster
+            .insert(GuildId::from(5u64), std::collections::HashMap::new());
+        live.bot_asked
+            .insert(GuildId::from(5u64), std::time::Instant::now());
+        live.bot_complete.insert(GuildId::from(5u64));
         live.status = Some(Status::Online);
         live.me = Some(UserId::from(1u64));
         live.last_channel = Some(ch());
@@ -1361,6 +1675,9 @@ mod tests {
         assert!(live.last_channel().is_none());
         assert!(live.requested.is_empty());
         assert!(live.member_rows.is_empty());
+        assert!(live.bot_roster.is_empty());
+        assert!(live.bot_asked.is_empty());
+        assert!(live.bot_complete.is_empty());
         assert!(live.status.is_none());
         assert!(live.me.is_none());
         assert!(live.rest.is_none());
@@ -1815,5 +2132,243 @@ mod tests {
 
         live.extend_members(GuildId::from(9u64));
         assert!(live.member_rows.is_empty(), "asked for someone else");
+    }
+
+    /// A bot roster groups by hoisted role with honest counts, and chunks
+    /// arriving out of order still all land.
+    #[test]
+    fn bot_chunks_group_by_role_with_honest_counts() {
+        use gumicord_model::{Member, Role, RoleId, User};
+
+        let guild = GuildId::from(7u64);
+        let admin = RoleId::from(11u64);
+        let modo = RoleId::from(12u64);
+        let mut live = live();
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: vec![
+                Role {
+                    id: admin,
+                    name: "管理".to_owned(),
+                    position: 2,
+                    hoist: true,
+                    color: None,
+                },
+                Role {
+                    id: modo,
+                    name: "モデ".to_owned(),
+                    position: 1,
+                    hoist: true,
+                    color: None,
+                },
+            ],
+        });
+
+        fn member(id: u64, name: &str, roles: Vec<RoleId>) -> Member {
+            Member {
+                nick: None,
+                avatar_hash: None,
+                roles,
+                joined_at: None,
+                user: Some(User {
+                    id: UserId::from(id),
+                    username: name.to_owned(),
+                    global_name: None,
+                    discriminator: "0".to_owned(),
+                    avatar_hash: None,
+                    bot: false,
+                }),
+            }
+        }
+
+        // Second chunk first: order must not matter.
+        live.apply_for_test(LiveEvent::MemberChunk {
+            guild,
+            members: vec![member(3, "cara", vec![]), member(4, "dan", vec![admin])],
+            index: Some(1),
+            count: Some(2),
+            presences: vec![(UserId::from(3), Status::Idle)],
+        });
+        live.apply_for_test(LiveEvent::MemberChunk {
+            guild,
+            members: vec![
+                member(1, "alice", vec![admin]),
+                member(2, "bob", vec![modo]),
+            ],
+            index: Some(0),
+            count: Some(2),
+            presences: vec![(UserId::from(1), Status::Online)],
+        });
+
+        let list = live.members(guild).expect("roster held");
+        let shown: Vec<String> = list
+            .rows()
+            .iter()
+            .map(|r| match r {
+                MemberRow::Member(m) => m.member.user.as_ref().expect("居る").username.clone(),
+                MemberRow::Group { id, count } => format!("[{id} {count}]"),
+            })
+            .collect();
+        // dan is offline, so he lands under offline despite his role, and
+        // the mod heading stays empty and is skipped.
+        assert_eq!(
+            shown,
+            vec![
+                "[11 1]",
+                "alice",
+                "[online 1]",
+                "cara",
+                "[offline 2]",
+                "bob",
+                "dan"
+            ]
+        );
+        assert_eq!(list.online(), 2);
+        assert_eq!(list.total(), 4);
+        assert!(live.bot_complete.contains(&guild));
+    }
+
+    /// Roles arriving after the chunks regroup what is held.
+    #[test]
+    fn bot_roles_arriving_late_regroup_the_roster() {
+        use gumicord_model::{Member, Role, RoleId, User};
+
+        let guild = GuildId::from(7u64);
+        let admin = RoleId::from(11u64);
+        let mut live = live();
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: Vec::new(),
+        });
+        live.apply_for_test(LiveEvent::MemberChunk {
+            guild,
+            members: vec![Member {
+                nick: None,
+                avatar_hash: None,
+                roles: vec![admin],
+                joined_at: None,
+                user: Some(User {
+                    id: UserId::from(1u64),
+                    username: "alice".to_owned(),
+                    global_name: None,
+                    discriminator: "0".to_owned(),
+                    avatar_hash: None,
+                    bot: false,
+                }),
+            }],
+            index: Some(0),
+            count: Some(1),
+            presences: vec![(UserId::from(1u64), Status::Online)],
+        });
+
+        // No roles known yet: everyone lands under online.
+        let shown = |live: &Live| {
+            live.members(guild)
+                .expect("roster held")
+                .rows()
+                .iter()
+                .map(|r| match r {
+                    MemberRow::Member(m) => m.member.user.as_ref().expect("居る").username.clone(),
+                    MemberRow::Group { id, count } => format!("[{id} {count}]"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&live), vec!["[online 1]", "alice"]);
+
+        live.apply_for_test(LiveEvent::GuildChanged(Box::new(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: vec![Role {
+                id: admin,
+                name: "管理".to_owned(),
+                position: 2,
+                hoist: true,
+                color: None,
+            }],
+        })));
+        assert_eq!(shown(&live), vec!["[11 1]", "alice"]);
+    }
+
+    /// A bot roster is asked once a live session exists; asking every
+    /// frame would rate-limit the session before a large guild finishes,
+    /// and asking before READY is dropped by the server. A resume re-asks
+    /// unless the roster already completed.
+    #[test]
+    fn bot_roster_is_asked_once_until_reconnect() {
+        use gumicord_model::{Channel, ChannelKind};
+
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        let (_gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.rest = Some(RestClient::anonymous().unwrap().with_token(Token::bot("x")));
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: vec![Channel {
+                id: ch(),
+                kind: ChannelKind::GuildText,
+                name: Some("一般".to_owned()),
+                guild_id: Some(guild),
+                parent_id: None,
+                position: 0,
+                topic: None,
+                nsfw: false,
+                recipients: Vec::new(),
+                last_message_id: None,
+            }],
+            roles: Vec::new(),
+        });
+
+        // Before the session is up nothing leaves, not even once.
+        live.open_channel(guild, ch());
+        assert!(
+            !live.bot_asked.contains_key(&guild),
+            "asking before READY is dropped by the server"
+        );
+
+        live.link = Link::Up;
+        live.open_channel(guild, ch());
+        let first = live.bot_asked.get(&guild).copied().expect("asked once");
+        live.open_channel(guild, ch());
+        assert_eq!(
+            live.bot_asked.get(&guild),
+            Some(&first),
+            "asked once, not once per frame"
+        );
+
+        // A stale ask without a completed roster goes out again, in case
+        // its answer was lost without closing the session.
+        live.bot_asked.insert(guild, first - BOT_ROSTER_RETRY);
+        live.open_channel(guild, ch());
+        assert!(
+            live.bot_asked.get(&guild).is_some_and(|at| *at > first),
+            "stale ask is retried"
+        );
+
+        // Reconnecting alone asks nothing; the resume after it does.
+        live.apply_for_test(LiveEvent::Link(Link::Reconnecting("x".to_owned())));
+        assert!(live.bot_asked.contains_key(&guild));
+        live.apply_for_test(LiveEvent::Link(Link::Up));
+        assert!(live.bot_asked.contains_key(&guild), "resume re-asks");
+
+        // Once complete, a resume asks nothing more.
+        live.bot_complete.insert(guild);
+        live.bot_asked.clear();
+        live.apply_for_test(LiveEvent::Link(Link::Up));
+        assert!(!live.bot_asked.contains_key(&guild));
     }
 }

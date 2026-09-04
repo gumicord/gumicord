@@ -260,6 +260,12 @@ impl Store {
         self.guilds.get(&id)
     }
 
+    /// A guild's roles, if known. Needed to group a bot's member list,
+    /// which arrives as flat chunks rather than grouped rows.
+    pub fn guild_roles(&self, guild: GuildId) -> Option<&[Role]> {
+        self.roles.get(&guild).map(Vec::as_slice)
+    }
+
     /// A role's name, if known. Never the id: an 18-digit number as a heading
     /// tells the reader nothing.
     pub fn role_name(&self, guild: GuildId, role: RoleId) -> Option<&str> {

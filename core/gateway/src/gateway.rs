@@ -255,6 +255,11 @@ impl Ready {
 /// Keeps the connection alive.
 pub struct Gateway {
     token: Token,
+    /// Which bot intent combination is currently being tried. Discord closes
+    /// the connection with 4014 when one or more privileged intents are not
+    /// enabled; the next combination removes only the privilege candidates
+    /// needed to find a usable set.
+    bot_intent_attempt: usize,
     conn: Option<Connection>,
     /// What resuming needs; survives a disconnect.
     session: Option<SessionInfo>,
@@ -274,6 +279,9 @@ enum Request {
     Watch(GuildId, ChannelId, Vec<MemberRange>),
     /// We need these members in this guild.
     Members(GuildId, Vec<UserId>),
+    /// Bot-only member list request. Unlike a user subscription, this is the
+    /// standard Gateway OP 8 flow and requires the GUILD_MEMBERS intent.
+    AllMembers(GuildId),
 }
 
 /// Tells the gateway what is being watched.
@@ -314,6 +322,11 @@ impl Subscriptions {
             return;
         }
         let _ = self.tx.send(Request::Members(guild, users));
+    }
+
+    /// Requests the bot's member list in Gateway chunks.
+    pub fn request_all_members(&self, guild: GuildId) {
+        let _ = self.tx.send(Request::AllMembers(guild));
     }
 }
 
@@ -371,6 +384,21 @@ fn request_members(guild: GuildId, users: &[UserId]) -> serde_json::Value {
     })
 }
 
+/// Fetches every member of a guild in chunks.
+/// `limit: 0` means uncapped: a large community guild must arrive whole, and
+/// capping it would show a headcount the official client does not.
+fn request_all_members(guild: GuildId) -> serde_json::Value {
+    json!({
+        "op": OP_REQUEST_MEMBERS,
+        "d": {
+            "guild_id": guild.get().to_string(),
+            "query": "",
+            "limit": 0,
+            "presences": true,
+        },
+    })
+}
+
 impl core::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Never prints the token.
@@ -395,6 +423,7 @@ impl Gateway {
         (
             Gateway {
                 token,
+                bot_intent_attempt: 0,
                 conn: None,
                 session: None,
                 backoff: BACKOFF_MIN,
@@ -424,6 +453,24 @@ impl Gateway {
         Ok(())
     }
 
+    /// Drops only privileged intents after Discord rejects the current set.
+    /// There are three privileged intents, so eight combinations are enough
+    /// to preserve every intent that this bot is actually allowed to use.
+    fn try_next_bot_intents(&mut self, error: &GatewayError) -> bool {
+        if self.token.kind() != TokenKind::Bot
+            || !matches!(error, GatewayError::Closed(4014))
+            || self.bot_intent_attempt + 1 >= BOT_INTENT_MASKS.len()
+        {
+            return false;
+        }
+        self.bot_intent_attempt += 1;
+        tracing::warn!(
+            intents = bot_intents(self.bot_intent_attempt),
+            "bot privileged intent rejected; retrying with fewer intents"
+        );
+        true
+    }
+
     /// Advances to the next event. After `Fatal` it just repeats itself.
     pub async fn next(&mut self) -> Event {
         loop {
@@ -435,6 +482,10 @@ impl Gateway {
                 match self.open().await {
                     Ok(()) => {}
                     Err(e) => {
+                        if self.try_next_bot_intents(&e) {
+                            self.session = None;
+                            continue;
+                        }
                         if let Some(fatal) = fatal_of(&e) {
                             return Event::Fatal(fatal);
                         }
@@ -487,6 +538,10 @@ impl Gateway {
                 Ok(None) => continue,
                 Err(e) => {
                     self.conn = None;
+                    if self.try_next_bot_intents(&e) {
+                        self.session = None;
+                        continue;
+                    }
                     if let Some(fatal) = fatal_of(&e) {
                         // Not resumable; drop it.
                         self.session = None;
@@ -538,7 +593,8 @@ impl Gateway {
             }
             None => {
                 tracing::debug!("identifying");
-                conn.send(identify(&self.token)).await?;
+                conn.send(identify(&self.token, bot_intents(self.bot_intent_attempt)))
+                    .await?;
             }
         }
 
@@ -580,13 +636,13 @@ struct Payload {
 /// The claim comes from one place; rebuilding it here would let it drift from
 /// the REST header, and the disagreement is itself a signal. A bot sends
 /// `intents`, a user sends `capabilities` — the two shapes differ on the wire.
-fn identify(token: &Token) -> serde_json::Value {
+fn identify(token: &Token, bot_intents: u64) -> serde_json::Value {
     match token.kind() {
         TokenKind::Bot => json!({
             "op": OP_IDENTIFY,
             "d": {
                 "token": token.expose(),
-                "intents": BOT_INTENTS,
+                "intents": bot_intents,
                 "properties": Identity::detect().properties(),
                 "compress": false,
             },
@@ -618,9 +674,25 @@ fn identify(token: &Token) -> serde_json::Value {
     }
 }
 
-/// Intents a bot identifies with. GUILDS | GUILD_MESSAGES; neither is
-/// privileged, so a hidden-dev bot logs in without Developer Portal setup.
-const BOT_INTENTS: u64 = (1 << 0) | (1 << 9);
+/// Every currently defined Gateway intent. The three privileged intents are
+/// included on the first attempt; if the application has not enabled one,
+/// `Gateway` retries with the smallest compatible combination.
+const ALL_BOT_INTENTS: u64 = ((1 << 17) - 1) | (1 << 20) | (1 << 21) | (1 << 24) | (1 << 25);
+const PRIVILEGED_BOT_INTENTS: u64 = (1 << 1) | (1 << 8) | (1 << 15);
+const BOT_INTENT_MASKS: [u64; 8] = [
+    ALL_BOT_INTENTS,
+    ALL_BOT_INTENTS & !(1 << 1),
+    ALL_BOT_INTENTS & !(1 << 8),
+    ALL_BOT_INTENTS & !(1 << 15),
+    ALL_BOT_INTENTS & !(1 << 1) & !(1 << 8),
+    ALL_BOT_INTENTS & !(1 << 1) & !(1 << 15),
+    ALL_BOT_INTENTS & !(1 << 8) & !(1 << 15),
+    ALL_BOT_INTENTS & !PRIVILEGED_BOT_INTENTS,
+];
+
+fn bot_intents(attempt: usize) -> u64 {
+    BOT_INTENT_MASKS[attempt]
+}
 
 /// Capabilities requested with a user token.
 ///
@@ -745,12 +817,16 @@ impl Connection {
             Step::Received(Some(())) => Ok(None),
             Step::Received(None) => Err(GatewayError::Closed(CLOSE_ABNORMAL)),
             Step::Watch(Some(Request::Members(guild, users))) => {
-                // Bots have no use for the user-token member request.
-                if is_bot {
-                    return Ok(None);
-                }
                 tracing::debug!(%guild, users = users.len(), "requesting members by id");
                 self.send(request_members(guild, &users)).await?;
+                Ok(None)
+            }
+            Step::Watch(Some(Request::AllMembers(guild))) => {
+                if !is_bot {
+                    return Ok(None);
+                }
+                tracing::debug!(%guild, "requesting bot member list");
+                self.send(request_all_members(guild)).await?;
                 Ok(None)
             }
             Step::Watch(Some(Request::Watch(guild, channel, ranges))) => {
@@ -1043,6 +1119,18 @@ mod tests {
         );
     }
 
+    /// The bot's roster fetch is uncapped: a large community guild must
+    /// arrive whole rather than stop at a round thousand.
+    #[test]
+    fn the_bot_roster_ask_has_no_limit() {
+        let payload = request_all_members(GuildId::from(2));
+        assert_eq!(payload["op"], OP_REQUEST_MEMBERS);
+        assert_eq!(payload["d"]["guild_id"], "2");
+        assert_eq!(payload["d"]["query"], "");
+        assert_eq!(payload["d"]["limit"], 0);
+        assert_eq!(payload["d"]["presences"], true);
+    }
+
     /// Unknown codes are retried; Discord adds them without notice.
     #[test]
     fn unknown_close_codes_are_retried() {
@@ -1101,7 +1189,7 @@ mod tests {
     /// and REST agree, since a disagreement is itself a signal.
     #[test]
     fn identify_matches_the_rest_headers() {
-        let payload = identify(&Token::new("t"));
+        let payload = identify(&Token::new("t"), bot_intents(0));
         let props = &payload["d"]["properties"];
 
         assert_eq!(
@@ -1119,11 +1207,23 @@ mod tests {
     /// user-token subscribe fields.
     #[test]
     fn a_bot_identifies_with_intents() {
-        let payload = identify(&Token::bot("t"));
+        let payload = identify(&Token::bot("t"), bot_intents(0));
         assert_eq!(payload["d"]["token"], "t");
-        assert_eq!(payload["d"]["intents"], (1 << 0) | (1 << 9));
+        assert_eq!(payload["d"]["intents"], ALL_BOT_INTENTS);
         assert!(payload["d"].get("capabilities").is_none());
         assert!(payload["d"].get("client_state").is_none());
+    }
+
+    #[test]
+    fn bot_intent_fallback_removes_only_privileged_flags() {
+        for mask in BOT_INTENT_MASKS {
+            assert_eq!(
+                mask & !PRIVILEGED_BOT_INTENTS,
+                ALL_BOT_INTENTS & !PRIVILEGED_BOT_INTENTS
+            );
+        }
+        assert_eq!(BOT_INTENT_MASKS[0], ALL_BOT_INTENTS);
+        assert_eq!(BOT_INTENT_MASKS[7] & PRIVILEGED_BOT_INTENTS, 0);
     }
 
     /// READY parses, and unknown fields do not break it.

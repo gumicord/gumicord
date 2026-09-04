@@ -25,6 +25,10 @@ use crate::route::{Method, Route};
 
 /// The one place the API version appears.
 const API_BASE: &str = "https://discord.com/api/v9";
+/// Bot requests must identify as a bot client. Sending the desktop Discord
+/// client UA used by user sessions can be rejected by Discord's edge layer
+/// with error 40333 before the API checks the token.
+const BOT_USER_AGENT: &str = "Gumicord (https://github.com/gumicord/gumicord, 0.0.0)";
 
 /// Retries after a 429. Bounded, so a fault on our side cannot hammer Discord
 /// forever.
@@ -154,6 +158,15 @@ impl RestClient {
         self.token.is_some()
     }
 
+    /// Whether this client is authenticated as a bot application.
+    ///
+    /// Bots do not have the user account endpoints used for read receipts.
+    /// Callers can use this before scheduling user-only operations instead of
+    /// turning an expected bot response into a dead-session signal.
+    pub fn is_bot(&self) -> bool {
+        self.is_bot
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, route: Route) -> Result<T, RestError> {
         self.send(route, None::<&()>).await
     }
@@ -252,12 +265,18 @@ impl RestClient {
             Method::Delete => self.http.delete(url),
         };
 
-        // The official client sends these on every request, so their absence
-        // is itself a signal.
-        req = req
-            .header("X-Super-Properties", self.identity.super_properties())
-            .header("X-Discord-Locale", &self.identity.system_locale)
-            .header("X-Debug-Options", "bugReporterEnabled");
+        if self.is_bot {
+            // These are user-client headers. Bots use the bot User-Agent and
+            // should not claim to be the Discord desktop client.
+            req = req.header("User-Agent", BOT_USER_AGENT);
+        } else {
+            // The official client sends these on every user request, so their
+            // absence is itself a signal.
+            req = req
+                .header("X-Super-Properties", self.identity.super_properties())
+                .header("X-Discord-Locale", &self.identity.system_locale)
+                .header("X-Debug-Options", "bugReporterEnabled");
+        }
 
         // User tokens take no `Bot ` prefix; a bot needs it. A token stored
         // from an earlier login carries its kind, so this never drifts from
@@ -377,6 +396,8 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(bot_req.headers()["authorization"], "Bot b-secret");
+        assert_eq!(bot_req.headers()["user-agent"], BOT_USER_AGENT);
+        assert!(bot_req.headers().get("x-super-properties").is_none());
 
         let user = base.with_token(Token::new("u-secret"));
         let user_req = user
@@ -384,9 +405,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(user_req.headers()["authorization"], "u-secret");
+        assert!(user_req.headers().get("x-super-properties").is_some());
 
         assert!(bot.is_bot);
         assert!(!user.is_bot);
+        assert!(bot.is_bot());
+        assert!(!user.is_bot());
     }
 
     #[test]
