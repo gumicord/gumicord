@@ -230,6 +230,12 @@ enum LoginField {
 /// The app state, and building the UITree from it.
 pub struct Gumicord {
     theme: Option<Theme>,
+    /// The theme file being watched, if one was configured. The bundled
+    /// theme has no file, so there is nothing to watch for it.
+    theme_path: Option<std::path::PathBuf>,
+    /// What the watched file looked like when last loaded. Compared every
+    /// frame; the file itself is only read when this moves.
+    theme_mtime: Option<std::time::SystemTime>,
     /// Dropping this stops everything running on it.
     runtime: Option<tokio::runtime::Runtime>,
     /// Wakes the event loop; handed to the gateway after login.
@@ -362,9 +368,13 @@ impl Gumicord {
         };
 
         let (account_switch_tx, account_switch_rx) = std::sync::mpsc::channel();
+        let theme_path = theme_file();
+        let theme_mtime = theme_path.as_ref().and_then(|p| mtime_of(p));
 
         Gumicord {
             theme: load_theme(),
+            theme_path,
+            theme_mtime,
             runtime: None,
             waker: None,
             login,
@@ -459,6 +469,46 @@ fn load_theme() -> Option<Theme> {
         tracing::warn!("theme: {d}");
     }
     result.theme
+}
+
+/// The configured theme file, if any. An empty or missing variable both
+/// mean the bundled theme.
+fn theme_file() -> Option<std::path::PathBuf> {
+    std::env::var(THEME_ENV).ok().map(std::path::PathBuf::from)
+}
+
+/// When a file was last written, if that is still known.
+fn mtime_of(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+impl Gumicord {
+    /// Re-reads the theme file when it changed. Runs on the frame boundary,
+    /// never mid-build. A file that cannot be read or parsed leaves the
+    /// last good theme up: editors write broken JSON halfway through a save.
+    fn maybe_reload_theme(&mut self) -> bool {
+        let path = match &self.theme_path {
+            Some(path) => path.clone(),
+            None => return false,
+        };
+        if mtime_of(&path) == self.theme_mtime {
+            return false;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let result = Theme::parse(&src);
+        for d in &result.diagnostics {
+            tracing::warn!("theme: {d}");
+        }
+        let Some(theme) = result.theme else {
+            return false;
+        };
+        self.theme = Some(theme);
+        self.theme_mtime = mtime_of(&path);
+        tracing::info!(?path, "reloaded the theme");
+        true
+    }
 }
 
 impl Application for Gumicord {
@@ -567,6 +617,7 @@ impl Application for Gumicord {
         changed |= self.live.poll();
         // An arrived image counts as a change, or it never gets drawn.
         changed |= self.images.poll();
+        changed |= self.maybe_reload_theme();
 
         while let Ok(res) = self.account_switch_rx.try_recv() {
             changed = true;
@@ -5720,5 +5771,55 @@ mod plugin_tests {
             std::thread::yield_now();
         }
         assert!(found, "the sample patch never reached the tree; {seen:?}");
+    }
+}
+
+#[cfg(test)]
+mod theme_hot_reload_tests {
+    use super::*;
+
+    fn theme_file(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gumicord-theme-reload-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("theme.json")
+    }
+
+    fn watching(path: std::path::PathBuf) -> Gumicord {
+        let mut a = Gumicord::demo();
+        a.theme_path = Some(path);
+        a.theme_mtime = None;
+        a
+    }
+
+    #[test]
+    fn editing_the_theme_file_reapplies_it() {
+        let path = theme_file("reapply");
+        std::fs::write(&path, DEFAULT_THEME).unwrap();
+        let mut a = watching(path);
+
+        assert!(a.maybe_reload_theme());
+        assert!(a.theme.is_some());
+        assert!(!a.maybe_reload_theme(), "same file, no change");
+    }
+
+    #[test]
+    fn a_broken_edit_keeps_the_last_good_theme() {
+        let path = theme_file("broken");
+        std::fs::write(&path, DEFAULT_THEME).unwrap();
+        let mut a = watching(path);
+        assert!(a.maybe_reload_theme());
+
+        std::fs::write(a.theme_path.as_ref().unwrap(), "{broken").unwrap();
+        a.theme_mtime = None;
+        assert!(!a.maybe_reload_theme());
+        assert!(a.theme.is_some(), "the broken edit took the theme down");
+    }
+
+    #[test]
+    fn without_a_theme_file_there_is_nothing_to_watch() {
+        let mut a = Gumicord::demo();
+        a.theme_path = None;
+        assert!(!a.maybe_reload_theme());
     }
 }
