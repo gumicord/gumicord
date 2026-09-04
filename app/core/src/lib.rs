@@ -37,6 +37,7 @@ pub mod live;
 pub mod markdown;
 pub mod menu;
 pub mod session;
+pub mod time;
 
 use std::borrow::Cow;
 
@@ -2172,14 +2173,23 @@ impl Gumicord {
             .child(UiNode::text(NodeId::ChatHeaderTitle, &name).with_data(id))
             .child(UiNode::text(NodeId::ChatHeaderTopic, topic.unwrap_or_default()).with_data(id));
 
-        // The same author in a row skips the header line; the indent is the
-        // theme's.
+        // A day always starts labelled, and one header covers a run: same
+        // author, same day, close together. Anything else starts over.
         let rows = self.message_rows();
         let mut messages = UiNode::new(NodeId::ChatMessageList);
-        let mut prev: Option<&str> = None;
+        let mut prev: Option<(&str, &str, i64)> = None;
         for m in &rows {
-            messages = messages.child(self.message(m, prev == Some(&*m.author)));
-            prev = Some(&m.author);
+            if !m.day.is_empty() && prev.is_none_or(|(_, day, _)| day != m.day) {
+                messages = messages.child(Self::day_divider(&m.day));
+            }
+            let grouped = match prev {
+                Some((author, day, unix)) => {
+                    author == m.author && crate::time::continues(day, unix, &m.day, m.unix)
+                }
+                None => false,
+            };
+            messages = messages.child(self.message(m, grouped));
+            prev = Some((&m.author, &m.day, m.unix));
         }
         messages = messages.children(self.scrollbar(NodeId::ChatMessageList));
 
@@ -2292,6 +2302,17 @@ impl Gumicord {
             return typing_line(&self.live.typing_in(channel));
         }
         "  みどり が入力中…".to_owned()
+    }
+
+    /// A day divider: the date centred with a line reaching both sides.
+    /// The lines are spacers the theme paints; soaking the row's remainder
+    /// keeps the label centred whatever the width.
+    fn day_divider(day: &str) -> UiNode {
+        UiNode::new(NodeId::LayoutRow)
+            .with_key(Key::Slot("day_divider"))
+            .child(UiNode::new(NodeId::LayoutSpacer).with_key(Key::Slot("day_divider_line")))
+            .child(UiNode::text(NodeId::ChatMessageListDayDivider, day))
+            .child(UiNode::new(NodeId::LayoutSpacer).with_key(Key::Slot("day_divider_line")))
     }
 
     /// One message. `grouped` drops the avatar and author line; the indent is
@@ -2450,6 +2471,10 @@ struct MessageRow {
     /// The role colour; where it lands is the theme's call.
     tint: Option<u32>,
     time: String,
+    /// Local day label, also the grouping key: equal strings share a day.
+    day: String,
+    /// Whole seconds, to tell a live run from yesterday's tail.
+    unix: i64,
     /// The parsed body. The raw string is deliberately absent: holding both
     /// invites drawing from the wrong one, and only the reader would notice.
     blocks: Vec<gumicord_markdown::Block>,
@@ -2693,12 +2718,17 @@ impl Gumicord {
             return demo::MESSAGES
                 .iter()
                 .chain(&self.sent)
-                .map(|m| MessageRow {
+                .enumerate()
+                .map(|(i, m)| MessageRow {
                     id: m.id,
                     author: m.author.to_string(),
                     avatar: None,
                     tint: None,
                     time: m.time.to_string(),
+                    // Demo shares one day so its runs still join; spacing
+                    // stays inside the grouping window.
+                    day: "今日".to_owned(),
+                    unix: i as i64 * 60,
                     blocks: gumicord_markdown::parse(&m.body),
                     mentioned: m.mentioned,
                 })
@@ -2724,6 +2754,7 @@ impl Gumicord {
                     .or_else(|| self.live.store().member(guild, m.author.id));
 
                 let blocks = gumicord_markdown::parse(&m.content);
+                let (time, day, unix) = row_time(&m.timestamp);
                 MessageRow {
                     id: m.id.get(),
                     // The per-guild name wins.
@@ -2744,7 +2775,9 @@ impl Gumicord {
                     // The topmost coloured role wins; where it lands is the
                     // theme's call.
                     tint: member.and_then(|x| self.live.store().member_tint(guild, &x.roles)),
-                    time: local_time(&m.timestamp),
+                    time,
+                    day,
+                    unix,
                     mentioned: m
                         .referenced_message
                         .as_ref()
@@ -2802,27 +2835,17 @@ fn initial(name: &str) -> String {
     name.chars().next().map(String::from).unwrap_or_default()
 }
 
-/// Formats an ISO 8601 timestamp as local `HH:MM`.
+/// Splits an ISO 8601 timestamp into local `HH:MM`, day label and instant.
 ///
-/// Discord returns UTC; showing it unshifted is hours out for most readers.
-/// An unparseable value is returned as-is rather than invented.
-fn local_time(iso: &str) -> String {
+/// Discord returns UTC; the day label doubles as the grouping key. Anything
+/// unparseable keeps the raw string for display and never groups.
+fn row_time(iso: &str) -> (String, String, i64) {
     // "2026-08-22T12:34:56.789000+00:00"
-    let Some((_, time)) = iso.split_once('T') else {
-        return iso.to_owned();
+    let Some(unix) = crate::time::parse_unix(iso) else {
+        return (iso.to_owned(), String::new(), 0);
     };
-    let mut parts = time.split(':');
-    let (Some(h), Some(m)) = (parts.next(), parts.next()) else {
-        return iso.to_owned();
-    };
-    let (Ok(h), Ok(m)) = (h.parse::<i32>(), m.parse::<i32>()) else {
-        return iso.to_owned();
-    };
-
-    let total = h * 60 + m + gumicord_platform::local_utc_offset_minutes();
-    // `rem_euclid` so a day boundary does not produce a negative remainder.
-    let total = total.rem_euclid(24 * 60);
-    format!("{:02}:{:02}", total / 60, total % 60)
+    let (day, h, m) = crate::time::local_day_hm(unix);
+    (format!("{h:02}:{m:02}"), day, unix)
 }
 
 /// A scrollbar. The thumb's size and position come from the renderer, since
@@ -4606,6 +4629,159 @@ mod member_tests {
         let row = &a.message_rows()[0];
         assert_eq!(row.author, "ねこ", "呼び名も出る");
         assert_eq!(row.tint, Some(0x00e0_5260), "役職の色も出る");
+    }
+
+    fn stamped(id: u64, user: u64, name: &str, timestamp: &str) -> Message {
+        let mut m = message(None, None);
+        m.id = MessageId::from(id);
+        m.author.id = UserId::from(user);
+        m.author.username = name.to_owned();
+        m.author.global_name = None;
+        m.timestamp = timestamp.to_owned();
+        m.member = None;
+        m
+    }
+
+    fn backlog(a: &mut Gumicord, messages: Vec<Message>) {
+        a.live
+            .store_mut()
+            .set_backlog(ChannelId::from(10u64), messages);
+    }
+
+    /// Consecutive messages from one author share a header; the tree marks
+    /// every message after the first grouped.
+    #[test]
+    fn close_messages_from_one_author_share_a_header() {
+        let mut a = app(message(None, None));
+        backlog(
+            &mut a,
+            vec![
+                stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00"),
+                stamped(2, 7, "nenneko", "2026-09-03T12:06:00+00:00"),
+            ],
+        );
+        let rows = a.message_rows();
+        assert_eq!(rows[0].day, rows[1].day);
+
+        let tree = a.chat_view();
+        let (mut dividers, mut lines, mut grouped) = (0, 0, Vec::new());
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessageListDayDivider {
+                dividers += 1;
+            }
+            if n.key == Some(Key::Slot("day_divider_line")) {
+                lines += 1;
+            }
+            if n.id == NodeId::ChatMessage {
+                grouped.push(n.states.contains(State::Grouped));
+            }
+        });
+        assert_eq!(dividers, 1, "one day, one divider");
+        assert_eq!(lines, 2, "a line reaches each side");
+        assert_eq!(grouped, vec![false, true]);
+    }
+
+    /// A new day breaks the run and draws its divider, even minutes apart.
+    /// A 26-hour gap always spans a local midnight, on any machine.
+    #[test]
+    fn a_new_day_breaks_the_run_and_draws_its_divider() {
+        let mut a = app(message(None, None));
+        backlog(
+            &mut a,
+            vec![
+                stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00"),
+                stamped(2, 7, "nenneko", "2026-09-04T14:00:00+00:00"),
+            ],
+        );
+        let rows = a.message_rows();
+        assert_ne!(rows[0].day, rows[1].day);
+
+        let tree = a.chat_view();
+        let (mut dividers, mut lines, mut grouped) = (0, 0, Vec::new());
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessageListDayDivider {
+                dividers += 1;
+            }
+            if n.key == Some(Key::Slot("day_divider_line")) {
+                lines += 1;
+            }
+            if n.id == NodeId::ChatMessage {
+                grouped.push(n.states.contains(State::Grouped));
+            }
+        });
+        assert_eq!(dividers, 2, "one divider per day, starting with the first");
+        assert_eq!(lines, 4, "a line reaches each side");
+        assert_eq!(grouped, vec![false, false]);
+    }
+
+    /// The date sits centred with a line reaching each side: the spacers
+    /// either side of the label hold equal widths on the same height.
+    #[test]
+    fn the_day_divider_centres_its_label_between_two_lines() {
+        let mut a = app(message(None, None));
+        backlog(
+            &mut a,
+            vec![stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00")],
+        );
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        };
+        let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+
+        let label = placed
+            .iter()
+            .find(|(id, _)| *id == NodeId::ChatMessageListDayDivider)
+            .map(|(_, r)| *r)
+            .expect("日付がない");
+        let mut lines: Vec<_> = placed
+            .iter()
+            .filter(|(id, r)| *id == NodeId::LayoutSpacer && r.h > 0.0 && r.h <= 2.0)
+            .map(|(_, r)| *r)
+            .collect();
+        assert_eq!(lines.len(), 2, "両側に線が1本ずつ");
+        lines.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let (left, right) = (lines[0], lines[1]);
+        assert!(
+            left.x + left.w <= label.x + 1.0,
+            "左の線がラベルに食い込んでいる"
+        );
+        assert!(
+            label.x + label.w <= right.x + 1.0,
+            "右の線がラベルに食い込んでいる"
+        );
+        assert!(
+            (left.w - right.w).abs() < 2.0,
+            "左右の線が均等でない {left:?} {right:?}"
+        );
+        assert!(
+            (left.y - label.y).abs() < label.h,
+            "線と文字が同じ高さにない"
+        );
+    }
+
+    /// Seven minutes apart starts over, even on the same day.
+    #[test]
+    fn a_long_pause_starts_over() {
+        let mut a = app(message(None, None));
+        backlog(
+            &mut a,
+            vec![
+                stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00"),
+                stamped(2, 7, "nenneko", "2026-09-03T12:07:00+00:00"),
+            ],
+        );
+        let rows = a.message_rows();
+        assert_eq!(rows[0].day, rows[1].day);
+
+        let tree = a.chat_view();
+        let mut grouped = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessage {
+                grouped.push(n.states.contains(State::Grouped));
+            }
+        });
+        assert_eq!(grouped, vec![false, false]);
     }
 
     /// The message's own member wins, being newer.

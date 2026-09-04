@@ -60,6 +60,7 @@ export type NodeId =
   | "chat.header.title"
   | "chat.header.topic"
   | "chat.message_list"
+  | "chat.message_list.day_divider"
   | "chat.message"
   | "chat.message.avatar"
   | "chat.message.header"

@@ -116,7 +116,7 @@ nav.guild_list
 | `unread` | 未読がある |
 | `mentioned` | メンションされている |
 | `loading` | 読み込み中 |
-| `grouped` | 直前と同じ送信者の続き / フォルダの中にいるサーバ |
+| `grouped` | 直前の続き (同じ送信者・同じ日・7 分以内) / フォルダの中にいるサーバ |
 | `collapsed` | 折り畳まれていて中身が出ていない (サーバフォルダ) |
 
 複数が同時に立ちうる。テーマ側での優先順位は [04-theme.md](04-theme.md) が定義する。
@@ -265,6 +265,7 @@ M1 で公開するフィールド。
 | `chat.header.title` | `ChannelData` | チャンネル名 |
 | `chat.header.topic` | `ChannelData` | トピック |
 | `chat.message_list` | — | メッセージ一覧 (FR-020) |
+| `chat.message_list.day_divider` | — | 日付の区切り (FR-020) |
 | `chat.message` | `MessageData` | メッセージ 1 件 (FR-020) |
 | `chat.message.avatar` | `MessageData` | 送信者アイコン |
 | `chat.message.header` | `MessageData` | 送信者行 |
@@ -338,7 +339,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 112 個** (中核 74 / プラグインも生成可 38)。
+**合計 113 個** (中核 75 / プラグインも生成可 38)。
 
 <!-- END GENERATED: node-ids -->
 

@@ -185,6 +185,7 @@ define_node_ids! {
     ChatHeaderTitle,          "chat.header.title",               Channel, Core,   "チャンネル名";
     ChatHeaderTopic,          "chat.header.topic",               Channel, Core,   "トピック";
     ChatMessageList,          "chat.message_list",               None,    Core,   "メッセージ一覧 (FR-020)";
+    ChatMessageListDayDivider, "chat.message_list.day_divider", None,    Core,   "日付の区切り (FR-020)";
     ChatMessage,              "chat.message",                    Message, Core,   "メッセージ 1 件 (FR-020)";
     ChatMessageAvatar,        "chat.message.avatar",             Message, Core,   "送信者アイコン";
     ChatMessageHeader,        "chat.message.header",             Message, Core,   "送信者行";

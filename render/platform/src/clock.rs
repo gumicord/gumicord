@@ -22,6 +22,7 @@ pub fn local_utc_offset_minutes() -> i32 {
 
         // Copied rather than imported: the constants live in
         // `SystemServices`, which would mean one more feature flag.
+        const UNKNOWN: u32 = 0;
         const STANDARD: u32 = 1;
         const DAYLIGHT: u32 = 2;
 
@@ -31,11 +32,12 @@ pub fn local_utc_offset_minutes() -> i32 {
             let kind = GetTimeZoneInformation(&mut info);
 
             // Windows' Bias runs local to UTC (UTC = local + Bias), so the
-            // sign is flipped.
+            // sign is flipped. UNKNOWN means no daylight saving, which
+            // still has a bias (Japan is UTC+9 year-round); only INVALID
+            // means unknown.
             let bias = match kind {
-                STANDARD => info.Bias + info.StandardBias,
+                UNKNOWN | STANDARD => info.Bias + info.StandardBias,
                 DAYLIGHT => info.Bias + info.DaylightBias,
-                // Includes TIME_ZONE_ID_INVALID: unknown, so do not shift.
                 _ => return 0,
             };
             -bias

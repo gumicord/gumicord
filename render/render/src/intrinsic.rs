@@ -275,6 +275,9 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
             .grow(1.0)
             .cross(Cross::Stretch)
             .scrollable_to_end(),
+        // A day divider's date stays on one line; the flanking spacers
+        // take the width instead.
+        ChatMessageListDayDivider => Intrinsic::row().cross(Cross::Center).one_line(),
         // Avatar beside body; the body side is wrapped in a column.
         ChatMessage => Intrinsic::row().cross(Cross::Start),
         ChatMessageAvatar => Intrinsic::stack().w(40.0).h(40.0),

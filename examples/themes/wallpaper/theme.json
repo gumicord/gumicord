@@ -141,6 +141,20 @@
     },
 
     {
+      "select": "layout.row",
+      "when": { "slot": "day_divider" },
+      "style": { "gap": 8, "margin": [12, 16, 4, 16] }
+    },
+    {
+      "select": "chat.message_list.day_divider",
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+    {
+      "select": "layout.spacer",
+      "when": { "slot": "day_divider_line" },
+      "style": { "height": 1, "background": "$color.border" }
+    },
+    {
       "select": "chat.message",
       "style": { "padding": [4, 16, 4, 16], "gap": 8 }
     },
