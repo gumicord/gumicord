@@ -110,6 +110,53 @@ function collectAssetRefs(theme) {
   return out;
 }
 
+// ---------------------------------------------------------------- Plugin manifests
+console.log("\nsample plugin manifests");
+const manifestValidate = schemas["plugin-manifest.schema.json"];
+if (manifestValidate) {
+  const pluginsDir = join(repo, "examples", "plugins");
+  if (existsSync(pluginsDir)) {
+    for (const name of readdirSync(pluginsDir)) {
+      const p = join(pluginsDir, name, "manifest.json");
+      if (!existsSync(p)) continue;
+      const data = JSON.parse(readFileSync(p, "utf8"));
+      if (!manifestValidate(data)) {
+        ng(name, JSON.stringify(manifestValidate.errors?.slice(0, 3), null, 2));
+        continue;
+      }
+      if (data.id !== name) {
+        ng(`${name} — id does not match the directory`);
+        continue;
+      }
+      ok(`${name} (${(data.capabilities ?? []).join(", ") || "no capabilities"})`);
+    }
+  }
+
+  console.log("\nmanifests that must be rejected");
+  const manifestBase = { id: "com.example.hello", name: "Hello", version: "1.0.0" };
+  for (const [label, data] of [
+    ["no id", { name: "Hello", version: "1.0.0" }],
+    ["id is not a reverse domain", { ...manifestBase, id: "hello" }],
+    ["version is not semver", { ...manifestBase, version: "1.0" }],
+    ["entry escapes the directory", { ...manifestBase, entry: "../evil.js" }],
+    ["entry in a subdirectory", { ...manifestBase, entry: "sub/plugin.js" }],
+    ["unknown capability", { ...manifestBase, capabilities: ["network"] }],
+    ["unknown top-level key", { ...manifestBase, main: "plugin.js" }],
+  ]) {
+    if (manifestValidate(data)) ng(`${label} — it passed`);
+    else ok(label);
+  }
+
+  console.log("\nmanifests that must be accepted");
+  for (const [label, data] of [
+    ["the minimum", manifestBase],
+    ["an entry and capabilities", { ...manifestBase, entry: "plugin.qjsc", capabilities: ["log", "storage"] }],
+  ]) {
+    if (manifestValidate(data)) ok(label);
+    else ng(label, JSON.stringify(manifestValidate.errors?.slice(0, 2)));
+  }
+}
+
 // ---------------------------------------------------------------- Must fail
 // Checks the schema rejects what it should. Without this, a schema loose
 // enough to accept everything would pass.

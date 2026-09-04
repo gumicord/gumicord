@@ -241,11 +241,11 @@ M1 をそのまま 1 本の作業として進めると、**全プラットフォ
 | E1 | `gumicord-theme`: パース / 検証 / トークン解決 / セレクタ照合 | M | ✅ 完了 | [04-theme.md](04-theme.md)。スキーマは作成済み |
 | E2 | テーマのホットリロード | S | | `EXT-015` |
 | E3 | テーマのアセット読み込み + 外部ホスト承認 UI | M | | `EXT-017`, `SEC-022`〜`SEC-025` |
-| E4 | `gumicord-plugin`: QuickJS ホスト / 隔離 / 強制停止 | M | | S3 で実証済み |
-| E5 | プラグインの差分パッチ適用 (P1〜P4 の意味論) | M | | [05-plugin-api.md 2](05-plugin-api.md#2-パッチ適用の意味論) |
-| E6 | ケイパビリティモデルと承認 UI | M | | `SEC-010`〜`SEC-012` |
-| E7 | `@gumicord/sdk` (型定義 + CLI + ウォッチモード) | M | | S3 でパイプライン実証済み |
-| E8 | セーフモード | S | | `EXT-052` |
+| E4 | `gumicord-plugin`: QuickJS ホスト / 隔離 / 強制停止 | M | ✅ 完了 | プラグインごとに `Runtime` + `Context`、宣言外 API は非注入、100ms 強制停止、32MB / 512KB 上限。JS とバイトコードの双方を読み込む |
+| E5 | プラグインの差分パッチ適用 (P1〜P7 の意味論) | M | ✅ 完了 | 走査は SDK 側、境界はネイティブ値、P5 はノード単位で回復し 100 回/60 秒で無効化。JS→Rust 変換の失敗も1回と数える |
+| E6 | ケイパビリティモデルと承認 UI | M | ✅ 完了 | `manifest.json` + 付与記録 (`grants.json`)、初見はモーダルで許可・拒否。権限は `log` と `storage` のみ。取り消し UI は設定画面 (`EXT-035`) 待ち |
+| E7 | `@gumicord/sdk` (型定義 + CLI + ウォッチモード) | M | ✅ 完了 | `gumicord-plugin build` / `dev` (esbuild の iife 同梱)。`examples/plugins/dev.gumicord.hello` が見本 |
+| E8 | セーフモード | S | ✅ 完了 | `GUMICORD_SAFE_MODE` (0 以外で有効)。プラグインを読み込まず起動する |
 
 > E1 で**アセット参照の検証**(同梱パスの脱出禁止 / `https` のみ / 宣言済みホストのみ) は済んでいる。
 > E3 に残るのは**実際に読み込む部分**と**承認 UI** である。

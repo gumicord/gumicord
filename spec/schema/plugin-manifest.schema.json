@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gumicord.dev/schema/plugin-manifest-1.json",
+  "title": "Gumicord プラグイン manifest",
+  "description": "Gumicord のプラグイン定義。仕様は spec/05-plugin-api.md の 7 章を参照。",
+  "type": "object",
+  "required": ["id", "name", "version"],
+  "additionalProperties": false,
+
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": {
+      "type": "string",
+      "description": "逆ドメイン形式の一意な識別子。置かれたディレクトリ名と一致させる",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9_-]+)+$"
+    },
+    "name": {
+      "type": "string",
+      "description": "利用者に見せる名前",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "version": {
+      "type": "string",
+      "description": "セマンティックバージョニング",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$"
+    },
+    "entry": {
+      "type": "string",
+      "description": "本体のファイル名。ディレクトリから出てはならない。省略時は plugin.js",
+      "default": "plugin.js",
+      "pattern": "^[^/\\\\]+\\.(js|qjsc)$"
+    },
+    "description": {
+      "type": "string",
+      "description": "承認画面に出す説明",
+      "maxLength": 512
+    },
+    "capabilities": {
+      "type": "array",
+      "description": "使う権限。ここに無いものは存在しないものとして扱う。初見では利用者の許可を得る",
+      "items": {
+        "type": "string",
+        "enum": ["log", "storage"]
+      },
+      "uniqueItems": true
+    }
+  }
+}

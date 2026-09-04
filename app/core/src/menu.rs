@@ -163,6 +163,15 @@ pub enum Action {
     AddAccount,
     /// Sign out: drop the token and wipe the local cache.
     LogOut,
+    /// Allow a plugin's requested capabilities.
+    ApprovePlugin {
+        /// Matches the manifest id the dialog showed.
+        id: String,
+        /// The capabilities being granted.
+        granted: Vec<String>,
+    },
+    /// Close a notification dialog.
+    Acknowledge,
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary

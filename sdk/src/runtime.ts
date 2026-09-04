@@ -54,18 +54,30 @@ function applyPatches(node: UINode, ctx: PatchContext): UINode {
       out = fn(out, ctx);
     } catch (e) {
       // One failing patch must not break the whole subtree. The host
-      // isolates per plugin as well.
+      // isolates per plugin as well, and counts failures towards
+      // disabling a chronically broken plugin.
       hostLog("error", `patch on ${node.id} threw: ${String(e)}`);
+      reportFailure(node.id);
       return current;
     }
   }
   return out;
 }
 
-declare const __gumicord_host: { log(level: string, msg: string): void };
+declare const __gumicord_host: {
+  log(level: string, msg: string): void;
+  patch_failed(nodeId: string): void;
+};
 function hostLog(level: string, msg: string): void {
   try {
     __gumicord_host.log(level, msg);
+  } catch {
+    /* Silently dropped when the host has injected nothing, as in tests. */
+  }
+}
+function reportFailure(nodeId: string): void {
+  try {
+    __gumicord_host.patch_failed(nodeId);
   } catch {
     /* Silently dropped when the host has injected nothing, as in tests. */
   }

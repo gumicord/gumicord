@@ -18,8 +18,9 @@
 //! [4] precedes [5] so themes apply to nodes plugins inserted. [6] follows
 //! [5] because plugins win when the two disagree.
 //!
-//! [4], [6] and [9] do not exist yet, and [3] rebuilds the whole tree every
-//! frame rather than diffing.
+//! [4] runs on a worker thread with latest-only handoff, so a runaway plugin
+//! lags effects instead of frames. [6] and [9] do not exist yet, and [3]
+//! rebuilds the whole tree every frame rather than diffing.
 //!
 //! There are two screens. A cache, a login, or `GUMICORD_SKIP_LOGIN` all lead
 //! to the main screen; nothing leads to the login screen. Having a cache
@@ -40,9 +41,11 @@ pub mod session;
 pub mod time;
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
 use gumicord_platform::{Application, FrameCx, HiddenKey, TextDocument, Waker};
+use gumicord_plugin::{ManagerEvent, PluginManager};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
@@ -58,6 +61,29 @@ const DEFAULT_THEME: &str = include_str!("../../../examples/themes/midnight/them
 /// Swaps the theme, for comparing themes while writing one. Goes away once
 /// there is a settings screen and hot reload.
 const THEME_ENV: &str = "GUMICORD_THEME";
+
+/// Starts without loading any plugin. Plugin code runs on first sight, so
+/// a broken one can take the session with it before anything is visible.
+const SAFE_MODE_ENV: &str = "GUMICORD_SAFE_MODE";
+
+/// Whether safe mode is on: any value but `0` counts, like the login skip.
+fn safe_mode_enabled(var: Option<&str>) -> bool {
+    matches!(var, Some(v) if v != "0")
+}
+
+/// A plugin asking for capabilities.
+struct PendingApproval {
+    id: String,
+    name: String,
+    capabilities: Vec<String>,
+}
+
+/// A dialog the plugin flow owns. Anything else showing means this one is
+/// gone: with no settings screen to revisit it, dismissal denies.
+enum Showing {
+    Approval(String),
+    Notice,
+}
 
 /// Image sizes requested from the CDN, in logical px, matching what is drawn.
 ///
@@ -271,6 +297,16 @@ pub struct Gumicord {
     account_switch_tx: std::sync::mpsc::Sender<
         Result<session::LoggedIn, (crate::account::AccountKey, String, bool)>,
     >,
+    /// Plugin hosts on their worker thread. Disabled in demo and safe mode.
+    plugins: PluginManager,
+    /// The latest plugin output; redrawn while the worker chews the next.
+    last_patched: Option<UiNode>,
+    /// Plugin approvals waiting for a dialog.
+    approval_queue: VecDeque<PendingApproval>,
+    /// Notices waiting for the same dialog.
+    dialogs: VecDeque<PendingDialog>,
+    /// The plugin dialog currently showing, if any.
+    showing: Option<Showing>,
 }
 
 impl Gumicord {
@@ -282,16 +318,35 @@ impl Gumicord {
         {
             live.open_cache(active.is_bot, active.id);
         }
-        Gumicord::with(Login::new(), live)
+        Gumicord::with(Login::new(), live, Self::start_plugins())
     }
 
     /// Skips login and builds from fixed demo data, as `GUMICORD_SKIP_LOGIN`
     /// does. Opens no cache: real data mixed in would break the premise.
     pub fn demo() -> Self {
-        Gumicord::with(Login::skipped(), Live::without_cache())
+        Gumicord::with(
+            Login::skipped(),
+            Live::without_cache(),
+            PluginManager::disabled(),
+        )
     }
 
-    fn with(login: Login, live: Live) -> Self {
+    /// Plugin hosts for this machine, unless safe mode says otherwise.
+    fn start_plugins() -> PluginManager {
+        if safe_mode_enabled(std::env::var(SAFE_MODE_ENV).as_deref().ok()) {
+            tracing::warn!("safe mode: starting without plugins");
+            return PluginManager::disabled();
+        }
+        match gumicord_platform::app_data_dir() {
+            Some(dir) => PluginManager::start(dir.join("plugins")),
+            None => {
+                tracing::warn!("no home directory; starting without plugins");
+                PluginManager::disabled()
+            }
+        }
+    }
+
+    fn with(login: Login, live: Live, plugins: PluginManager) -> Self {
         // Restore the last channel, and the guild it belongs to.
         let (guild, channel) = match live.last_channel() {
             Some(ch) => {
@@ -338,6 +393,11 @@ impl Gumicord {
             holds: std::cell::Cell::new(None),
             account_switch_rx,
             account_switch_tx,
+            plugins,
+            last_patched: None,
+            approval_queue: VecDeque::new(),
+            dialogs: VecDeque::new(),
+            showing: None,
         }
     }
 
@@ -978,7 +1038,7 @@ impl Application for Gumicord {
         self.login_input.take();
     }
 
-    /// Pipeline stages [3] and [5]. The plugin passes will go between them.
+    /// Pipeline stages [3] through [5]. The plugin pass runs between them.
     fn build(&mut self, cx: &FrameCx) -> UiNode {
         // Image sizes depend on it, so capture before building.
         self.scale = cx.scale;
@@ -994,7 +1054,11 @@ impl Application for Gumicord {
         self.match_ctx = ctx;
 
         // [3] build the tree
-        let mut tree = self.build_tree(Panes::for_width(cx.viewport.w));
+        let tree = self.build_tree(Panes::for_width(cx.viewport.w));
+
+        // [4] run it through the plugins; the newest finished output wins,
+        // or the raw tree when nothing finished yet.
+        let mut tree = self.apply_plugins(tree);
 
         // [5] resolve the theme
         match &self.theme {
@@ -1004,6 +1068,56 @@ impl Application for Gumicord {
             None => gumicord_theme::resolve::clear(&mut tree),
         }
         tree
+    }
+}
+
+/// A dialog waiting for room: plugin flows share one modal at a time.
+struct PendingDialog {
+    confirm: crate::menu::Confirm,
+    showing: Showing,
+}
+
+impl PendingDialog {
+    fn notice(title: &str, body: String) -> Self {
+        PendingDialog {
+            confirm: crate::menu::Confirm {
+                title: title.to_owned(),
+                body,
+                preview: None,
+                action: crate::menu::Action::Acknowledge,
+                confirm: "わかった".to_owned(),
+                danger: false,
+            },
+            showing: Showing::Notice,
+        }
+    }
+}
+
+impl PendingApproval {
+    /// What the approval asks, in the user's words.
+    fn confirm(self) -> crate::menu::Confirm {
+        let mut lines = self
+            .capabilities
+            .iter()
+            .map(|c| match c.as_str() {
+                "log" => "・記録を残す",
+                "storage" => "・設定などのデータを保存する",
+                _ => "・（不明な権限）",
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        lines.push_str("\n「やめる」を押すと、このプラグインは読み込まれません。");
+        crate::menu::Confirm {
+            title: format!("「{}」の許可", self.name),
+            body: lines,
+            preview: Some(self.id.clone()),
+            action: crate::menu::Action::ApprovePlugin {
+                id: self.id,
+                granted: self.capabilities,
+            },
+            confirm: "許可する".to_owned(),
+            danger: false,
+        }
     }
 }
 
@@ -1338,6 +1452,13 @@ impl Gumicord {
 
             crate::menu::Action::LogOut => {
                 self.sign_out();
+            }
+            crate::menu::Action::ApprovePlugin { id, granted } => {
+                self.showing = None;
+                self.plugins.approve(id, granted);
+            }
+            crate::menu::Action::Acknowledge => {
+                self.showing = None;
             }
 
             crate::menu::Action::Cut => {
@@ -2313,6 +2434,86 @@ impl Gumicord {
             .child(UiNode::new(NodeId::LayoutSpacer).with_key(Key::Slot("day_divider_line")))
             .child(UiNode::text(NodeId::ChatMessageListDayDivider, day))
             .child(UiNode::new(NodeId::LayoutSpacer).with_key(Key::Slot("day_divider_line")))
+    }
+
+    /// Drains plugin events and hands the tree over. Returns the newest
+    /// finished output, or the input when the worker has none yet.
+    fn apply_plugins(&mut self, tree: UiNode) -> UiNode {
+        for event in self.plugins.drain() {
+            match event {
+                ManagerEvent::Patched(patched) => {
+                    self.last_patched = Some(*patched);
+                }
+                ManagerEvent::Disabled { id, failures, .. } => {
+                    tracing::error!(plugin = %id, failures, "plugin disabled");
+                    self.dialogs.push_back(PendingDialog::notice(
+                        "プラグインを無効化しました",
+                        format!("「{id}」が繰り返し失敗したため、読み込みを止めました。"),
+                    ));
+                }
+                ManagerEvent::NeedsApproval {
+                    id,
+                    name,
+                    capabilities,
+                } => {
+                    self.approval_queue.push_back(PendingApproval {
+                        id,
+                        name,
+                        capabilities,
+                    });
+                }
+                ManagerEvent::Warned { message } => {
+                    tracing::warn!("plugin: {message}");
+                }
+            }
+        }
+        self.settle_dialog();
+        // Approvals can wait for login; a dialog over the QR screen invites
+        // approving something unread.
+        if self.login.session().logged_in().is_some() {
+            self.pump_dialog();
+        }
+        self.plugins.submit(&tree);
+        self.last_patched.clone().unwrap_or(tree)
+    }
+
+    /// A shown dialog that is gone was dismissed: without a settings screen
+    /// to revisit it, that denies an approval and drops a notice.
+    fn settle_dialog(&mut self) {
+        let showing = self.showing.as_ref();
+        let still_there = match (&self.floating, showing) {
+            (Some(crate::menu::Floating::Confirm(c)), Some(Showing::Approval(id))) => {
+                matches!(&c.action, crate::menu::Action::ApprovePlugin { id: aid, .. } if aid == id)
+            }
+            (Some(crate::menu::Floating::Confirm(c)), Some(Showing::Notice)) => {
+                matches!(&c.action, crate::menu::Action::Acknowledge)
+            }
+            _ => false,
+        };
+        if still_there {
+            return;
+        }
+        // Notices and nothing showing need no farewell.
+        if let Some(Showing::Approval(id)) = self.showing.take() {
+            self.plugins.deny(&id);
+        }
+    }
+
+    /// Shows the next queued dialog, if nothing is already showing.
+    fn pump_dialog(&mut self) {
+        if self.showing.is_some() || self.floating.is_some() {
+            return;
+        }
+        if let Some(dialog) = self.dialogs.pop_front() {
+            self.floating = Some(crate::menu::Floating::Confirm(dialog.confirm));
+            self.showing = Some(dialog.showing);
+            return;
+        }
+        if let Some(approval) = self.approval_queue.pop_front() {
+            let id = approval.id.clone();
+            self.floating = Some(crate::menu::Floating::Confirm(approval.confirm()));
+            self.showing = Some(Showing::Approval(id));
+        }
     }
 
     /// One message. `grouped` drops the avatar and author line; the indent is
@@ -3863,7 +4064,11 @@ mod login_tests {
     /// A signed-out app. `Gumicord::new` reads the environment, and a
     /// developer's variables must not change test results.
     fn pending() -> Gumicord {
-        Gumicord::with(Login::fresh_for_test(), Live::without_cache())
+        Gumicord::with(
+            Login::fresh_for_test(),
+            Live::without_cache(),
+            PluginManager::disabled(),
+        )
     }
 
     fn ids(tree: &UiNode) -> Vec<NodeId> {
@@ -5287,5 +5492,233 @@ fn face(id: NodeId, url: Option<&str>, name: &str) -> UiNode {
     match url {
         Some(url) => UiNode::image(id, url),
         None => UiNode::text(id, initial(name)),
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    fn plugins_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gumicord-app-plugin-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_plugin(root: &std::path::Path, id: &str, capabilities: &str, source: &str) {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(
+                r#"{{"id":"{id}","name":"Hi","version":"1.0.0","capabilities":[{capabilities}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("plugin.js"), source).unwrap();
+    }
+
+    fn frame() -> gumicord_platform::FrameCx {
+        gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        }
+    }
+
+    /// A real plugin worker on a scratch directory. Demo data, not live:
+    /// faking a login would show an empty live store with nothing to patch.
+    fn app_with_plugins(dir: &std::path::Path) -> Gumicord {
+        Gumicord::with(
+            Login::skipped(),
+            Live::without_cache(),
+            PluginManager::start(dir.to_owned()),
+        )
+    }
+
+    /// Approval dialogs only show once signed in.
+    fn sign_in(a: &mut Gumicord) {
+        a.login.set_logged_in(session::LoggedIn {
+            me: gumicord_model::CurrentUser {
+                user: gumicord_model::User {
+                    id: UserId::from(1u64),
+                    username: "nenneko".to_owned(),
+                    discriminator: "0".to_owned(),
+                    global_name: None,
+                    avatar_hash: None,
+                    bot: false,
+                },
+                email: None,
+                verified: false,
+                mfa_enabled: false,
+            },
+            client: gumicord_rest::RestClient::anonymous().unwrap(),
+            token: gumicord_model::Token::new("t"),
+        });
+    }
+
+    fn confirm_action(a: &Gumicord) -> Option<crate::menu::Action> {
+        match &a.floating {
+            Some(crate::menu::Floating::Confirm(c)) => Some(c.action.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn safe_mode_flag() {
+        assert!(!safe_mode_enabled(None));
+        assert!(!safe_mode_enabled(Some("0")));
+        // Same rule as the login skip: anything but "0" counts.
+        assert!(safe_mode_enabled(Some("")));
+        assert!(safe_mode_enabled(Some("1")));
+    }
+
+    /// Approval appears as a dialog naming the plugin and its capabilities;
+    /// confirming records the grant.
+    #[test]
+    fn approving_loads_with_the_granted_capabilities() {
+        let root = plugins_dir("approve");
+        write_plugin(
+            &root,
+            "com.example.hi",
+            r#""log""#,
+            "globalThis.__gumicord_apply = (n) => n;",
+        );
+        let mut a = app_with_plugins(&root);
+        sign_in(&mut a);
+        let cx = frame();
+        for _ in 0..2000 {
+            a.build(&cx);
+            if confirm_action(&a).is_some() {
+                break;
+            }
+            // The worker scans on its own thread; spin without yielding
+            // and it never gets scheduled.
+            std::thread::yield_now();
+        }
+        let action = confirm_action(&a).expect("no approval dialog appeared");
+        let (id, granted) = match action {
+            crate::menu::Action::ApprovePlugin { id, granted } => (id, granted),
+            other => panic!("not an approval dialog: {other:?}"),
+        };
+        assert_eq!(id, "com.example.hi");
+        assert_eq!(granted, ["log"]);
+
+        assert!(a.run_action(crate::menu::button::CONFIRM));
+        for _ in 0..5000 {
+            if root.join("grants.json").is_file() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let grants = std::fs::read_to_string(root.join("grants.json")).expect("no grants file");
+        assert!(
+            grants.contains("com.example.hi") && grants.contains("log"),
+            "{grants}"
+        );
+    }
+
+    /// Dismissing the dialog denies: the grant is recorded empty and the
+    /// dialog does not come back.
+    #[test]
+    fn dismissing_denies_and_does_not_ask_again() {
+        let root = plugins_dir("deny");
+        write_plugin(
+            &root,
+            "com.example.hi",
+            r#""storage""#,
+            "globalThis.__gumicord_apply = (n) => n;",
+        );
+        let mut a = app_with_plugins(&root);
+        sign_in(&mut a);
+        let cx = frame();
+        for _ in 0..2000 {
+            a.build(&cx);
+            if confirm_action(&a).is_some() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(confirm_action(&a).is_some(), "no approval dialog appeared");
+
+        assert!(a.run_action(crate::menu::button::CANCEL));
+        for _ in 0..5000 {
+            if root.join("grants.json").is_file() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        // One more frame lets the dismissal settle into a denial.
+        for _ in 0..5000 {
+            a.build(&cx);
+            let grants = std::fs::read_to_string(root.join("grants.json")).unwrap_or_default();
+            if grants.contains("com.example.hi") {
+                assert!(!grants.contains("storage"), "{grants}");
+                break;
+            }
+            std::thread::yield_now();
+        }
+        // Settled and gone: rebuilding asks nothing more.
+        for _ in 0..50 {
+            a.build(&cx);
+        }
+        assert!(
+            confirm_action(&a).is_none() && a.approval_queue.is_empty(),
+            "denial did not stick"
+        );
+    }
+
+    /// End to end: a capability-free plugin loads by itself and its patch
+    /// shows up in the built tree, all off the main thread. The walk below
+    /// mirrors the SDK runtime (bottom-up, original IDs, no output recursion).
+    #[test]
+    fn a_sample_patch_reaches_the_tree() {
+        let root = plugins_dir("e2e");
+        write_plugin(
+            &root,
+            "com.example.hi",
+            "",
+            r#"globalThis.__gumicord_apply = (n) => {
+                const walk = (x) => {
+                    const kids = (x.children ?? []).map(walk);
+                    const cur = kids.length ? { ...x, children: kids } : x;
+                    if (cur.id !== "chat.message.content") return cur;
+                    return { ...cur, children: [...(cur.children ?? []), { id: "primitive.badge", props: { text: "hi" } }] };
+                };
+                return walk(n);
+            };"#,
+        );
+        let mut a = app_with_plugins(&root);
+        let cx = frame();
+        let mut found = false;
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..2000 {
+            let tree = a.build(&cx);
+            // Mirror production: Patched goes back where it belongs, the
+            // rest is only recorded.
+            for e in a.plugins.drain() {
+                match e {
+                    ManagerEvent::Patched(t) => a.last_patched = Some(*t),
+                    other => {
+                        let s = format!("{other:?}");
+                        if !seen.contains(&s) {
+                            seen.push(s);
+                        }
+                    }
+                }
+            }
+            let mut badges = 0;
+            tree.walk(&mut |n, _| {
+                if n.id == NodeId::PrimitiveBadge {
+                    badges += 1;
+                }
+            });
+            if badges > 0 {
+                found = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(found, "the sample patch never reached the tree; {seen:?}");
     }
 }

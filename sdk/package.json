@@ -13,14 +13,20 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
+  "bin": {
+    "gumicord-plugin": "./bin/gumicord-plugin.mjs"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test:types": "node test/run.mjs"
+    "test:types": "node test/run.mjs",
+    "build:sample": "node bin/gumicord-plugin.mjs build ../examples/plugins/dev.gumicord.hello"
   },
   "devDependencies": {
+    "esbuild": "^0.25.12",
     "typescript": "^5.7.0"
   }
 }
