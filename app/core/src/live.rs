@@ -152,6 +152,7 @@ pub struct Live {
     rest: Option<RestClient>,
     waker: Option<Waker>,
     started: bool,
+    task: Option<tokio::task::JoinHandle<()>>,
 
     store: Store,
     /// Local cache; the app works without one.
@@ -201,47 +202,17 @@ pub struct Live {
     /// Our status. READY starts it; presences about us keep it current, so
     /// changing it on a phone shows up without reconnecting.
     status: Option<Status>,
+    /// The account currently backing the open cache.
+    current_account_cache: Option<(bool, UserId)>,
 }
 
 impl Live {
-    /// Opens the cache and loads the previous state.
-    ///
-    /// Read synchronously: the first frame needs it, and deferring would show
-    /// an empty screen for a moment. It takes a few milliseconds.
+    /// Starts with an empty state. An account's cache is opened explicitly.
     pub fn new() -> Self {
-        let mut live = Live::without_cache();
-
-        match gumicord_store::default_path().and_then(|p| Db::open(&p)) {
-            Ok((db, snapshot)) => {
-                tracing::debug!(
-                    guilds = snapshot.guilds.len(),
-                    messages = snapshot.messages.len(),
-                    "loaded from cache"
-                );
-                live.store.replace_guilds(snapshot.guilds);
-                if !snapshot.guild_order.is_empty() {
-                    live.store.set_preferred_order(snapshot.guild_order);
-                }
-                live.store.set_sidebar(snapshot.folders);
-                live.store.set_collapsed(snapshot.collapsed);
-                live.last_channel = snapshot.last_channel;
-                if let Some(ch) = snapshot.last_channel {
-                    // Not marked as requested: REST should still refetch once
-                    // connected.
-                    live.store.set_backlog(ch, snapshot.messages);
-                }
-                live.db = Some(db);
-            }
-            Err(e) => {
-                // The cache only makes things faster.
-                tracing::warn!(%e, "no cache; everything will be refetched");
-            }
-        }
-        live
+        Live::without_cache()
     }
 
-    /// Without a cache, for demo mode and tests. `Live::new` would open the
-    /// developer's real cache.
+    /// Without a cache, for demo mode and tests.
     pub fn without_cache() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Live {
@@ -251,6 +222,7 @@ impl Live {
             rest: None,
             waker: None,
             started: false,
+            task: None,
             store: Store::new(),
             db: None,
             link: Link::Idle,
@@ -268,7 +240,100 @@ impl Live {
             members: std::collections::HashMap::new(),
             member_rows: std::collections::HashMap::new(),
             me: None,
+            current_account_cache: None,
         }
+    }
+
+    /// Stops the gateway task without touching the cache. Old events still
+    /// queued are dropped with the channel, so nothing from the previous
+    /// account reaches the new one.
+    fn stop_background(&mut self) {
+        if let Some(handle) = self.task.take() {
+            handle.abort();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx = tx;
+        self.rx = rx;
+    }
+
+    /// Clears everything that belongs to one account. The cache file itself
+    /// is handled separately: `disconnect` and `open_cache` close it,
+    /// `forget_everything` wipes it but keeps it open.
+    fn clear_account_state(&mut self) {
+        self.store = Store::new();
+        self.requested.clear();
+        self.paging.clear();
+        self.exhausted.clear();
+        self.watching = None;
+        self.asked_members.clear();
+        self.members.clear();
+        self.member_rows.clear();
+        self.typing.clear();
+        self.last_channel = None;
+        self.started = false;
+        self.subs = None;
+        self.me = None;
+        self.status = None;
+        self.link = Link::Connecting;
+        self.rejected = false;
+        self.prepended = false;
+        self.rest = None;
+    }
+
+    /// Opens the cache for a specific account, replacing any currently open
+    /// cache after joining its writer thread.
+    pub fn open_cache(&mut self, is_bot: bool, id: UserId) -> bool {
+        if self.current_account_cache == Some((is_bot, id)) && self.db.is_some() {
+            return false;
+        }
+
+        // A different account must never see the previous one's in-memory
+        // state, even when it has no cache file yet.
+        self.stop_background();
+        // Dropping the existing Db stops and joins its writer thread.
+        self.close_cache();
+        self.clear_account_state();
+        self.current_account_cache = Some((is_bot, id));
+
+        match gumicord_store::account_path(is_bot, id).and_then(|p| Db::open(&p)) {
+            Ok((db, snapshot)) => {
+                tracing::debug!(
+                    guilds = snapshot.guilds.len(),
+                    messages = snapshot.messages.len(),
+                    "loaded account cache"
+                );
+                self.store.replace_guilds(snapshot.guilds);
+                if !snapshot.guild_order.is_empty() {
+                    self.store.set_preferred_order(snapshot.guild_order);
+                }
+                self.store.set_sidebar(snapshot.folders);
+                self.store.set_collapsed(snapshot.collapsed);
+                self.last_channel = snapshot.last_channel;
+                if let Some(ch) = snapshot.last_channel {
+                    self.store.set_backlog(ch, snapshot.messages);
+                }
+                self.db = Some(db);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(%e, "no account cache; will fetch from network");
+                false
+            }
+        }
+    }
+
+    /// Closes the currently open cache cleanly.
+    pub fn close_cache(&mut self) {
+        self.db = None;
+        self.current_account_cache = None;
+    }
+
+    /// Disconnects from the current account without wiping its cache.
+    /// Used when switching accounts.
+    pub fn disconnect(&mut self) {
+        self.stop_background();
+        self.close_cache();
+        self.clear_account_state();
     }
 
     /// Takes the waker early, so cache reads before login can still redraw.
@@ -345,7 +410,7 @@ impl Live {
         self.subs = Some(subs);
 
         let tx = self.tx.clone();
-        rt.spawn(async move { pump(gateway, tx, waker).await });
+        self.task = Some(rt.spawn(async move { pump(gateway, tx, waker).await }));
     }
 
     /// Who is typing in a channel.
@@ -656,22 +721,12 @@ impl Live {
         if let Some(db) = &self.db {
             db.wipe();
         }
-        self.store = Store::new();
-        self.requested.clear();
-        self.paging.clear();
-        self.exhausted.clear();
-        self.watching = None;
-        self.asked_members.clear();
-        self.members.clear();
-        self.typing.clear();
-        self.last_channel = None;
-
-        // The gateway task is already gone. Without clearing this, `start`
-        // returns early after the next login and nothing ever reconnects.
-        self.started = false;
-        self.subs = None;
-        self.me = None;
-        self.link = Link::Connecting;
+        // The old gateway may still be connected; without aborting it, its
+        // events would repopulate the cleared store. Without clearing
+        // `started`, `start` returns early after the next login and nothing
+        // ever reconnects.
+        self.stop_background();
+        self.clear_account_state();
     }
     /// Stores the sidebar order.
     ///
@@ -993,6 +1048,14 @@ impl Default for Live {
     }
 }
 
+impl Drop for Live {
+    fn drop(&mut self) {
+        if let Some(handle) = self.task.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Pumps the gateway until it reports a fatal error.
 async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
     loop {
@@ -1277,6 +1340,46 @@ mod tests {
         assert!(!live.started, "a later start() would return early");
         assert!(live.subs.is_none());
         assert!(live.me.is_none(), "the previous account is still current");
+    }
+
+    #[test]
+    fn disconnect_clears_per_account_state() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(1, "old account")],
+        });
+        live.requested.insert(ch());
+        live.member_rows.insert(GuildId::from(5u64), vec![[0, 99]]);
+        live.status = Some(Status::Online);
+        live.me = Some(UserId::from(1u64));
+        live.last_channel = Some(ch());
+
+        live.disconnect();
+
+        assert!(live.is_empty());
+        assert!(live.last_channel().is_none());
+        assert!(live.requested.is_empty());
+        assert!(live.member_rows.is_empty());
+        assert!(live.status.is_none());
+        assert!(live.me.is_none());
+        assert!(live.rest.is_none());
+    }
+
+    #[test]
+    fn disconnect_drops_events_queued_before_the_switch() {
+        let mut live = live();
+        let tx = live.tx.clone();
+        tx.send(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(1, "old account")],
+        })
+        .unwrap();
+
+        live.disconnect();
+
+        assert!(!live.poll(), "old account events must not leak");
+        assert!(live.is_empty());
     }
 
     fn message(id: u64, body: &str) -> Message {

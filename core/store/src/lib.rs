@@ -9,7 +9,7 @@
 
 pub mod db;
 
-pub use db::{Db, DbError, Snapshot, default_path};
+pub use db::{Db, DbError, Snapshot, account_path, default_path};
 
 use std::collections::{HashMap, HashSet};
 

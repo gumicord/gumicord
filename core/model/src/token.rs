@@ -59,6 +59,11 @@ impl Token {
         self.kind
     }
 
+    /// Whether this token belongs to a bot application.
+    pub fn is_bot(&self) -> bool {
+        self.kind == TokenKind::Bot
+    }
+
     /// Yields the secret. Named to be greppable; a bland name like `as_str`
     /// would slip through review.
     pub fn expose(&self) -> &str {

@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
-use gumicord_model::{Channel, ChannelId, Guild, GuildId, Member, Message, User};
+use gumicord_model::{Channel, ChannelId, Guild, GuildId, Member, Message, User, UserId};
 
 /// Messages kept per channel: enough to fill the screen on open, since the
 /// rest can be refetched. Keeping everything makes startup slower over time.
@@ -188,6 +188,24 @@ pub fn default_path() -> Result<PathBuf, DbError> {
         .ok_or(DbError::NoHome)?
         .join("gumicord")
         .join("cache.db"))
+}
+
+/// The location for a specific account's cache.
+pub fn account_path(is_bot: bool, id: UserId) -> Result<PathBuf, DbError> {
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
+
+    let prefix = if is_bot { "bot" } else { "user" };
+    Ok(base
+        .ok_or(DbError::NoHome)?
+        .join("gumicord")
+        .join("cache")
+        .join("accounts")
+        .join(format!("{prefix}_{id}.db")))
 }
 
 // ─────────────────────────────────────────────── Schema
@@ -816,5 +834,20 @@ mod tests {
         });
         let got = rx.recv().expect("返事が来ない");
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn account_path_generates_correct_locations() {
+        let expected_user = PathBuf::from("cache")
+            .join("accounts")
+            .join("user_123456789.db");
+        let user = account_path(false, UserId::from(123456789u64)).unwrap();
+        assert!(user.ends_with(&expected_user));
+
+        let expected_bot = PathBuf::from("cache")
+            .join("accounts")
+            .join("bot_987654321.db");
+        let bot = account_path(true, UserId::from(987654321u64)).unwrap();
+        assert!(bot.ends_with(&expected_bot));
     }
 }

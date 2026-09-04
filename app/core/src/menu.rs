@@ -109,6 +109,8 @@ pub struct Item {
     pub icon: Option<&'static str>,
     /// A destructive action, which the theme paints in red.
     pub danger: bool,
+    /// Whether this item represents the currently selected choice.
+    pub selected: bool,
 }
 
 impl Item {
@@ -118,6 +120,7 @@ impl Item {
             label: label.into(),
             icon: None,
             danger: false,
+            selected: false,
         }
     }
 
@@ -128,6 +131,11 @@ impl Item {
 
     pub fn danger(mut self) -> Item {
         self.danger = true;
+        self
+    }
+
+    pub fn selected(mut self, sel: bool) -> Item {
+        self.selected = sel;
         self
     }
 }
@@ -149,6 +157,10 @@ pub enum Action {
     Edit(u64),
     /// Delete this message.
     Delete(u64),
+    /// Switch to another saved account.
+    SwitchAccount(crate::account::AccountKey),
+    /// Open login to add a new account.
+    AddAccount,
     /// Sign out: drop the token and wipe the local cache.
     LogOut,
 
@@ -289,6 +301,7 @@ impl Item {
             // leave one unreachable.
             .with_key(Key::Index(index as u32))
             .with_state_if(hovered, gumicord_uitree::State::Hover)
+            .with_state_if(self.selected, gumicord_uitree::State::Selected)
             .child_if(self.icon.is_some(), || {
                 UiNode::new(NodeId::OverlayMenuItemIcon)
                     .with_content(gumicord_uitree::Content::Icon(

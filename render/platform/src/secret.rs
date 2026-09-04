@@ -45,11 +45,15 @@ pub struct SecretStore {
 }
 
 impl SecretStore {
-    /// Prepares the directory, failing here if it cannot be made.
-    pub fn new() -> Result<Self, SecretError> {
-        let dir = base_dir()?.join("secrets");
+    /// Uses an explicit directory. For tests and isolated instances.
+    pub fn in_dir(dir: PathBuf) -> Result<Self, SecretError> {
         std::fs::create_dir_all(&dir)?;
         Ok(SecretStore { dir })
+    }
+
+    /// Prepares the directory, failing here if it cannot be made.
+    pub fn new() -> Result<Self, SecretError> {
+        Self::in_dir(base_dir()?.join("secrets"))
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -97,19 +101,18 @@ impl SecretStore {
 
 /// Where settings and secrets live.
 fn base_dir() -> Result<PathBuf, SecretError> {
+    crate::dirs::app_data_dir().ok_or(SecretError::NoHome(home_var()))
+}
+
+/// Names the missing variable for the error.
+fn home_var() -> &'static str {
     #[cfg(windows)]
     {
-        let appdata = std::env::var_os("APPDATA").ok_or(SecretError::NoHome("APPDATA"))?;
-        Ok(PathBuf::from(appdata).join("gumicord"))
+        "APPDATA"
     }
     #[cfg(not(windows))]
     {
-        // XDG. The backend comes later; the location is settled now.
-        if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
-            return Ok(PathBuf::from(x).join("gumicord"));
-        }
-        let home = std::env::var_os("HOME").ok_or(SecretError::NoHome("HOME"))?;
-        Ok(PathBuf::from(home).join(".config").join("gumicord"))
+        "HOME"
     }
 }
 

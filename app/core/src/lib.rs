@@ -30,6 +30,7 @@
 //! `uses_live()` is the single place that distinguishes demo data from real
 //! data. The row types absorb the difference so the tree builder never asks.
 
+pub mod account;
 pub mod demo;
 pub mod images;
 pub mod live;
@@ -263,12 +264,24 @@ pub struct Gumicord {
     /// How long the built tree stays valid. `None` means nothing changes
     /// with time. A `Cell` because building takes `&self`.
     holds: std::cell::Cell<Option<i64>>,
+    account_switch_rx: std::sync::mpsc::Receiver<
+        Result<session::LoggedIn, (crate::account::AccountKey, String, bool)>,
+    >,
+    account_switch_tx: std::sync::mpsc::Sender<
+        Result<session::LoggedIn, (crate::account::AccountKey, String, bool)>,
+    >,
 }
 
 impl Gumicord {
     pub fn new() -> Self {
-        // Reads the cache here, so the first frame has something to draw.
-        Gumicord::with(Login::new(), Live::new())
+        let mut live = Live::without_cache();
+        if let Ok(store) = gumicord_platform::SecretStore::new()
+            && let Ok(idx) = crate::account::AccountsIndex::load(&store)
+            && let Some(active) = idx.active.or_else(|| idx.accounts.first().map(|a| a.key))
+        {
+            live.open_cache(active.is_bot, active.id);
+        }
+        Gumicord::with(Login::new(), live)
     }
 
     /// Skips login and builds from fixed demo data, as `GUMICORD_SKIP_LOGIN`
@@ -291,6 +304,8 @@ impl Gumicord {
             }
             None => (demo::GUILDS[0].id, demo::CHANNELS[1].id),
         };
+
+        let (account_switch_tx, account_switch_rx) = std::sync::mpsc::channel();
 
         Gumicord {
             theme: load_theme(),
@@ -320,6 +335,8 @@ impl Gumicord {
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
             holds: std::cell::Cell::new(None),
+            account_switch_rx,
+            account_switch_tx,
         }
     }
 
@@ -490,11 +507,62 @@ impl Application for Gumicord {
         // An arrived image counts as a change, or it never gets drawn.
         changed |= self.images.poll();
 
+        while let Ok(res) = self.account_switch_rx.try_recv() {
+            changed = true;
+            match res {
+                Ok(logged_in) => {
+                    tracing::info!(user = %logged_in.me.user.display_name(), "account switched");
+                    let key = crate::account::AccountKey::new(
+                        logged_in.me.user.id,
+                        logged_in.token.is_bot(),
+                    );
+                    self.live.disconnect();
+                    self.live.open_cache(key.is_bot, key.id);
+                    if let Ok(store) = gumicord_platform::SecretStore::new()
+                        && let Ok(mut idx) = crate::account::AccountsIndex::load(&store)
+                    {
+                        idx.active = Some(key);
+                        let _ = idx.save(&store);
+                    }
+                    if let Some(ch) = self.live.last_channel() {
+                        self.selected_channel = ch.get();
+                        if let Some(c) = self.live.store().channel(ch)
+                            && let Some(g) = c.guild_id
+                        {
+                            self.selected_guild = g.get();
+                        }
+                    } else {
+                        self.selected_guild = 0;
+                        self.selected_channel = 0;
+                    }
+                    self.images.forget_everything();
+                    self.floating = None;
+                    self.composing = Composing::New;
+                    self.input.take();
+                    self.input_focused = false;
+                    self.reveals = crate::markdown::Reveals::default();
+                    self.login.set_logged_in(logged_in);
+                }
+                Err((key, err, unauthorized)) => {
+                    tracing::warn!(%err, "account switch failed");
+                    if unauthorized
+                        && let Ok(store) = gumicord_platform::SecretStore::new()
+                        && let Ok(mut idx) = crate::account::AccountsIndex::load(&store)
+                    {
+                        let _ = idx.remove(&store, key);
+                    }
+                }
+            }
+        }
+
         // `Live::start` is a no-op once started, so calling it every time is
         // fine.
         if let (Some(l), Some(rt), Some(waker)) =
             (self.login.session().logged_in(), &self.runtime, &self.waker)
         {
+            let key = crate::account::AccountKey::new(l.me.user.id, l.token.is_bot());
+            self.live.open_cache(key.is_bot, key.id);
+
             // Set before READY, so our own typing is filtered from the start.
             let me = l.me.user.id;
             self.live.start(
@@ -1092,12 +1160,33 @@ impl Gumicord {
         let Some(l) = self.login.session().logged_in() else {
             return Vec::new();
         };
-        vec![
-            Item::new(Action::Copy(l.me.user.id.to_string()), "ID をコピー").icon("id"),
+        let mut items =
+            vec![Item::new(Action::Copy(l.me.user.id.to_string()), "ID をコピー").icon("id")];
+
+        if let Ok(store) = gumicord_platform::SecretStore::new()
+            && let Ok(index) = crate::account::AccountsIndex::load(&store)
+        {
+            let current_key = crate::account::AccountKey::new(l.me.user.id, l.token.is_bot());
+            for acc in &index.accounts {
+                let is_current = acc.key == current_key;
+                let id_str = acc.key.id.to_string();
+                let suffix = &id_str[id_str.len().saturating_sub(4)..];
+                let label = format!("{} (…{})", acc.display_name, suffix);
+                let mut item = Item::new(Action::SwitchAccount(acc.key), label);
+                if is_current {
+                    item = item.icon("check").selected(true);
+                }
+                items.push(item);
+            }
+        }
+
+        items.push(Item::new(Action::AddAccount, "アカウントを追加"));
+        items.push(
             Item::new(Action::LogOut, "ログアウト")
                 .icon("logout")
                 .danger(),
-        ]
+        );
+        items
     }
 
     /// The hovered menu item or dialog button.
@@ -1239,6 +1328,12 @@ impl Gumicord {
                     self.input.take();
                 }
             }
+            crate::menu::Action::SwitchAccount(key) => {
+                self.switch_account(*key);
+            }
+            crate::menu::Action::AddAccount => {
+                self.add_account();
+            }
 
             crate::menu::Action::LogOut => {
                 self.sign_out();
@@ -1259,6 +1354,82 @@ impl Gumicord {
                 }
             }
         }
+        true
+    }
+
+    fn switch_account(&mut self, target: crate::account::AccountKey) -> bool {
+        let (Some(rt), Some(waker)) = (&self.runtime, &self.waker) else {
+            return false;
+        };
+        if let Some(l) = self.login.session().logged_in()
+            && l.me.user.id == target.id
+            && l.token.is_bot() == target.is_bot
+        {
+            return false;
+        }
+
+        let store = match gumicord_platform::SecretStore::new() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(%e, "cannot access secure store for account switch");
+                return false;
+            }
+        };
+        let index = match crate::account::AccountsIndex::load(&store) {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::warn!(%e, "cannot read accounts index for switch");
+                return false;
+            }
+        };
+        let token = match index.load_token(&store, target) {
+            Ok(Some(tok)) => tok,
+            Ok(None) => {
+                tracing::warn!("no token stored for target account");
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(%e, "cannot load token for target account");
+                return false;
+            }
+        };
+
+        let tx = self.account_switch_tx.clone();
+        let waker = waker.clone();
+        rt.spawn(async move {
+            let res = match gumicord_rest::RestClient::anonymous() {
+                Ok(rest) => match rest.authenticate(token.clone()).await {
+                    Ok((client, me)) => Ok(session::LoggedIn { me, client, token }),
+                    Err(e) => {
+                        let unauthorized = e.is_unauthorized();
+                        Err((target, e.to_string(), unauthorized))
+                    }
+                },
+                Err(e) => {
+                    let unauthorized = e.is_unauthorized();
+                    Err((target, e.to_string(), unauthorized))
+                }
+            };
+            let _ = tx.send(res);
+            waker.wake();
+        });
+        true
+    }
+
+    fn add_account(&mut self) -> bool {
+        let (Some(rt), Some(waker)) = (&self.runtime, &self.waker) else {
+            return false;
+        };
+        self.live.disconnect();
+        self.images.forget_everything();
+        self.login.start_add_account(rt.handle(), waker.clone());
+        self.login_form = None;
+        self.login_error = None;
+        self.floating = None;
+        self.composing = Composing::New;
+        self.input.take();
+        self.input_focused = false;
+        self.reveals = crate::markdown::Reveals::default();
         true
     }
 
@@ -4223,6 +4394,38 @@ mod user_panel_tests {
             "巻く領域が中に無い"
         );
         assert_eq!(pane.children[0].id, NodeId::NavChannelListHeader);
+    }
+
+    #[test]
+    fn user_menu_shows_account_options_and_masks_tokens() {
+        let mut a = Gumicord::demo();
+        let me = gumicord_model::CurrentUser {
+            user: gumicord_model::User {
+                id: UserId::from(1234567890u64),
+                username: "Alice".to_owned(),
+                discriminator: "0".to_owned(),
+                global_name: Some("Alice".to_owned()),
+                avatar_hash: None,
+                bot: false,
+            },
+            email: None,
+            verified: false,
+            mfa_enabled: false,
+        };
+        let client = gumicord_rest::RestClient::anonymous().unwrap();
+        let token = gumicord_model::Token::new("super_secret_token");
+        a.login
+            .set_logged_in(session::LoggedIn { me, client, token });
+
+        let menu = a.user_menu();
+        assert!(menu.iter().any(|it| it.label == "ID をコピー"));
+        assert!(menu.iter().any(|it| it.label == "アカウントを追加"));
+        assert!(menu.iter().any(|it| it.label == "ログアウト"));
+
+        // Secret tokens must never appear in menu labels.
+        for item in &menu {
+            assert!(!item.label.contains("super_secret_token"));
+        }
     }
 }
 

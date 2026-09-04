@@ -20,11 +20,24 @@ use gumicord_model::{CurrentUser, Token};
 use gumicord_platform::{SecretStore, Waker};
 use gumicord_rest::{CaptchaChallenge, LoginOutcome, RestClient, RestError, SolvedCaptcha};
 
+use crate::account::{AccountKey, AccountsIndex, LEGACY_BOT_TOKEN_KEY, LEGACY_USER_TOKEN_KEY};
+
 /// Skips login to look at the UI. Shows fixed demo data, never real data.
 const SKIP_ENV: &str = "GUMICORD_SKIP_LOGIN";
 
-/// The token's name in the OS keychain.
-const TOKEN_KEY: &str = "token";
+const TOKEN_KEY: &str = LEGACY_USER_TOKEN_KEY;
+const BOT_TOKEN_KEY: &str = LEGACY_BOT_TOKEN_KEY;
+
+fn remember_account(store: Option<&SecretStore>, me: &CurrentUser, token: &Token) {
+    let Some(store) = store else {
+        return;
+    };
+    let mut index = AccountsIndex::load(store).unwrap_or_default();
+    let key = AccountKey::new(me.user.id, token.is_bot());
+    if let Err(e) = index.remember(store, key, me.user.display_name().to_owned(), token) {
+        tracing::warn!(%e, "could not store the account credentials; next start will ask again");
+    }
+}
 
 /// How far login has got. The only thing the screen consults.
 #[derive(Debug, Clone)]
@@ -232,6 +245,14 @@ impl Login {
     /// Starts the background work. Safe to call before the window exists,
     /// and worth doing: key generation takes about a second.
     pub fn start(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
+        self.start_with_restore(rt, waker, true);
+    }
+
+    /// Starts the background work, optionally skipping the stored token.
+    /// Adding an account must not restore: the current account is still
+    /// saved, so restoring would sign straight back into it and the QR
+    /// would never get a chance.
+    fn start_with_restore(&mut self, rt: &tokio::runtime::Handle, waker: Waker, restore: bool) {
         if self.skipped {
             return;
         }
@@ -249,7 +270,7 @@ impl Login {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         self.cmd_tx = cmd_tx;
         rt.spawn(async move {
-            run(tx, waker, store, cmd_rx).await;
+            run(tx, waker, store, cmd_rx, restore).await;
         });
     }
 
@@ -381,6 +402,7 @@ async fn run(
     waker: Waker,
     store: Option<SecretStore>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<LoginCommand>,
+    restore_enabled: bool,
 ) {
     // Measure first: both REST and the gateway build their claim after this,
     // and measuring later would leave one of them stale. The screen is
@@ -392,20 +414,25 @@ async fn run(
     let mut said_ended = false;
     let mut wait = RETRY_MIN;
     loop {
-        match restore(store.as_ref()).await {
-            RestoreOutcome::LoggedIn(l) => {
-                let _ = tx.send(LoginEvent::Done(l));
-                waker.wake();
-                return;
-            }
-            RestoreOutcome::Gone => {
-                if !said_ended {
-                    said_ended = true;
-                    let _ = tx.send(LoginEvent::Ended);
+        // Adding an account skips this entirely, every turn: the current
+        // account is still saved, and restoring it would sign straight back
+        // into it — even after the QR expired and the loop came back around.
+        if restore_enabled {
+            match restore(store.as_ref()).await {
+                RestoreOutcome::LoggedIn(l) => {
+                    let _ = tx.send(LoginEvent::Done(l));
                     waker.wake();
+                    return;
                 }
+                RestoreOutcome::Gone => {
+                    if !said_ended {
+                        said_ended = true;
+                        let _ = tx.send(LoginEvent::Ended);
+                        waker.wake();
+                    }
+                }
+                RestoreOutcome::Unchecked => {}
             }
-            RestoreOutcome::Unchecked => {}
         }
 
         // The QR runs in the background so a password command can interrupt
@@ -454,7 +481,7 @@ async fn run(
                 }
                 Some(LoginCommand::BotToken { token }) => {
                     qr.abort();
-                    match run_bot_token(&tx, &waker, token).await {
+                    match run_bot_token(&tx, &waker, store.as_ref(), token).await {
                         // In; the bot path already sent Done.
                         true => return,
                         false => {
@@ -577,11 +604,7 @@ async fn run_password(
             match rest.authenticate(tok.clone()).await {
                 Ok((client, me)) => {
                     tracing::info!(user = %me.user.display_name(), "signed in with password");
-                    if let Some(store) = store
-                        && let Err(e) = store.store(TOKEN_KEY, tok.expose().as_bytes())
-                    {
-                        tracing::warn!(%e, "could not store the token; the next start will ask again");
-                    }
+                    remember_account(store, &me, &tok);
                     let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn {
                         me,
                         client,
@@ -598,13 +621,17 @@ async fn run_password(
 
 /// Logs in with a bot token.
 ///
-/// Hidden, development-only path: the token rides straight into REST with a
-/// `Bot ` prefix and is validated by `GET /users/@me`. It is deliberately not
-/// stored — a dev bot token is not worth the keychain entry or the ambiguity
-/// of restoring a kind the raw string does not carry.
+/// Hidden path: the token rides straight into REST with a `Bot ` prefix and
+/// is validated by `GET /users/@me`. It is stored separately from user tokens
+/// so restoring it retains the bot kind.
 ///
 /// Returns `true` on success; [`LoginEvent::Done`] was already sent.
-async fn run_bot_token(tx: &Sender<LoginEvent>, waker: &Waker, token: String) -> bool {
+async fn run_bot_token(
+    tx: &Sender<LoginEvent>,
+    waker: &Waker,
+    store: Option<&SecretStore>,
+    token: String,
+) -> bool {
     let token = Token::bot(token);
     let rest = match RestClient::anonymous() {
         Ok(r) => r,
@@ -618,6 +645,7 @@ async fn run_bot_token(tx: &Sender<LoginEvent>, waker: &Waker, token: String) ->
     match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
             tracing::info!(user = %me.user.display_name(), "signed in with a bot token");
+            remember_account(store, &me, &token);
             let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
             waker.wake();
             true
@@ -682,41 +710,87 @@ async fn restore(store: Option<&SecretStore>) -> RestoreOutcome {
     let Some(store) = store else {
         return RestoreOutcome::Gone;
     };
-    let raw = match store.load(TOKEN_KEY) {
-        Ok(Some(raw)) => raw,
-        // Nothing stored is the ordinary first start.
-        Ok(None) => return RestoreOutcome::Gone,
+    let mut index = match AccountsIndex::load(store) {
+        Ok(idx) => idx,
         Err(e) => {
-            // Not exceptional: a different OS user, for instance. Unreadable
-            // from here on, so the entry goes rather than failing in
-            // silence every start.
-            tracing::warn!(%e, "cannot read the stored token; discarding it");
-            let _ = store.clear(TOKEN_KEY);
+            tracing::warn!(%e, "cannot read accounts index");
             return RestoreOutcome::Gone;
         }
     };
 
-    let token = Token::new(String::from_utf8_lossy(&raw).into_owned());
+    let candidate = index
+        .active
+        .or_else(|| index.accounts.first().map(|a| a.key));
+    let (account_key, token, is_legacy) = if let Some(key) = candidate {
+        match index.load_token(store, key) {
+            Ok(Some(tok)) => (Some(key), tok, false),
+            Ok(None) => {
+                tracing::warn!("stored account has no token; clearing entry");
+                let _ = index.remove(store, key);
+                return RestoreOutcome::Gone;
+            }
+            Err(e) => {
+                tracing::warn!(%e, "cannot read stored account token");
+                return RestoreOutcome::Gone;
+            }
+        }
+    } else {
+        match store.load(TOKEN_KEY) {
+            Ok(Some(raw)) => (
+                None,
+                Token::new(String::from_utf8_lossy(&raw).into_owned()),
+                true,
+            ),
+            Ok(None) => match store.load(BOT_TOKEN_KEY) {
+                Ok(Some(raw)) => (
+                    None,
+                    Token::bot(String::from_utf8_lossy(&raw).into_owned()),
+                    true,
+                ),
+                Ok(None) => return RestoreOutcome::Gone,
+                Err(e) => {
+                    tracing::warn!(%e, "cannot read legacy bot token");
+                    let _ = store.clear(BOT_TOKEN_KEY);
+                    return RestoreOutcome::Gone;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(%e, "cannot read legacy token");
+                let _ = store.clear(TOKEN_KEY);
+                return RestoreOutcome::Gone;
+            }
+        }
+    };
+
     let rest = match RestClient::anonymous() {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(%e, "cannot build a client to check the stored token");
+            tracing::warn!(%e, "cannot build client to restore token");
             return RestoreOutcome::Unchecked;
         }
     };
 
     match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
-            tracing::info!(user = %me.user.display_name(), "signed in with the stored token");
+            tracing::info!(user = %me.user.display_name(), "restored session");
+            if is_legacy {
+                let key = AccountKey::new(me.user.id, token.is_bot());
+                let _ = index.remember(store, key, me.user.display_name().to_owned(), &token);
+            }
             RestoreOutcome::LoggedIn(Box::new(LoggedIn { me, client, token }))
         }
         Err(e) if e.is_unauthorized() => {
-            tracing::warn!(%e, "the stored token was rejected; discarding it");
-            let _ = store.clear(TOKEN_KEY);
+            tracing::warn!(%e, "stored credentials were rejected; clearing");
+            if let Some(key) = account_key {
+                let _ = index.remove(store, key);
+            } else {
+                let _ = store.clear(TOKEN_KEY);
+                let _ = store.clear(BOT_TOKEN_KEY);
+            }
             RestoreOutcome::Gone
         }
         Err(e) => {
-            tracing::warn!(%e, "could not check the stored token; keeping it for a later try");
+            tracing::warn!(%e, "could not verify stored token; retaining for later");
             RestoreOutcome::Unchecked
         }
     }
@@ -770,14 +844,7 @@ async fn attempt(
                     .await
                     .map_err(|e| e.to_string())?;
                 tracing::info!(user = %me.user.display_name(), "signed in");
-
-                // Stored only after it is known to work. A failure to store
-                // does not fail the login; the next start just asks again.
-                if let Some(store) = store.as_ref()
-                    && let Err(e) = store.store(TOKEN_KEY, token.expose().as_bytes())
-                {
-                    tracing::warn!(%e, "could not store the token; the next start will ask again");
-                }
+                remember_account(store.as_ref(), &me, &token);
 
                 let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
                 waker.wake();
@@ -811,15 +878,40 @@ impl Login {
 }
 
 impl Login {
-    /// Drops the stored token and starts over.
+    /// Drops the stored token for the current account and starts over.
     ///
     /// Called both when the gateway rejects it and when the user signs out.
     pub fn forget(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
         if let Ok(store) = SecretStore::new() {
+            if let Some(logged_in) = self.session.logged_in() {
+                let key = AccountKey::new(logged_in.me.user.id, logged_in.token.is_bot());
+                if let Ok(mut idx) = AccountsIndex::load(&store) {
+                    let _ = idx.remove(&store, key);
+                }
+            }
             let _ = store.clear(TOKEN_KEY);
+            let _ = store.clear(BOT_TOKEN_KEY);
         }
         self.session = Session::Connecting;
         self.start(rt, waker);
+    }
+
+    /// Resets session to connecting and starts QR login without wiping accounts.
+    pub fn start_add_account(&mut self, rt: &tokio::runtime::Handle, waker: Waker) {
+        self.session = Session::Connecting;
+        self.ended = false;
+        self.notice = None;
+        self.last_error = None;
+        self.pending = None;
+        self.start_with_restore(rt, waker, false);
+    }
+
+    /// Sets the session directly to logged in.
+    pub fn set_logged_in(&mut self, logged_in: LoggedIn) {
+        self.session = Session::LoggedIn(Box::new(logged_in));
+        self.ended = false;
+        self.notice = None;
+        self.last_error = None;
     }
 }
 
