@@ -6,6 +6,12 @@
 use gumicord_app::Gumicord;
 
 fn main() {
+    // A probe child reports its backend and exits; it must not reach the
+    // window, the logger, or anything else that talks.
+    let args: Vec<String> = std::env::args().collect();
+    if gumicord_render::probe::run_probe(&args) {
+        return;
+    }
     init_tracing();
 
     if let Err(e) = gumicord_platform::run(Gumicord::new()) {

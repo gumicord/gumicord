@@ -14,5 +14,6 @@ path = "src/main.rs"
 [dependencies]
 gumicord-app.workspace = true
 gumicord-platform.workspace = true
+gumicord-render.workspace = true
 tokio.workspace = true
 tracing.workspace = true

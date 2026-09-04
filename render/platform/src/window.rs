@@ -903,6 +903,7 @@ impl ApplicationHandler<LoopEvent> for Host {
             scale,
             wake,
             crate::app_data_dir().map(|d| d.join("fonts")),
+            crate::app_data_dir().map(|d| d.join("gpu")),
         ) {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {

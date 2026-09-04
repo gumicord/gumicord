@@ -6,8 +6,9 @@
 //! and took the process with it. Windows tries GL first on measurement — the
 //! same scene resident in 18.1 MB against DX12's 285.7 MB.
 //!
-//! Probing in a separate process at startup is still to come, so a broken
-//! driver still takes the client down with it.
+//! Each candidate backend is created in a probe child first ([`probe`]), so a
+//! broken driver kills the child and the client starts without it instead of
+//! dying with it.
 
 use crate::draw::{DrawList, FLOATS_PER_GLYPH, FLOATS_PER_RECT, RunKind};
 
@@ -67,14 +68,18 @@ impl Gpu {
         target: wgpu::SurfaceTarget<'static>,
         width: u32,
         height: u32,
+        probe_cache: Option<&std::path::Path>,
     ) -> Result<Self, GpuError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         // Narrowed before the instance exists: a broken driver crashes while
-        // one is being created, not while adapters are enumerated.
+        // one is being created, not while adapters are enumerated. Each
+        // candidate is created in a probe child first, so only survivors
+        // reach this process.
         if std::env::var("WGPU_BACKEND").is_err() {
-            desc.backends = CANDIDATES
-                .iter()
-                .fold(wgpu::Backends::empty(), |a, b| a | *b);
+            desc.backends = crate::probe::surviving_backends(CANDIDATES, probe_cache);
+            if desc.backends.is_empty() {
+                return Err(GpuError::NoAdapter);
+            }
         }
         let backends = desc.backends;
 

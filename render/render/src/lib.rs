@@ -17,6 +17,7 @@ pub mod icon;
 pub mod intrinsic;
 pub mod layout;
 pub mod motion;
+pub mod probe;
 pub mod text;
 
 pub use geom::{Rect, Size};
@@ -147,8 +148,9 @@ impl Renderer {
         scale: f32,
         wake: Box<dyn Fn() + Send + Sync + 'static>,
         font_cache_dir: Option<std::path::PathBuf>,
+        probe_cache_dir: Option<std::path::PathBuf>,
     ) -> Result<Self, GpuError> {
-        let gpu = Gpu::new(target, width, height)?;
+        let gpu = Gpu::new(target, width, height, probe_cache_dir.as_deref())?;
         let text = TextEngine::new(&gpu.device, scale, wake, font_cache_dir);
         let atlas_binds = bind_pages(&gpu, &text);
         Ok(Renderer {

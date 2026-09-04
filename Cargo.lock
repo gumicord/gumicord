@@ -1745,6 +1745,7 @@ version = "0.0.0"
 dependencies = [
  "gumicord-app",
  "gumicord-platform",
+ "gumicord-render",
  "tokio",
  "tracing",
 ]
