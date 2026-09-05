@@ -11,10 +11,10 @@ use gumicord_uitree::{Content, Key, UiNode};
 
 /// Builds the whole tree. The reader diffs by node id, so the same node
 /// maps to the same id on every frame of the run.
-pub fn tree_update(tree: &UiNode, focus: Option<&str>, title: &str) -> TreeUpdate {
+pub fn tree_update(tree: &UiNode, focus: Option<(&str, Option<Key>)>, title: &str) -> TreeUpdate {
     let mut builder = Builder::new(focus);
     let root = builder
-        .node(tree, true, title)
+        .node(tree, true, title, 0)
         .unwrap_or_else(|| builder.fallback_root(title));
     TreeUpdate {
         nodes: builder.nodes,
@@ -25,7 +25,7 @@ pub fn tree_update(tree: &UiNode, focus: Option<&str>, title: &str) -> TreeUpdat
 }
 
 struct Builder<'a> {
-    focus_stable: Option<&'a str>,
+    focus_stable: Option<(&'a str, Option<Key>)>,
     focus_id: Option<NodeId>,
     next: u64,
     ids: HashMap<String, NodeId>,
@@ -34,7 +34,7 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(focus: Option<&'a str>) -> Self {
+    fn new(focus: Option<(&'a str, Option<Key>)>) -> Self {
         Builder {
             focus_stable: focus,
             focus_id: None,
@@ -45,9 +45,11 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// One id per distinct node, stable across frames. Siblings sharing a
-    /// stable id tell apart by key; keyless ones by order of appearance.
-    fn id_of(&mut self, stable: &'a str, key: &Option<Key>) -> NodeId {
+    /// One id per node position, stable across frames. Keyed siblings tell
+    /// apart by key; keyless ones by order of appearance. The parent's id
+    /// joins in: the same key under two parents is two nodes, and the
+    /// reader rejects a child id seen twice anywhere in one update.
+    fn id_of(&mut self, parent: u64, stable: &'a str, key: &Option<Key>) -> NodeId {
         let instance = match key {
             Some(Key::Id(id)) => format!("id{id}"),
             Some(Key::Slot(slot)) => format!("slot{slot}"),
@@ -58,7 +60,7 @@ impl<'a> Builder<'a> {
                 format!("nth{n}")
             }
         };
-        let discriminator = format!("{stable}\0{instance}");
+        let discriminator = format!("{parent}:{stable}\0{instance}");
         if let Some(&id) = self.ids.get(&discriminator) {
             return id;
         }
@@ -70,16 +72,26 @@ impl<'a> Builder<'a> {
 
     /// Translates one node, pruning what carries nothing. The QR payload is
     /// a login ticket, so it is never read aloud, whatever wraps it.
-    fn node(&mut self, node: &'a UiNode, is_root: bool, title: &'a str) -> Option<NodeId> {
+    fn node(
+        &mut self,
+        node: &'a UiNode,
+        is_root: bool,
+        title: &'a str,
+        parent: u64,
+    ) -> Option<NodeId> {
         let stable = node.id.as_str();
-        let id = self.id_of(stable, &node.key);
-        if self.focus_stable == Some(stable) && self.focus_id.is_none() {
+        let id = self.id_of(parent, stable, &node.key);
+        let focused = self
+            .focus_stable
+            .as_ref()
+            .is_some_and(|(s, k)| *s == stable && k.as_ref() == node.key.as_ref());
+        if focused && self.focus_id.is_none() {
             self.focus_id = Some(NodeId(id.0));
         }
         let mut children = Vec::new();
         if !matches!(node.content, Content::Qr(_)) {
             for child in &node.children {
-                if let Some(cid) = self.node(child, false, title) {
+                if let Some(cid) = self.node(child, false, title, id.0) {
                     children.push(cid);
                 }
             }
@@ -186,7 +198,7 @@ mod tests {
             .push(text(StableId::ChatMessageContent, "hello"));
         tree.children
             .push(text(StableId::ChromeTitlebarControl, "×"));
-        let update = tree_update(&tree, Some("chat.message.content"), "Gumicord");
+        let update = tree_update(&tree, Some(("chat.message.content", None)), "Gumicord");
         assert_eq!(update.nodes.len(), 3);
         let focused = update
             .nodes
@@ -229,5 +241,59 @@ mod tests {
         tree.children.push(UiNode::new(StableId::ChatMessageAvatar));
         let update = tree_update(&tree, None, "Gumicord");
         assert_eq!(update.nodes.len(), 1, "only the window should remain");
+    }
+
+    /// The same key under two parents is two nodes: the reader rejects a
+    /// child id seen twice anywhere in one update.
+    #[test]
+    fn shared_keys_under_different_parents_stay_distinct() {
+        use gumicord_uitree::Key;
+        fn item(i: u32, label: &str) -> UiNode {
+            UiNode::new(StableId::OverlayMenuItem)
+                .with_key(Key::Index(i))
+                .child(
+                    UiNode::text(StableId::OverlayMenuItemLabel, label.to_owned())
+                        .with_key(Key::Slot("normal")),
+                )
+        }
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        tree.children.push(
+            UiNode::new(StableId::OverlayMenu)
+                .child(item(0, "one"))
+                .child(item(1, "two")),
+        );
+        tree.children.push(
+            UiNode::new(StableId::OverlayMenu)
+                .child(item(0, "uno"))
+                .child(item(1, "dos")),
+        );
+        let update = tree_update(&tree, None, "Gumicord");
+        let mut seen = std::collections::HashSet::new();
+        for (id, _) in &update.nodes {
+            assert!(seen.insert(id.0), "duplicate child id {}", id.0);
+        }
+        // And the same tree maps the same way twice.
+        let second = tree_update(&tree, None, "Gumicord");
+        let ids = |u: &TreeUpdate| u.nodes.iter().map(|(id, _)| id.0).collect::<Vec<_>>();
+        assert_eq!(ids(&update), ids(&second));
+    }
+
+    /// Focus names a node, not just a kind: pressing the second message
+    /// must not read the first.
+    #[test]
+    fn focus_can_name_one_message() {
+        use gumicord_uitree::Key;
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        for (id, body) in [(1u64, "first"), (2u64, "second")] {
+            tree.children.push(
+                UiNode::new(StableId::ChatMessage)
+                    .with_key(Key::Id(id))
+                    .child(text(StableId::ChatMessageContent, body)),
+            );
+        }
+        let focus =
+            |id| tree_update(&tree, Some(("chat.message", Some(Key::Id(id)))), "Gumicord").focus;
+        assert_ne!(focus(1), focus(2), "focus ignores the key");
+        assert_eq!(focus(2), focus(2), "focus moves between frames");
     }
 }
