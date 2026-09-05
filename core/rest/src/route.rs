@@ -111,6 +111,17 @@ impl Route {
         )
     }
 
+    /// Around one message, for jumping to a reply's source. `around` stays
+    /// out of the key like `before`, sharing the bucket with
+    /// [`Route::messages`].
+    pub fn messages_around(channel: ChannelId, limit: u8, around: MessageId) -> Self {
+        Self::scoped(
+            Method::Get,
+            format!("/channels/{channel}/messages?limit={limit}&around={around}"),
+            format!("/channels/{channel}/messages"),
+        )
+    }
+
     /// Marks a channel read up to a message. The message id stays out of the
     /// key, or every ack would learn its own bucket.
     pub fn ack_message(channel: ChannelId, message: MessageId) -> Self {

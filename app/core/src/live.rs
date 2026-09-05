@@ -118,6 +118,13 @@ pub enum LiveEvent {
         channel: ChannelId,
         list: Vec<Message>,
     },
+    /// Messages around a jump target, replacing history like a fresh
+    /// load. Empty means the target could not be fetched.
+    Around {
+        channel: ChannelId,
+        target: u64,
+        list: Vec<Message>,
+    },
     /// A member list diff.
     Members(Box<gumicord_gateway::member_list::MemberListUpdate>),
     /// Members we asked for by name.
@@ -184,6 +191,11 @@ pub struct Live {
     paging: HashSet<ChannelId>,
     /// Channels with nothing older left.
     exhausted: HashSet<ChannelId>,
+    /// Jump targets being fetched. A second press while one flies waits
+    /// for it, and a late answer for a superseded jump is dropped.
+    around_inflight: HashSet<(ChannelId, u64)>,
+    /// Fetches that came back with nothing to show, consumed once.
+    around_failed: HashSet<(ChannelId, u64)>,
     /// Something was prepended; consumed once by the renderer to hold the
     /// scroll position.
     prepended: bool,
@@ -262,6 +274,8 @@ impl Live {
             requested: HashSet::new(),
             paging: HashSet::new(),
             exhausted: HashSet::new(),
+            around_inflight: HashSet::new(),
+            around_failed: HashSet::new(),
             prepended: false,
             rejected: false,
             last_channel: None,
@@ -300,6 +314,8 @@ impl Live {
         self.requested.clear();
         self.paging.clear();
         self.exhausted.clear();
+        self.around_inflight.clear();
+        self.around_failed.clear();
         self.watching = None;
         self.asked_members.clear();
         self.members.clear();
@@ -627,6 +643,51 @@ impl Live {
             let _ = tx.send(LiveEvent::Older { channel, list });
             waker.wake();
         });
+    }
+
+    /// Fetches messages around a jump target. True when the request left;
+    /// false means there is no runtime to ask with, so the caller answers
+    /// at once instead of waiting for an event that never comes.
+    pub fn fetch_around(&mut self, channel: ChannelId, target: u64) -> bool {
+        if !self.around_inflight.insert((channel, target)) {
+            return true;
+        }
+        let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
+            self.around_inflight.remove(&(channel, target));
+            return false;
+        };
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
+        rt.spawn(async move {
+            let list = match rest
+                .messages_around(channel, BACKLOG, MessageId::from(target))
+                .await
+            {
+                Ok(mut list) => {
+                    list.reverse();
+                    list
+                }
+                Err(e) => {
+                    if report_dead_token(&tx, Some(&waker), &e) {
+                        return;
+                    }
+                    tracing::warn!(%e, channel = %channel, "could not fetch around a jump target");
+                    Vec::new()
+                }
+            };
+            let _ = tx.send(LiveEvent::Around {
+                channel,
+                target,
+                list,
+            });
+            waker.wake();
+        });
+        true
+    }
+
+    /// Takes a failed jump fetch, if its answer arrived. Consumed once, so
+    /// one failure toasts once no matter how many frames pass.
+    pub fn take_around_failed(&mut self, channel: ChannelId, target: u64) -> bool {
+        self.around_failed.remove(&(channel, target))
     }
 
     /// Whether something was prepended. True once, so the renderer can hold
@@ -1112,6 +1173,27 @@ impl Live {
                 // Hold the scroll position: prepending grows the content and
                 // would push the line being read downwards.
                 self.prepended = true;
+                true
+            }
+            LiveEvent::Around {
+                channel,
+                target,
+                list,
+            } => {
+                if !self.around_inflight.remove(&(channel, target)) {
+                    return false;
+                }
+                if list.is_empty() {
+                    self.around_failed.insert((channel, target));
+                    return true;
+                }
+                // A jumped-to window replaces history like a fresh load, so
+                // paging can start over. It is not saved: a partial window
+                // must not overwrite the cache's newest tail.
+                self.exhausted.remove(&channel);
+                self.store.set_backlog(channel, list);
+                // REST messages carry no member; ask for them.
+                self.fill_members(channel);
                 true
             }
             LiveEvent::Members(update) => {
@@ -1861,6 +1943,49 @@ mod tests {
         }));
         assert!(live.is_exhausted(ch()));
         assert!(!live.take_prepended(), "nothing was prepended");
+    }
+
+    /// A jump window replaces history; a stale or empty answer does not
+    /// strand the reader.
+    #[test]
+    fn around_replaces_but_stale_or_empty_does_not() {
+        let mut live = live();
+        live.apply(LiveEvent::Backlog {
+            channel: ch(),
+            list: vec![message(9, "new")],
+        });
+        // A late answer for a superseded jump changes nothing.
+        assert!(!live.apply(LiveEvent::Around {
+            channel: ch(),
+            target: 3,
+            list: vec![message(3, "old")],
+        }));
+        assert_eq!(live.store().messages(ch()).len(), 1);
+
+        // Fetch, then answer.
+        live.around_inflight.insert((ch(), 3));
+        assert!(live.apply(LiveEvent::Around {
+            channel: ch(),
+            target: 3,
+            list: vec![message(2, "a"), message(3, "b")],
+        }));
+        let bodies: Vec<_> = live
+            .store()
+            .messages(ch())
+            .iter()
+            .map(|m| &*m.content)
+            .collect();
+        assert_eq!(bodies, vec!["a", "b"]);
+
+        // An empty answer records the failure once.
+        live.around_inflight.insert((ch(), 4));
+        assert!(live.apply(LiveEvent::Around {
+            channel: ch(),
+            target: 4,
+            list: Vec::new(),
+        }));
+        assert!(live.take_around_failed(ch(), 4));
+        assert!(!live.take_around_failed(ch(), 4), "failure repeats");
     }
 
     /// Replacing the history re-enables paging.

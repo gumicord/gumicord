@@ -364,6 +364,9 @@ pub struct Gumicord {
     /// A jump waiting for the next frame: the renderer knows where the
     /// message landed last frame, this layer only knows it was pressed.
     pending_reveal: Option<u64>,
+    /// A jump waiting for its messages: fetched around the target when it
+    /// is not loaded. Dropped when the channel moves on.
+    pending_jump: Option<(ChannelId, u64)>,
     /// The last pressed message, for the screen reader to follow.
     a11y_message: Option<u64>,
     /// The settings screen. Closed most of the time.
@@ -494,6 +497,7 @@ impl Gumicord {
             dialogs: VecDeque::new(),
             showing: None,
             pending_reveal: None,
+            pending_jump: None,
             a11y_message: None,
             settings: SettingsView::default(),
         };
@@ -1488,6 +1492,7 @@ impl Application for Gumicord {
         // timestamps disagree.
         self.now = gumicord_platform::now_unix();
         self.holds.set(None);
+        self.settle_jump();
 
         // Inline decoration is spans, which stage [5] never walks, so the
         // theme is consulted while building.
@@ -3653,17 +3658,45 @@ impl Gumicord {
             .child(body)
     }
 
-    /// Jumps the chat to a message. Only what is loaded can move: fetching
-    /// around an unloaded message needs its own request (see `load_older`),
-    /// so an unknown target says so instead of stranding the reader.
+    /// Jumps the chat to a message. Loaded targets move at once; anything
+    /// else is fetched around first, like the official client. A target
+    /// that cannot be fetched says so instead of stranding the reader.
     fn jump_to_message(&mut self, target: u64) -> bool {
         if self.message_rows().iter().any(|m| m.id == target) {
             self.pending_reveal = Some(target);
             self.a11y_message = Some(target);
+            self.pending_jump = None;
             return true;
         }
-        self.notify_toast("そのメッセージは読み込まれていません".to_owned());
+        let channel = ChannelId::from(self.selected_channel);
+        if !self.live.fetch_around(channel, target) {
+            self.notify_toast("そのメッセージは読み込めませんでした".to_owned());
+            return true;
+        }
+        self.pending_jump = Some((channel, target));
         true
+    }
+
+    /// Settles a waiting jump once its messages arrive. Runs on the frame
+    /// after the fetch lands: the rows have to exist before revealing.
+    fn settle_jump(&mut self) {
+        let Some((channel, target)) = self.pending_jump else {
+            return;
+        };
+        if ChannelId::from(self.selected_channel) != channel {
+            self.pending_jump = None;
+            return;
+        }
+        if self.live.take_around_failed(channel, target) {
+            self.pending_jump = None;
+            self.notify_toast("そのメッセージは読み込めませんでした".to_owned());
+            return;
+        }
+        if self.message_rows().iter().any(|m| m.id == target) {
+            self.pending_reveal = Some(target);
+            self.a11y_message = Some(target);
+            self.pending_jump = None;
+        }
     }
 
     /// The body.
@@ -6140,6 +6173,40 @@ mod member_tests {
         assert!(press(&mut a, 77));
         assert!(a.pending_reveal.is_none(), "無い所へ飛ぼうとした");
         assert!(!a.toasts.is_empty(), "黙って失敗した");
+    }
+
+    /// An unloaded target fetches around instead of stranding; without a
+    /// runtime it says so at once.
+    #[test]
+    fn an_unloaded_jump_fetches_or_says_so() {
+        let mut a = app(message(None, None));
+        assert!(a.jump_to_message(77));
+        assert!(a.pending_jump.is_none(), "飛べないのに待っている");
+        assert!(!a.toasts.is_empty(), "黙って失敗した");
+    }
+
+    /// A fetched window settles into a reveal; moving on drops it.
+    #[test]
+    fn a_fetched_window_settles_into_a_reveal() {
+        let mut target = message(None, None);
+        target.id = MessageId::from(99u64);
+        let mut m = message(None, None);
+        m.referenced_message = Some(Box::new(target.clone()));
+        let mut a = app(message(None, None));
+        a.live
+            .store_mut()
+            .set_backlog(ChannelId::from(10u64), vec![target, m]);
+
+        a.pending_jump = Some((ChannelId::from(10u64), 99));
+        a.settle_jump();
+        assert_eq!(a.pending_reveal, Some(99));
+        assert!(a.pending_jump.is_none());
+        assert!(a.take_reveal().is_some());
+
+        a.pending_jump = Some((ChannelId::from(11u64), 99));
+        a.settle_jump();
+        assert!(a.pending_jump.is_none(), "去った先へ飛ぼうとした");
+        assert!(a.take_reveal().is_none());
     }
 
     /// Long sources truncate to one line.

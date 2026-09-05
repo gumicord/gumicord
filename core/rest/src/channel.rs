@@ -32,6 +32,19 @@ impl RestClient {
             .await
     }
 
+    /// Fetches messages around one message, newest first like the rest.
+    /// The target is included when it still exists; a deleted target comes
+    /// back as the neighbours alone, and a forbidden one errors.
+    pub async fn messages_around(
+        &self,
+        channel: ChannelId,
+        limit: u8,
+        around: MessageId,
+    ) -> Result<Vec<Message>, RestError> {
+        self.get(Route::messages_around(channel, limit.clamp(1, 100), around))
+            .await
+    }
+
     /// Posts a message, as a reply when `reply_to` is set.
     ///
     /// The created message is returned, but the Gateway delivers the same one
@@ -195,5 +208,15 @@ mod tests {
 
         assert!(next.path.contains("before=9"));
         assert_eq!(first.bucket_key, next.bucket_key);
+    }
+
+    #[test]
+    fn jumping_around_shares_the_bucket() {
+        let ch = ChannelId::from(1u64);
+        let first = Route::messages(ch, 50);
+        let jump = Route::messages_around(ch, 50, gumicord_model::MessageId::from(9u64));
+
+        assert!(jump.path.contains("around=9"));
+        assert_eq!(first.bucket_key, jump.bucket_key);
     }
 }
