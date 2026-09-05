@@ -443,6 +443,7 @@ mod tests {
                 // or the user panel, only its inner scroll region.
                 NodeId::NavDmList,
                 NodeId::NavMemberList,
+                NodeId::NavMemberListSheet,
                 NodeId::ChatMessageList,
                 NodeId::SettingsPage,
                 NodeId::LayoutScroll,
