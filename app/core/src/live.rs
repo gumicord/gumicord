@@ -481,8 +481,33 @@ impl Live {
 
     /// Whether the member pane shows. The app sets it every frame; hidden
     /// narrows the subscription to the minimum (see [`visible_rows`]).
+    /// Flipping re-asks: opening while hidden subscribes to the minimum,
+    /// and nothing else re-asks when the pane comes back.
     pub fn set_members_visible(&mut self, visible: bool) {
+        if self.members_visible == visible {
+            return;
+        }
         self.members_visible = visible;
+        let (Some(subs), Some(channel)) = (&self.subs, self.watching) else {
+            return;
+        };
+        let Some(guild) = self.store.channel(channel).and_then(|c| c.guild_id) else {
+            return;
+        };
+        // Bots have no member-list subscription; their roster arrives
+        // through OP 8 chunks.
+        if self.rest.as_ref().is_some_and(RestClient::is_bot) {
+            return;
+        }
+        let rows = if visible {
+            self.member_rows
+                .entry(guild)
+                .or_insert_with(|| MEMBER_ROWS.to_vec())
+                .clone()
+        } else {
+            MIN_MEMBER_ROWS.to_vec()
+        };
+        subs.watch(guild, channel, &rows);
     }
 
     /// Records who we are, so our own typing is filtered out.
@@ -2143,6 +2168,66 @@ mod tests {
                 &live.member_rows[&GuildId::from(5u64)]
             ),
             &[[0, 99], [100, 199]]
+        );
+    }
+
+    /// Flipping the member pane re-asks: narrowing sends the minimum,
+    /// showing again restores the remembered rows. Opening while hidden
+    /// subscribes to the minimum, and nothing else re-asks on the way back.
+    #[test]
+    fn flipping_the_member_pane_reasks() {
+        use gumicord_gateway::Request;
+        use gumicord_model::{Channel, ChannelKind};
+
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        let (mut gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.watching = Some(ch());
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: vec![Channel {
+                id: ch(),
+                kind: ChannelKind::GuildText,
+                name: Some("一般".to_owned()),
+                guild_id: Some(guild),
+                parent_id: None,
+                position: 0,
+                topic: None,
+                nsfw: false,
+                recipients: Vec::new(),
+                last_message_id: None,
+            }],
+            roles: Vec::new(),
+        });
+        live.member_rows.insert(guild, vec![[0, 99]]);
+        let watching = |requests: Vec<Request>| {
+            requests.into_iter().find_map(|r| match r {
+                Request::Watch(g, c, rows) if g == guild && c == ch() => Some(rows),
+                _ => None,
+            })
+        };
+
+        live.set_members_visible(false);
+        assert_eq!(
+            watching(gateway.take_requests()),
+            Some(vec![[0u32, 0]]),
+            "hiding did not narrow the ask"
+        );
+        live.set_members_visible(true);
+        assert_eq!(
+            watching(gateway.take_requests()),
+            Some(vec![[0u32, 99]]),
+            "showing did not restore the ask"
+        );
+        // Steady state sends nothing, every frame sets this.
+        live.set_members_visible(true);
+        assert!(
+            gateway.take_requests().is_empty(),
+            "re-asked without a flip"
         );
     }
 

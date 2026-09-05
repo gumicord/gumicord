@@ -15,7 +15,8 @@ pub mod status;
 pub mod zstd_stream;
 
 pub use gateway::{
-    Event, Fatal, Gateway, GatewayError, GuildSettingsEntry, MemberRange, Ready, Subscriptions,
+    Event, Fatal, Gateway, GatewayError, GuildSettingsEntry, MemberRange, Ready, Request,
+    Subscriptions,
 };
 pub use guild_order::Folder;
 pub use member_list::{MemberEntry, MemberList, MemberRow};

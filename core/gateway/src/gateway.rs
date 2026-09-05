@@ -274,7 +274,7 @@ pub struct Gateway {
 
 /// A request to send to the gateway.
 #[derive(Debug, Clone)]
-enum Request {
+pub enum Request {
     /// We are watching this channel, and which rows of its member list.
     Watch(GuildId, ChannelId, Vec<MemberRange>),
     /// We need these members in this guild.
@@ -282,6 +282,17 @@ enum Request {
     /// Bot-only member list request. Unlike a user subscription, this is the
     /// standard Gateway OP 8 flow and requires the GUILD_MEMBERS intent.
     AllMembers(GuildId),
+}
+
+impl Gateway {
+    /// Drains pending requests, so tests can see what was asked.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.requests.try_recv() {
+            out.push(r);
+        }
+        out
+    }
 }
 
 /// Tells the gateway what is being watched.
