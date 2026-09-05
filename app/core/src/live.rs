@@ -44,6 +44,10 @@ const TYPING_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 /// (`NEXT.md` 4.).
 const MEMBER_ROWS: [gumicord_gateway::MemberRange; 1] = [[0, 99]];
 
+/// The least a hidden member pane still subscribes to. An empty subscription
+/// never worked, so hidden narrows instead of unsubscribing.
+const MIN_MEMBER_ROWS: [gumicord_gateway::MemberRange; 1] = [[0, 0]];
+
 /// How long a bot roster ask covers. OP 8 answers can be lost without
 /// closing the session, and asking every frame instead gets rate-limited;
 ///
@@ -210,6 +214,10 @@ pub struct Live {
     /// Widened on scroll: the gateway re-sends the subscription when the
     /// ranges change and skips an identical one, so announcing again is free.
     member_rows: std::collections::HashMap<GuildId, Vec<gumicord_gateway::MemberRange>>,
+    /// Whether the member pane shows. Hidden narrows the subscription to the
+    /// minimum instead of unsubscribing, which never worked. The app sets it
+    /// every frame; widened rows are remembered regardless.
+    members_visible: bool,
     /// A bot's roster, accumulated across OP 8 chunks keyed by user. Chunks
     /// carry no grouping, so the rows are rebuilt from this on every chunk.
     bot_roster: std::collections::HashMap<
@@ -263,6 +271,7 @@ impl Live {
             typing: std::collections::HashMap::new(),
             members: std::collections::HashMap::new(),
             member_rows: std::collections::HashMap::new(),
+            members_visible: true,
             bot_roster: std::collections::HashMap::new(),
             bot_asked: std::collections::HashMap::new(),
             bot_complete: HashSet::new(),
@@ -470,6 +479,12 @@ impl Live {
         self.members.get(&guild).filter(|m| !m.is_empty())
     }
 
+    /// Whether the member pane shows. The app sets it every frame; hidden
+    /// narrows the subscription to the minimum (see [`visible_rows`]).
+    pub fn set_members_visible(&mut self, visible: bool) {
+        self.members_visible = visible;
+    }
+
     /// Records who we are, so our own typing is filtered out.
     pub fn set_me(&mut self, me: UserId) {
         self.me = Some(me);
@@ -499,7 +514,7 @@ impl Live {
                 .member_rows
                 .entry(guild)
                 .or_insert_with(|| MEMBER_ROWS.to_vec());
-            subs.watch(guild, channel, rows);
+            subs.watch(guild, channel, visible_rows(self.members_visible, rows));
         }
 
         if !self.requested.insert(channel) {
@@ -665,7 +680,7 @@ impl Live {
         };
         tracing::debug!(%guild, from = next[0], "asking for more member rows");
         asked.push(next);
-        subs.watch(guild, channel, asked);
+        subs.watch(guild, channel, visible_rows(self.members_visible, asked));
     }
 
     /// Asks for a bot guild's roster. OP 8 answers in chunks, which
@@ -1606,6 +1621,20 @@ fn next_member_rows(
     Some([start, start + PAGE - 1])
 }
 
+/// What to actually send: the remembered rows while the member pane shows,
+/// the bare minimum while it does not. An empty subscription never worked,
+/// so hidden never means zero.
+fn visible_rows(
+    visible: bool,
+    remembered: &[gumicord_gateway::MemberRange],
+) -> &[gumicord_gateway::MemberRange] {
+    if visible {
+        remembered
+    } else {
+        &MIN_MEMBER_ROWS
+    }
+}
+
 /// Maps Discord's notification level integer to the store enum.
 ///
 /// `message_notifications`: 0 = all, 1 = only @mentions, 2 = nothing.
@@ -2075,6 +2104,46 @@ mod tests {
         assert_eq!(next_member_rows(150, &[first, [100, 199]]), None);
         let three = [first, [100, 199], [200, 299]];
         assert_eq!(next_member_rows(250, &three), None);
+    }
+
+    /// Hidden narrows to one row; shown restores the remembered rows. Empty
+    /// never goes out: a subscription without any was never seen to work.
+    #[test]
+    fn hiding_the_member_pane_narrows_instead_of_unsubscribing() {
+        let widened = [[0u32, 99], [100, 199]];
+        assert_eq!(visible_rows(true, &widened), &widened);
+        assert_eq!(visible_rows(false, &widened), &[[0, 0]]);
+        assert_eq!(visible_rows(false, &[]), &[[0, 0]], "never zero");
+    }
+
+    /// Widened rows survive hiding, so showing again restores them without
+    /// asking from scratch.
+    #[test]
+    fn remembered_rows_survive_hiding() {
+        let mut live = live();
+        assert!(
+            live.members_visible,
+            "hidden by default would change current behaviour"
+        );
+        live.member_rows
+            .insert(GuildId::from(5u64), vec![[0, 99], [100, 199]]);
+
+        live.set_members_visible(false);
+        assert_eq!(
+            visible_rows(
+                live.members_visible,
+                &live.member_rows[&GuildId::from(5u64)]
+            ),
+            &[[0, 0]]
+        );
+        live.set_members_visible(true);
+        assert_eq!(
+            visible_rows(
+                live.members_visible,
+                &live.member_rows[&GuildId::from(5u64)]
+            ),
+            &[[0, 99], [100, 199]]
+        );
     }
 
     /// One scroll widens the ask once and then holds until the page lands.

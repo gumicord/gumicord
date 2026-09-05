@@ -1211,7 +1211,11 @@ impl Application for Gumicord {
         self.match_ctx = ctx;
 
         // [3] build the tree
-        let tree = self.build_tree(Panes::for_width(cx.viewport.w));
+        let panes = Panes::for_width(cx.viewport.w);
+        // The member subscription follows the member pane: hidden narrows to
+        // the minimum instead of unsubscribing, which never worked.
+        self.live.set_members_visible(panes.members());
+        let tree = self.build_tree(panes);
 
         // [4] run it through the plugins; the newest finished output wins,
         // or the raw tree when nothing finished yet.
