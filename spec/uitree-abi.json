@@ -46,6 +46,7 @@
     "nav.user_panel.name": "none",
     "nav.user_panel.status": "none",
     "nav.member_list": "none",
+    "nav.member_list.sheet": "none",
     "nav.member_list.group": "none",
     "nav.member_list.item": "MemberData",
     "nav.member_list.item.avatar": "MemberData",

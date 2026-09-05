@@ -258,6 +258,8 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
             .w(MEMBER_LIST_W)
             .cross(Cross::Stretch)
             .scrollable(),
+        // The sheet twin fills the width instead; rows are shared.
+        NavMemberListSheet => Intrinsic::column().cross(Cross::Stretch).scrollable(),
         NavMemberListGroup => Intrinsic::row().cross(Cross::Center).one_line(),
         NavMemberListItem => Intrinsic::row().cross(Cross::Center),
         NavMemberListItemAvatar => Intrinsic::stack().w(32.0).h(32.0),

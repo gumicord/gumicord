@@ -942,6 +942,8 @@ impl Gumicord {
                     | NodeId::NavDmListItem
                     | NodeId::NavUserPanel
                     | NodeId::NavMemberList
+                    | NodeId::NavMemberListGroup
+                    | NodeId::NavMemberListSheet
                     | NodeId::NavMemberListItem
                     | NodeId::PrimitiveButton
                     | NodeId::LayoutScrollbarThumb
@@ -2101,9 +2103,22 @@ impl Gumicord {
                     .children(self.sidebar(Panes::Four))
             })
             .child_if(self.member_sheet_open, || {
-                UiNode::new(NodeId::OverlaySheet)
-                    .child(UiNode::new(NodeId::OverlaySheetHandle))
-                    .child(self.member_list())
+                let sheet = UiNode::new(NodeId::OverlaySheet)
+                    .child(UiNode::new(NodeId::OverlaySheetHandle));
+                // The sheet's own container fills the width; the side
+                // pane's fixed-width one would leave a narrow rail.
+                let mut list = UiNode::new(NodeId::NavMemberListSheet);
+                match self.member_list_rows() {
+                    None => {
+                        list = list.with_state(State::Loading);
+                    }
+                    Some(rows) => {
+                        list = list
+                            .children(rows)
+                            .children(self.scrollbar(NodeId::NavMemberListSheet));
+                    }
+                }
+                sheet.child(list)
             })
             .child_if(!self.toasts.is_empty(), || {
                 let texts: Vec<String> = self.toasts.iter().map(|t| t.text.clone()).collect();
@@ -3200,21 +3215,32 @@ impl Gumicord {
     /// Stops at 100 people, which is what the subscription asks for; paging
     /// further is not implemented.
     fn member_list(&self) -> UiNode {
+        let list = UiNode::new(NodeId::NavMemberList);
+        match self.member_list_rows() {
+            None => list.with_state(State::Loading),
+            Some(rows) => list
+                .children(rows)
+                .children(self.scrollbar(NodeId::NavMemberList)),
+        }
+    }
+
+    /// The member rows without their container: the side pane wraps them
+    /// fixed-width, the sheet lets them fill. `None` while loading, which
+    /// both render as a loading state rather than an empty list.
+    fn member_list_rows(&self) -> Option<Vec<UiNode>> {
         use gumicord_gateway::MemberRow;
 
         let guild = GuildId::from(self.selected_guild);
-        let Some(list) = self.live.members(guild) else {
-            return UiNode::new(NodeId::NavMemberList).with_state(State::Loading);
-        };
+        let list = self.live.members(guild)?;
 
-        let mut out = UiNode::new(NodeId::NavMemberList);
+        let mut out = Vec::new();
         for row in list.rows() {
             match row {
                 MemberRow::Group { id, count } => {
                     let Some(name) = self.group_name(guild, id) else {
                         continue;
                     };
-                    out = out.child(UiNode::text(
+                    out.push(UiNode::text(
                         NodeId::NavMemberListGroup,
                         format!("{name} — {count}"),
                     ));
@@ -3251,7 +3277,7 @@ impl Gumicord {
                         .member_tint(guild, &m.member.roles)
                         .map(Color::from_rgb);
 
-                    out = out.child(
+                    out.push(
                         UiNode::new(NodeId::NavMemberListItem)
                             .with_id_key(id)
                             .with_data(id)
@@ -3274,10 +3300,10 @@ impl Gumicord {
         }
 
         // Nothing nameable yet.
-        if out.children.is_empty() {
-            return out.with_state(State::Loading);
+        if out.is_empty() {
+            return None;
         }
-        out.children(self.scrollbar(NodeId::NavMemberList))
+        Some(out)
     }
 
     /// A heading's name, if it can be resolved.
@@ -4795,7 +4821,7 @@ mod tests {
         let mut list = false;
         a.build_tree(Panes::One).walk(&mut |n, _| {
             sheet = sheet || n.id == NodeId::OverlaySheet;
-            list = list || n.id == NodeId::NavMemberList;
+            list = list || n.id == NodeId::NavMemberListSheet;
         });
         assert!(sheet && list, "面か一覧が出ていない");
 
@@ -4880,6 +4906,15 @@ mod tests {
         assert!(
             (sheet.y + sheet.h - h).abs() < 1.0,
             "下に付いていない {sheet:?}"
+        );
+        let list = placed
+            .iter()
+            .find(|(id, _)| *id == NodeId::NavMemberListSheet)
+            .map(|(_, r)| *r)
+            .expect("一覧が出ていない");
+        assert!(
+            (list.w - sheet.w).abs() < 1.0,
+            "一覧が面を埋めていない {list:?} {sheet:?}"
         );
     }
 

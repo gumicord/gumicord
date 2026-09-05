@@ -250,6 +250,7 @@ M1 で公開するフィールド。
 | `nav.user_panel.name` | — | 自分の表示名 |
 | `nav.user_panel.status` | — | ステータスの言葉 (FR-043) |
 | `nav.member_list` | — | メンバー一覧 (FR-043) |
+| `nav.member_list.sheet` | — | 面の中の一覧。幅を埋める点以外は同じ |
 | `nav.member_list.group` | — | 役職やオンラインの見出し |
 | `nav.member_list.item` | `MemberData` | メンバー 1 人 (FR-043) |
 | `nav.member_list.item.avatar` | `MemberData` | その人のアバター |
@@ -351,7 +352,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 120 個** (中核 76 / プラグインも生成可 44)。
+**合計 121 個** (中核 77 / プラグインも生成可 44)。
 
 <!-- END GENERATED: node-ids -->
 

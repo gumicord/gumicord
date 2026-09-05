@@ -173,6 +173,7 @@ define_node_ids! {
     NavUserPanelName,         "nav.user_panel.name",             None,    Core,   "自分の表示名";
     NavUserPanelStatus,       "nav.user_panel.status",           None,    Core,   "ステータスの言葉 (FR-043)";
     NavMemberList,            "nav.member_list",                 None,    Core,   "メンバー一覧 (FR-043)";
+    NavMemberListSheet,       "nav.member_list.sheet",           None,    Core,   "面の中の一覧。幅を埋める点以外は同じ";
     NavMemberListGroup,       "nav.member_list.group",           None,    Core,   "役職やオンラインの見出し";
     NavMemberListItem,        "nav.member_list.item",            Member,  Core,   "メンバー 1 人 (FR-043)";
     NavMemberListItemAvatar,  "nav.member_list.item.avatar",     Member,  Core,   "その人のアバター";

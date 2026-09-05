@@ -50,6 +50,7 @@ export type NodeId =
   | "nav.user_panel.name"
   | "nav.user_panel.status"
   | "nav.member_list"
+  | "nav.member_list.sheet"
   | "nav.member_list.group"
   | "nav.member_list.item"
   | "nav.member_list.item.avatar"

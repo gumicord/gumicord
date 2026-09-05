@@ -413,6 +413,10 @@
       "style": { "background": "$color.bg.sunken", "padding": [8, 0, 8, 0], "gap": 2 }
     },
     {
+      "select": "nav.member_list.sheet",
+      "style": { "background": "$color.bg.sunken", "padding": [8, 0, 8, 0], "gap": 2 }
+    },
+    {
       "select": "nav.member_list.group",
       "style": {
         "font": { "size": 11, "lineHeight": 24, "weight": 600 },
