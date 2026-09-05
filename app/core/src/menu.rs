@@ -193,6 +193,10 @@ pub enum Action {
     EnablePlugin(String),
     /// Forget a plugin's grants and ask again.
     ReapprovePlugin(String),
+    /// Apply an installed theme, by manifest id.
+    SelectTheme(String),
+    /// Go back to the bundled theme.
+    UseBundledTheme,
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary
@@ -389,13 +393,14 @@ impl Item {
 
 /// Builds a bare row list for embedding, as in the settings screen. The
 /// same nodes as a menu, without the popover or sheet wrapper: indices
-/// address the rows exactly like menu items.
-pub fn rows(items: &[Item], hovered: Option<usize>) -> UiNode {
+/// address the rows exactly like menu items. `base` offsets the indices
+/// when several lists share one index space.
+pub fn rows(items: &[Item], hovered: Option<usize>, base: usize) -> UiNode {
     UiNode::new(NodeId::OverlayMenu).children(
         items
             .iter()
             .enumerate()
-            .map(|(i, it)| it.node(i, hovered == Some(i))),
+            .map(|(i, it)| it.node(base + i, hovered == Some(base + i))),
     )
 }
 
