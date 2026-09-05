@@ -64,6 +64,7 @@
     "chat.message.header.badges": "MessageData",
     "chat.message.header.timestamp": "MessageData",
     "chat.message.reply_ref": "MessageData",
+    "chat.message.reply_ref.avatar": "none",
     "chat.message.content": "MessageData",
     "chat.message.content.quote": "none",
     "chat.message.attachments": "MessageData",

@@ -272,7 +272,8 @@ M1 で公開するフィールド。
 | `chat.message.header.author` | `MessageData` | 送信者名 (FR-022) |
 | `chat.message.header.badges` | `MessageData` | BOT タグなど |
 | `chat.message.header.timestamp` | `MessageData` | 時刻 |
-| `chat.message.reply_ref` | `MessageData` | 返信元の参照表示 (FR-028) |
+| `chat.message.reply_ref` | `MessageData` | 返信元の参照表示 (FR-028)。小アイコンと1行文 |
+| `chat.message.reply_ref.avatar` | — | 参照表示の小アイコン |
 | `chat.message.content` | `MessageData` | 本文 (FR-021) |
 | `chat.message.content.quote` | — | 引用ブロックの行。中身の高さにだけ合わせる |
 | `chat.message.attachments` | `MessageData` | 添付一覧 (FR-025) |
@@ -349,7 +350,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 118 個** (中核 75 / プラグインも生成可 43)。
+**合計 119 個** (中核 76 / プラグインも生成可 43)。
 
 <!-- END GENERATED: node-ids -->
 

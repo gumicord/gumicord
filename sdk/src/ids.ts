@@ -68,6 +68,7 @@ export type NodeId =
   | "chat.message.header.badges"
   | "chat.message.header.timestamp"
   | "chat.message.reply_ref"
+  | "chat.message.reply_ref.avatar"
   | "chat.message.content"
   | "chat.message.content.quote"
   | "chat.message.attachments"

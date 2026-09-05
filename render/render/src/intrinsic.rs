@@ -287,6 +287,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         ChatMessageHeaderAuthor | ChatMessageHeaderTime => Intrinsic::row().one_line(),
         ChatMessageHeaderBadges => Intrinsic::row(),
         ChatMessageReplyRef => Intrinsic::row().cross(Cross::Center),
+        ChatMessageReplyRefAvatar => Intrinsic::stack().w(16.0).h(16.0),
         ChatMessageContent => Intrinsic::column().cross(Cross::Stretch),
         // A quote hugs its content: with `LayoutRow` it would grow and soak
         // up the leftover height of a tall message, drifting what follows it.

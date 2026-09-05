@@ -122,6 +122,8 @@ const GUILD_ICON_PX: f32 = 48.0;
 const MESSAGE_AVATAR_PX: f32 = 40.0;
 /// The user panel and the member list.
 const SMALL_AVATAR_PX: f32 = 32.0;
+/// The reply reference avatar, like Discord's.
+const REPLY_AVATAR_PX: f32 = 16.0;
 
 /// Icons tiled inside a folded folder, 2x2 as in Discord.
 ///
@@ -3579,7 +3581,16 @@ impl Gumicord {
                 } else {
                     format!("{}: {}", reply.author, reply.snippet)
                 };
-                UiNode::text(NodeId::ChatMessageReplyRef, text).with_data(m.id)
+                UiNode::new(NodeId::ChatMessageReplyRef)
+                    .with_data(m.id)
+                    .child_if(reply.avatar.is_some(), || {
+                        UiNode::image(
+                            NodeId::ChatMessageReplyRefAvatar,
+                            reply.avatar.clone().unwrap_or_default(),
+                        )
+                        .with_data(m.id)
+                    })
+                    .child(UiNode::text(NodeId::PrimitiveText, text).with_data(m.id))
             })
             .child_if(!grouped, || {
                 UiNode::new(NodeId::ChatMessageHeader)
@@ -3754,6 +3765,8 @@ struct MessageRow {
 struct ReplyRef {
     author: String,
     snippet: String,
+    /// Small avatar URL; everyone has one, default included.
+    avatar: Option<String>,
 }
 
 /// How many characters of a referenced message show.
@@ -4077,13 +4090,21 @@ impl Gumicord {
                         || calls_me(&blocks, me, member.map(|x| x.roles.as_slice())),
                     blocks,
                     reply: m.referenced_message.as_ref().map(|r| {
-                        let author = match self.live.store().member(guild, r.author.id) {
+                        let member = self.live.store().member(guild, r.author.id);
+                        let author = match &member {
                             Some(x) => x.display_name(&r.author).to_owned(),
                             None => r.author.display_name().to_owned(),
                         };
+                        let avatar = match &member {
+                            Some(x) => x.display_avatar(guild, &r.author),
+                            None => r.author.display_avatar(),
+                        }
+                        .with_size(self.asset_px(REPLY_AVATAR_PX))
+                        .url();
                         ReplyRef {
                             author,
                             snippet: reply_snippet(&r.content),
+                            avatar: Some(avatar),
                         }
                     }),
                 }
@@ -5992,14 +6013,20 @@ mod member_tests {
         assert_eq!(a.message_rows()[0].author, "ねんねこ");
     }
 
-    fn reply_text(a: &Gumicord, row: &MessageRow) -> Option<String> {
-        let mut found = None;
+    fn reply_text(a: &Gumicord, row: &MessageRow) -> (Option<String>, bool) {
+        let mut text = None;
+        let mut avatar = false;
         a.message(row, false).walk(&mut |n, _| {
             if n.id == NodeId::ChatMessageReplyRef {
-                found = n.content.as_text().map(str::to_owned);
+                for c in &n.children {
+                    if c.id == NodeId::PrimitiveText {
+                        text = c.content.as_text().map(str::to_owned);
+                    }
+                    avatar = avatar || c.id == NodeId::ChatMessageReplyRefAvatar;
+                }
             }
         });
-        found
+        (text, avatar)
     }
 
     /// A reply shows who and what it answers, on the tree too.
@@ -6012,10 +6039,10 @@ mod member_tests {
         let reply = rows[0].reply.as_ref().expect("返信元がない");
         assert_eq!(reply.author, "ねんねこ");
         assert_eq!(reply.snippet, "こんにちは");
-        assert_eq!(
-            reply_text(&a, &rows[0]).as_deref(),
-            Some("ねんねこ: こんにちは")
-        );
+        assert!(reply.avatar.is_some(), "小アイコンがない");
+        let (text, avatar) = reply_text(&a, &rows[0]);
+        assert_eq!(text.as_deref(), Some("ねんねこ: こんにちは"));
+        assert!(avatar, "木に小アイコンがない");
     }
 
     /// No reference, no row.

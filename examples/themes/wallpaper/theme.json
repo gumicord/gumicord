@@ -760,6 +760,10 @@
       "style": { "font": "$font.small", "color": "$color.text.muted", "opacity": 0.8 }
     },
     {
+      "select": "chat.message.reply_ref.avatar",
+      "style": { "radius": "$radius.full" }
+    },
+    {
       "select": "chat.typing_indicator",
       "style": { "font": "$font.small", "color": "$color.text.muted" }
     },
