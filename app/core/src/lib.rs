@@ -3570,6 +3570,17 @@ impl Gumicord {
     /// the theme's, since a spacer node would bake it in.
     fn message(&self, m: &MessageRow, grouped: bool) -> UiNode {
         let body = UiNode::new(NodeId::LayoutColumn)
+            .child_if(m.reply.is_some(), || {
+                let reply = m.reply.as_ref().expect("直前に確かめた");
+                // Author and snippet share one line; splitting them for a
+                // future language happens with the message table (ADR-0010).
+                let text = if reply.snippet.is_empty() {
+                    reply.author.clone()
+                } else {
+                    format!("{}: {}", reply.author, reply.snippet)
+                };
+                UiNode::text(NodeId::ChatMessageReplyRef, text).with_data(m.id)
+            })
             .child_if(!grouped, || {
                 UiNode::new(NodeId::ChatMessageHeader)
                     .with_data(m.id)
@@ -3733,6 +3744,32 @@ struct MessageRow {
     /// invites drawing from the wrong one, and only the reader would notice.
     blocks: Vec<gumicord_markdown::Block>,
     mentioned: bool,
+    /// The answered message, if this replies to one (FR-028). Display only:
+    /// pressing it to jump there is a later piece.
+    reply: Option<ReplyRef>,
+}
+
+/// Who and what a reply answers: one line, like Discord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplyRef {
+    author: String,
+    snippet: String,
+}
+
+/// How many characters of a referenced message show.
+const REPLY_SNIPPET_LEN: usize = 120;
+
+/// The referenced message in one line. The first line only; longer bodies
+/// end in an ellipsis rather than wrapping the header.
+fn reply_snippet(content: &str) -> String {
+    let line = content.split('\n').next().unwrap_or_default();
+    let mut chars = line.chars();
+    let head: String = chars.by_ref().take(REPLY_SNIPPET_LEN).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 impl Gumicord {
@@ -3985,6 +4022,7 @@ impl Gumicord {
                     unix: i as i64 * 60,
                     blocks: gumicord_markdown::parse(&m.body),
                     mentioned: m.mentioned,
+                    reply: None,
                 })
                 .collect();
         }
@@ -4038,6 +4076,16 @@ impl Gumicord {
                         .is_some_and(|r| Some(r.author.id) == me)
                         || calls_me(&blocks, me, member.map(|x| x.roles.as_slice())),
                     blocks,
+                    reply: m.referenced_message.as_ref().map(|r| {
+                        let author = match self.live.store().member(guild, r.author.id) {
+                            Some(x) => x.display_name(&r.author).to_owned(),
+                            None => r.author.display_name().to_owned(),
+                        };
+                        ReplyRef {
+                            author,
+                            snippet: reply_snippet(&r.content),
+                        }
+                    }),
                 }
             })
             .collect()
@@ -5942,6 +5990,60 @@ mod member_tests {
 
         let a = app(message(None, None));
         assert_eq!(a.message_rows()[0].author, "ねんねこ");
+    }
+
+    fn reply_text(a: &Gumicord, row: &MessageRow) -> Option<String> {
+        let mut found = None;
+        a.message(row, false).walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessageReplyRef {
+                found = n.content.as_text().map(str::to_owned);
+            }
+        });
+        found
+    }
+
+    /// A reply shows who and what it answers, on the tree too.
+    #[test]
+    fn a_reply_shows_its_source() {
+        let mut m = message(None, None);
+        m.referenced_message = Some(Box::new(message(None, None)));
+        let a = app(m);
+        let rows = a.message_rows();
+        let reply = rows[0].reply.as_ref().expect("返信元がない");
+        assert_eq!(reply.author, "ねんねこ");
+        assert_eq!(reply.snippet, "こんにちは");
+        assert_eq!(
+            reply_text(&a, &rows[0]).as_deref(),
+            Some("ねんねこ: こんにちは")
+        );
+    }
+
+    /// No reference, no row.
+    #[test]
+    fn a_plain_message_has_no_reply_ref() {
+        let a = app(message(None, None));
+        let rows = a.message_rows();
+        assert!(rows[0].reply.is_none());
+        let mut found = false;
+        a.message(&rows[0], false).walk(&mut |n, _| {
+            found = found || n.id == NodeId::ChatMessageReplyRef;
+        });
+        assert!(!found, "参照表示が出ている");
+    }
+
+    /// Long sources truncate to one line.
+    #[test]
+    fn a_long_source_truncates_to_one_line() {
+        let mut m = message(None, None);
+        let mut r = message(None, None);
+        r.content = "あ".repeat(200) + "\n二行目";
+        m.referenced_message = Some(Box::new(r));
+        let a = app(m);
+        let rows = a.message_rows();
+        let snippet = &rows[0].reply.as_ref().expect("返信元がない").snippet;
+        assert_eq!(snippet.chars().count(), REPLY_SNIPPET_LEN + 1);
+        assert!(snippet.ends_with('…'), "{snippet}");
+        assert!(!snippet.contains('\n'), "{snippet}");
     }
 
     /// Avatars are per guild too; the guild appears in the URL.
