@@ -46,14 +46,12 @@ Do **not** introduce or rely on `just`, `make`, or another task runner.
 
 However, `cargo xtask` is **not a replacement for standard Cargo development commands**.
 
-Use standard Cargo commands such as `cargo check` and targeted `cargo test`
-when they are the fastest appropriate way to validate an ordinary Rust change.
+Use standard Cargo commands such as `cargo check` and targeted
+`cargo test` when they are the fastest appropriate way to validate an ordinary Rust change.
 
-Use `cargo xtask` when the repository-specific behavior of an xtask is
-required.
+Use `cargo xtask` when the repository-specific behavior of an xtask is required.
 
-Do not manually reproduce a repository-specific xtask operation with unrelated
-commands when that operation is required.
+Do not manually reproduce a repository-specific xtask operation with unrelated commands when that operation is required.
 
 ## Setup
 
@@ -66,30 +64,70 @@ npm install
 
 ## Next Tasks
 
-`NEXT.md` contains the tasks and work items that should be worked on next.
+`NEXT.md` is the persistent task handoff file for **work that must survive across sessions**.
 
-Before deciding what to work on next, **MUST read `NEXT.md`**.
+It is **not** a replacement for the OpenCode Todo list.
 
-When completing a task listed in `NEXT.md`:
+### Session-Scoped Work
 
-1. Implement and validate the task according to the specification.
-2. Confirm that the task is actually complete.
-3. **Remove the completed task from `NEXT.md`.**
+For work being performed within the current session:
 
-Do not leave completed tasks in `NEXT.md`.
+* **Use the OpenCode Todo list** to track the task.
+* Create Todo items for multi-step work.
+* Keep Todo statuses up to date as work progresses.
+* Mark an item `in_progress` when actually starting it.
+* Mark an item `completed` immediately after the corresponding work is actually completed and validated.
+* Do **not** defer Todo updates until the end of the task.
+* Do **not** mark multiple completed items at once when they were completed at different points in the work.
+* Add newly discovered work to the Todo list as necessary.
+* Keep the Todo list synchronized with the actual state of the work.
 
-If implementation reveals that a task needs to be split into additional work, update
-`NEXT.md` accordingly rather than marking the original task complete prematurely.
+The OpenCode Todo list is the authoritative representation of **current-session progress**.
 
-`NEXT.md` describes the current remaining work; it should not become a historical
-record of completed tasks.
+The Todo list should always make it clear:
+
+1. What has been completed.
+2. What is currently being worked on.
+3. What remains to be done.
+
+Do not use `NEXT.md` as a substitute for this session-scoped tracking.
+
+### Cross-Session Work
+
+Use `NEXT.md` only for work that needs to be remembered after the current session ends.
+
+Before deciding what persistent work remains, **MUST read `NEXT.md`**.
+
+When a task from `NEXT.md` is started:
+
+1. Add the relevant work to the OpenCode Todo list for the current session.
+2. Work on and validate it according to the specification.
+3. Confirm that the task is actually complete.
+4. Remove the completed task from `NEXT.md`.
+
+Do not use `NEXT.md` as a running progress log.
+
+Do not continuously update `NEXT.md` with intermediate progress that is already tracked by the OpenCode Todo list.
+
+### Creating Persistent Follow-Up Work
+
+If implementation reveals work that cannot or should not be completed in the current session:
+
+1. Add that work to `NEXT.md`.
+2. Make the entry specific enough for a future session to understand what remains.
+3. Keep the current-session progress in the OpenCode Todo list.
+
+`NEXT.md` should contain **only unfinished work that needs to survive the current session**.
+
+Completed work should not remain in `NEXT.md`.
+
+If implementation reveals that a task needs to be split into additional work, update `NEXT.md` accordingly rather than marking the original persistent task complete prematurely.
 
 ## Validation
 
 The goal is to **maximize development speed without reducing correctness or quality**.
 
-Do not trade correctness, test coverage, specification compliance, or validation
-quality for faster iteration.
+Do not trade correctness, test coverage, specification compliance, or validation quality for faster iteration.
 
 At the same time, avoid unnecessary validation overhead during implementation.
 
@@ -121,8 +159,7 @@ project-specific xtask validation
 full project validation
 ```
 
-This is a guideline, not a mandatory sequence. Skip steps that do not provide
-meaningful additional information.
+This is a guideline, not a mandatory sequence. Skip steps that do not provide meaningful additional information.
 
 ### During Implementation
 
@@ -146,8 +183,7 @@ If the package is not known or package-level selection is impractical:
 cargo check
 ```
 
-Do **not** run `cargo xtask check` merely to verify that a small Rust change
-compiles.
+Do **not** run `cargo xtask check` merely to verify that a small Rust change compiles.
 
 #### Multiple related changes
 
@@ -172,8 +208,7 @@ cargo check --workspace
 
 Then run the relevant tests.
 
-`cargo xtask check-fast` is also available as the repository's named
-workspace-wide fast compilation check:
+`cargo xtask check-fast` is also available as the repository's named workspace-wide fast compilation check:
 
 ```bash
 cargo xtask check-fast
@@ -181,8 +216,7 @@ cargo xtask check-fast
 
 #### Specification-only changes
 
-When only specifications are changed and no generated or implementation
-artifacts need compilation:
+When only specifications are changed and no generated or implementation artifacts need compilation:
 
 ```bash
 cargo xtask check-light
@@ -196,8 +230,7 @@ Use:
 cargo xtask fmt
 ```
 
-or the appropriate standard Cargo formatting command when only formatting needs
-to be checked.
+or the appropriate standard Cargo formatting command when only formatting needs to be checked.
 
 Do not run the full test suite solely because formatting changed.
 
@@ -206,16 +239,16 @@ Do not run the full test suite solely because formatting changed.
 When generated code is affected:
 
 1. Change the source of truth under `spec/`.
+
 2. Run:
 
    ```bash
    cargo xtask gen
    ```
-3. Validate the resulting changes with the appropriate targeted or project-wide
-   checks.
 
-Do not manually edit generated output when the specification workflow should
-generate it.
+3. Validate the resulting changes with the appropriate targeted or project-wide checks.
+
+Do not manually edit generated output when the specification workflow should generate it.
 
 ### Expensive Checks
 
@@ -239,8 +272,7 @@ In particular:
 * Do not run all xtask checks repeatedly without a reason.
 * Do not rerun a check when none of its relevant inputs have materially changed.
 
-When several related changes are being made, finish the coherent group before
-running expensive validation.
+When several related changes are being made, finish the coherent group before running expensive validation.
 
 ### Avoid Redundant Compilation
 
@@ -261,9 +293,7 @@ cargo xtask test
 cargo test --workspace
 ```
 
-`cargo clippy` and `cargo test` perform compilation as part of their work, so
-an additional `cargo check` immediately beforehand is not required unless
-the fast compiler feedback itself is useful during iteration.
+`cargo clippy` and `cargo test` perform compilation as part of their work, so an additional `cargo check` immediately beforehand is not required unless the fast compiler feedback itself is useful during iteration.
 
 The goal is to reduce **redundant work**, not to reduce necessary validation.
 
@@ -271,8 +301,7 @@ The goal is to reduce **redundant work**, not to reduce necessary validation.
 
 A completed task **MUST receive appropriate final validation**.
 
-Do not consider a task complete merely because `cargo check` succeeds or a
-single targeted test passes.
+Do not consider a task complete merely because `cargo check` succeeds or a single targeted test passes.
 
 Before completion:
 
@@ -282,16 +311,13 @@ Before completion:
 4. Run appropriate project-wide checks when the change requires them.
 5. Confirm generated artifacts are up to date when applicable.
 6. Confirm formatting and linting requirements are satisfied.
-7. Run `cargo xtask check` for substantial changes that require full project
-   validation.
+7. Run `cargo xtask check` for substantial changes that require full project validation.
 
 The final validation must be proportional to the scope and risk of the change.
 
-A trivial localized change does not automatically require every expensive
-project-wide command.
+A trivial localized change does not automatically require every expensive project-wide command.
 
-A substantial, cross-cutting, public-interface, schema, ABI, or generated-code
-change should receive comprehensive project-wide validation.
+A substantial, cross-cutting, public-interface, schema, ABI, or generated-code change should receive comprehensive project-wide validation.
 
 ### Handling Failures
 
@@ -344,9 +370,7 @@ cargo xtask abi
 cargo xtask gen
 ```
 
-`cargo xtask` should be preferred when the task performs repository-specific
-validation, generation, schema checking, ABI checking, or other behavior that
-standard Cargo commands do not provide.
+`cargo xtask` should be preferred when the task performs repository-specific validation, generation, schema checking, ABI checking, or other behavior that standard Cargo commands do not provide.
 
 ## Specification and Generated Code
 
@@ -359,8 +383,7 @@ When changing material that is generated by the specification workflow:
 3. Run `cargo xtask gen` when generation is required.
 4. Validate the resulting changes.
 
-Do not manually edit generated output when the correct source is the
-specification.
+Do not manually edit generated output when the correct source is the specification.
 
 ## Language Rules
 
@@ -371,8 +394,7 @@ In particular:
 * Code is written in **English**.
 * The specification is written in **Japanese**.
 
-Do not translate or rewrite specifications into English merely to make
-implementation easier.
+Do not translate or rewrite specifications into English merely to make implementation easier.
 
 ## Build Considerations
 
@@ -384,8 +406,7 @@ Normal release builds use thin LTO.
 
 The repository limits build parallelism to `jobs = 2` in `.cargo/config.toml`.
 
-If the machine has sufficient memory and higher parallelism is intentionally
-desired, `CARGO_BUILD_JOBS` may be increased, for example:
+If the machine has sufficient memory and higher parallelism is intentionally desired, `CARGO_BUILD_JOBS` may be increased, for example:
 
 ```bash
 CARGO_BUILD_JOBS=8 cargo build --release
@@ -399,13 +420,11 @@ The distribution/performance profile is:
 cargo build --profile dist
 ```
 
-Be aware that `dist` uses **fat LTO**, which can require several GB of memory
-during linking and can make `target/` several GB larger.
+Be aware that `dist` uses **fat LTO**, which can require several GB of memory during linking and can make `target/` several GB larger.
 
 Avoid unnecessarily running `dist` builds.
 
-`cargo clean` removes build artifacts and incremental compilation state. Do not
-use it routinely, because it destroys useful build caches.
+`cargo clean` removes build artifacts and incremental compilation state. Do not use it routinely, because it destroys useful build caches.
 
 ## Change Discipline
 
@@ -422,8 +441,7 @@ Do not silently change:
 * SDK guarantees
 * Generated files
 
-If a requested implementation requires a specification change, make that
-relationship explicit.
+If a requested implementation requires a specification change, make that relationship explicit.
 
 ## Quality Requirements
 
@@ -437,18 +455,14 @@ The agent should:
 * Consider error handling and edge cases relevant to the changed behavior.
 * Avoid introducing technical debt merely to make the current task faster.
 * Avoid unnecessary refactoring that increases the scope of the change.
-* Verify behavior rather than assuming that successful compilation implies
-  correctness.
+* Verify behavior rather than assuming that successful compilation implies correctness.
 * Use tests as a correctness tool, not merely as a final formality.
 * Prefer targeted validation during iteration.
 * Prefer comprehensive validation at meaningful completion checkpoints.
 * Avoid repeating expensive commands when their relevant inputs have not changed.
-* Optimize validation by reducing redundant work rather than by skipping
-  necessary checks.
+* Optimize validation by reducing redundant work rather than by skipping necessary checks.
 
-When a change is non-trivial, spend enough time reasoning about its design
-before making implementation changes. Do not compensate for poor reasoning by
-relying on repeated test runs.
+When a change is non-trivial, spend enough time reasoning about its design before making implementation changes. Do not compensate for poor reasoning by relying on repeated test runs.
 
 ## Priority
 
@@ -461,5 +475,4 @@ When determining intended behavior, use this order:
 5. Existing implementation behavior
 6. Assumptions
 
-The existing implementation is **not** the source of truth when it conflicts
-with the specification.
+The existing implementation is **not** the source of truth when it conflicts with the specification.
