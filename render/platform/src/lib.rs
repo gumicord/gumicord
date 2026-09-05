@@ -32,4 +32,6 @@ pub use secret::{SecretError, SecretStore};
 pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
 pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
+#[cfg(target_os = "android")]
+pub use window::run_android;
 pub use window::{Application, FrameCx, PlatformError, RevealRequest, Waker, run};
