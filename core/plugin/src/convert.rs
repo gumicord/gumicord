@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use gumicord_uitree::{Content, Key, NodeId, State, UiNode};
+use gumicord_uitree::{Content, Key, NodeId, State, StateSet, UiNode, value::Color};
 use rquickjs::{Array, Ctx, FromJs, IntoJs, Object, Value};
 
 use crate::PluginError;
@@ -231,6 +231,27 @@ fn as_value<'a, T: AsRef<Value<'a>>>(v: &T) -> Value<'a> {
 }
 
 /// Plain JS object ↁERust node, inheriting identity from the input tree.
+/// A carried tint, if the object has a valid one. Anything else falls
+/// back to inheritance: a decorative value must not fail a patch.
+fn tint_from_js(obj: &Object) -> Option<Color> {
+    let s: String = obj.get("tint").ok()?;
+    Color::parse(&s)
+}
+
+/// Carried states, if the object has a list. Unknown names fall away;
+/// the writer may target a newer client.
+fn states_from_js(obj: &Object) -> Option<StateSet> {
+    let list: Array = obj.get("states").ok()?;
+    let mut set = StateSet::EMPTY;
+    for i in 0..list.len() {
+        let name: String = list.get(i).ok()?;
+        if let Some(state) = State::ALL.iter().find(|s| s.as_str() == name) {
+            set = set.with(*state);
+        }
+    }
+    Some(set)
+}
+
 pub fn js_to_node<'a>(
     ctx: &Ctx<'a>,
     value: &Value<'a>,
@@ -258,6 +279,16 @@ pub fn js_to_node<'a>(
             node.data = o.data;
             node.anchor = o.anchor;
         }
+    }
+    // What JS carried wins over inheritance. Spreading a node keeps its
+    // tint and states, which the index cannot tell apart when several
+    // nodes share an id and key: every message author, for one. Without
+    // this they all wear the first author's colour.
+    if let Some(tint) = tint_from_js(&obj) {
+        node.tint = Some(tint);
+    }
+    if let Some(states) = states_from_js(&obj) {
+        node.states = states;
     }
     node.content = content_from(ctx, node_id, &obj).map_err(bad)?;
 
@@ -680,6 +711,55 @@ mod tests {
                 let js = node_to_js(ctx.clone(), &node).unwrap();
                 let back = apply_result(&ctx, &node, as_value(&js)).unwrap();
                 assert_eq!(back.content, content);
+            }
+        });
+    }
+
+    /// Repeated keyless nodes keep their own tint and states: spreading
+    /// every author must not dress them all in the first author's colour.
+    #[test]
+    fn carried_tint_and_states_win_over_inheritance() {
+        use gumicord_uitree::value::Color;
+        let rt = Runtime::new().unwrap();
+        let context = Context::full(&rt).unwrap();
+        context.with(|ctx| {
+            let mut tree = UiNode::new(NodeId::ChatMessageList);
+            for (name, tint) in [
+                ("red", Color::parse("#ff0000")),
+                ("green", Color::parse("#00ff00")),
+            ] {
+                let mut author = UiNode::text(NodeId::ChatMessageHeaderAuthor, name.to_owned());
+                author.tint = tint;
+                author.states = StateSet::EMPTY.with(State::Mentioned);
+                tree.children.push(author);
+            }
+            let js = node_to_js(ctx.clone(), &tree).unwrap();
+            ctx.globals().set("__input", js).unwrap();
+            // What the greeting badge does: wrap each author, spreading it.
+            let wrapped: Value = ctx
+                .eval(
+                    r#"({
+                        id: "chat.message_list",
+                        children: __input.children.map((a) => ({
+                            id: "layout.row",
+                            children: [a, { id: "primitive.badge", props: { text: "hi" } }],
+                        })),
+                    })"#,
+                )
+                .unwrap();
+            let back = apply_result(&ctx, &tree, wrapped).unwrap();
+            assert_eq!(back.children.len(), 2);
+            for (row, (name, tint)) in back.children.iter().zip([
+                ("red", Color::parse("#ff0000")),
+                ("green", Color::parse("#00ff00")),
+            ]) {
+                let author = &row.children[0];
+                assert_eq!(author.content.as_text(), Some(name));
+                assert_eq!(author.tint, tint, "{name} wears another colour");
+                assert!(
+                    author.states.contains(State::Mentioned),
+                    "{name} lost its states"
+                );
             }
         });
     }
