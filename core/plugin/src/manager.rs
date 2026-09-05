@@ -1144,4 +1144,41 @@ mod tests {
         .unwrap();
         assert_eq!(set.settings_tree("com.example.paged"), None);
     }
+
+    /// Reload re-reads the files: editing code alone changes nothing until
+    /// it runs. Hot reload watches theme files, not plugin code.
+    #[test]
+    fn reloading_picks_up_edited_code() {
+        use gumicord_uitree::{NodeId, UiNode};
+        let root = dir("reload-code");
+        let plugin = plugin_dir(
+            &root,
+            "com.example.r",
+            r#"globalThis.__gumicord_apply = (n) => ({...n, children: [...(n.children ?? []), {id: "primitive.text", props: {value: "v1"}}]});"#,
+            "",
+        );
+        let (mut set, _) = PluginSet::open(&root);
+        assert!(set.scan().is_empty());
+
+        let texts = |set: &mut PluginSet| {
+            let tree = UiNode::new(NodeId::ChatMessageContent);
+            let (out, _) = set.apply_all(tree, &PatchContext::empty());
+            out.children
+                .iter()
+                .filter_map(|c| c.content.as_text().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&mut set), ["v1"]);
+
+        std::fs::write(
+            plugin.join("plugin.js"),
+            r#"globalThis.__gumicord_apply = (n) => ({...n, children: [...(n.children ?? []), {id: "primitive.text", props: {value: "v2"}}]});"#,
+        )
+        .unwrap();
+        // Still the old code: nothing watches plugin files.
+        assert_eq!(texts(&mut set), ["v1"]);
+
+        assert!(set.reload("com.example.r").is_empty());
+        assert_eq!(texts(&mut set), ["v2"]);
+    }
 }

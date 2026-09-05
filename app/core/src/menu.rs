@@ -193,6 +193,9 @@ pub enum Action {
     EnablePlugin(String),
     /// Forget a plugin's grants and ask again.
     ReapprovePlugin(String),
+    /// Re-read a plugin from disk. Editing files alone changes nothing;
+    /// hot reload watches theme files, not plugin code.
+    ReloadPlugin(String),
     /// Apply an installed theme, by manifest id.
     SelectTheme(String),
     /// Go back to the bundled theme.
