@@ -64,6 +64,11 @@ const DEFAULT_THEME: &str = include_str!("../../../examples/themes/midnight/them
 /// there is a settings screen and hot reload.
 const THEME_ENV: &str = "GUMICORD_THEME";
 
+/// How long a toast stays up, in seconds.
+const TOAST_SECS: i64 = 4;
+/// How many toasts stack; older ones drop off unread.
+const TOAST_MAX: usize = 3;
+
 /// Starts without loading any plugin. Plugin code runs on first sight, so
 /// a broken one can take the session with it before anything is visible.
 const SAFE_MODE_ENV: &str = "GUMICORD_SAFE_MODE";
@@ -273,6 +278,8 @@ pub struct Gumicord {
     reveals: crate::markdown::Reveals,
     /// Whatever is floating; at most one.
     floating: Option<crate::menu::Floating>,
+    /// Transient notices; several share one node and none blocks input.
+    toasts: VecDeque<crate::menu::Toast>,
     /// What the composer is doing.
     composing: Composing,
     selected_channel: u64,
@@ -397,6 +404,7 @@ impl Gumicord {
             match_ctx: MatchContext::new(0.0),
             reveals: crate::markdown::Reveals::default(),
             floating: None,
+            toasts: VecDeque::new(),
             composing: Composing::New,
             selected_channel: channel,
             input_focused: false,
@@ -548,6 +556,7 @@ impl Gumicord {
         self.theme = Some(theme);
         self.theme_mtime = mtime_of(&path);
         self.refresh_theme_assets();
+        self.notify_toast("テーマを再読み込みしました".to_owned());
         tracing::info!(?path, "reloaded the theme");
         true
     }
@@ -705,6 +714,7 @@ impl Application for Gumicord {
         changed |= self.images.poll();
         changed |= self.maybe_reload_theme();
         changed |= self.assets.poll();
+        changed |= self.prune_toasts(gumicord_platform::now_unix());
         if let Some(ask) = self.assets.poll_ask() {
             changed = true;
             self.dialogs.push_back(PendingDialog::theme_hosts(ask));
@@ -715,6 +725,10 @@ impl Application for Gumicord {
             match res {
                 Ok(logged_in) => {
                     tracing::info!(user = %logged_in.me.user.display_name(), "account switched");
+                    self.notify_toast(format!(
+                        "{} に切り替えました",
+                        logged_in.me.user.display_name()
+                    ));
                     let key = crate::account::AccountKey::new(
                         logged_in.me.user.id,
                         logged_in.token.is_bot(),
@@ -748,6 +762,7 @@ impl Application for Gumicord {
                 }
                 Err((key, err, unauthorized)) => {
                     tracing::warn!(%err, "account switch failed");
+                    self.notify_toast("アカウントを切り替えられませんでした".to_owned());
                     if unauthorized
                         && let Ok(store) = gumicord_platform::SecretStore::new()
                         && let Ok(mut idx) = crate::account::AccountsIndex::load(&store)
@@ -1352,6 +1367,7 @@ impl Gumicord {
         } else {
             self.login_screen()
         };
+        let tooltip = self.tooltip();
 
         UiNode::new(NodeId::AppRoot)
             .child(
@@ -1364,6 +1380,56 @@ impl Gumicord {
                 let f = self.floating.as_ref().expect("直前に確かめた");
                 f.node(panes.present(), self.hovered_item())
             })
+            .child_if(!self.toasts.is_empty(), || {
+                let texts: Vec<String> = self.toasts.iter().map(|t| t.text.clone()).collect();
+                if let Some(until) = self.toasts.iter().map(|t| t.until).min() {
+                    self.hold(until - self.now);
+                }
+                crate::menu::toast_node(&texts).expect("空でないと確かめた")
+            })
+            .child_if(tooltip.is_some(), || {
+                tooltip.clone().expect("直前に確かめた")
+            })
+    }
+
+    /// Full date for a hovered timestamp. The header shows only the hour, and
+    /// the whole date is what hovering asks for.
+    fn tooltip(&self) -> Option<UiNode> {
+        let (id, key) = self.hovered.as_ref()?;
+        if *id != NodeId::ChatMessageHeaderTime {
+            return None;
+        }
+        let Some(Key::Id(mid)) = key.as_ref() else {
+            return None;
+        };
+        let row = self.message_rows().into_iter().find(|m| m.id == *mid)?;
+        if row.day.is_empty() {
+            return None;
+        }
+        Some(crate::menu::tooltip_node(&format!(
+            "{} {}",
+            row.day, row.time
+        )))
+    }
+
+    /// Shows a transient notice. User-initiated outcomes only: anything else
+    /// would chatter while the user reads.
+    fn notify_toast(&mut self, text: String) {
+        self.toasts.push_back(crate::menu::Toast {
+            text,
+            until: gumicord_platform::now_unix() + TOAST_SECS,
+        });
+        while self.toasts.len() > TOAST_MAX {
+            self.toasts.pop_front();
+        }
+    }
+
+    /// Drops expired notices. Split out for tests: the clock is real
+    /// everywhere else.
+    fn prune_toasts(&mut self, now: i64) -> bool {
+        let shown = self.toasts.len();
+        self.toasts.retain(|t| t.until > now);
+        self.toasts.len() != shown
     }
 
     /// A message's menu. Only what can actually be done: a greyed row adds to
@@ -2710,7 +2776,8 @@ impl Gumicord {
                     )
                     .child(
                         UiNode::text(NodeId::ChatMessageHeaderTime, format!("  {}", m.time))
-                            .with_data(m.id),
+                            .with_data(m.id)
+                            .with_id_key(m.id),
                     )
             })
             .child(self.content_of(m));
@@ -5950,5 +6017,142 @@ mod theme_hot_reload_tests {
         let mut a = Gumicord::demo();
         a.theme_path = None;
         assert!(!a.maybe_reload_theme());
+    }
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+    use gumicord_model::{Message, MessageId, User, UserId};
+
+    fn live_app(timestamp: &str) -> Gumicord {
+        let mut a = Gumicord::demo();
+        a.selected_guild = 1;
+        a.selected_channel = 10;
+        a.live
+            .store_mut()
+            .replace_guilds(vec![gumicord_model::Guild {
+                id: 1u64.into(),
+                name: "テスト".to_owned(),
+                icon_hash: None,
+                unavailable: false,
+                channels: vec![gumicord_model::Channel {
+                    id: 10u64.into(),
+                    kind: gumicord_model::ChannelKind::GuildText,
+                    name: Some("いっぱん".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: None,
+                    position: 0,
+                    topic: None,
+                    nsfw: false,
+                    recipients: Vec::new(),
+                    last_message_id: None,
+                }],
+                roles: Vec::new(),
+            }]);
+        a.live.store_mut().set_backlog(
+            ChannelId::from(10u64),
+            vec![Message {
+                id: MessageId::from(1u64),
+                channel_id: ChannelId::from(10u64),
+                guild_id: None,
+                author: User {
+                    id: UserId::from(7u64),
+                    username: "nenneko".to_owned(),
+                    global_name: None,
+                    discriminator: "0".to_owned(),
+                    avatar_hash: None,
+                    bot: false,
+                },
+                content: "hi".to_owned(),
+                timestamp: timestamp.to_owned(),
+                edited_timestamp: None,
+                pinned: false,
+                attachments: Vec::new(),
+                member: None,
+                referenced_message: None,
+                mentions: Vec::new(),
+                mention_everyone: false,
+            }],
+        );
+        a
+    }
+
+    fn tip_text(tip: &UiNode) -> Vec<String> {
+        let mut out = Vec::new();
+        tip.walk(&mut |n, _| {
+            if n.id == NodeId::OverlayTooltip
+                && let Some(s) = n.content.as_text()
+            {
+                out.push(s.to_owned());
+            }
+        });
+        out
+    }
+
+    /// Hovering a timestamp shows the whole date, not the short hour.
+    #[test]
+    fn hovering_a_timestamp_shows_the_whole_date() {
+        let mut a = live_app("2026-09-03T12:00:00+00:00");
+        let rows = a.message_rows();
+        assert!(!rows.is_empty(), "backlog did not take");
+        a.hovered = Some((NodeId::ChatMessageHeaderTime, Some(Key::Id(1))));
+        let tip = a.tooltip().expect("no tip");
+        assert_eq!(
+            tip_text(&tip),
+            vec![format!("{} {}", rows[0].day, rows[0].time)]
+        );
+    }
+
+    /// Anywhere else, and for dateless rows, there is nothing to add.
+    #[test]
+    fn hovering_anywhere_else_shows_nothing() {
+        let mut a = live_app("2026-09-03T12:00:00+00:00");
+        assert!(!a.message_rows().is_empty(), "backlog did not take");
+        a.hovered = Some((NodeId::ChatMessageContent, Some(Key::Id(1))));
+        assert!(a.tooltip().is_none());
+        a.hovered = None;
+        assert!(a.tooltip().is_none());
+
+        let mut b = live_app("あとで");
+        assert!(!b.message_rows().is_empty(), "backlog did not take");
+        b.hovered = Some((NodeId::ChatMessageHeaderTime, Some(Key::Id(1))));
+        assert!(b.tooltip().is_none(), "dateless rows add nothing");
+    }
+
+    /// Notices stack three deep, then expire.
+    #[test]
+    fn toasts_cap_and_expire() {
+        let mut a = Gumicord::demo();
+        for n in ["one", "two", "three", "four"] {
+            a.notify_toast(n.to_owned());
+        }
+        assert_eq!(a.toasts.len(), 3);
+        assert_eq!(a.toasts[0].text, "two");
+
+        let now = gumicord_platform::now_unix();
+        a.toasts.push_front(crate::menu::Toast {
+            text: "old".to_owned(),
+            until: now - 1,
+        });
+        assert!(a.prune_toasts(now));
+        assert!(a.toasts.iter().all(|t| t.until > now));
+        assert!(!a.prune_toasts(now), "nothing left to drop");
+    }
+
+    /// Toasts ride the tree only while shown.
+    #[test]
+    fn toasts_reach_the_tree_while_shown() {
+        let mut a = Gumicord::demo();
+        let shown = |a: &Gumicord| {
+            let mut found = false;
+            a.build_tree(Panes::Four).walk(&mut |n, _| {
+                found = found || n.id == NodeId::OverlayToast;
+            });
+            found
+        };
+        assert!(!shown(&a));
+        a.notify_toast("hi".to_owned());
+        assert!(shown(&a));
     }
 }

@@ -70,7 +70,7 @@ Esc とボタンで閉じるが、**外を押しても閉じない** (決めた�
 `gumicord_render::layout_for_test` で見てある (真ん中に出る・はみ出さない・
 400px 幅でも収まる) が、**色と間合いは見てもらう必要がある。**
 
-まだ決めていない `overlay.*` は `overlay.tooltip` / `overlay.toast` の 2 つ。
+まだ決めていない `overlay.*` は残っていない (`overlay.tooltip` / `overlay.toast` を決めた。トーストは利用者起点の知らせ付きで動く)。
 
 ---
 

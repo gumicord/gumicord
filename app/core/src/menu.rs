@@ -308,6 +308,29 @@ impl Confirm {
     }
 }
 
+/// A transient notice with its expiry.
+pub struct Toast {
+    pub text: String,
+    /// Unix seconds. Expired lines never draw: the frame wakes in time.
+    pub until: i64,
+}
+
+/// Builds the toast node, or nothing when there is nothing to say. Lines
+/// share one node: each alone would need its own layer position, and they
+/// never overlap anything pressable anyway.
+pub fn toast_node(lines: &[String]) -> Option<UiNode> {
+    if lines.is_empty() {
+        return None;
+    }
+    Some(UiNode::text(NodeId::OverlayToast, lines.join("\n")))
+}
+
+/// Hover explanation for one node. Built on demand while hovering; nothing
+/// stores it, so a stale tip can never outlive its target.
+pub fn tooltip_node(text: &str) -> UiNode {
+    UiNode::text(NodeId::OverlayTooltip, text)
+}
+
 impl Item {
     fn node(&self, index: usize, hovered: bool) -> UiNode {
         UiNode::new(NodeId::OverlayMenuItem)
@@ -571,5 +594,27 @@ mod tests {
     fn an_empty_body_yields_no_preview() {
         assert_eq!(preview_line(""), None);
         assert_eq!(preview_line("   \n\t "), None);
+    }
+
+    // ── toast / tooltip
+
+    /// A tooltip names itself, nothing else.
+    #[test]
+    fn tooltip_names_itself() {
+        let n = tooltip_node("2026年9月3日 12:00");
+        assert_eq!(n.id, NodeId::OverlayTooltip);
+        assert_eq!(
+            texts(&n, NodeId::OverlayTooltip),
+            vec!["2026年9月3日 12:00".to_owned()]
+        );
+    }
+
+    /// Toasts join lines; nothing to say is no node.
+    #[test]
+    fn toast_lines_share_one_node() {
+        assert!(toast_node(&[]).is_none());
+        let n = toast_node(&["a".to_owned(), "b".to_owned()]).expect("no node");
+        assert_eq!(n.id, NodeId::OverlayToast);
+        assert_eq!(texts(&n, NodeId::OverlayToast), vec!["a\nb".to_owned()]);
     }
 }

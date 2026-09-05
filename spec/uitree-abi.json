@@ -93,6 +93,8 @@
     "overlay.modal.actions": "none",
     "overlay.modal.action": "none",
     "overlay.modal.action.label": "none",
+    "overlay.tooltip": "none",
+    "overlay.toast": "none",
     "primitive.text": "none",
     "primitive.image": "none",
     "primitive.icon": "none",

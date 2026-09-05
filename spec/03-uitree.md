@@ -307,6 +307,8 @@ M1 で公開するフィールド。
 | `overlay.modal.actions` | — | 窓のボタン群 |
 | `overlay.modal.action` | — | 窓のボタン 1 つ (key で番号を持つ) |
 | `overlay.modal.action.label` | — | ボタンの文字 (slot で cancel/confirm/danger) |
+| `overlay.tooltip` | — | 指しているものの短い説明。押せず消えるだけ |
+| `overlay.toast` | — | 下に出て数秒で消える知らせ。押すものはない |
 
 ### `primitive.*` — プラグインも生成できる
 
@@ -339,9 +341,18 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 113 個** (中核 75 / プラグインも生成可 38)。
+**合計 115 個** (中核 75 / プラグインも生成可 40)。
 
 <!-- END GENERATED: node-ids -->
+
+### overlay.tooltip / overlay.toast の振る舞い
+
+| ID | 振る舞い |
+|---|---|
+| `overlay.tooltip` | 指しているものの短い説明。押せず、指し先が変わるか外れると消える。説明先がないときは出さない |
+| `overlay.toast` | 中央に重ねて出し、数秒で消える知らせ。押すものはなく、他の操作を止めない。3 件までで古いものから消える |
+
+どちらも利用者の操作を止めない。止める必要がある知らせは `overlay.modal` の仕事である。
 
 ### 3.7 M1 の合計
 
@@ -351,7 +362,7 @@ M1 で公開するフィールド。
 
 | 領域 | 理由 |
 |---|---|
-| ~~`overlay.*`~~ | **一部を決めた**。層・覆い・浮かぶ箱・面・操作の並び・**確認の窓**まで。まだ決めていないのは `overlay.tooltip` / `overlay.toast` で、これらは急がない |
+| ~~`overlay.*`~~ | **一部を決めた**。層・覆い・浮かぶ箱・面・操作の並び・**確認の窓**・短い説明・数秒の知らせまで |
 | `settings.*` (設定画面) | プラグインの設定画面 (`EXT-035`) と併せて設計する必要がある |
 | `chat.message.reactions` | `FR-029` が M2 のため |
 | `member_list.*` | `FR-043` が M2 のため |

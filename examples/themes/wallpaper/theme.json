@@ -155,6 +155,30 @@
       "style": { "height": 1, "background": "$color.border" }
     },
     {
+      "select": "overlay.toast",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.primary",
+        "background": "$color.panel.deep",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.md",
+        "padding": [10, 14, 10, 14]
+      }
+    },
+    {
+      "select": "overlay.tooltip",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.primary",
+        "background": "$color.panel.deep",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.sm",
+        "padding": [6, 10, 6, 10]
+      }
+    },
+    {
       "select": "chat.message",
       "style": { "padding": [4, 16, 4, 16], "gap": 8 }
     },

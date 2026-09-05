@@ -226,8 +226,10 @@ define_node_ids! {
     OverlayModalBody,         "overlay.modal.body",              None,    Plugin, "何が起きるかの説明";
     OverlayModalPreview,      "overlay.modal.preview",           None,    Plugin, "これから起きることの対象そのもの";
     OverlayModalActions,      "overlay.modal.actions",           None,    Plugin, "窓のボタン群";
-    OverlayModalAction,       "overlay.modal.action",            None,    Plugin, "窓のボタン 1 つ (key で番号を持つ)";
-    OverlayModalActionLabel,  "overlay.modal.action.label",      None,    Plugin, "ボタンの文字 (slot で cancel/confirm/danger)";
+    OverlayModalAction,       "overlay.modal.action",              None,    Plugin, "窓のボタン 1 つ (key で番号を持つ)";
+    OverlayModalActionLabel,  "overlay.modal.action.label",        None,    Plugin, "ボタンの文字 (slot で cancel/confirm/danger)";
+    OverlayTooltip,           "overlay.tooltip",                    None,    Plugin, "指しているものの短い説明。押せず消えるだけ";
+    OverlayToast,             "overlay.toast",                      None,    Plugin, "下に出て数秒で消える知らせ。押すものはない";
 
     // ─────────────────────────── primitive.* — the drawing vocabulary plugins use
     PrimitiveText,            "primitive.text",                  None,    Plugin, "文字列";
