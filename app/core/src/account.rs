@@ -151,6 +151,8 @@ mod tests {
         assert_eq!(bot.secret_key(), "account_bot_2002");
     }
 
+    /// Needs the OS backend: without encryption nothing is stored.
+    #[cfg(windows)]
     #[test]
     fn accounts_remember_and_load_retains_token_kinds() {
         let store = scratch("multi_account");
@@ -183,6 +185,8 @@ mod tests {
         assert!(loaded_bot.is_bot());
     }
 
+    /// Needs the OS backend: migration moves secrets between keys.
+    #[cfg(windows)]
     #[test]
     fn remember_cleans_up_legacy_tokens_on_migration() {
         let store = scratch("migration");
@@ -211,6 +215,8 @@ mod tests {
         assert_eq!(tok.expose(), "new_token");
     }
 
+    /// Needs the OS backend: removal deletes the stored secret.
+    #[cfg(windows)]
     #[test]
     fn removing_account_deletes_secret_and_updates_active() {
         let store = scratch("remove_account");
@@ -231,5 +237,20 @@ mod tests {
         assert_eq!(index.accounts.len(), 1);
         assert_eq!(index.active, Some(a1));
         assert!(index.load_token(&store, a2).unwrap().is_none());
+    }
+
+    /// Without an OS backend nothing is stored; callers log in again.
+    #[cfg(not(windows))]
+    #[test]
+    fn without_a_backend_remembering_reports_unsupported() {
+        let store = scratch("unsupported");
+        let mut index = AccountsIndex::default();
+        let key = AccountKey::new(UserId::from(1u64), false);
+        assert!(matches!(
+            index.remember(&store, key, "One".to_owned(), &Token::new("t1")),
+            Err(SecretError::Unsupported)
+        ));
+        assert!(index.accounts.is_empty());
+        assert_eq!(index.active, None);
     }
 }
