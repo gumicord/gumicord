@@ -120,25 +120,22 @@ impl Backgrounds {
     }
 }
 
-/// Mipmap levels for a size, down to 1x1. Halving rounds up, so this counts
-/// how many rounds reach a single texel rather than trusting logarithms.
+/// Mipmap levels for a size, matching what the GPU accepts: each level
+/// halves rounding down, down to 1x1. Counting round-up halvings overshoots
+/// on sizes that are not powers of two (1000px counts 11 that way; the GPU
+/// allows 10 for it), which fails texture creation.
 pub fn mip_levels(w: u32, h: u32) -> u32 {
-    let mut n = w.max(h);
+    let n = w.max(h);
     if n == 0 {
         return 1;
     }
-    let mut levels = 1u32;
-    while n > 1 {
-        n = n.div_ceil(2);
-        levels += 1;
-    }
-    levels
+    32 - n.leading_zeros()
 }
 
-/// Halves an image by averaging 2x2 blocks. Odd edges clamp, like the blur:
-/// dropping the last row would shift the picture by half a texel per level.
+/// Halves an image by averaging 2x2 blocks, rounding down like the GPU's
+/// mip sizes do. Source reads clamp at odd edges, like the blur.
 pub fn downsample_half(rgba: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
-    let (nw, nh) = (w.max(1).div_ceil(2), h.max(1).div_ceil(2));
+    let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
     let at = |x: u32, y: u32, c: usize| -> u32 {
         let x = x.min(w - 1);
         let y = y.min(h - 1);
@@ -165,17 +162,39 @@ mod tests {
 
     #[test]
     fn mip_chain_ends_in_one_texel() {
-        assert_eq!(mip_levels(1920, 1080), 12);
+        assert_eq!(mip_levels(1920, 1080), 11);
         assert_eq!(mip_levels(1024, 1024), 11);
         assert_eq!(mip_levels(1, 1), 1);
         assert_eq!(mip_levels(0, 0), 1);
         assert_eq!(mip_levels(4, 4), 3);
+        // Not a power of two: round-up counting gives 11 here, which the
+        // GPU refuses (wallpaper.png crashed texture creation this way).
+        assert_eq!(mip_levels(1000, 600), 10);
         // Each level halves until nothing is left to halve.
         let (mut w, mut h) = (1920u32, 1080u32);
         for _ in 1..mip_levels(1920, 1080) {
-            (w, h) = (w.max(1).div_ceil(2), h.max(1).div_ceil(2));
+            (w, h) = ((w / 2).max(1), (h / 2).max(1));
         }
         assert_eq!((w, h), (1, 1));
+    }
+
+    /// Downsampled sizes match the GPU's mip sizes, or uploads overrun the
+    /// level they target.
+    #[test]
+    fn downsampled_sizes_match_gpu_mip_sizes() {
+        let (mut w, mut h) = (1000u32, 600u32);
+        let levels = mip_levels(w, h);
+        for level in 0..levels {
+            assert_eq!(
+                (w, h),
+                ((1000u32 >> level).max(1), (600u32 >> level).max(1)),
+                "level {level}"
+            );
+            if level + 1 < levels {
+                let rgba = vec![0u8; w as usize * h as usize * 4];
+                (_, w, h) = downsample_half(&rgba, w, h);
+            }
+        }
     }
 
     #[test]
@@ -189,11 +208,13 @@ mod tests {
         assert_eq!(out, vec![128, 128, 128, 255]);
     }
 
+    /// Odd sizes shrink like the GPU's mips do (3 goes to 1, not 2), and
+    /// the sampler clamps instead of reading out of bounds.
     #[test]
     fn odd_edges_clamp_instead_of_dropping() {
         let rgba = vec![200u8; 12];
         let (out, w, h) = downsample_half(&rgba, 3, 1);
-        assert_eq!((w, h), (2, 1));
-        assert_eq!(out, vec![200u8; 8]);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(out, vec![200u8; 4]);
     }
 }
