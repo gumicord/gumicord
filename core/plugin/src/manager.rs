@@ -470,7 +470,7 @@ impl PluginSet {
         };
         match serde_json::to_string_pretty(&stored)
             .map_err(|e| e.to_string())
-            .and_then(|raw| std::fs::write(&path, raw).map_err(|e| e.to_string()))
+            .and_then(|raw| write_atomically(&path, raw.as_bytes()).map_err(|e| e.to_string()))
         {
             Ok(()) => Vec::new(),
             Err(reason) => vec![warn(format!(
@@ -483,6 +483,14 @@ impl PluginSet {
 
 fn warn(message: String) -> ManagerEvent {
     ManagerEvent::Warned { message }
+}
+
+/// Writes beside the target and renames over it, so a concurrent reader
+/// never sees a half-written file.
+fn write_atomically(path: &std::path::Path, raw: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, raw)?;
+    std::fs::rename(&tmp, path)
 }
 
 fn load_grants(plugins_dir: &Path) -> (HashMap<String, Vec<String>>, HashSet<String>) {

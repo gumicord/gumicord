@@ -454,7 +454,9 @@ fn save_grants(path: Option<&Path>, granted: &HashSet<String>, denied: &HashSet<
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, text);
+    // Beside-then-rename: readers never see a half-written file.
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
 }
 
 #[cfg(test)]
