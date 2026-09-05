@@ -3124,12 +3124,16 @@ impl Gumicord {
         // A day always starts labelled, and one header covers a run: same
         // author, same day, close together. Anything else starts over.
         // A reply always stands alone and breaks the run, whatever follows.
+        // Dividers track the day on their own: a broken run must not
+        // redraw the date.
         let rows = self.message_rows();
         let mut messages = UiNode::new(NodeId::ChatMessageList);
         let mut prev: Option<(&str, &str, i64)> = None;
+        let mut divided_day = "";
         for m in &rows {
-            if !m.day.is_empty() && prev.is_none_or(|(_, day, _)| day != m.day) {
+            if !m.day.is_empty() && m.day != divided_day {
                 messages = messages.child(Self::day_divider(&m.day));
+                divided_day = &m.day;
             }
             let grouped = match prev {
                 Some((author, day, unix)) if m.reply.is_none() => {
@@ -6507,12 +6511,17 @@ mod member_tests {
 
         let tree = a.chat_view();
         let mut grouped = Vec::new();
+        let mut dividers = 0;
         tree.walk(&mut |n, _| {
             if n.id == NodeId::ChatMessage {
                 grouped.push(n.states.contains(State::Grouped));
             }
+            if n.id == NodeId::ChatMessageListDayDivider {
+                dividers += 1;
+            }
         });
         assert_eq!(grouped, vec![false, false, false, true]);
+        assert_eq!(dividers, 1, "same day redrawn after the reply");
     }
 
     /// The message's own member wins, being newer.
