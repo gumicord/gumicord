@@ -43,7 +43,7 @@ pub mod session;
 pub mod time;
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
 use gumicord_platform::{Application, FrameCx, HiddenKey, TextDocument, Waker};
@@ -52,7 +52,7 @@ use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::value::Color;
-use gumicord_uitree::{Content, Editable, Key, NodeId, State, UiNode};
+use gumicord_uitree::{Content, DataKind, Editable, Key, NodeId, State, UiNode};
 use live::Live;
 use session::{Login, Session};
 
@@ -2714,10 +2714,251 @@ impl Gumicord {
         if self.login.session().logged_in().is_some() {
             self.pump_dialog();
         }
-        self.plugins.submit(&tree);
+        self.plugins.submit(&tree, &self.plugin_data_context(&tree));
         self.last_patched.clone().unwrap_or(tree)
     }
 
+    /// Domain facts for patches: what `ctx.data` carries.
+    ///
+    /// The tree hands over shape; snowflake IDs mean nothing to JS, so the
+    /// readable side (bodies, names, counts) travels here instead, keyed by
+    /// node identity. Only nodes carrying a `DataRef` the resolver knows
+    /// appear; anything else reads `undefined`, exactly as the SDK types
+    /// promise for nodes without data.
+    fn plugin_data_context(&self, tree: &UiNode) -> gumicord_plugin::PatchContext {
+        use gumicord_gateway::member_list::MemberRow;
+        use gumicord_gateway::status::Status;
+
+        let guild = GuildId::from(self.selected_guild);
+        let channel = ChannelId::from(self.selected_channel);
+        let store = self.live.store();
+        let messages: HashMap<u64, &gumicord_model::Message> = store
+            .messages(channel)
+            .iter()
+            .map(|m| (m.id.get(), m))
+            .collect();
+        let guilds: HashMap<u64, GuildRow> =
+            self.guild_rows().into_iter().map(|g| (g.id, g)).collect();
+        let channels: HashMap<u64, ChannelRow> = self
+            .openable_rows()
+            .into_iter()
+            .map(|c| (c.id, c))
+            .collect();
+        let mut statuses: HashMap<u64, &'static str> = HashMap::new();
+        if let Some(list) = self.live.members(guild) {
+            for row in list.rows() {
+                if let MemberRow::Member(entry) = row
+                    && let Some(user) = entry.member.user.as_ref()
+                {
+                    // Invisible looks offline to everyone else.
+                    let status = match entry.status {
+                        Status::Invisible => "offline",
+                        s => s.as_wire(),
+                    };
+                    statuses.insert(user.id.get(), status);
+                }
+            }
+        }
+
+        let mut table = serde_json::Map::new();
+        tree.walk(&mut |node, _| {
+            let Some(data) = &node.data else {
+                return;
+            };
+            let key = gumicord_plugin::data_key(node.id.as_str(), &node.key);
+            let value = match data.kind {
+                DataKind::Message => messages
+                    .get(&data.id)
+                    .map(|m| message_data(m, &channel.get().to_string(), guild.get(), store)),
+                DataKind::Guild => guilds.get(&data.id).map(guild_data),
+                DataKind::Channel => channels
+                    .get(&data.id)
+                    .and_then(|c| store.channel(ChannelId::from(c.id)).map(|m| (c, m)))
+                    .map(|(c, m)| channel_data(c, m)),
+                DataKind::Member => member_data(&data.id, guild, store, &statuses),
+                // No data-bearing nodes of the other kinds exist today;
+                // their resolvers arrive with their nodes.
+                _ => None,
+            };
+            if let Some(value) = value {
+                table.insert(key, value);
+            }
+        });
+        gumicord_plugin::PatchContext {
+            data: Some(serde_json::Value::Object(table)),
+        }
+    }
+}
+
+/// `ctx.data` shapes, mirroring `sdk/src/data.ts` field for field: the
+/// TypeScript types promise these exact names.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserDataJson {
+    id: String,
+    username: String,
+    display_name: String,
+    bot: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar_url: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageDataJson {
+    id: String,
+    channel_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guild_id: Option<String>,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edited_at: Option<String>,
+    content: String,
+    author: UserDataJson,
+    pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referenced_message_id: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuildDataJson {
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+    unread: bool,
+    mention_count: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelDataJson {
+    id: String,
+    name: String,
+    /// The Discord channel type number, as a string.
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topic: Option<String>,
+    nsfw: bool,
+    unread: bool,
+    mention_count: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberDataJson {
+    user: UserDataJson,
+    display_name: String,
+    status: String,
+    roles: Vec<String>,
+}
+
+fn user_data(user: &gumicord_model::User, avatar_url: Option<String>) -> UserDataJson {
+    UserDataJson {
+        id: user.id.to_string(),
+        username: user.username.clone(),
+        display_name: user.display_name().to_owned(),
+        bot: user.bot,
+        avatar_url,
+    }
+}
+
+fn message_data(
+    m: &gumicord_model::Message,
+    channel_id: &str,
+    guild: u64,
+    store: &gumicord_store::Store,
+) -> serde_json::Value {
+    let guild_id = GuildId::from(guild);
+    let avatar_url = store
+        .member(guild_id, m.author.id)
+        .map(|member| member.display_avatar(guild_id, &m.author).url())
+        .unwrap_or_else(|| m.author.display_avatar().url());
+    let data = MessageDataJson {
+        id: m.id.to_string(),
+        channel_id: channel_id.to_owned(),
+        guild_id: (guild != 0).then(|| guild.to_string()),
+        created_at: m.timestamp.clone(),
+        edited_at: m.edited_timestamp.clone(),
+        content: m.content.clone(),
+        author: user_data(&m.author, Some(avatar_url)),
+        pinned: m.pinned,
+        referenced_message_id: m.referenced_message.as_ref().map(|r| r.id.to_string()),
+    };
+    serde_json::to_value(data).expect("plain data always serialises")
+}
+
+fn guild_data(g: &GuildRow) -> serde_json::Value {
+    serde_json::to_value(GuildDataJson {
+        id: g.id.to_string(),
+        name: g.name.clone(),
+        icon_url: g.icon.clone(),
+        unread: g.unread,
+        mention_count: g.mentions,
+    })
+    .expect("plain data always serialises")
+}
+
+fn channel_data(c: &ChannelRow, m: &gumicord_model::Channel) -> serde_json::Value {
+    serde_json::to_value(ChannelDataJson {
+        id: c.id.to_string(),
+        name: c.name.clone(),
+        kind: channel_kind_number(&m.kind),
+        topic: m.topic.clone(),
+        nsfw: m.nsfw,
+        unread: c.unread,
+        mention_count: c.mentions,
+    })
+    .expect("plain data always serialises")
+}
+
+/// The Discord channel type number, as a string. Names would be invented
+/// ABI; the numbers are Discord's own.
+fn channel_kind_number(kind: &gumicord_model::ChannelKind) -> String {
+    use gumicord_model::ChannelKind::*;
+    match kind {
+        GuildText => "0",
+        Dm => "1",
+        GuildVoice => "2",
+        GroupDm => "3",
+        GuildCategory => "4",
+        GuildAnnouncement => "5",
+        AnnouncementThread => "10",
+        PublicThread => "11",
+        PrivateThread => "12",
+        GuildStageVoice => "13",
+        GuildForum => "15",
+        Unknown(n) => return n.to_string(),
+    }
+    .to_owned()
+}
+
+fn member_data(
+    id: &u64,
+    guild: GuildId,
+    store: &gumicord_store::Store,
+    statuses: &std::collections::HashMap<u64, &'static str>,
+) -> Option<serde_json::Value> {
+    use gumicord_model::UserId;
+    let member = store.member(guild, UserId::from(*id))?;
+    let user = member.user.as_ref()?;
+    let data = MemberDataJson {
+        user: user_data(user, Some(member.display_avatar(guild, user).url())),
+        display_name: member.display_name(user).to_owned(),
+        status: statuses.get(id).copied().unwrap_or("offline").to_owned(),
+        roles: member
+            .roles
+            .iter()
+            .filter_map(|r| store.role_name(guild, *r))
+            .map(str::to_owned)
+            .collect(),
+    };
+    Some(serde_json::to_value(data).expect("plain data always serialises"))
+}
+
+impl Gumicord {
     /// A shown dialog that is gone was dismissed: without a settings screen
     /// to revisit it, that denies an approval and drops a notice.
     fn settle_dialog(&mut self) {
@@ -2885,6 +3126,7 @@ impl crate::markdown::Names for StoreNames<'_> {
 //  one it is holding.
 // ═══════════════════════════════════════════════════════════════════════
 
+#[derive(Debug, Clone)]
 struct GuildRow {
     id: u64,
     name: String,
@@ -2904,6 +3146,7 @@ struct GuildRow {
     members: Vec<GuildRow>,
 }
 
+#[derive(Debug, Clone)]
 struct ChannelRow {
     id: u64,
     name: String,
@@ -6158,5 +6401,148 @@ mod toast_tests {
         assert!(!shown(&a));
         a.notify_toast("hi".to_owned());
         assert!(shown(&a));
+    }
+}
+
+#[cfg(test)]
+mod plugin_data_tests {
+    use super::*;
+    use gumicord_model::{Member, Message, MessageId, RoleId, User, UserId};
+
+    fn live_app() -> Gumicord {
+        let mut a = Gumicord::demo();
+        a.selected_guild = 1;
+        a.selected_channel = 10;
+        a.live
+            .store_mut()
+            .replace_guilds(vec![gumicord_model::Guild {
+                id: 1u64.into(),
+                name: "テスト".to_owned(),
+                icon_hash: None,
+                unavailable: false,
+                channels: vec![gumicord_model::Channel {
+                    id: 10u64.into(),
+                    kind: gumicord_model::ChannelKind::GuildText,
+                    name: Some("いっぱん".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: None,
+                    position: 0,
+                    topic: Some("ようこそ".to_owned()),
+                    nsfw: false,
+                    recipients: Vec::new(),
+                    last_message_id: None,
+                }],
+                roles: vec![gumicord_model::Role {
+                    id: 55u64.into(),
+                    name: "管理者".to_owned(),
+                    position: 3,
+                    hoist: true,
+                    color: None,
+                }],
+            }]);
+        a.live.store_mut().set_backlog(
+            ChannelId::from(10u64),
+            vec![Message {
+                id: MessageId::from(1u64),
+                channel_id: ChannelId::from(10u64),
+                guild_id: None,
+                author: User {
+                    id: UserId::from(7u64),
+                    username: "nenneko".to_owned(),
+                    global_name: Some("ねんねこ".to_owned()),
+                    discriminator: "0".to_owned(),
+                    avatar_hash: None,
+                    bot: false,
+                },
+                content: "hi".to_owned(),
+                timestamp: "2026-09-03T12:00:00+00:00".to_owned(),
+                edited_timestamp: None,
+                pinned: true,
+                attachments: Vec::new(),
+                member: None,
+                referenced_message: None,
+                mentions: Vec::new(),
+                mention_everyone: false,
+            }],
+        );
+        a.live.store_mut().remember_member(
+            GuildId::from(1u64),
+            UserId::from(7u64),
+            Member {
+                nick: Some("ねこ".to_owned()),
+                avatar_hash: None,
+                roles: vec![RoleId::from(55u64)],
+                joined_at: None,
+                user: Some(User {
+                    id: UserId::from(7u64),
+                    username: "nenneko".to_owned(),
+                    global_name: Some("ねんねこ".to_owned()),
+                    discriminator: "0".to_owned(),
+                    avatar_hash: None,
+                    bot: false,
+                }),
+            },
+        );
+        a
+    }
+
+    fn table(a: &Gumicord, tree: &UiNode) -> serde_json::Value {
+        let ctx = a.plugin_data_context(tree);
+        ctx.data.expect("empty table")
+    }
+
+    /// A message node reads its body, author and ids.
+    #[test]
+    fn messages_carry_their_facts() {
+        let a = live_app();
+        let tree = UiNode::new(NodeId::ChatMessage).with_id_key(1).with_data(1);
+        let data = table(&a, &tree);
+        let m = &data["chat.message\n1"];
+        assert_eq!(m["content"], "hi");
+        assert_eq!(m["id"], "1");
+        assert_eq!(m["channelId"], "10");
+        assert_eq!(m["guildId"], "1");
+        assert_eq!(m["author"]["username"], "nenneko");
+        assert_eq!(m["author"]["displayName"], "ねんねこ");
+        assert!(m.get("editedAt").is_none(), "absent, not null");
+    }
+
+    /// Keyless nodes key on the stable ID alone; unknown ids stay out.
+    #[test]
+    fn keys_follow_the_nodes() {
+        let a = live_app();
+        let tree = UiNode::new(NodeId::ChatMessage).with_data(1);
+        let data = table(&a, &tree);
+        assert!(data.get("chat.message\n").is_some());
+        assert!(data.get("chat.message\n1").is_none());
+
+        let tree = UiNode::new(NodeId::ChatMessage)
+            .with_id_key(999)
+            .with_data(999);
+        assert!(table(&a, &tree).as_object().unwrap().is_empty());
+    }
+
+    /// Guilds, channels and members resolve with names and counts.
+    #[test]
+    fn guilds_channels_and_members_resolve() {
+        let a = live_app();
+        let tree = UiNode::new(NodeId::AppScreenMain)
+            .child(UiNode::new(NodeId::NavGuildListItem).with_data(1))
+            .child(UiNode::new(NodeId::NavChannelListItem).with_data(10))
+            .child(
+                UiNode::new(NodeId::NavMemberListItem)
+                    .with_id_key(7)
+                    .with_data(7),
+            );
+        let data = table(&a, &tree);
+        let g = &data["nav.guild_list.item\n"];
+        assert_eq!(g["name"], "テスト");
+        let c = &data["nav.channel_list.item\n"];
+        assert_eq!(c["name"], "いっぱん");
+        assert_eq!(c["type"], "0");
+        let m = &data["nav.member_list.item\n7"];
+        assert_eq!(m["displayName"], "ねこ");
+        assert_eq!(m["status"], "offline");
+        assert_eq!(m["roles"], serde_json::json!(["管理者"]));
     }
 }

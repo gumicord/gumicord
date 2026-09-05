@@ -351,11 +351,11 @@ impl PluginManager {
     }
 
     /// Hands the latest tree over; older unhandled ones are dropped.
-    pub fn submit(&self, tree: &UiNode) {
+    pub fn submit(&self, tree: &UiNode, ctx: &PatchContext) {
         let Some(cmd) = &self.cmd else { return };
         let _ = cmd.send(Command::Submit {
             tree: Box::new(tree.clone()),
-            ctx: PatchContext::empty(),
+            ctx: ctx.clone(),
         });
     }
 
@@ -652,7 +652,7 @@ mod tests {
         let tree = UiNode::text(NodeId::ChatMessageContent, "hello");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            manager.submit(&tree);
+            manager.submit(&tree, &PatchContext::empty());
             let mut badges = 0;
             let mut warnings = Vec::new();
             for e in manager.drain() {

@@ -14,7 +14,7 @@ pub mod manager;
 pub mod manifest;
 pub mod storage;
 
-pub use convert::{PatchContext, apply_args, apply_result, js_to_node, node_to_js};
+pub use convert::{PatchContext, apply_args, apply_result, data_key, js_to_node, node_to_js};
 pub use host::{INTERRUPT_BUDGET, PluginHost, PluginSource};
 pub use manager::{ManagerEvent, PluginManager};
 pub use manifest::{KNOWN_CAPABILITIES, Manifest};

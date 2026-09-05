@@ -512,6 +512,13 @@ fn object_of<'a>(value: &Value<'a>) -> Option<Object<'a>> {
     }
 }
 
+/// The `ctx.data` table key for one node: stable ID, then key. The SDK
+/// builds the same string from the JS side, so both ends agree without a
+/// second channel.
+pub fn data_key(stable: &str, key: &Option<Key>) -> String {
+    format!("{}\n{}", stable, key_string(key))
+}
+
 fn key_string(key: &Option<Key>) -> String {
     key_string_opt(key).unwrap_or_default()
 }

@@ -47,11 +47,18 @@ function applyPatches(node: UINode, ctx: PatchContext): UINode {
   const list = patches.get(node.id);
   if (!list) return current;
 
+  // The domain facts for this node alone. The host keys the table by stable
+  // ID and key, exactly as below; anything without an entry reads undefined,
+  // which is what the types promise for nodes without data.
+  const key =
+    node.key === undefined ? node.id + "\n" : node.id + "\n" + node.key;
+  const table = ctx.data as unknown as Record<string, unknown> | undefined;
+  const nodeCtx = { ...ctx, data: table?.[key] };
   // P3, P4: applied in order, without recursing into the output.
   let out = current;
   for (const fn of list) {
     try {
-      out = fn(out, ctx);
+      out = fn(out, nodeCtx as PatchContext);
     } catch (e) {
       // One failing patch must not break the whole subtree. The host
       // isolates per plugin as well, and counts failures towards
