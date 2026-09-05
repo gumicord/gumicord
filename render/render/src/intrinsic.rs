@@ -343,9 +343,14 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // and centring puts the label in the middle.
         OverlayModalAction => Intrinsic::column().grow(1.0).cross(Cross::Center),
         OverlayModalActionLabel => Intrinsic::row().cross(Cross::Center).one_line(),
-        // Several lines share one node, so wrapping stays on.
-        OverlayToast => Intrinsic::row().cross(Cross::Center),
-        OverlayTooltip => Intrinsic::row().cross(Cross::Center).one_line(),
+        // Several lines share one node, so wrapping stays on. Content-sized:
+        // fullscreen either would paint its background over the chat it
+        // must not block.
+        OverlayToast => Intrinsic::row().cross(Cross::Center).hugs_content(),
+        OverlayTooltip => Intrinsic::row()
+            .cross(Cross::Center)
+            .one_line()
+            .hugs_content(),
 
         // ── settings.*
         //

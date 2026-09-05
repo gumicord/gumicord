@@ -7293,6 +7293,35 @@ mod toast_tests {
         a.notify_toast("hi".to_owned());
         assert!(shown(&a));
     }
+
+    /// The toast is a small centred box, not a fullscreen layer: fullscreen
+    /// it paints its background over the chat it must not block.
+    #[test]
+    fn the_toast_is_a_small_centred_box() {
+        let (w, h) = (1280.0, 800.0);
+        let mut a = Gumicord::demo();
+        a.notify_toast("テスト".to_owned());
+        let viewport = gumicord_render::Size::new(w, h);
+        let tree = a.build(&gumicord_platform::FrameCx {
+            viewport,
+            scale: 1.0,
+        });
+        let placed = gumicord_render::layout_for_test(&tree, viewport);
+        let toast = placed
+            .iter()
+            .find(|(id, _)| *id == NodeId::OverlayToast)
+            .map(|(_, r)| *r)
+            .expect("トーストがない");
+        assert!(toast.w < w && toast.h < h, "全画面を覆っている {toast:?}");
+        assert!(
+            (toast.x + toast.w / 2.0 - w / 2.0).abs() < 1.0,
+            "横に寄っている {toast:?}"
+        );
+        assert!(
+            (toast.y + toast.h / 2.0 - h / 2.0).abs() < 1.0,
+            "縦に寄っている {toast:?}"
+        );
+    }
 }
 
 #[cfg(test)]
