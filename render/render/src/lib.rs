@@ -290,7 +290,7 @@ impl Renderer {
     /// scrolling to a guess would strand the reader.
     pub fn reveal(&mut self, region: NodeId, id: NodeId, key: Option<&Key>) -> bool {
         let (at, max) = self.scroll_place(region);
-        let Some(next) = reveal_at(&self.hits, at, max, id, key) else {
+        let Some(next) = reveal_at(&self.hits, at, max, region, id, key) else {
             return false;
         };
         self.scroll
@@ -679,14 +679,34 @@ pub fn layout_for_test(
 }
 
 /// Where a region must scroll to show a node: its viewport rect plus the
-/// current offset is its content position. `None` when the node is unknown
-/// or there is nothing to scroll.
-fn reveal_at(hits: &[Hit], at: f32, max: f32, id: NodeId, key: Option<&Key>) -> Option<f32> {
+/// current offset is its content position, less what already covers the
+/// region's top. The chat header sits above the list in the flow, so that
+/// is usually the region's own top; measuring instead of assuming keeps
+/// working if it ever overlays. `None` when the node is unknown or there
+/// is nothing to scroll.
+fn reveal_at(
+    hits: &[Hit],
+    at: f32,
+    max: f32,
+    region: NodeId,
+    id: NodeId,
+    key: Option<&Key>,
+) -> Option<f32> {
     if max <= 0.0 {
         return None;
     }
-    let hit = hits.iter().find(|h| h.id == id && h.key.as_ref() == key)?;
-    Some((hit.rect.y + at).clamp(0.0, max))
+    let target = hits.iter().find(|h| h.id == id && h.key.as_ref() == key)?;
+    let region_y = hits
+        .iter()
+        .find(|h| h.id == region && h.key.is_none())
+        .map(|h| h.rect.y)
+        .unwrap_or(0.0);
+    let top = hits
+        .iter()
+        .filter(|h| h.id == NodeId::ChatHeader)
+        .map(|h| h.rect.y + h.rect.h)
+        .fold(region_y, f32::max);
+    Some((target.rect.y + at - top).clamp(0.0, max))
 }
 
 #[cfg(test)]
@@ -921,52 +941,66 @@ mod press_tests {
         assert_eq!(links[0].url, "https://example.com/s");
     }
 
-    /// Revealing aims at the node's content position; unknown nodes and
-    /// flat lists hold still.
+    /// Revealing aims at the node's content position, less what covers
+    /// the region's top; unknown nodes and flat lists hold still.
     #[test]
     fn revealing_aims_at_the_node() {
-        let hit = |y: f32| Hit {
-            id: NodeId::ChatMessage,
-            key: Some(Key::Id(7)),
-            rect: Rect::new(0.0, y, 100.0, 40.0),
+        let hit = |id: NodeId, key: Option<Key>, y: f32, h: f32| Hit {
+            id,
+            key,
+            rect: Rect::new(0.0, y, 100.0, h),
             clip: None,
         };
-        // The viewport shows content 200 and on; the node sits at viewport
-        // 100, so content 300.
-        let at = reveal_at(
-            &[hit(100.0)],
-            200.0,
-            1000.0,
-            NodeId::ChatMessage,
-            Some(&Key::Id(7)),
+        let region = NodeId::ChatMessageList;
+        let key = Key::Id(7);
+        let target = Some(&key);
+        // Region top at 48 under a 48-high header; the node sits at
+        // viewport 148 with the list already at 200: content 348, less
+        // the 48 covered, aims at 300.
+        let hits = vec![
+            hit(region, None, 48.0, 552.0),
+            hit(NodeId::ChatHeader, None, 0.0, 48.0),
+            hit(NodeId::ChatMessage, Some(Key::Id(7)), 148.0, 40.0),
+        ];
+        assert_eq!(
+            reveal_at(&hits, 200.0, 1000.0, region, NodeId::ChatMessage, target),
+            Some(300.0)
         );
-        assert_eq!(at, Some(300.0));
+        // A header overlapping the region pushes the aim down past it.
+        let hits = vec![
+            hit(region, None, 48.0, 552.0),
+            hit(NodeId::ChatHeader, None, 20.0, 48.0),
+            hit(NodeId::ChatMessage, Some(Key::Id(7)), 148.0, 40.0),
+        ];
+        assert_eq!(
+            reveal_at(&hits, 200.0, 1000.0, region, NodeId::ChatMessage, target),
+            Some(280.0)
+        );
         // A wrong key is a different node.
-        let at = reveal_at(
-            &[hit(100.0)],
-            200.0,
-            1000.0,
-            NodeId::ChatMessage,
-            Some(&Key::Id(8)),
+        assert_eq!(
+            reveal_at(
+                &hits,
+                200.0,
+                1000.0,
+                region,
+                NodeId::ChatMessage,
+                Some(&Key::Id(8))
+            ),
+            None
         );
-        assert_eq!(at, None);
         // Nothing to scroll.
-        let at = reveal_at(
-            &[hit(100.0)],
-            0.0,
-            0.0,
-            NodeId::ChatMessage,
-            Some(&Key::Id(7)),
+        assert_eq!(
+            reveal_at(&hits, 0.0, 0.0, region, NodeId::ChatMessage, target),
+            None
         );
-        assert_eq!(at, None);
         // Past the end clamps.
-        let at = reveal_at(
-            &[hit(900.0)],
-            200.0,
-            1000.0,
-            NodeId::ChatMessage,
-            Some(&Key::Id(7)),
+        let hits = vec![
+            hit(region, None, 48.0, 552.0),
+            hit(NodeId::ChatMessage, Some(Key::Id(7)), 948.0, 40.0),
+        ];
+        assert_eq!(
+            reveal_at(&hits, 200.0, 1000.0, region, NodeId::ChatMessage, target),
+            Some(1000.0)
         );
-        assert_eq!(at, Some(1000.0));
     }
 }
