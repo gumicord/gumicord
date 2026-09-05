@@ -326,6 +326,9 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // Full width, content height, rising from the bottom.
         OverlaySheet => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
         OverlaySheetHandle => Intrinsic::row().cross(Cross::Center),
+        // Content-sized and corner-anchored by the app: like a popover
+        // stood on its side.
+        OverlayDrawer => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
         OverlayMenuItem => Intrinsic::row().cross(Cross::Center),
         OverlayMenuItemIcon => Intrinsic::row().cross(Cross::Center),
         OverlayMenuItemLabel => Intrinsic::row().cross(Cross::Center).one_line(),

@@ -82,6 +82,7 @@
     "overlay.popover": "none",
     "overlay.sheet": "none",
     "overlay.sheet.handle": "none",
+    "overlay.drawer": "none",
     "overlay.menu": "none",
     "overlay.menu.item": "none",
     "overlay.menu.item.icon": "none",

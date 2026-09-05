@@ -46,13 +46,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 
 use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
-use gumicord_platform::{Application, FrameCx, HiddenKey, RevealRequest, TextDocument, Waker};
+use gumicord_platform::{
+    Application, FrameCx, HiddenKey, RevealRequest, Swipe, SwipeDir, TextDocument, Waker,
+};
 use gumicord_plugin::{ManagerEvent, PluginManager};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
 use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::value::Color;
-use gumicord_uitree::{Content, DataKind, Editable, Key, NodeId, State, UiNode};
+use gumicord_uitree::{Anchor, Content, DataKind, Editable, Key, NodeId, State, UiNode};
 use live::Live;
 use session::{Login, Session};
 
@@ -139,6 +141,14 @@ const FOLDER_TILES: usize = 4;
 const CANCEL_COMPOSING: &str = "cancel_composing";
 /// Slot for the settings gear in the user panel; same use.
 const SETTINGS_OPEN: &str = "settings_open";
+/// Slot for the member-list button in the chat header; same use. Only
+/// built while the member pane is hidden.
+const MEMBERS_OPEN: &str = "members_open";
+/// The member-list button's icon. Unknown names draw nothing, so the
+/// registry and this string are pinned together by a test below.
+const MEMBERS_ICON: &str = "members";
+/// A swipe starting this close to the left edge opens the drawer.
+const DRAWER_EDGE: f32 = 24.0;
 /// The gear's icon. Unknown names draw nothing, so the registry and this
 /// string are pinned together by a test below.
 const SETTINGS_GEAR: &str = "gear";
@@ -369,6 +379,10 @@ pub struct Gumicord {
     pending_jump: Option<(ChannelId, u64)>,
     /// The last pressed message, for the screen reader to follow.
     a11y_message: Option<u64>,
+    /// The navigation drawer, for widths that hide the lists.
+    drawer_open: bool,
+    /// The member list as a bottom sheet, for widths that hide it.
+    member_sheet_open: bool,
     /// The settings screen. Closed most of the time.
     settings: SettingsView,
 }
@@ -499,6 +513,8 @@ impl Gumicord {
             pending_reveal: None,
             pending_jump: None,
             a11y_message: None,
+            drawer_open: false,
+            member_sheet_open: false,
             settings: SettingsView::default(),
         };
         app.refresh_theme_assets();
@@ -810,6 +826,9 @@ impl Gumicord {
     /// otherwise the focused field does, then the last pressed message.
     /// Pressing a message is the only way to point the reader at the chat:
     /// hovering moves nothing.
+    /// Which node the screen reader follows. Dialogs and menus grab it;
+    /// otherwise the focused field does, then the drawer or the sheet,
+    /// then the last pressed message.
     fn a11y_focus(&self) -> Option<(&'static str, Option<Key>)> {
         if matches!(self.floating, Some(crate::menu::Floating::Confirm(_))) {
             Some(("overlay.modal", None))
@@ -819,10 +838,127 @@ impl Gumicord {
             Some(("chat.input.field", None))
         } else if self.login_field.is_some() {
             Some(("app.screen.login.field", None))
+        } else if self.drawer_open {
+            Some(("overlay.drawer", None))
+        } else if self.member_sheet_open {
+            Some(("overlay.sheet", None))
         } else {
             self.a11y_message
                 .map(|id| ("chat.message", Some(Key::Id(id))))
         }
+    }
+}
+
+impl Gumicord {
+    /// One press against the hit arms. Returns what changed, if anything.
+    fn press_loop(&mut self, hits: &[Hit]) -> bool {
+        let mut changed = false;
+        // Only the frontmost selectable hit.
+        for h in hits {
+            match (h.id, &h.key) {
+                // The way into the password form (or its submit / back).
+                (
+                    NodeId::PrimitiveButton,
+                    Some(Key::Slot(slot @ ("login_submit" | "login_back" | "login_password"))),
+                ) => {
+                    changed |= self.login_button(slot);
+                }
+                // Folders only fold; they do not change the selected guild.
+                (NodeId::NavGuildListFolder, Some(Key::Id(id))) => {
+                    self.live.toggle_folder(*id);
+                    changed = true;
+                }
+                (NodeId::NavGuildListItem, Some(Key::Id(id))) => {
+                    if self.selected_guild == *id {
+                        break;
+                    }
+                    self.selected_guild = *id;
+                    // Clear the channel, or the list and the body disagree.
+                    self.selected_channel = 0;
+                    changed = true;
+                }
+                (NodeId::NavChannelListItem, Some(Key::Id(id))) => {
+                    changed |= self.selected_channel != *id;
+                    self.selected_channel = *id;
+                }
+                (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
+                    changed |= self.stop_composing();
+                }
+                // The gear sits on the user panel; its hit comes first, so
+                // this arm wins over the panel's own menu.
+                (NodeId::PrimitiveButton, Some(Key::Slot(SETTINGS_OPEN))) => {
+                    changed |= self.open_settings();
+                }
+                // The member-list button in the chat header.
+                (NodeId::PrimitiveButton, Some(Key::Slot(MEMBERS_OPEN))) => {
+                    changed |= self.open_member_sheet();
+                }
+                // A press anywhere else on the message still opens all of it:
+                // a single run is a small target.
+                (NodeId::ChatMessage, Some(Key::Id(id))) => {
+                    changed |= self.reveals.messages.insert(*id);
+                    self.a11y_message = Some(*id);
+                }
+                // A reply reference jumps to the answered message.
+                (NodeId::ChatMessageReplyRef, Some(Key::Id(target))) => {
+                    changed |= self.jump_to_message(*target);
+                }
+                _ => continue,
+            }
+            break;
+        }
+        changed
+    }
+
+    /// A press while the drawer or the member sheet is open. Content acts
+    /// through the normal arms; anything else dismisses.
+    fn overlay_press(&mut self, hits: &[Hit]) -> bool {
+        // Member rows have no profile view yet; tapping one closes the
+        // sheet instead of stranding the press.
+        if self.member_sheet_open && hits.iter().any(|h| h.id == NodeId::NavMemberListItem) {
+            return self.close_member_sheet();
+        }
+        let content = hits.iter().any(|h| {
+            matches!(
+                h.id,
+                NodeId::NavSidebar
+                    | NodeId::NavSidebarLists
+                    | NodeId::NavGuildList
+                    | NodeId::NavGuildListHome
+                    | NodeId::NavGuildListItem
+                    | NodeId::NavGuildListFolder
+                    | NodeId::NavChannelList
+                    | NodeId::NavChannelListItem
+                    | NodeId::NavDmList
+                    | NodeId::NavDmListItem
+                    | NodeId::NavUserPanel
+                    | NodeId::NavMemberList
+                    | NodeId::NavMemberListItem
+                    | NodeId::PrimitiveButton
+                    | NodeId::LayoutScrollbarThumb
+            )
+        });
+        if !content {
+            let drawer = self.close_drawer();
+            let sheet = self.close_member_sheet();
+            return drawer || sheet;
+        }
+        let (guild, channel, settings_was, floating_was) = (
+            self.selected_guild,
+            self.selected_channel,
+            self.settings.open,
+            self.floating.is_some(),
+        );
+        let changed = self.press_loop(hits);
+        if self.selected_guild != guild
+            || self.selected_channel != channel
+            || self.settings.open && !settings_was
+            || self.floating.is_some() && !floating_was
+        {
+            self.close_drawer();
+            self.close_member_sheet();
+        }
+        changed
     }
 }
 
@@ -1138,6 +1274,12 @@ impl Application for Gumicord {
             };
         }
 
+        // The drawer and the member sheet own their presses while open:
+        // letting one through would navigate the chat behind them.
+        if self.drawer_open || self.member_sheet_open {
+            return self.overlay_press(hits);
+        }
+
         let mut changed = false;
 
         // Pressing outside the composer removes focus.
@@ -1168,55 +1310,7 @@ impl Application for Gumicord {
         }
 
         // Only the frontmost selectable hit.
-        for h in hits {
-            match (h.id, &h.key) {
-                // The way into the password form (or its submit / back).
-                (
-                    NodeId::PrimitiveButton,
-                    Some(Key::Slot(slot @ ("login_submit" | "login_back" | "login_password"))),
-                ) => {
-                    changed |= self.login_button(slot);
-                }
-                // Folders only fold; they do not change the selected guild.
-                (NodeId::NavGuildListFolder, Some(Key::Id(id))) => {
-                    self.live.toggle_folder(*id);
-                    changed = true;
-                }
-                (NodeId::NavGuildListItem, Some(Key::Id(id))) => {
-                    if self.selected_guild == *id {
-                        break;
-                    }
-                    self.selected_guild = *id;
-                    // Clear the channel, or the list and the body disagree.
-                    self.selected_channel = 0;
-                    changed = true;
-                }
-                (NodeId::NavChannelListItem, Some(Key::Id(id))) => {
-                    changed |= self.selected_channel != *id;
-                    self.selected_channel = *id;
-                }
-                (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
-                    changed |= self.stop_composing();
-                }
-                // The gear sits on the user panel; its hit comes first, so
-                // this arm wins over the panel's own menu.
-                (NodeId::PrimitiveButton, Some(Key::Slot(SETTINGS_OPEN))) => {
-                    changed |= self.open_settings();
-                }
-                // A press anywhere else on the message still opens all of it:
-                // a single run is a small target.
-                (NodeId::ChatMessage, Some(Key::Id(id))) => {
-                    changed |= self.reveals.messages.insert(*id);
-                    self.a11y_message = Some(*id);
-                }
-                // A reply reference jumps to the answered message.
-                (NodeId::ChatMessageReplyRef, Some(Key::Id(target))) => {
-                    changed |= self.jump_to_message(*target);
-                }
-                _ => continue,
-            }
-            break;
-        }
+        changed |= self.press_loop(hits);
 
         // Fetch immediately, or the selection looks stuck on empty until
         // something else happens.
@@ -1249,6 +1343,39 @@ impl Application for Gumicord {
             self.reveals.open_run(owner, run);
         }
         true
+    }
+
+    fn swiped(&mut self, hits: &[Hit], swipe: Swipe) -> bool {
+        // Overlays own every gesture while open, like they own presses.
+        if self.floating.is_some() || self.settings.open {
+            return false;
+        }
+        let Swipe::Point { dir, x, .. } = swipe;
+        match dir {
+            SwipeDir::Left => {
+                // A message swiped left starts a reply, like the menu does.
+                if let Some(id) = hits.iter().find_map(|h| match (h.id, &h.key) {
+                    (NodeId::ChatMessage, Some(Key::Id(id))) => Some(*id),
+                    _ => None,
+                }) {
+                    self.composing = Composing::Reply(id);
+                    self.input_focused = true;
+                    self.a11y_message = Some(id);
+                    return true;
+                }
+                // Anywhere else closes the drawer.
+                self.close_drawer()
+            }
+            SwipeDir::Right => {
+                // From the screen edge with the lists hidden: the drawer.
+                if x <= DRAWER_EDGE && !self.drawer_open {
+                    return self.open_drawer();
+                }
+                false
+            }
+            // Vertical moves scroll; they never act.
+            SwipeDir::Up | SwipeDir::Down => false,
+        }
     }
 
     /// Secondary press; what was hit decides the menu.
@@ -1360,6 +1487,13 @@ impl Application for Gumicord {
         }
         // The settings screen sits above everything but a menu.
         if self.close_settings() {
+            return true;
+        }
+        // The drawer and the member sheet sit below dialogs and settings.
+        if self.close_drawer() {
+            return true;
+        }
+        if self.close_member_sheet() {
             return true;
         }
         // Escape on a login field abandons the whole password login.
@@ -1666,9 +1800,47 @@ impl Gumicord {
         self.login_input.take();
     }
 
+    /// The current width class. Read from the last built frame; events
+    /// never precede it meaningfully.
+    fn panes(&self) -> Panes {
+        Panes::for_width(self.match_ctx.window_width)
+    }
+
+    /// Opens the navigation drawer. Only where the lists hide and past
+    /// login; elsewhere there is nothing to drawer over.
+    fn open_drawer(&mut self) -> bool {
+        if self.drawer_open || self.panes().guilds() || !self.shows_main() {
+            return false;
+        }
+        self.drawer_open = true;
+        self.member_sheet_open = false;
+        true
+    }
+
+    fn close_drawer(&mut self) -> bool {
+        std::mem::replace(&mut self.drawer_open, false)
+    }
+
+    /// Opens the member list as a bottom sheet. Only where the member
+    /// pane hides and past login.
+    fn open_member_sheet(&mut self) -> bool {
+        if self.member_sheet_open || self.panes().members() || !self.shows_main() {
+            return false;
+        }
+        self.member_sheet_open = true;
+        self.drawer_open = false;
+        true
+    }
+
+    fn close_member_sheet(&mut self) -> bool {
+        std::mem::replace(&mut self.member_sheet_open, false)
+    }
+
     /// Opens the settings screen. The drill-in is reset; the category stays,
     /// like Discord remembering the section.
     fn open_settings(&mut self) -> bool {
+        self.drawer_open = false;
+        self.member_sheet_open = false;
         self.settings.plugin = None;
         self.settings.page = None;
         self.refresh_settings_states();
@@ -1911,6 +2083,18 @@ impl Gumicord {
             .child_if(self.floating.is_some(), || {
                 let f = self.floating.as_ref().expect("直前に確かめた");
                 f.node(panes.present(), self.hovered_item())
+            })
+            // The drawer and the member sheet sit above the chat but below
+            // dialogs: a decision interrupts navigation, not the reverse.
+            .child_if(self.drawer_open, || {
+                UiNode::new(NodeId::OverlayDrawer)
+                    .with_anchor(Anchor::at(0.0, 0.0))
+                    .children(self.sidebar(Panes::Four))
+            })
+            .child_if(self.member_sheet_open, || {
+                UiNode::new(NodeId::OverlaySheet)
+                    .child(UiNode::new(NodeId::OverlaySheetHandle))
+                    .child(self.member_list())
             })
             .child_if(!self.toasts.is_empty(), || {
                 let texts: Vec<String> = self.toasts.iter().map(|t| t.text.clone()).collect();
@@ -3119,7 +3303,18 @@ impl Gumicord {
             .with_data(id)
             .child(UiNode::icon(NodeId::PrimitiveIcon, icon))
             .child(UiNode::text(NodeId::ChatHeaderTitle, &name).with_data(id))
-            .child(UiNode::text(NodeId::ChatHeaderTopic, topic.unwrap_or_default()).with_data(id));
+            .child(UiNode::text(NodeId::ChatHeaderTopic, topic.unwrap_or_default()).with_data(id))
+            // Last, so it draws and hits above the header: only built
+            // while the member pane hides.
+            .child_if(!self.panes().members(), || {
+                UiNode::new(NodeId::PrimitiveButton)
+                    .with_key(Key::Slot(MEMBERS_OPEN))
+                    .with_state_if(
+                        self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot(MEMBERS_OPEN))),
+                        State::Hover,
+                    )
+                    .child(UiNode::icon(NodeId::PrimitiveIcon, MEMBERS_ICON))
+            });
 
         // A day always starts labelled, and one header covers a run: same
         // author, same day, close together. Anything else starts over.
@@ -4476,6 +4671,167 @@ mod tests {
         a.input.select_all();
         assert!(has(&a, Action::CopySelection));
         assert!(has(&a, Action::Cut));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Touch: swipes, drawer, member sheet
+
+    fn swipe(dir: SwipeDir, x: f32) -> Swipe {
+        Swipe::Point { dir, x, y: 400.0 }
+    }
+
+    fn narrow() -> Gumicord {
+        let mut a = app();
+        a.match_ctx = MatchContext::new(400.0);
+        a
+    }
+
+    /// A message swiped left starts a reply, like the menu does.
+    #[test]
+    fn swipe_left_on_a_message_starts_a_reply() {
+        let mut a = app();
+        let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
+        assert!(a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
+        assert_eq!(a.composing, Composing::Reply(7));
+        assert!(a.input_focused, "入力欄に焦点がない");
+        assert_eq!(a.a11y_message, Some(7));
+    }
+
+    /// Swipes do nothing while a dialog owns the input.
+    #[test]
+    fn swipes_are_ignored_under_overlays() {
+        let mut a = with_menu();
+        let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
+        assert!(!a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
+        assert_eq!(a.composing, Composing::New);
+    }
+
+    /// An edge swipe opens the drawer only where the lists hide.
+    #[test]
+    fn edge_swipe_opens_the_drawer_when_narrow() {
+        let mut a = narrow();
+        assert!(a.swiped(&[], swipe(SwipeDir::Right, 10.0)));
+        assert!(a.drawer_open, "棚が開かない");
+
+        let mut wide = app();
+        wide.match_ctx = MatchContext::new(1400.0);
+        assert!(!wide.swiped(&[], swipe(SwipeDir::Right, 10.0)));
+        assert!(!wide.drawer_open, "広いのに開いた");
+
+        let mut mid = narrow();
+        assert!(!mid.swiped(&[], swipe(SwipeDir::Right, 300.0)));
+        assert!(!mid.drawer_open, "端でないのに開いた");
+    }
+
+    /// The drawer holds both lists and navigates, then closes.
+    #[test]
+    fn drawer_selects_a_channel_then_closes() {
+        let mut a = narrow();
+        assert!(a.open_drawer());
+        let mut found = false;
+        a.build_tree(Panes::One).walk(&mut |n, _| {
+            found = found
+                || n.id == NodeId::OverlayDrawer
+                || n.id == NodeId::NavGuildList
+                || n.id == NodeId::NavChannelList;
+        });
+        assert!(found, "棚の中身がない");
+
+        assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(10)))]));
+        assert_eq!(a.selected_channel, 10);
+        assert!(!a.drawer_open, "選んだのに閉じない");
+    }
+
+    /// Tapping outside the drawer dismisses it without navigating.
+    #[test]
+    fn tapping_outside_the_drawer_dismisses_it() {
+        let mut a = narrow();
+        assert!(a.open_drawer());
+        let channel = a.selected_channel;
+        assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+        assert!(!a.drawer_open, "閉じていない");
+        assert_eq!(a.selected_channel, channel, "下のチャンネルへ移動した");
+    }
+
+    /// Escape closes the drawer and the sheet, after menus and settings.
+    #[test]
+    fn escape_closes_drawer_and_sheet() {
+        let mut a = narrow();
+        assert!(a.open_drawer());
+        assert!(a.cancel_input());
+        assert!(!a.drawer_open, "Esc で閉じない");
+
+        assert!(a.open_member_sheet());
+        assert!(a.cancel_input());
+        assert!(!a.member_sheet_open, "Esc で閉じない");
+    }
+
+    /// The member button opens the sheet only where the pane hides.
+    #[test]
+    fn members_button_opens_the_sheet_when_narrow() {
+        let mut a = narrow();
+        assert!(a.open_member_sheet());
+        let mut sheet = false;
+        let mut list = false;
+        a.build_tree(Panes::One).walk(&mut |n, _| {
+            sheet = sheet || n.id == NodeId::OverlaySheet;
+            list = list || n.id == NodeId::NavMemberList;
+        });
+        assert!(sheet && list, "面か一覧が出ていない");
+
+        // Tapping a row closes the sheet; there is no profile view yet.
+        assert!(a.pressed(&[hit_of(NodeId::NavMemberListItem, Some(Key::Id(5)))]));
+        assert!(!a.member_sheet_open, "閉じていない");
+
+        let mut wide = app();
+        wide.match_ctx = MatchContext::new(1400.0);
+        assert!(!wide.open_member_sheet(), "広いのに開いた");
+    }
+
+    /// The header carries the member button only while the pane hides.
+    #[test]
+    fn header_button_appears_only_when_narrow() {
+        fn has_button(a: &Gumicord, panes: Panes) -> bool {
+            let mut found = false;
+            a.build_tree(panes).walk(&mut |n, _| {
+                found = found
+                    || (n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(MEMBERS_OPEN)));
+            });
+            found
+        }
+        assert!(has_button(&narrow(), Panes::One));
+        let mut wide = app();
+        wide.match_ctx = MatchContext::new(1400.0);
+        assert!(!has_button(&wide, Panes::Four));
+    }
+
+    /// The members mark names a real icon; unknown names draw nothing.
+    #[test]
+    fn members_icon_exists() {
+        assert!(
+            gumicord_render::icon::lookup(MEMBERS_ICON).is_some(),
+            "人形札の絵がない"
+        );
+    }
+
+    /// The drawer stands at the left edge, narrower than the window.
+    #[test]
+    fn drawer_stands_at_the_left_edge() {
+        let (w, h) = (400.0, 800.0);
+        let mut a = narrow();
+        assert!(a.open_drawer());
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(w, h),
+            scale: 1.0,
+        };
+        let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+        let drawer = placed
+            .iter()
+            .find(|(id, _)| *id == NodeId::OverlayDrawer)
+            .map(|(_, r)| *r)
+            .expect("棚が置かれていない");
+        assert!(drawer.x.abs() < 1.0, "左端にいない {drawer:?}");
+        assert!(drawer.w < w, "全画面を覆っている {drawer:?}");
     }
 
     // ═══════════════════════════════════════════════════════════════

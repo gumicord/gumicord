@@ -677,6 +677,18 @@
       }
     },
     {
+      "select": "overlay.drawer",
+      "style": {
+        "background": "$color.bg.raised",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.md",
+        "padding": [6, 0, 6, 0],
+        "shadow": "$shadow.raised",
+        "minWidth": 280
+      }
+    },
+    {
       "select": "overlay.sheet",
       "style": {
         "background": "$color.bg.raised",

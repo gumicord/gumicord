@@ -217,6 +217,7 @@ define_node_ids! {
     OverlayPopover,           "overlay.popover",                 None,    Plugin, "基準の点に浮かぶ箱";
     OverlaySheet,             "overlay.sheet",                   None,    Plugin, "下から出てくる面 (携帯)";
     OverlaySheetHandle,       "overlay.sheet.handle",            None,    Plugin, "面の上端の掴みしろ";
+    OverlayDrawer,            "overlay.drawer",                  None,    Plugin, "横から出てくる棚。狭い画面での一覧置き場";
     OverlayMenu,              "overlay.menu",                    None,    Plugin, "操作の並び";
     OverlayMenuItem,          "overlay.menu.item",               None,    Plugin, "操作 1 つ";
     OverlayMenuItemIcon,      "overlay.menu.item.icon",          None,    Plugin, "操作の絵";
