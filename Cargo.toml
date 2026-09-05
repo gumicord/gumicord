@@ -13,6 +13,8 @@ members = [
     "render/platform",
     "app/core",
     "app/desktop",
+    "app/android",
+    "app/ios",
     "xtask",
 ]
 # Spikes are throwaway code, so they stay out of the workspace.
@@ -44,8 +46,7 @@ gumicord-app = { path = "app/core" }
 
 # Drawing
 wgpu = "30"
-winit = "0.30"
-# In-window webview for hCaptcha (ADR-0007); only used to show a third-party
+winit = "0.30"# In-window webview for hCaptcha (ADR-0007); only used to show a third-party
 # challenge, never to render our own UI.
 wry = "0.56"
 cosmic-text = "0.19"
@@ -97,6 +98,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
+log = "0.4"
+
+# Mobile shells. GameActivity is required: accesskit's Android backend only
+# works on it (see app/android/README.md). Pinned here, compiled only on
+# Android: a virtual manifest cannot hold target sections.
+android_logger = "0.14"
 
 # What a build costs.
 #

@@ -1,0 +1,5 @@
+// Top-level build file. Versions live here so app/build.gradle stays
+// about the app, not the toolchain.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

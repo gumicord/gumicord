@@ -284,8 +284,32 @@ impl Waker {
 }
 
 /// Opens the window and runs until exit.
-pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
+pub fn run(app: impl Application + 'static) -> Result<(), PlatformError> {
     let event_loop = EventLoop::<LoopEvent>::with_user_event().build()?;
+    run_loop(event_loop, app)
+}
+
+/// Opens the window on Android and runs until exit.
+///
+/// The event loop needs the activity it belongs to; everything past that
+/// is the shared loop. Called from the shell's `android_main`, never
+/// directly.
+#[cfg(target_os = "android")]
+pub fn run_android(
+    app: impl Application + 'static,
+    android_app: winit::platform::android::activity::AndroidApp,
+) -> Result<(), PlatformError> {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+    let event_loop = EventLoop::<LoopEvent>::with_user_event()
+        .with_android_app(android_app)
+        .build()?;
+    run_loop(event_loop, app)
+}
+
+fn run_loop(
+    event_loop: EventLoop<LoopEvent>,
+    mut app: impl Application + 'static,
+) -> Result<(), PlatformError> {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     // Before the window exists: login may start early, and earlier means the

@@ -1,0 +1,59 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.gumicord.app'
+    // Must match the NDK installed in CI (see .github/workflows/ci.yml).
+    ndkVersion '26.3.11579264'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'dev.gumicord.app'
+        // GameActivity needs 21+; 26 covers effectively every device that
+        // can still run the Play Store, and skips a decade of legacy paths.
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.0.0'
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            // The Rust cdylib arrives via jniLibs (see CI); never strip or
+            // shrink what Gradle cannot see into.
+            minifyEnabled false
+            packagingOptions {
+                // Rust's libc++_shared.so duplicates the NDK copy; either
+                // one loads the same.
+                pickFirst 'lib/arm64-v8a/libc++_shared.so'
+            }
+        }
+        release {
+            minifyEnabled false
+            packagingOptions {
+                pickFirst 'lib/arm64-v8a/libc++_shared.so'
+            }
+        }
+    }
+
+    // Only 64-bit ARM for now: that is every phone shipped in years, and
+    // each ABI multiplies native build time. 32-bit ARM and x86 emulators
+    // come back when someone needs them.
+    ndk {
+        abiFilters 'arm64-v8a'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // GameActivity itself, from Google Maven. The Rust side drives through
+    // winit's android-game-activity feature; nothing here subclasses it.
+    implementation 'androidx.games:games-activity:2.0.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+}
