@@ -30,4 +30,4 @@ pub use dirs::app_data_dir;
 pub use secret::{SecretError, SecretStore};
 pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
 pub use url::{OpenUrlError, open_url};
-pub use window::{Application, FrameCx, PlatformError, Waker, run};
+pub use window::{Application, FrameCx, PlatformError, RevealRequest, Waker, run};

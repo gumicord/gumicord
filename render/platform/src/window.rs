@@ -56,6 +56,14 @@ pub struct FrameCx {
     pub scale: f32,
 }
 
+/// Scrolls a scroll region so a node becomes visible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevealRequest {
+    pub region: NodeId,
+    pub id: NodeId,
+    pub key: Option<Key>,
+}
+
 /// The application, as the platform layer sees it. No OS types appear here,
 /// so winit never leaks into the app crate.
 pub trait Application {
@@ -117,6 +125,13 @@ pub trait Application {
     /// A list that grew at the top and should hold its scroll position.
     /// Consumed once; only the app knows which end grew.
     fn keep_place(&mut self) -> Option<NodeId> {
+        None
+    }
+
+    /// Scrolls a region so a node becomes visible, on the next frame.
+    /// Consumed once; the app knows what was pressed, the renderer knows
+    /// where it landed.
+    fn take_reveal(&mut self) -> Option<RevealRequest> {
         None
     }
 
@@ -676,6 +691,7 @@ impl Host {
         let backgrounds = self.app.take_backgrounds();
         // Holds the scroll position for one frame after a prepend.
         let keep_place = self.app.keep_place();
+        let reveal = self.app.take_reveal();
         let moving;
 
         let (stats, backend) = {
@@ -684,6 +700,9 @@ impl Host {
             r.set_theme_namespace(self.app.theme_namespace());
             if let Some(id) = keep_place {
                 r.keep_place(id);
+            }
+            if let Some(req) = reveal {
+                r.reveal(req.region, req.id, req.key.as_ref());
             }
             for image in &images {
                 r.put_image(image);

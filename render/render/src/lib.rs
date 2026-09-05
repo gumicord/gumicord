@@ -285,6 +285,19 @@ impl Renderer {
         self.scroll.insert(id, at);
     }
 
+    /// Scrolls a region so a node from the last frame becomes visible, and
+    /// reports whether it was found. Unknown nodes leave the scroll alone:
+    /// scrolling to a guess would strand the reader.
+    pub fn reveal(&mut self, region: NodeId, id: NodeId, key: Option<&Key>) -> bool {
+        let (at, max) = self.scroll_place(region);
+        let Some(next) = reveal_at(&self.hits, at, max, id, key) else {
+            return false;
+        };
+        self.scroll
+            .insert(region, layout::remember(region, next, max));
+        true
+    }
+
     /// Holds the scroll position across a prepend, for one frame.
     ///
     /// The caller says so: the renderer cannot tell which end grew, and
@@ -665,10 +678,21 @@ pub fn layout_for_test(
     r.placed.iter().map(|p| (p.node.id, p.rect)).collect()
 }
 
+/// Where a region must scroll to show a node: its viewport rect plus the
+/// current offset is its content position. `None` when the node is unknown
+/// or there is nothing to scroll.
+fn reveal_at(hits: &[Hit], at: f32, max: f32, id: NodeId, key: Option<&Key>) -> Option<f32> {
+    if max <= 0.0 {
+        return None;
+    }
+    let hit = hits.iter().find(|h| h.id == id && h.key.as_ref() == key)?;
+    Some((hit.rect.y + at).clamp(0.0, max))
+}
+
 #[cfg(test)]
 mod press_tests {
     use super::*;
-    use gumicord_uitree::{NodeId, Span};
+    use gumicord_uitree::{Key, NodeId, Span};
 
     fn span(text: &str, url: Option<&str>, hidden: bool) -> Span {
         Span {
@@ -895,5 +919,54 @@ mod press_tests {
         // And its contents are reachable as a link now.
         assert_eq!(links.len(), 1, "{links:?}");
         assert_eq!(links[0].url, "https://example.com/s");
+    }
+
+    /// Revealing aims at the node's content position; unknown nodes and
+    /// flat lists hold still.
+    #[test]
+    fn revealing_aims_at_the_node() {
+        let hit = |y: f32| Hit {
+            id: NodeId::ChatMessage,
+            key: Some(Key::Id(7)),
+            rect: Rect::new(0.0, y, 100.0, 40.0),
+            clip: None,
+        };
+        // The viewport shows content 200 and on; the node sits at viewport
+        // 100, so content 300.
+        let at = reveal_at(
+            &[hit(100.0)],
+            200.0,
+            1000.0,
+            NodeId::ChatMessage,
+            Some(&Key::Id(7)),
+        );
+        assert_eq!(at, Some(300.0));
+        // A wrong key is a different node.
+        let at = reveal_at(
+            &[hit(100.0)],
+            200.0,
+            1000.0,
+            NodeId::ChatMessage,
+            Some(&Key::Id(8)),
+        );
+        assert_eq!(at, None);
+        // Nothing to scroll.
+        let at = reveal_at(
+            &[hit(100.0)],
+            0.0,
+            0.0,
+            NodeId::ChatMessage,
+            Some(&Key::Id(7)),
+        );
+        assert_eq!(at, None);
+        // Past the end clamps.
+        let at = reveal_at(
+            &[hit(900.0)],
+            200.0,
+            1000.0,
+            NodeId::ChatMessage,
+            Some(&Key::Id(7)),
+        );
+        assert_eq!(at, Some(1000.0));
     }
 }

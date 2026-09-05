@@ -46,7 +46,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 
 use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
-use gumicord_platform::{Application, FrameCx, HiddenKey, TextDocument, Waker};
+use gumicord_platform::{Application, FrameCx, HiddenKey, RevealRequest, TextDocument, Waker};
 use gumicord_plugin::{ManagerEvent, PluginManager};
 use gumicord_render::Hit;
 use gumicord_store::{ChannelEntry, GuildEntry};
@@ -361,6 +361,11 @@ pub struct Gumicord {
     dialogs: VecDeque<PendingDialog>,
     /// The plugin dialog currently showing, if any.
     showing: Option<Showing>,
+    /// A jump waiting for the next frame: the renderer knows where the
+    /// message landed last frame, this layer only knows it was pressed.
+    pending_reveal: Option<u64>,
+    /// The last pressed message, for the screen reader to follow.
+    a11y_message: Option<u64>,
     /// The settings screen. Closed most of the time.
     settings: SettingsView,
 }
@@ -488,6 +493,8 @@ impl Gumicord {
             approval_queue: VecDeque::new(),
             dialogs: VecDeque::new(),
             showing: None,
+            pending_reveal: None,
+            a11y_message: None,
             settings: SettingsView::default(),
         };
         app.refresh_theme_assets();
@@ -796,18 +803,21 @@ impl Gumicord {
     }
 
     /// Which node the screen reader follows. Dialogs and menus grab it;
-    /// otherwise the focused field does.
-    fn a11y_focus(&self) -> Option<&'static str> {
+    /// otherwise the focused field does, then the last pressed message.
+    /// Pressing a message is the only way to point the reader at the chat:
+    /// hovering moves nothing.
+    fn a11y_focus(&self) -> Option<(&'static str, Option<Key>)> {
         if matches!(self.floating, Some(crate::menu::Floating::Confirm(_))) {
-            Some("overlay.modal")
+            Some(("overlay.modal", None))
         } else if matches!(self.floating, Some(crate::menu::Floating::Menu(_))) {
-            Some("overlay.menu")
+            Some(("overlay.menu", None))
         } else if self.input_focused {
-            Some("chat.input.field")
+            Some(("chat.input.field", None))
         } else if self.login_field.is_some() {
-            Some("app.screen.login.field")
+            Some(("app.screen.login.field", None))
         } else {
-            None
+            self.a11y_message
+                .map(|id| ("chat.message", Some(Key::Id(id))))
         }
     }
 }
@@ -934,6 +944,14 @@ impl Application for Gumicord {
         self.live
             .take_prepended()
             .then_some(NodeId::ChatMessageList)
+    }
+
+    fn take_reveal(&mut self) -> Option<RevealRequest> {
+        self.pending_reveal.take().map(|target| RevealRequest {
+            region: NodeId::ChatMessageList,
+            id: NodeId::ChatMessage,
+            key: Some(Key::Id(target)),
+        })
     }
 
     /// Drains background events. The only entry point for them.
@@ -1185,6 +1203,11 @@ impl Application for Gumicord {
                 // a single run is a small target.
                 (NodeId::ChatMessage, Some(Key::Id(id))) => {
                     changed |= self.reveals.messages.insert(*id);
+                    self.a11y_message = Some(*id);
+                }
+                // A reply reference jumps to the answered message.
+                (NodeId::ChatMessageReplyRef, Some(Key::Id(target))) => {
+                    changed |= self.jump_to_message(*target);
                 }
                 _ => continue,
             }
@@ -1753,6 +1776,10 @@ impl Gumicord {
                                     Action::DisablePlugin(id.clone()),
                                     "無効にする",
                                 ));
+                                items.push(Item::new(
+                                    Action::ReloadPlugin(id.clone()),
+                                    "再読み込みする",
+                                ));
                             }
                             PluginStateKind::Disabled | PluginStateKind::LoadFailed => {
                                 items.push(Item::new(
@@ -2225,6 +2252,10 @@ impl Gumicord {
             }
             crate::menu::Action::ReapprovePlugin(id) => {
                 self.plugins.reapprove(id);
+                self.refresh_settings_states();
+            }
+            crate::menu::Action::ReloadPlugin(id) => {
+                self.plugins.reload(id);
                 self.refresh_settings_states();
             }
             crate::menu::Action::SelectTheme(id) => {
@@ -3583,6 +3614,7 @@ impl Gumicord {
                 };
                 UiNode::new(NodeId::ChatMessageReplyRef)
                     .with_data(m.id)
+                    .with_id_key(reply.target)
                     .child_if(reply.avatar.is_some(), || {
                         UiNode::image(
                             NodeId::ChatMessageReplyRefAvatar,
@@ -3619,6 +3651,19 @@ impl Gumicord {
             })
             // Author line and body stacked.
             .child(body)
+    }
+
+    /// Jumps the chat to a message. Only what is loaded can move: fetching
+    /// around an unloaded message needs its own request (see `load_older`),
+    /// so an unknown target says so instead of stranding the reader.
+    fn jump_to_message(&mut self, target: u64) -> bool {
+        if self.message_rows().iter().any(|m| m.id == target) {
+            self.pending_reveal = Some(target);
+            self.a11y_message = Some(target);
+            return true;
+        }
+        self.notify_toast("そのメッセージは読み込まれていません".to_owned());
+        true
     }
 
     /// The body.
@@ -3767,6 +3812,8 @@ struct ReplyRef {
     snippet: String,
     /// Small avatar URL; everyone has one, default included.
     avatar: Option<String>,
+    /// The answered message, to jump to on press.
+    target: u64,
 }
 
 /// How many characters of a referenced message show.
@@ -4105,6 +4152,7 @@ impl Gumicord {
                             author,
                             snippet: reply_snippet(&r.content),
                             avatar: Some(avatar),
+                            target: r.id.get(),
                         }
                     }),
                 }
@@ -4853,10 +4901,11 @@ mod tests {
         let selected_index = |a: &Gumicord| {
             let mut out = Vec::new();
             a.build_tree(Panes::Four).walk(&mut |n, _| {
-                if n.id == NodeId::OverlayMenuItem && n.states.contains(State::Selected) {
-                    if let Some(Key::Index(i)) = &n.key {
-                        out.push(*i);
-                    }
+                if n.id == NodeId::OverlayMenuItem
+                    && n.states.contains(State::Selected)
+                    && let Some(Key::Index(i)) = &n.key
+                {
+                    out.push(*i);
                 }
             });
             out
@@ -6058,6 +6107,41 @@ mod member_tests {
         assert!(!found, "参照表示が出ている");
     }
 
+    /// Pressing a reply reference queues a jump to the answered message.
+    /// An unloaded target says so instead of stranding the reader.
+    #[test]
+    fn pressing_a_reply_queues_a_jump_to_its_source() {
+        let mut target = message(None, None);
+        target.id = MessageId::from(99u64);
+        let mut m = message(None, None);
+        m.referenced_message = Some(Box::new(target.clone()));
+        let mut a = app(message(None, None));
+        a.live
+            .store_mut()
+            .set_backlog(ChannelId::from(10u64), vec![target, m]);
+
+        let press = |a: &mut Gumicord, id: u64| {
+            a.pressed(&[Hit {
+                id: NodeId::ChatMessageReplyRef,
+                key: Some(Key::Id(id)),
+                rect: gumicord_render::Rect::ZERO,
+                clip: None,
+            }])
+        };
+        assert!(press(&mut a, 99));
+        assert_eq!(a.pending_reveal, Some(99));
+        assert_eq!(a.a11y_message, Some(99), "読み上げが付いていかない");
+        let req = a.take_reveal().expect("ジャンプが出ない");
+        assert_eq!(req.region, NodeId::ChatMessageList);
+        assert_eq!(req.id, NodeId::ChatMessage);
+        assert_eq!(req.key, Some(Key::Id(99)));
+        assert!(a.take_reveal().is_none(), "ジャンプが繰り返す");
+
+        assert!(press(&mut a, 77));
+        assert!(a.pending_reveal.is_none(), "無い所へ飛ぼうとした");
+        assert!(!a.toasts.is_empty(), "黙って失敗した");
+    }
+
     /// Long sources truncate to one line.
     #[test]
     fn a_long_source_truncates_to_one_line() {
@@ -7228,10 +7312,11 @@ mod theme_select_tests {
         let selected = |a: &Gumicord| {
             let mut out = Vec::new();
             a.build_tree(Panes::Four).walk(&mut |n, _| {
-                if n.id == NodeId::OverlayMenuItem && n.states.contains(State::Selected) {
-                    if let Some(Key::Index(i)) = &n.key {
-                        out.push(*i);
-                    }
+                if n.id == NodeId::OverlayMenuItem
+                    && n.states.contains(State::Selected)
+                    && let Some(Key::Index(i)) = &n.key
+                {
+                    out.push(*i);
                 }
             });
             out
@@ -7280,9 +7365,8 @@ mod theme_select_tests {
             Some("dev.example.wall")
         );
 
-        match env_before {
-            Some(v) => unsafe { std::env::set_var(THEME_ENV, v) },
-            None => {}
+        if let Some(v) = env_before {
+            unsafe { std::env::set_var(THEME_ENV, v) }
         }
     }
 }
