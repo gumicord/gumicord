@@ -3123,6 +3123,7 @@ impl Gumicord {
 
         // A day always starts labelled, and one header covers a run: same
         // author, same day, close together. Anything else starts over.
+        // A reply always stands alone and breaks the run, whatever follows.
         let rows = self.message_rows();
         let mut messages = UiNode::new(NodeId::ChatMessageList);
         let mut prev: Option<(&str, &str, i64)> = None;
@@ -3131,13 +3132,17 @@ impl Gumicord {
                 messages = messages.child(Self::day_divider(&m.day));
             }
             let grouped = match prev {
-                Some((author, day, unix)) => {
+                Some((author, day, unix)) if m.reply.is_none() => {
                     author == m.author && crate::time::continues(day, unix, &m.day, m.unix)
                 }
-                None => false,
+                _ => false,
             };
             messages = messages.child(self.message(m, grouped));
-            prev = Some((&m.author, &m.day, m.unix));
+            prev = if m.reply.is_some() {
+                None
+            } else {
+                Some((&m.author, &m.day, m.unix))
+            };
         }
         messages = messages.children(self.scrollbar(NodeId::ChatMessageList));
 
@@ -6476,6 +6481,38 @@ mod member_tests {
             }
         });
         assert_eq!(grouped, vec![false, false]);
+    }
+
+    /// A reply stands alone and breaks the run; later plain messages can
+    /// still group with each other.
+    #[test]
+    fn a_reply_stands_alone_and_breaks_the_run() {
+        let mut a = app(message(None, None));
+        let mut replying = stamped(2, 7, "nenneko", "2026-09-03T12:01:00+00:00");
+        replying.referenced_message = Some(Box::new(stamped(
+            9,
+            7,
+            "nenneko",
+            "2026-09-03T11:00:00+00:00",
+        )));
+        backlog(
+            &mut a,
+            vec![
+                stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00"),
+                replying,
+                stamped(3, 7, "nenneko", "2026-09-03T12:02:00+00:00"),
+                stamped(4, 7, "nenneko", "2026-09-03T12:03:00+00:00"),
+            ],
+        );
+
+        let tree = a.chat_view();
+        let mut grouped = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::ChatMessage {
+                grouped.push(n.states.contains(State::Grouped));
+            }
+        });
+        assert_eq!(grouped, vec![false, false, false, true]);
     }
 
     /// The message's own member wins, being newer.
