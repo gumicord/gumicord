@@ -117,6 +117,10 @@ pub struct Renderer {
     bg_binds: Vec<wgpu::BindGroup>,
     /// Uploaded background textures by lookup key.
     backgrounds: backgrounds::Backgrounds,
+    /// Submit microseconds of recent frames, uploading versus presenting.
+    /// The p99 of the first is what the refresh budget is spent on.
+    upload_us: std::collections::VecDeque<u64>,
+    present_us: std::collections::VecDeque<u64>,
     scale: f32,
     scroll: ScrollState,
     /// The previous frame's layout, for hit testing.
@@ -175,6 +179,8 @@ impl Renderer {
             theme_namespace: None,
             backgrounds: backgrounds::Backgrounds::default(),
             bg_binds: Vec::new(),
+            upload_us: std::collections::VecDeque::new(),
+            present_us: std::collections::VecDeque::new(),
             caret_visible: true,
         })
     }
@@ -394,6 +400,28 @@ impl Renderer {
 
         self.missing_images.clone_from(&dl.missing_images);
         self.missing_backgrounds.clone_from(&dl.missing_backgrounds);
+
+        let (upload_us, present_us) = self.gpu.last_submit_us();
+        self.upload_us.push_back(upload_us);
+        self.present_us.push_back(present_us);
+        // Bounded memory and a bounded window: old frames stop mattering.
+        const FRAME_WINDOW: usize = 300;
+        while self.upload_us.len() > FRAME_WINDOW {
+            self.upload_us.pop_front();
+            self.present_us.pop_front();
+        }
+        if self.upload_us.len() == FRAME_WINDOW {
+            tracing::debug!(
+                upload_p50 = crate::gpu::percentile(self.upload_us.make_contiguous(), 0.5),
+                upload_p99 = crate::gpu::percentile(self.upload_us.make_contiguous(), 0.99),
+                present_p50 = crate::gpu::percentile(self.present_us.make_contiguous(), 0.5),
+                present_p99 = crate::gpu::percentile(self.present_us.make_contiguous(), 0.99),
+                "frame submit times (us)",
+            );
+            // Non-overlapping windows: the next log covers the next frames.
+            self.upload_us.clear();
+            self.present_us.clear();
+        }
 
         FrameStats {
             nodes: layout.placed.len(),

@@ -59,6 +59,13 @@ pub struct Gpu {
     rect_capacity: usize,
     glyph_buf: wgpu::Buffer,
     glyph_capacity: usize,
+    /// What the buffers held last frame, for uploading only what changed.
+    last_rects: Vec<f32>,
+    last_glyphs: Vec<f32>,
+    /// Microseconds of the last submit, split at present: uploading and
+    /// encoding versus waiting for the screen.
+    last_upload_us: u64,
+    last_present_us: u64,
 
     pub backend: wgpu::Backend,
     pub adapter_name: String,
@@ -292,6 +299,10 @@ impl Gpu {
             rect_capacity: INITIAL_RECTS,
             glyph_buf,
             glyph_capacity: INITIAL_GLYPHS,
+            last_rects: Vec::new(),
+            last_glyphs: Vec::new(),
+            last_upload_us: 0,
+            last_present_us: 0,
             backend: info.backend,
             adapter_name: info.name,
         })
@@ -392,12 +403,13 @@ impl Gpu {
         bg_binds: &[wgpu::BindGroup],
         clear: [f32; 4],
     ) -> Presented {
+        let submit_start = std::time::Instant::now();
         let frame = match self.acquire() {
             Ok(f) => f,
             Err(why) => return why,
         };
 
-        self.ensure_capacity(dl);
+        let grew = self.ensure_capacity(dl);
 
         self.queue.write_buffer(
             &self.globals_buf,
@@ -409,14 +421,20 @@ impl Gpu {
                 0.0,
             ]),
         );
-        if !dl.rects.is_empty() {
-            self.queue
-                .write_buffer(&self.rect_buf, 0, bytemuck::cast_slice(&dl.rects));
-        }
-        if !dl.glyphs.is_empty() {
-            self.queue
-                .write_buffer(&self.glyph_buf, 0, bytemuck::cast_slice(&dl.glyphs));
-        }
+        upload_instances(
+            &self.queue,
+            &self.rect_buf,
+            &dl.rects,
+            &mut self.last_rects,
+            grew,
+        );
+        upload_instances(
+            &self.queue,
+            &self.glyph_buf,
+            &dl.glyphs,
+            &mut self.last_glyphs,
+            grew,
+        );
 
         let view = frame
             .texture
@@ -508,18 +526,29 @@ impl Gpu {
                 pass.draw(0..4, run.first..(run.first + run.count));
             }
         }
+        self.last_upload_us = submit_start.elapsed().as_micros() as u64;
+        let presented_at = std::time::Instant::now();
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+        self.last_present_us = presented_at.elapsed().as_micros() as u64;
         Presented::Yes
     }
 
-    fn ensure_capacity(&mut self, dl: &DrawList) {
+    /// Microseconds of the last submit: uploading and encoding first, then
+    /// waiting for the screen.
+    pub fn last_submit_us(&self) -> (u64, u64) {
+        (self.last_upload_us, self.last_present_us)
+    }
+
+    fn ensure_capacity(&mut self, dl: &DrawList) -> bool {
+        let mut grew = false;
         let rects = dl.rect_count() as usize;
         if rects > self.rect_capacity {
             self.rect_capacity = rects.next_power_of_two();
             self.rect_buf =
                 make_instance_buffer(&self.device, "rects", self.rect_capacity * FLOATS_PER_RECT);
             tracing::debug!(capacity = self.rect_capacity, "矩形バッファを広げた");
+            grew = true;
         }
         let glyphs = dl.glyph_count() as usize;
         if glyphs > self.glyph_capacity {
@@ -530,8 +559,101 @@ impl Gpu {
                 self.glyph_capacity * FLOATS_PER_GLYPH,
             );
             tracing::debug!(capacity = self.glyph_capacity, "グリフバッファを広げた");
+            grew = true;
+        }
+        grew
+    }
+}
+
+/// Uploads only what changed since the last frame. Static frames redraw on
+/// wakeups that change nothing drawable — a blink phase, a hover that moved
+/// away — and those upload nothing at all now.
+fn upload_instances(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    current: &[f32],
+    last: &mut Vec<f32>,
+    grew: bool,
+) {
+    if grew || last.len() != current.len() {
+        // A new buffer holds garbage, and a new length moves everything:
+        // both upload whole.
+        if !current.is_empty() {
+            queue.write_buffer(buffer, 0, bytemuck::cast_slice(current));
+        }
+        last.clear();
+        last.extend_from_slice(current);
+        return;
+    }
+    let Some(runs) = diff_ranges(last, current) else {
+        if !current.is_empty() {
+            queue.write_buffer(buffer, 0, bytemuck::cast_slice(current));
+        }
+        last.clear();
+        last.extend_from_slice(current);
+        return;
+    };
+    for (start, end) in runs {
+        queue.write_buffer(
+            buffer,
+            (start * 4) as u64,
+            bytemuck::cast_slice(&current[start..end]),
+        );
+    }
+    last.clear();
+    last.extend_from_slice(current);
+}
+
+/// Changed float ranges between frames, merged across small gaps. `None`
+/// means the whole buffer should go: too many runs cost more submission
+/// calls than one upload saves.
+fn diff_ranges(old: &[f32], new: &[f32]) -> Option<Vec<(usize, usize)>> {
+    /// Gaps this wide or narrower ride along; splitting would cost more
+    /// than re-uploading them.
+    const MAX_GAP: usize = 64;
+    /// More runs than this, and one upload wins.
+    const MAX_RUNS: usize = 8;
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < new.len() {
+        if old.get(i) == new.get(i) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        loop {
+            while i < new.len() && old.get(i) != new.get(i) {
+                i += 1;
+            }
+            let mut gap = 0;
+            while gap < MAX_GAP && i + gap < new.len() && old.get(i + gap) == new.get(i + gap) {
+                gap += 1;
+            }
+            if i + gap >= new.len() || gap == MAX_GAP {
+                break;
+            }
+            i += gap;
+        }
+        runs.push((start, i));
+        if runs.len() > MAX_RUNS {
+            return None;
         }
     }
+    Some(runs)
+}
+
+/// The q-th percentile of samples, for frame-time logs. Sorts a copy; the
+/// window is a few hundred long and the log fires rarely.
+pub(crate) fn percentile(samples: &[u64], q: f64) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank =
+        ((q.clamp(0.0, 1.0) * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1);
+    sorted[rank]
 }
 
 /// The backends to try, in order. Windows omits Vulkan after the S1 crash.
@@ -639,4 +761,62 @@ fn make_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_frames_upload_nothing() {
+        let frame = vec![1.0, 2.0, 3.0];
+        assert_eq!(diff_ranges(&frame, &frame), Some(vec![]));
+        assert_eq!(diff_ranges(&[], &[]), Some(vec![]));
+    }
+
+    #[test]
+    fn one_change_makes_one_run() {
+        let old = vec![0.0; 100];
+        let mut new = old.clone();
+        new[42] = 1.0;
+        assert_eq!(diff_ranges(&old, &new), Some(vec![(42, 43)]));
+    }
+
+    #[test]
+    fn small_gaps_ride_along_large_gaps_split() {
+        let old = vec![0.0; 300];
+        let mut new = old.clone();
+        new[10] = 1.0;
+        new[20] = 1.0;
+        assert_eq!(diff_ranges(&old, &new), Some(vec![(10, 21)]));
+        new[200] = 1.0;
+        assert_eq!(diff_ranges(&old, &new), Some(vec![(10, 21), (200, 201)]));
+    }
+
+    #[test]
+    fn a_changed_tail_runs_to_the_end() {
+        let old = vec![1.0, 2.0];
+        let new = vec![1.0, 2.0, 3.0, 4.0];
+        assert_eq!(diff_ranges(&old, &new), Some(vec![(2, 4)]));
+    }
+
+    #[test]
+    fn too_many_runs_upload_whole() {
+        let old = vec![0.0; 2000];
+        let mut new = old.clone();
+        for i in (0..2000).step_by(100) {
+            new[i] = 1.0;
+        }
+        assert_eq!(diff_ranges(&old, &new), None);
+    }
+
+    #[test]
+    fn percentiles_read_off_the_sorted_samples() {
+        assert_eq!(percentile(&[], 0.99), 0);
+        assert_eq!(percentile(&[7], 0.5), 7);
+        let samples: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile(&samples, 0.5), 51);
+        assert_eq!(percentile(&samples, 0.99), 99);
+        assert_eq!(percentile(&samples, 0.0), 1);
+    }
 }
