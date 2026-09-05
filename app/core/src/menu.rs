@@ -177,6 +177,22 @@ pub enum Action {
     },
     /// Close a notification dialog.
     Acknowledge,
+    /// Open the settings screen.
+    OpenSettings,
+    /// Close the settings screen.
+    CloseSettings,
+    /// Show a settings category.
+    SettingsCategory(SettingsCategory),
+    /// Open one plugin's page in the settings screen.
+    SelectSettingsPlugin(String),
+    /// Back from a plugin's page to the plugin list.
+    SettingsPluginBack,
+    /// Turn a plugin off; its grants are kept.
+    DisablePlugin(String),
+    /// Turn a plugin back on. A denied plugin stays denied.
+    EnablePlugin(String),
+    /// Forget a plugin's grants and ask again.
+    ReapprovePlugin(String),
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary
@@ -185,6 +201,24 @@ pub enum Action {
     CopySelection,
     Paste,
     SelectAll,
+}
+
+/// A settings screen category. Two for now: what is installed, and what
+/// the theme failed to fetch. More arrive with their features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsCategory {
+    #[default]
+    Plugins,
+    Theme,
+}
+
+impl SettingsCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsCategory::Plugins => "プラグイン",
+            SettingsCategory::Theme => "テーマ",
+        }
+    }
 }
 
 /// How a menu is wrapped.
@@ -351,6 +385,18 @@ impl Item {
                     .with_key(Key::Slot(if self.danger { "danger" } else { "normal" })),
             )
     }
+}
+
+/// Builds a bare row list for embedding, as in the settings screen. The
+/// same nodes as a menu, without the popover or sheet wrapper: indices
+/// address the rows exactly like menu items.
+pub fn rows(items: &[Item], hovered: Option<usize>) -> UiNode {
+    UiNode::new(NodeId::OverlayMenu).children(
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| it.node(i, hovered == Some(i))),
+    )
 }
 
 #[cfg(test)]

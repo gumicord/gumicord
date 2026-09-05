@@ -34,3 +34,6 @@ if (ui.exists("chrome.titlebar")) {
 
 log.info("ok");
 storage.setJSON("config", { enabled: true });
+
+// A settings page registers a node factory.
+ui.settings(() => ui.stack([ui.text("見出し"), ui.text("説明")]));

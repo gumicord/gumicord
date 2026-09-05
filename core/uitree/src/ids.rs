@@ -231,6 +231,14 @@ define_node_ids! {
     OverlayTooltip,           "overlay.tooltip",                    None,    Plugin, "指しているものの短い説明。押せず消えるだけ";
     OverlayToast,             "overlay.toast",                      None,    Plugin, "下に出て数秒で消える知らせ。押すものはない";
 
+    // ─────────────────────────── settings.* — the client's own settings screen
+    //
+    // Same origin as overlay.*: containers with no domain object behind
+    // them. The client builds the screen; a plugin's page lands inside it.
+    SettingsScreen,           "settings.screen",                    None,    Plugin,   "設定画面";
+    SettingsNav,              "settings.nav",                       None,    Plugin,   "設定の分類の並び";
+    SettingsPage,             "settings.page",                      None,    Plugin,   "開いている分類の中身";
+
     // ─────────────────────────── primitive.* — the drawing vocabulary plugins use
     PrimitiveText,            "primitive.text",                  None,    Plugin, "文字列";
     PrimitiveImage,           "primitive.image",                 None,    Plugin, "画像";

@@ -93,6 +93,23 @@ enum Showing {
     Notice,
 }
 
+/// Where the settings screen stands. Closed most of the time; while open it
+/// owns every press, like a menu, and the tree carries it last so it draws
+/// on top.
+#[derive(Debug, Clone, Default)]
+struct SettingsView {
+    open: bool,
+    category: crate::menu::SettingsCategory,
+    /// The plugin whose page is showing, if drilled in.
+    plugin: Option<String>,
+    /// That plugin's settings tree, read once per selection. The call
+    /// blocks on the plugin worker, so frames never make it.
+    page: Option<(String, UiNode)>,
+    /// The plugin rows, refreshed on open, on actions, and on plugin
+    /// events. Cached for the same reason as the page.
+    states: Vec<gumicord_plugin::PluginState>,
+}
+
 /// Image sizes requested from the CDN, in logical px, matching what is drawn.
 ///
 /// Never ask for more than is drawn: the atlas is one 2048-square page, and
@@ -115,6 +132,8 @@ const FOLDER_TILES: usize = 4;
 /// Slot for the cancel button; the same string is used to build it and to
 /// match the press.
 const CANCEL_COMPOSING: &str = "cancel_composing";
+/// Slot for the settings gear in the user panel; same use.
+const SETTINGS_OPEN: &str = "settings_open";
 
 /// Leads the login screen after an involuntary sign-out. A silent kick back
 /// to the QR reads as a crash.
@@ -328,6 +347,8 @@ pub struct Gumicord {
     dialogs: VecDeque<PendingDialog>,
     /// The plugin dialog currently showing, if any.
     showing: Option<Showing>,
+    /// The settings screen. Closed most of the time.
+    settings: SettingsView,
 }
 
 impl Gumicord {
@@ -426,6 +447,7 @@ impl Gumicord {
             approval_queue: VecDeque::new(),
             dialogs: VecDeque::new(),
             showing: None,
+            settings: SettingsView::default(),
         };
         app.refresh_theme_assets();
         app
@@ -864,6 +886,24 @@ impl Application for Gumicord {
             };
         }
 
+        // The settings screen owns every press while open: letting one
+        // through would navigate the chat behind it.
+        if self.settings.open {
+            let item = hits.iter().find_map(|h| match (h.id, &h.key) {
+                (NodeId::OverlayMenuItem, Some(Key::Index(i))) => Some(*i as usize),
+                _ => None,
+            });
+            return match item {
+                Some(i) => self.settings_action(i),
+                // An inert control inside a plugin's page: swallowed, so the
+                // screen does not close under a curious press.
+                None if hits.iter().any(|h| h.id == NodeId::PrimitiveButton) => false,
+                // An outside press closes; unlike a dialog there is no unmade
+                // decision to protect.
+                None => self.close_settings(),
+            };
+        }
+
         let mut changed = false;
 
         // Pressing outside the composer removes focus.
@@ -923,6 +963,11 @@ impl Application for Gumicord {
                 }
                 (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
                     changed |= self.stop_composing();
+                }
+                // The gear sits on the user panel; its hit comes first, so
+                // this arm wins over the panel's own menu.
+                (NodeId::PrimitiveButton, Some(Key::Slot(SETTINGS_OPEN))) => {
+                    changed |= self.open_settings();
                 }
                 // A press anywhere else on the message still opens all of it:
                 // a single run is a small target.
@@ -1072,6 +1117,10 @@ impl Application for Gumicord {
     fn cancel_input(&mut self) -> bool {
         // The menu floats above the composer, so escape stops here.
         if self.close_menu() {
+            return true;
+        }
+        // The settings screen sits above everything but a menu.
+        if self.close_settings() {
             return true;
         }
         // Escape on a login field abandons the whole password login.
@@ -1282,16 +1331,7 @@ impl PendingDialog {
 impl PendingApproval {
     /// What the approval asks, in the user's words.
     fn confirm(self) -> crate::menu::Confirm {
-        let mut lines = self
-            .capabilities
-            .iter()
-            .map(|c| match c.as_str() {
-                "log" => "・記録を残す",
-                "storage" => "・設定などのデータを保存する",
-                _ => "・（不明な権限）",
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut lines = capability_bullets(&self.capabilities);
         lines.push_str("\n「やめる」を押すと、このプラグインは読み込まれません。");
         crate::menu::Confirm {
             title: format!("「{}」の許可", self.name),
@@ -1304,6 +1344,33 @@ impl PendingApproval {
             confirm: "許可する".to_owned(),
             danger: false,
         }
+    }
+}
+
+/// Capability ids in the user's words, one bullet per line. Shared by the
+/// approval dialog and the settings screen, so a capability never has two
+/// names.
+fn capability_bullets(caps: &[String]) -> String {
+    caps.iter()
+        .map(|c| match c.as_str() {
+            "log" => "・記録を残す",
+            "storage" => "・設定などのデータを保存する",
+            _ => "・（不明な権限）",
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A plugin's state in the user's words. One place, so the list and the
+/// page never disagree.
+fn plugin_state_label(state: gumicord_plugin::PluginStateKind) -> &'static str {
+    use gumicord_plugin::PluginStateKind;
+    match state {
+        PluginStateKind::Loaded => "有効",
+        PluginStateKind::Disabled => "無効",
+        PluginStateKind::Denied => "拒否",
+        PluginStateKind::NeedsApproval => "未許可",
+        PluginStateKind::LoadFailed => "読込失敗",
     }
 }
 
@@ -1359,6 +1426,205 @@ impl Gumicord {
         self.login_input.take();
     }
 
+    /// Opens the settings screen. The drill-in is reset; the category stays,
+    /// like Discord remembering the section.
+    fn open_settings(&mut self) -> bool {
+        self.settings.plugin = None;
+        self.settings.page = None;
+        self.refresh_settings_states();
+        if self.settings.open {
+            return false;
+        }
+        self.settings.open = true;
+        true
+    }
+
+    fn close_settings(&mut self) -> bool {
+        if !self.settings.open {
+            return false;
+        }
+        self.settings.open = false;
+        self.settings.plugin = None;
+        self.settings.page = None;
+        true
+    }
+
+    /// Re-reads the plugin rows. Blocking on the worker, so only on open,
+    /// on actions, and on plugin events — never per frame.
+    fn refresh_settings_states(&mut self) {
+        self.settings.states = self.plugins.plugin_states();
+    }
+
+    fn select_settings_plugin(&mut self, id: String) {
+        let page = self.plugins.settings_tree(&id);
+        self.settings.plugin = Some(id.clone());
+        self.settings.page = page.map(|tree| (id, tree));
+    }
+
+    /// A pressed settings row. The nav and the page share one index space,
+    /// in tree order.
+    fn settings_action(&mut self, index: usize) -> bool {
+        let action = self
+            .settings_nav_items()
+            .into_iter()
+            .chain(self.settings_page_items())
+            .nth(index)
+            .map(|item| item.action);
+        match action {
+            Some(action) => self.perform(action),
+            // A stale index: the list changed under the press. Staying put
+            // beats acting on the wrong row.
+            None => true,
+        }
+    }
+
+    fn settings_nav_items(&self) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item, SettingsCategory};
+        let mut items = vec![Item::new(Action::CloseSettings, "閉じる").icon("close")];
+        for category in [SettingsCategory::Plugins, SettingsCategory::Theme] {
+            items.push(
+                Item::new(Action::SettingsCategory(category), category.label())
+                    .selected(self.settings.category == category),
+            );
+        }
+        items
+    }
+
+    fn settings_page_items(&self) -> Vec<crate::menu::Item> {
+        use crate::menu::{Action, Item, SettingsCategory};
+        use gumicord_plugin::PluginStateKind;
+        match self.settings.category {
+            SettingsCategory::Theme => Vec::new(),
+            SettingsCategory::Plugins => match &self.settings.plugin {
+                None => self
+                    .settings
+                    .states
+                    .iter()
+                    .map(|p| {
+                        // One-line rows assemble name, version and state;
+                        // split them when the message table arrives (ADR-0010).
+                        Item::new(
+                            Action::SelectSettingsPlugin(p.id.clone()),
+                            format!(
+                                "{} {}（{}）",
+                                p.name,
+                                p.version,
+                                plugin_state_label(p.state)
+                            ),
+                        )
+                    })
+                    .collect(),
+                Some(id) => {
+                    let mut items = vec![Item::new(Action::SettingsPluginBack, "← プラグイン")];
+                    if let Some(p) = self.settings.states.iter().find(|p| &p.id == id) {
+                        // The approval dialog owns unapproved plugins; the
+                        // re-approve row below is their way back to it.
+                        match p.state {
+                            PluginStateKind::Loaded => {
+                                items.push(Item::new(
+                                    Action::DisablePlugin(id.clone()),
+                                    "無効にする",
+                                ));
+                            }
+                            PluginStateKind::Disabled | PluginStateKind::LoadFailed => {
+                                items.push(Item::new(
+                                    Action::EnablePlugin(id.clone()),
+                                    "有効にする",
+                                ));
+                            }
+                            PluginStateKind::Denied | PluginStateKind::NeedsApproval => {}
+                        }
+                        items.push(Item::new(
+                            Action::ReapprovePlugin(id.clone()),
+                            "許可をやり直す",
+                        ));
+                    }
+                    items
+                }
+            },
+        }
+    }
+
+    /// The page's display-only lines: status, capabilities, warnings. Rows
+    /// stay rows; these are what rows cannot say.
+    fn settings_page_texts(&self) -> Vec<String> {
+        use crate::menu::SettingsCategory;
+        match self.settings.category {
+            SettingsCategory::Theme => {
+                let warnings = self.assets.warnings();
+                if warnings.is_empty() {
+                    vec!["画像の取得で問題は起きていません。".to_owned()]
+                } else {
+                    warnings
+                }
+            }
+            SettingsCategory::Plugins => match &self.settings.plugin {
+                None if self.settings.states.is_empty() => {
+                    vec!["プラグインはありません。".to_owned()]
+                }
+                None => Vec::new(),
+                Some(id) => match self.settings.states.iter().find(|p| &p.id == id) {
+                    None => vec!["このプラグインはもうありません。".to_owned()],
+                    Some(p) => {
+                        // Name and state stay on separate lines: word order
+                        // moves by language, so they must not share one
+                        // sentence (ADR-0010).
+                        let mut out = vec![
+                            format!("{} {}", p.name, p.version),
+                            plugin_state_label(p.state).to_owned(),
+                        ];
+                        if p.capabilities.is_empty() {
+                            out.push("権限を求めません。".to_owned());
+                        } else {
+                            out.push(format!(
+                                "求める権限:\n{}",
+                                capability_bullets(&p.capabilities)
+                            ));
+                        }
+                        let page_missing =
+                            self.settings.page.as_ref().is_none_or(|(pid, _)| pid != id);
+                        if p.has_settings && page_missing {
+                            out.push("設定ページを読み込めませんでした。".to_owned());
+                        }
+                        out
+                    }
+                },
+            },
+        }
+    }
+
+    /// The selected plugin's own page, if it declared and delivered one.
+    fn settings_page_embed(&self) -> Option<UiNode> {
+        let id = self.settings.plugin.as_ref()?;
+        let (pid, tree) = self.settings.page.as_ref()?;
+        (pid == id).then(|| tree.clone())
+    }
+
+    /// The settings screen, Discord-style: categories left, page right. Rows
+    /// are menu items, so the theme and the press routing already know them.
+    fn settings_screen(&self) -> UiNode {
+        let nav = self.settings_nav_items();
+        let page_items = self.settings_page_items();
+        let hovered = self.hovered_item();
+        let hovered_nav = hovered.filter(|i| *i < nav.len());
+        let hovered_page = hovered.and_then(|i| i.checked_sub(nav.len()));
+
+        let mut page = UiNode::new(NodeId::SettingsPage);
+        for text in self.settings_page_texts() {
+            page = page.child(UiNode::text(NodeId::PrimitiveText, text));
+        }
+        if !page_items.is_empty() {
+            page = page.child(crate::menu::rows(&page_items, hovered_page));
+        }
+        if let Some(tree) = self.settings_page_embed() {
+            page = page.child(tree);
+        }
+
+        UiNode::new(NodeId::SettingsScreen)
+            .child(UiNode::new(NodeId::SettingsNav).child(crate::menu::rows(&nav, hovered_nav)))
+            .child(page)
+    }
+
     /// Rebuilds the whole tree every frame; diffing waits until the renderer's
     /// requirements settle.
     fn build_tree(&self, panes: Panes) -> UiNode {
@@ -1394,6 +1660,9 @@ impl Gumicord {
             .child_if(tooltip.is_some(), || {
                 tooltip.clone().expect("直前に確かめた")
             })
+            // Last, so it draws above everything: while open it also owns
+            // every press.
+            .child_if(self.settings.open, || self.settings_screen())
     }
 
     /// Full date for a hovered timestamp. The header shows only the hour, and
@@ -1700,6 +1969,36 @@ impl Gumicord {
             }
             crate::menu::Action::Acknowledge => {
                 self.showing = None;
+            }
+            crate::menu::Action::OpenSettings => {
+                self.open_settings();
+            }
+            crate::menu::Action::CloseSettings => {
+                self.close_settings();
+            }
+            crate::menu::Action::SettingsCategory(category) => {
+                self.settings.category = *category;
+                self.settings.plugin = None;
+                self.settings.page = None;
+            }
+            crate::menu::Action::SelectSettingsPlugin(id) => {
+                self.select_settings_plugin(id.clone());
+            }
+            crate::menu::Action::SettingsPluginBack => {
+                self.settings.plugin = None;
+                self.settings.page = None;
+            }
+            crate::menu::Action::DisablePlugin(id) => {
+                self.plugins.disable(id);
+                self.refresh_settings_states();
+            }
+            crate::menu::Action::EnablePlugin(id) => {
+                self.plugins.enable(id);
+                self.refresh_settings_states();
+            }
+            crate::menu::Action::ReapprovePlugin(id) => {
+                self.plugins.reapprove(id);
+                self.refresh_settings_states();
             }
 
             crate::menu::Action::Cut => {
@@ -2396,7 +2695,25 @@ impl Gumicord {
             lines = lines.child(UiNode::text(NodeId::NavUserPanelStatus, s.label()));
         }
 
-        Some(UiNode::new(NodeId::NavUserPanel).child(avatar).child(lines))
+        Some(
+            UiNode::new(NodeId::NavUserPanel)
+                .child(avatar)
+                .child(lines)
+                // Last, so it draws and hits above the panel: a press on the
+                // gear must reach it, not the panel's own menu.
+                .child(
+                    UiNode::new(NodeId::PrimitiveButton)
+                        .with_key(Key::Slot(SETTINGS_OPEN))
+                        .with_state_if(
+                            self.is_hovered(
+                                NodeId::PrimitiveButton,
+                                Some(&Key::Slot(SETTINGS_OPEN)),
+                            ),
+                            State::Hover,
+                        )
+                        .child(UiNode::icon(NodeId::PrimitiveIcon, "gear")),
+                ),
+        )
     }
 
     /// The member list, at the right edge.
@@ -2680,7 +2997,9 @@ impl Gumicord {
     /// Drains plugin events and hands the tree over. Returns the newest
     /// finished output, or the input when the worker has none yet.
     fn apply_plugins(&mut self, tree: UiNode) -> UiNode {
+        let mut plugin_changed = false;
         for event in self.plugins.drain() {
+            plugin_changed = true;
             match event {
                 ManagerEvent::Patched(patched) => {
                     self.last_patched = Some(*patched);
@@ -2706,6 +3025,15 @@ impl Gumicord {
                 ManagerEvent::Warned { message } => {
                     tracing::warn!("plugin: {message}");
                 }
+            }
+        }
+        // The settings rows cache the worker's answers; refresh them when
+        // the worker did something, never per frame.
+        if plugin_changed && self.settings.open {
+            self.refresh_settings_states();
+            if let Some(id) = self.settings.plugin.clone() {
+                let page = self.plugins.settings_tree(&id);
+                self.settings.page = page.map(|tree| (id, tree));
             }
         }
         self.settle_dialog();
@@ -4095,6 +4423,120 @@ mod tests {
         }));
         press_menu(&mut a, 0);
         assert!(a.floating.is_none(), "既読にするだけで窓が出た");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Settings screen
+
+    fn with_settings() -> Gumicord {
+        let mut a = app();
+        assert!(a.open_settings(), "開かなかった");
+        a
+    }
+
+    fn settings_ids(a: &Gumicord) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        a.build_tree(Panes::Four).walk(&mut |n, _| out.push(n.id));
+        out
+    }
+
+    fn settings_texts(a: &Gumicord) -> Vec<String> {
+        let mut out = Vec::new();
+        a.build_tree(Panes::Four).walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveText {
+                out.extend(n.content.as_text().map(str::to_owned));
+            }
+        });
+        out
+    }
+
+    /// The screen carries the nav and the page, in that order.
+    #[test]
+    fn opening_settings_shows_screen_nav_and_page() {
+        let a = with_settings();
+        let ids = settings_ids(&a);
+        let screen = ids
+            .iter()
+            .position(|i| *i == NodeId::SettingsScreen)
+            .expect("画面がない");
+        let nav = ids
+            .iter()
+            .position(|i| *i == NodeId::SettingsNav)
+            .expect("分類がない");
+        let page = ids
+            .iter()
+            .position(|i| *i == NodeId::SettingsPage)
+            .expect("中身がない");
+        assert!(screen < nav && nav < page, "並びが逆");
+
+        let closed = app();
+        assert!(
+            !settings_ids(&closed).contains(&NodeId::SettingsScreen),
+            "閉じているのに出ている"
+        );
+    }
+
+    /// Demo loads no plugins, and nothing failed to fetch.
+    #[test]
+    fn empty_lists_say_so() {
+        let a = with_settings();
+        let texts = settings_texts(&a).join("\n");
+        assert!(texts.contains("プラグインはありません"), "{texts}");
+        let mut theme = with_settings();
+        press_menu(&mut theme, 2);
+        let texts = settings_texts(&theme).join("\n");
+        assert!(texts.contains("問題は起きていません"), "{texts}");
+    }
+
+    /// The rows share the menu's index space: 0 closes, 1 and 2 switch.
+    #[test]
+    fn settings_rows_route_by_index() {
+        let mut a = with_settings();
+        press_menu(&mut a, 2);
+        assert_eq!(
+            a.settings.category,
+            crate::menu::SettingsCategory::Theme,
+            "分類が変わらない"
+        );
+        press_menu(&mut a, 1);
+        assert_eq!(
+            a.settings.category,
+            crate::menu::SettingsCategory::Plugins,
+            "戻れない"
+        );
+        press_menu(&mut a, 0);
+        assert!(!a.settings.open, "閉じない");
+    }
+
+    /// A stale index stays put instead of acting on the wrong row.
+    #[test]
+    fn a_stale_settings_index_keeps_the_screen() {
+        let mut a = with_settings();
+        press_menu(&mut a, 99);
+        assert!(a.settings.open, "画面が消えた");
+    }
+
+    /// Nothing underneath is reachable while it is open. Like a menu, an
+    /// outside press closes the screen instead of navigating behind it.
+    #[test]
+    fn nothing_underneath_is_reachable_while_settings_are_open() {
+        let mut a = with_settings();
+        let before = a.selected_channel;
+        assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]));
+        assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
+        assert!(!a.settings.open, "外側の押下で閉じない");
+    }
+
+    /// Escape closes it; an outside press does too, with nothing to decide.
+    #[test]
+    fn escape_and_outside_press_close_settings() {
+        let mut a = with_settings();
+        assert!(a.cancel_input());
+        assert!(!a.settings.open, "Esc で閉じない");
+
+        let mut b = with_settings();
+        assert!(b.pressed(&[]), "閉じるという変化がない");
+        assert!(!b.settings.open, "外側の押下で閉じない");
     }
 
     /// The dialog's laid-out rectangles. Reading the theme's numbers does not

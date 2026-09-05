@@ -46,6 +46,34 @@ pub enum ManagerEvent {
     Warned { message: String },
 }
 
+/// One row of the settings screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginState {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub state: PluginStateKind,
+    pub capabilities: Vec<String>,
+    /// Whether the manifest declares a settings page.
+    pub has_settings: bool,
+}
+
+/// Where a plugin stands. Refusals and switches persist; anything else is
+/// recomputed from what is loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginStateKind {
+    /// Running and patching.
+    Loaded,
+    /// Turned off by the user; grants kept.
+    Disabled,
+    /// Refused; never loads until approved again.
+    Denied,
+    /// Unseen capabilities; the approval dialog owns it.
+    NeedsApproval,
+    /// Granted but absent: loading failed, and the warning went out already.
+    LoadFailed,
+}
+
 enum Command {
     Submit {
         tree: Box<UiNode>,
@@ -64,6 +92,22 @@ enum Command {
     Unload {
         id: String,
     },
+    Disable {
+        id: String,
+    },
+    Enable {
+        id: String,
+    },
+    Reapprove {
+        id: String,
+    },
+    ListStates {
+        reply: mpsc::Sender<Vec<PluginState>>,
+    },
+    SettingsTree {
+        id: String,
+        reply: mpsc::Sender<Option<UiNode>>,
+    },
     Shutdown,
 }
 
@@ -77,6 +121,7 @@ struct PluginSet {
     plugins: Vec<LoadedPlugin>,
     known: HashMap<String, (PathBuf, Manifest)>,
     grants: HashMap<String, Vec<String>>,
+    disabled: HashSet<String>,
 }
 
 impl PluginSet {
@@ -90,13 +135,14 @@ impl PluginSet {
                 ),
             });
         }
-        let grants = load_grants(plugins_dir);
+        let (grants, disabled) = load_grants(plugins_dir);
         (
             PluginSet {
                 plugins_dir: plugins_dir.to_owned(),
                 plugins: Vec::new(),
                 known: HashMap::new(),
                 grants,
+                disabled,
             },
             events,
         )
@@ -136,6 +182,9 @@ impl PluginSet {
             let id = manifest.id.clone();
             self.known
                 .insert(id.clone(), (dir.clone(), manifest.clone()));
+            if self.disabled.contains(&id) {
+                continue;
+            }
             if manifest.capabilities.is_empty() {
                 events.extend(self.load_host(&id));
             } else {
@@ -177,12 +226,70 @@ impl PluginSet {
         self.save_grants()
     }
 
+    /// Turns a plugin off and remembers it. Grants stay: enabling again
+    /// resumes where it left off, without asking twice.
+    fn disable(&mut self, id: &str) -> Vec<ManagerEvent> {
+        if !self.known.contains_key(id) {
+            return vec![warn(format!("disable for unknown plugin {id}"))];
+        }
+        self.disabled.insert(id.to_owned());
+        self.unload(id);
+        self.save_grants()
+    }
+
+    /// Turns a plugin back on. A denied plugin stays denied: refusing and
+    /// then enabling must not silently grant. Unasked capabilities ask.
+    fn enable(&mut self, id: &str) -> Vec<ManagerEvent> {
+        let Some((_, manifest)) = self.known.get(id).cloned() else {
+            return vec![warn(format!("enable for unknown plugin {id}"))];
+        };
+        if self.grants.get(id).is_some_and(Vec::is_empty) {
+            return vec![warn(format!("plugin {id} is denied; approve it first"))];
+        }
+        self.disabled.remove(id);
+        let mut events = self.save_grants();
+        if manifest.capabilities.is_empty() || self.grants.contains_key(id) {
+            events.extend(self.load_host(id));
+        } else {
+            events.push(ManagerEvent::NeedsApproval {
+                id: id.to_owned(),
+                name: manifest.name.clone(),
+                capabilities: manifest.capabilities.clone(),
+            });
+        }
+        events
+    }
+
+    /// Asks again after a denial: forgets the refusal and goes through the
+    /// approval dialog like a first sighting.
+    fn reapprove(&mut self, id: &str) -> Vec<ManagerEvent> {
+        let Some((_, manifest)) = self.known.get(id).cloned() else {
+            return vec![warn(format!("approve for unknown plugin {id}"))];
+        };
+        self.grants.remove(id);
+        self.disabled.remove(id);
+        let mut events = self.save_grants();
+        if manifest.capabilities.is_empty() {
+            events.extend(self.load_host(id));
+        } else {
+            events.push(ManagerEvent::NeedsApproval {
+                id: id.to_owned(),
+                name: manifest.name.clone(),
+                capabilities: manifest.capabilities.clone(),
+            });
+        }
+        events
+    }
+
     fn reload(&mut self, id: &str) -> Vec<ManagerEvent> {
         let Some((dir, _)) = self.known.get(id).cloned() else {
             return vec![warn(format!("reload for unknown plugin {id}"))];
         };
         if self.grants.get(id).is_some_and(Vec::is_empty) {
             return vec![warn(format!("plugin {id} is denied; not reloading"))];
+        }
+        if self.disabled.contains(id) {
+            return vec![warn(format!("plugin {id} is disabled; not reloading"))];
         }
         match Manifest::load(&dir) {
             Err(e) => vec![warn(format!("reload of {id} failed: {e}"))],
@@ -196,6 +303,68 @@ impl PluginSet {
 
     fn unload(&mut self, id: &str) {
         self.plugins.retain(|p| p.manifest.id != id);
+    }
+
+    /// Reads one plugin's settings page, if it declares one. Display-only:
+    /// controls sit inert until the settings event channel arrives.
+    fn settings_tree(&self, id: &str) -> Option<UiNode> {
+        let (dir, manifest) = self.known.get(id)?.clone();
+        let settings = manifest.settings.as_ref()?;
+        let bytes = std::fs::read(dir.join(settings)).ok()?;
+        let source = match settings.rsplit_once('.') {
+            Some((_, "js")) => PluginSource::Js(bytes),
+            Some((_, "qjsc")) => PluginSource::Bytecode(bytes),
+            _ => return None,
+        };
+        let storage = Storage::load(&dir).ok()?;
+        let granted: HashSet<String> = self
+            .grants
+            .get(id)
+            .map(|g| {
+                g.iter()
+                    .filter(|c| manifest.capabilities.contains(c))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        match PluginHost::settings_tree(id, &granted, source, storage) {
+            Ok(tree) => tree,
+            Err(e) => {
+                tracing::warn!(plugin = %id, %e, "settings page failed");
+                None
+            }
+        }
+    }
+    /// One row per known plugin for the settings screen.
+    fn states(&self) -> Vec<PluginState> {
+        let mut ids: Vec<&String> = self.known.keys().collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                let (_, manifest) = &self.known[id];
+                let state = if self.disabled.contains(id) {
+                    PluginStateKind::Disabled
+                } else if self.grants.get(id).is_some_and(Vec::is_empty) {
+                    PluginStateKind::Denied
+                } else if self.plugins.iter().any(|p| &p.manifest.id == id) {
+                    PluginStateKind::Loaded
+                } else if !manifest.capabilities.is_empty() && !self.grants.contains_key(id) {
+                    PluginStateKind::NeedsApproval
+                } else {
+                    // Granted but absent: loading failed, and the warning
+                    // went out with the event.
+                    PluginStateKind::LoadFailed
+                };
+                PluginState {
+                    id: id.clone(),
+                    name: manifest.name.clone(),
+                    version: manifest.version.clone(),
+                    state,
+                    capabilities: manifest.capabilities.clone(),
+                    has_settings: manifest.settings.is_some(),
+                }
+            })
+            .collect()
     }
 
     /// Builds a host when the grants cover it. Already-loaded hosts stay.
@@ -291,7 +460,15 @@ impl PluginSet {
 
     fn save_grants(&self) -> Vec<ManagerEvent> {
         let path = self.plugins_dir.join("grants.json");
-        match serde_json::to_string_pretty(&self.grants)
+        let stored = StoredGrants {
+            grants: self.grants.clone(),
+            disabled: {
+                let mut ids: Vec<String> = self.disabled.iter().cloned().collect();
+                ids.sort();
+                ids
+            },
+        };
+        match serde_json::to_string_pretty(&stored)
             .map_err(|e| e.to_string())
             .and_then(|raw| std::fs::write(&path, raw).map_err(|e| e.to_string()))
         {
@@ -308,12 +485,30 @@ fn warn(message: String) -> ManagerEvent {
     ManagerEvent::Warned { message }
 }
 
-fn load_grants(plugins_dir: &Path) -> HashMap<String, Vec<String>> {
-    let path = plugins_dir.join("grants.json");
-    match std::fs::read_to_string(&path) {
-        Err(_) => HashMap::new(),
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+fn load_grants(plugins_dir: &Path) -> (HashMap<String, Vec<String>>, HashSet<String>) {
+    let empty = || (HashMap::new(), HashSet::new());
+    let Ok(raw) = std::fs::read_to_string(plugins_dir.join("grants.json")) else {
+        return empty();
+    };
+    // Flat first: the shaped read ignores unknown fields, so it would
+    // swallow an old file into emptiness. A plugin id can never be
+    // "grants" or "disabled" (no dots), so the shapes never collide.
+    if let Ok(flat) = serde_json::from_str::<HashMap<String, Vec<String>>>(&raw) {
+        return (flat, HashSet::new());
     }
+    if let Ok(shaped) = serde_json::from_str::<StoredGrants>(&raw) {
+        return (shaped.grants, shaped.disabled.into_iter().collect());
+    }
+    empty()
+}
+
+/// `grants.json` on disk. `disabled` joined later; old flat files still read.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct StoredGrants {
+    #[serde(default)]
+    grants: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    disabled: Vec<String>,
 }
 
 /// The main-thread handle. Everything cross-thread is latest-only: sending
@@ -389,6 +584,56 @@ impl PluginManager {
         if let Some(cmd) = &self.cmd {
             let _ = cmd.send(Command::Unload { id: id.to_owned() });
         }
+    }
+
+    pub fn disable(&self, id: &str) {
+        if let Some(cmd) = &self.cmd {
+            let _ = cmd.send(Command::Disable { id: id.to_owned() });
+        }
+    }
+
+    pub fn enable(&self, id: &str) {
+        if let Some(cmd) = &self.cmd {
+            let _ = cmd.send(Command::Enable { id: id.to_owned() });
+        }
+    }
+
+    pub fn reapprove(&self, id: &str) {
+        if let Some(cmd) = &self.cmd {
+            let _ = cmd.send(Command::Reapprove { id: id.to_owned() });
+        }
+    }
+
+    /// One plugin's settings tree, for the settings screen. Blocking, but
+    /// settings open rarely; frames never call it.
+    pub fn settings_tree(&self, id: &str) -> Option<UiNode> {
+        let Some(cmd) = &self.cmd else {
+            return None;
+        };
+        let (tx, rx) = mpsc::channel();
+        if cmd
+            .send(Command::SettingsTree {
+                id: id.to_owned(),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.recv().unwrap_or(None)
+    }
+
+    /// One row per known plugin, for the settings screen. Blocking, but the
+    /// settings screen opens rarely; frames never call it.
+    pub fn plugin_states(&self) -> Vec<PluginState> {
+        let Some(cmd) = &self.cmd else {
+            return Vec::new();
+        };
+        let (tx, rx) = mpsc::channel();
+        if cmd.send(Command::ListStates { reply: tx }).is_err() {
+            return Vec::new();
+        }
+        rx.recv().unwrap_or_default()
     }
 }
 
@@ -489,6 +734,27 @@ fn handle_command(
             }
         }
         Command::Unload { id } => set.unload(&id),
+        Command::Disable { id } => {
+            for e in set.disable(&id) {
+                send(e);
+            }
+        }
+        Command::Enable { id } => {
+            for e in set.enable(&id) {
+                send(e);
+            }
+        }
+        Command::Reapprove { id } => {
+            for e in set.reapprove(&id) {
+                send(e);
+            }
+        }
+        Command::ListStates { reply } => {
+            let _ = reply.send(set.states());
+        }
+        Command::SettingsTree { id, reply } => {
+            let _ = reply.send(set.settings_tree(&id));
+        }
         Command::Shutdown => return true,
     }
     false
@@ -700,5 +966,182 @@ mod tests {
         }
         assert!(disabled, "chronic failure unloads the plugin");
         assert!(set.plugins.is_empty());
+    }
+
+    fn state_of(set: &PluginSet, id: &str) -> PluginStateKind {
+        set.states()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("known plugin missing")
+            .state
+    }
+
+    /// Disabling remembers, enabling resumes grants, and denying needs a new
+    /// approval. The settings screen reads the same states it acts on.
+    #[test]
+    fn disabling_enabling_and_reapproving() {
+        let root = dir("states");
+        plugin_dir(
+            &root,
+            "com.example.a",
+            "globalThis.__gumicord_apply = (n) => n;",
+            r#""log""#,
+        );
+        let (mut set, _) = PluginSet::open(&root);
+        let events = set.scan();
+        assert!(
+            events.iter().any(
+                |e| matches!(e, ManagerEvent::NeedsApproval { id, .. } if id == "com.example.a")
+            ),
+            "unseen capabilities ask: {events:?}"
+        );
+        assert_eq!(
+            state_of(&set, "com.example.a"),
+            PluginStateKind::NeedsApproval
+        );
+
+        set.approve("com.example.a", &["log".to_owned()]);
+        assert_eq!(state_of(&set, "com.example.a"), PluginStateKind::Loaded);
+
+        set.disable("com.example.a");
+        assert_eq!(state_of(&set, "com.example.a"), PluginStateKind::Disabled);
+        assert!(set.plugins.is_empty(), "disabled unloads");
+
+        // Grants survived the switch: enabling resumes without asking.
+        let events = set.enable("com.example.a");
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(state_of(&set, "com.example.a"), PluginStateKind::Loaded);
+
+        set.deny("com.example.a");
+        assert_eq!(state_of(&set, "com.example.a"), PluginStateKind::Denied);
+
+        // Enabling never overrides a refusal.
+        let events = set.enable("com.example.a");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ManagerEvent::Warned { .. })),
+            "silent grant: {events:?}"
+        );
+        assert_eq!(state_of(&set, "com.example.a"), PluginStateKind::Denied);
+
+        // Asking again forgets the refusal like a first sighting.
+        let events = set.reapprove("com.example.a");
+        assert!(
+            events.iter().any(
+                |e| matches!(e, ManagerEvent::NeedsApproval { id, .. } if id == "com.example.a")
+            ),
+            "no second ask: {events:?}"
+        );
+        assert_eq!(
+            state_of(&set, "com.example.a"),
+            PluginStateKind::NeedsApproval
+        );
+    }
+
+    /// Old flat grants files still read; disabled survives a restart.
+    #[test]
+    fn grants_files_old_and_new() {
+        let root = dir("grants-shape");
+        std::fs::write(root.join("grants.json"), r#"{"com.example.a":["log"]}"#).unwrap();
+        let (grants, disabled) = load_grants(&root);
+        assert_eq!(grants.get("com.example.a").unwrap(), &["log"]);
+        assert!(disabled.is_empty());
+
+        let root = dir("grants-disabled");
+        plugin_dir(
+            &root,
+            "com.example.a",
+            "globalThis.__gumicord_apply = (n) => n;",
+            "",
+        );
+        let (mut set, _) = PluginSet::open(&root);
+        assert!(set.scan().is_empty());
+        set.disable("com.example.a");
+        drop(set);
+
+        let (mut set, _) = PluginSet::open(&root);
+        let events = set.scan();
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                ManagerEvent::NeedsApproval { .. } | ManagerEvent::Patched(_)
+            )),
+            "disabled plugin asked or ran: {events:?}"
+        );
+        assert_eq!(
+            set.states()[0].state,
+            PluginStateKind::Disabled,
+            "disabled did not survive"
+        );
+    }
+
+    /// A declared settings page reads; anything else is no page. The
+    /// settings screen embeds what comes back verbatim.
+    #[test]
+    fn settings_trees_read() {
+        use gumicord_uitree::NodeId;
+        let root = dir("settings-page");
+        let plain = plugin_dir(
+            &root,
+            "com.example.plain",
+            "globalThis.__gumicord_apply = (n) => n;",
+            "",
+        );
+        let _ = plain;
+        let with = root.join("com.example.paged");
+        std::fs::create_dir_all(&with).unwrap();
+        std::fs::write(
+            with.join("manifest.json"),
+            r#"{"id":"com.example.paged","name":"Paged","version":"1.0.0","capabilities":[],"settings":"settings.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            with.join("plugin.js"),
+            "globalThis.__gumicord_apply = (n) => n;",
+        )
+        .unwrap();
+        std::fs::write(
+            with.join("settings.js"),
+            r#"globalThis.__gumicord_settings = () => ({ id: "primitive.text", props: { value: "hi" } });"#,
+        )
+        .unwrap();
+
+        let (mut set, _) = PluginSet::open(&root);
+        assert!(set.scan().is_empty());
+
+        let states = set.states();
+        assert!(
+            states
+                .iter()
+                .find(|s| s.id == "com.example.paged")
+                .is_some_and(|s| s.has_settings)
+        );
+        assert!(
+            states
+                .iter()
+                .find(|s| s.id == "com.example.plain")
+                .is_some_and(|s| !s.has_settings)
+        );
+
+        let tree = set.settings_tree("com.example.paged").expect("no page");
+        let mut texts = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveText {
+                texts.extend(n.content.as_text().map(str::to_owned));
+            }
+        });
+        assert_eq!(texts, ["hi"]);
+
+        assert_eq!(set.settings_tree("com.example.plain"), None);
+        assert_eq!(set.settings_tree("com.example.missing"), None);
+
+        // A throwing page is no page, not a crash.
+        std::fs::write(
+            with.join("settings.js"),
+            "globalThis.__gumicord_settings = () => { throw new Error('boom'); };",
+        )
+        .unwrap();
+        assert_eq!(set.settings_tree("com.example.paged"), None);
     }
 }

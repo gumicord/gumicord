@@ -243,8 +243,8 @@ M1 をそのまま 1 本の作業として進めると、**全プラットフォ
 | E3 | テーマのアセット読み込み + 外部ホスト承認 UI | M | ✅ 完了 | 同梱・data URI・承認済み https の取得、宣言外へのリダイレクト拒否、32MB 上限、Cookie・認証なし、ディスクキャッシュ、初見ホストはモーダルで許可・拒否。背景はアトラス経由で描画 (cover/contain/stretch/none + CPU タイル)。R5 に残るのはミップマップ、読み込み時 blur、JPEG/WebP/AVIF の復号、個別テクスチャ |
 | E4 | `gumicord-plugin`: QuickJS ホスト / 隔離 / 強制停止 | M | ✅ 完了 | プラグインごとに `Runtime` + `Context`、宣言外 API は非注入、100ms 強制停止、32MB / 512KB 上限。JS とバイトコードの双方を読み込む |
 | E5 | プラグインの差分パッチ適用 (P1〜P7 の意味論) | M | ✅ 完了 | 走査は SDK 側、境界はネイティブ値、P5 はノード単位で回復し 100 回/60 秒で無効化。JS→Rust 変換の失敗も1回と数える |
-| E6 | ケイパビリティモデルと承認 UI | M | ✅ 完了 | `manifest.json` + 付与記録 (`grants.json`)、初見はモーダルで許可・拒否。権限は `log` と `storage` のみ。取り消し UI は設定画面 (`EXT-035`) 待ち |
-| E7 | `@gumicord/sdk` (型定義 + CLI + ウォッチモード) | M | ✅ 完了 | `gumicord-plugin build` / `dev` (esbuild の iife 同梱)。`examples/plugins/dev.gumicord.hello` が見本 |
+| E6 | ケイパビリティモデルと承認 UI | M | ✅ 完了 | `manifest.json` + 付与記録 (`grants.json` の `grants` / `disabled`)、初見はモーダルで許可・拒否。権限は `log` と `storage` のみ。取り消し・無効化・有効化・再承認は設定画面 (`EXT-035`) で行う |
+| E7 | `@gumicord/sdk` (型定義 + CLI + ウォッチモード) | M | ✅ 完了 | `gumicord-plugin build` / `dev` (esbuild の iife 同梱、設定頁の `settings.js` も一緒に作る)。`examples/plugins/dev.gumicord.hello` が見本。`ui.settings` で設定頁を出す |
 | E8 | セーフモード | S | ✅ 完了 | `GUMICORD_SAFE_MODE` (0 以外で有効)。プラグインを読み込まず起動する |
 
 > E1 で**アセット参照の検証**(同梱パスの脱出禁止 / `https` のみ / 宣言済みホストのみ) は済んでいる。

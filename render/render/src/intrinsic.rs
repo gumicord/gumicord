@@ -162,6 +162,8 @@ const TITLEBAR_BUTTON_W: f32 = 46.0;
 const SCROLLBAR_W: f32 = 10.0;
 /// QR edge length, about what the official client uses.
 const QR_SIZE: f32 = 176.0;
+/// Settings category width, narrower than the channel list: two words fit.
+const SETTINGS_NAV_W: f32 = 200.0;
 
 /// Whether a node is overlaid on its parent rather than joining its flow.
 ///
@@ -345,6 +347,17 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         OverlayToast => Intrinsic::row().cross(Cross::Center),
         OverlayTooltip => Intrinsic::row().cross(Cross::Center).one_line(),
 
+        // ── settings.*
+        //
+        // A full-window layer: the screen underneath is unreachable while
+        // open. Categories left, page right, like Discord.
+        SettingsScreen => Intrinsic::row().grow(1.0).cross(Cross::Stretch),
+        SettingsNav => Intrinsic::column().w(SETTINGS_NAV_W).cross(Cross::Stretch),
+        SettingsPage => Intrinsic::column()
+            .grow(1.0)
+            .cross(Cross::Stretch)
+            .scrollable(),
+
         // ── layout.*
         //
         // Rows and columns take the slack because they are used as
@@ -395,7 +408,15 @@ mod tests {
         );
     }
 
-    /// Only lists scroll; clipping anywhere else is hard to trace.
+    /// The settings screen fills the window like the main screen.
+    #[test]
+    fn the_settings_screen_can_fill_the_window() {
+        assert_eq!(intrinsic(NodeId::SettingsScreen).axis, Axis::Row);
+        assert!(intrinsic(NodeId::SettingsPage).grow > 0.0, "横の余りを取る");
+    }
+
+    /// Only lists scroll; clipping anywhere else is hard to trace. The
+    /// settings page is a list of rows, so it scrolls too.
     #[test]
     fn only_lists_scroll() {
         let scrolling: Vec<_> = NodeId::ALL
@@ -412,6 +433,7 @@ mod tests {
                 NodeId::NavDmList,
                 NodeId::NavMemberList,
                 NodeId::ChatMessageList,
+                NodeId::SettingsPage,
                 NodeId::LayoutScroll,
             ]
         );

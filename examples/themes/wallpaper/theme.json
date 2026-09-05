@@ -155,6 +155,23 @@
       "style": { "height": 1, "background": "$color.border" }
     },
     {
+      "select": "settings.screen",
+      "style": { "background": "$color.panel", "gap": 16, "padding": [24, 24, 24, 24] }
+    },
+    {
+      "select": "settings.nav",
+      "style": { "gap": 1 }
+    },
+    {
+      "select": "settings.page",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.md",
+        "padding": [16, 16, 16, 16],
+        "gap": 8
+      }
+    },
+    {
       "select": "overlay.toast",
       "style": {
         "font": "$font.small",

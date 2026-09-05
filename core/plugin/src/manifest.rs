@@ -27,6 +27,10 @@ pub struct Manifest {
     pub description: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Settings entry file name, when the plugin provides its own settings
+    /// page. Same flat-file rules as `entry`; absent means no settings page.
+    #[serde(default)]
+    pub settings: Option<String>,
 }
 
 fn default_entry() -> String {
@@ -59,6 +63,11 @@ impl Manifest {
         }
         if !is_entry_name(&self.entry) {
             return Err(PluginError::BadEntry(self.entry.clone()));
+        }
+        if let Some(settings) = &self.settings
+            && !is_entry_name(settings)
+        {
+            return Err(PluginError::BadEntry(settings.clone()));
         }
         let mut seen = HashSet::new();
         for cap in &self.capabilities {
@@ -193,5 +202,40 @@ mod tests {
     fn a_missing_file_is_an_error_not_a_panic() {
         let dir = scratch("missing");
         assert!(Manifest::load(&dir.join("nope")).is_err());
+    }
+
+    #[test]
+    fn settings_entry_follows_the_same_flat_rules() {
+        let dir = scratch("settings-ok");
+        write(
+            &dir,
+            r#"{"id":"com.example.h","name":"H","version":"1.0.0","settings":"settings.js"}"#,
+        );
+        assert_eq!(
+            Manifest::load(&dir).unwrap().settings.as_deref(),
+            Some("settings.js")
+        );
+
+        let dir = scratch("settings-absent");
+        write(
+            &dir,
+            r#"{"id":"com.example.h","name":"H","version":"1.0.0"}"#,
+        );
+        assert!(Manifest::load(&dir).unwrap().settings.is_none());
+
+        for (tag, settings) in [
+            ("escape", "../evil.js"),
+            ("subdir", "sub/settings.js"),
+            ("bad-ext", "settings.ts"),
+        ] {
+            let dir = scratch(tag);
+            write(
+                &dir,
+                &format!(
+                    r#"{{"id":"com.example.h","name":"H","version":"1.0.0","settings":"{settings}"}}"#
+                ),
+            );
+            assert!(Manifest::load(&dir).is_err(), "{tag} loaded");
+        }
     }
 }

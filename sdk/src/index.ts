@@ -101,6 +101,17 @@ export const ui = {
     return { id: "layout.row", children: [sibling, node] };
   },
 
+  /**
+   * Provides this plugin's settings page, shown in the client's settings
+   * screen when the manifest declares a `settings` entry.
+   *
+   * Display-only for now: controls sit inert until the settings event
+   * channel arrives, so describe, do not operate.
+   */
+  settings(fn: () => UINode): void {
+    (globalThis as Record<string, unknown>)["__gumicord_settings"] = fn;
+  },
+
   /** Stacks nodes vertically. */
   stack(nodes: UINode[]): UINode {
     return { id: "layout.column", children: nodes };

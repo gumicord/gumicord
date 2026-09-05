@@ -150,6 +150,43 @@ console.log("per-node data resolves");
   }
 }
 
+console.log("\nui.settings registers the settings page");
+{
+  // The bundle is the SDK entry itself: importing it must not touch the
+  // host, only define the helpers.
+  const ESBUILD = join(sdk, "node_modules", "esbuild", "bin", "esbuild");
+  const bundle = join(here, ".settings.tmp.mjs");
+  const script = join(here, ".settings-test.tmp.mjs");
+  try {
+    execFileSync(
+      process.execPath,
+      [ESBUILD, "src/index.ts", "--bundle", "--format=esm", `--outfile=${bundle}`],
+      { cwd: sdk, stdio: "pipe" },
+    );
+    writeFileSync(
+      script,
+      `import { ui } from ${JSON.stringify("./.settings.tmp.mjs")};
+const assert = (c, m) => { if (!c) { console.error("NG " + m); process.exit(1); } };
+assert(globalThis["__gumicord_settings"] === undefined, "nothing registered by import");
+ui.settings(() => ui.stack([ui.text("a"), ui.text("b")]));
+const page = globalThis["__gumicord_settings"]();
+assert(page.id === "layout.column", "page root");
+assert(page.children.length === 2 && page.children[0].id === "primitive.text", "page rows");
+assert(page.children[0].props.value === "a", "row text");
+console.log("settings page registers");
+`,
+    );
+    const out = execFileSync(process.execPath, [script], { cwd: here, encoding: "utf8" });
+    if (!out.includes("settings page registers")) throw new Error("assertions silent");
+    ok("ui.settings registers the settings page");
+  } catch (e) {
+    ng("ui.settings registers the settings page", e.message ?? String(e));
+  } finally {
+    rmSync(bundle, { force: true });
+    rmSync(script, { force: true });
+  }
+}
+
 console.log();
 if (failed > 0) {
   console.log(`\x1b[31m${failed} failed\x1b[0m`);

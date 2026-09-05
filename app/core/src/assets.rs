@@ -35,6 +35,8 @@ pub struct HostAsk {
 pub struct ThemeAssets {
     tx: Sender<ImageData>,
     rx: Receiver<ImageData>,
+    warn_tx: Sender<String>,
+    warn_rx: Receiver<String>,
     rt: Option<tokio::runtime::Handle>,
     waker: Option<Waker>,
     http: Option<reqwest::Client>,
@@ -49,16 +51,22 @@ pub struct ThemeAssets {
     denied: HashSet<String>,
     grants_file: Option<PathBuf>,
     ready: Vec<ImageData>,
+    /// Asset failures in the user's words, for the settings screen. Traced
+    /// too, but logs are not where users look.
+    warnings: std::collections::VecDeque<String>,
 }
 
 impl ThemeAssets {
     pub fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (warn_tx, warn_rx) = std::sync::mpsc::channel();
         let grants_file = default_grants_file();
         let (granted, denied) = load_grants(grants_file.as_deref());
         ThemeAssets {
             tx,
             rx,
+            warn_tx,
+            warn_rx,
             rt: None,
             waker: None,
             http: None,
@@ -73,6 +81,7 @@ impl ThemeAssets {
             denied,
             grants_file,
             ready: Vec::new(),
+            warnings: std::collections::VecDeque::new(),
         }
     }
 
@@ -153,11 +162,24 @@ impl ThemeAssets {
 
     /// Collects what arrived, reporting whether anything did.
     pub fn poll(&mut self) -> bool {
-        let before = self.ready.len();
+        let before = self.ready.len() + self.warnings.len();
         while let Ok(image) = self.rx.try_recv() {
             self.ready.push(image);
         }
-        self.ready.len() != before
+        while let Ok(warning) = self.warn_rx.try_recv() {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push_back(warning);
+            }
+            while self.warnings.len() > 10 {
+                self.warnings.pop_front();
+            }
+        }
+        self.ready.len() + self.warnings.len() != before
+    }
+
+    /// Asset failures in the user's words, oldest first.
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.iter().cloned().collect()
     }
 
     /// Takes the arrived images; the caller passes them to the renderer.
@@ -223,6 +245,7 @@ impl ThemeAssets {
         self.requested.insert(key.to_owned());
 
         let (tx, waker) = (self.tx.clone(), waker.clone());
+        let warn_tx = self.warn_tx.clone();
         let (key, r) = (key.to_owned(), r.clone());
         let (dir, http, cache) = (
             self.dir.clone(),
@@ -238,7 +261,14 @@ impl ThemeAssets {
                     fetch_remote(http.as_ref(), cache.as_deref(), url, &declared).await
                 }
             };
-            let Some(bytes) = bytes else { return };
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(warning) => {
+                    tracing::warn!(warning, "theme asset failed");
+                    let _ = warn_tx.send(warning);
+                    return;
+                }
+            };
             let owned = key.clone();
             if let Ok(Some(image)) = tokio::task::spawn_blocking(move || {
                 decode_image_capped(&owned, &bytes, MAX_SIDE).map(|image| box_blur(image, blur))
@@ -248,10 +278,12 @@ impl ThemeAssets {
                 let _ = tx.send(image);
                 waker.wake();
             } else {
+                let warning = "画像として読めなかったため色で描く".to_owned();
                 tracing::warn!(
                     key,
                     "could not decode the image; keeping the fallback colour"
                 );
+                let _ = warn_tx.send(warning);
             }
         });
     }
@@ -270,25 +302,33 @@ impl Default for ThemeAssets {
 /// Reads a bundled file without leaving the theme directory. The parser
 /// already rejected `..` lexically; resolving symlinks here catches links
 /// planted inside the directory pointing out.
-fn read_bundled(dir: Option<&Path>, rel: &str) -> Option<Vec<u8>> {
-    let base = dir?.canonicalize().ok()?;
-    let path = base.join(rel).canonicalize().ok()?;
+fn read_bundled(dir: Option<&Path>, rel: &str) -> Result<Vec<u8>, String> {
+    let Some(dir) = dir else {
+        return Err("同梱画像の置き場所がわからないため読み込めない".to_owned());
+    };
+    let base = dir
+        .canonicalize()
+        .map_err(|_| "テーマの置き場所が読めない".to_owned())?;
+    let path = base
+        .join(rel)
+        .canonicalize()
+        .map_err(|_| format!("{rel} が見つからないため色で描く"))?;
     if !path.starts_with(&base) {
         tracing::warn!(rel, "bundled asset escapes the theme directory");
-        return None;
+        return Err(format!("{rel} はテーマの外を指しているため読み込めない"));
     }
-    std::fs::read(path).ok()
+    std::fs::read(path).map_err(|_| format!("{rel} が読めなかったため色で描く"))
 }
 
 /// Decodes a data: URI body. Only images ride here; fonts come later.
-fn decode_data_uri(mime: &str, base64_body: &str) -> Option<Vec<u8>> {
+fn decode_data_uri(mime: &str, base64_body: &str) -> Result<Vec<u8>, String> {
     if !mime.starts_with("image/") {
-        return None;
+        return Err("画像ではない data URI のため読み込めない".to_owned());
     }
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
         .decode(base64_body.trim())
-        .ok()
+        .map_err(|_| "壊れた data URI のため色で描く".to_owned())
 }
 
 /// Fetches an approved host's file, honouring the local cache first so a
@@ -298,42 +338,54 @@ async fn fetch_remote(
     cache: Option<&Path>,
     url: &str,
     declared: &[String],
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, String> {
     if let Some(bytes) = read_cache(cache, url) {
-        return Some(bytes);
+        return Ok(bytes);
     }
-    let http = http?;
+    let Some(http) = http else {
+        return Err(format!("{url} を取りに行けなかったため色で描く"));
+    };
     let mut current = url.to_owned();
     for _ in 0..=MAX_HOPS {
-        let response = http.get(&current).send().await.ok()?;
+        let response = http
+            .get(&current)
+            .send()
+            .await
+            .map_err(|_| format!("{url} を取得できなかったため色で描く"))?;
         let status = response.status();
         if status.is_redirection() {
             let location = response
                 .headers()
-                .get(reqwest::header::LOCATION)?
-                .to_str()
-                .ok()?;
-            let next = reqwest::Url::parse(&current).ok()?.join(location).ok()?;
-            let host = next.host_str()?.to_lowercase();
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|loc| reqwest::Url::parse(&current).ok()?.join(loc).ok());
+            let Some(next) = location else {
+                return Err(format!("{url} の行き先が読めなかったため色で描く"));
+            };
+            let host = next.host_str().unwrap_or_default().to_lowercase();
             if next.scheme() != "https" || !declared.iter().any(|d| d == &host) {
                 tracing::warn!(%current, host, "redirect leaves the declared hosts");
-                return None;
+                return Err("宣言外への転送は追わないため色で描く".to_owned());
             }
             current = next.to_string();
             continue;
         }
         if !status.is_success() {
-            return None;
+            return Err(format!("{url} は {status} のため色で描く"));
         }
-        let bytes = response.bytes().await.ok()?.to_vec();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| format!("{url} を読み切れなかったため色で描く"))?
+            .to_vec();
         if bytes.len() > MAX_BYTES {
             tracing::warn!(url, len = bytes.len(), "theme asset too large; dropping it");
-            return None;
+            return Err("大きすぎるため読み込めない (32MB まで)".to_owned());
         }
         write_cache(cache, url, &bytes);
-        return Some(bytes);
+        return Ok(bytes);
     }
-    None
+    Err(format!("{url} は転送が多すぎるため色で描く"))
 }
 
 /// Names a cache file after a URL, which holds characters a filename cannot.
@@ -431,11 +483,11 @@ mod tests {
     #[test]
     fn data_uris_decode_or_refuse() {
         assert_eq!(
-            decode_data_uri("image/png", "aGk=").as_deref(),
-            Some(b"hi".as_slice())
+            decode_data_uri("image/png", "aGk=").unwrap(),
+            b"hi".to_vec()
         );
-        assert!(decode_data_uri("font/woff2", "aGk=").is_none());
-        assert!(decode_data_uri("image/png", "not base64!!").is_none());
+        assert!(decode_data_uri("font/woff2", "aGk=").is_err());
+        assert!(decode_data_uri("image/png", "not base64!!").is_err());
     }
 
     #[test]
@@ -446,12 +498,22 @@ mod tests {
         std::fs::write(dir.join("assets").join("bg.png"), b"fake").unwrap();
 
         assert_eq!(
-            read_bundled(Some(&dir), "assets/bg.png").as_deref(),
-            Some(b"fake".as_slice())
+            read_bundled(Some(&dir), "assets/bg.png").unwrap(),
+            b"fake".to_vec()
         );
-        assert!(read_bundled(Some(&dir), "../outside.png").is_none());
-        assert!(read_bundled(Some(&dir), "missing.png").is_none());
-        assert!(read_bundled(None, "assets/bg.png").is_none());
+        assert!(read_bundled(Some(&dir), "../outside.png").is_err());
+        assert!(read_bundled(Some(&dir), "missing.png").is_err());
+        assert!(read_bundled(None, "assets/bg.png").is_err());
+    }
+
+    /// Failures arrive in the user's words, not as silence.
+    #[test]
+    fn warnings_reach_the_settings_screen() {
+        let mut assets = ThemeAssets::new();
+        assets.warn_tx.send("ためし".to_owned()).unwrap();
+        assert!(assets.poll());
+        assert_eq!(assets.warnings(), ["ためし"]);
+        assert!(!assets.poll(), "nothing new, nothing reported");
     }
 
     #[test]

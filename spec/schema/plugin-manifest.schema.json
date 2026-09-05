@@ -44,6 +44,11 @@
         "enum": ["log", "storage"]
       },
       "uniqueItems": true
+    },
+    "settings": {
+      "type": "string",
+      "description": "設定画面のファイル名。entry と同じく平らでなければならない。省略時は設定画面なし",
+      "pattern": "^[^/\\\\]+\\.(js|qjsc)$"
     }
   }
 }

@@ -3,5 +3,6 @@
   "name": "Hello",
   "version": "1.0.0",
   "description": "送信者名の横に挨拶バッジを付ける見本。",
-  "capabilities": ["log"]
+  "capabilities": ["log"],
+  "settings": "settings.js"
 }

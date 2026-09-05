@@ -795,14 +795,30 @@
       "style": { "color": "$color.danger" }
     },
     {
+      "select": "settings.screen",
+      "style": { "background": "$color.bg.base", "gap": "$space.3", "padding": [24, 24, 24, 24] }
+    },
+    {
+      "select": "settings.nav",
+      "style": { "gap": 1 }
+    },
+    {
+      "select": "settings.page",
+      "style": {
+        "background": "$color.bg.raised",
+        "radius": "$radius.md",
+        "padding": [16, 16, 16, 16],
+        "gap": "$space.2"
+      }
+    },
+    {
       "select": "overlay.toast",
       "style": {
         "font": "$font.small",
         "color": "$color.text.primary",
         "background": "$color.bg.raised",
         "borderColor": "$color.border",
-        "borderWidth": 1,
-        "radius": "$radius.md",
+        "borderWidth": 1,        "radius": "$radius.md",
         "padding": [10, 14, 10, 14]
       }
     },

@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
-use rquickjs::{Context, Ctx, FromJs, Function, Module, Object, Runtime};
+use rquickjs::{Context, Ctx, FromJs, Function, Module, Object, Runtime, Value};
 
 use crate::PluginError;
 use crate::storage::Storage;
@@ -169,7 +169,70 @@ impl PluginHost {
         })
     }
 
+    /// Reads the settings page in a throwaway world: same code, fresh
+    /// globals, storage writes refused. Nothing here may disturb the patch
+    /// context, which keeps running beside it.
+    pub fn settings_tree(
+        id: &str,
+        granted: &HashSet<String>,
+        source: PluginSource,
+        storage: Storage,
+    ) -> Result<Option<gumicord_uitree::UiNode>, PluginError> {
+        let fail = |reason: String| PluginError::LoadFailed {
+            id: id.to_owned(),
+            reason,
+        };
+        let runtime = Runtime::new().map_err(|e| fail(e.to_string()))?;
+        runtime.set_memory_limit(MEMORY_LIMIT_BYTES);
+        runtime.set_max_stack_size(MAX_STACK_BYTES);
+        let deadline: Shared<Option<Instant>> = std::rc::Rc::new(RefCell::new(None));
+        {
+            let stop_at = Rc::clone(&deadline);
+            runtime.set_interrupt_handler(Some(Box::new(move || {
+                stop_at.borrow().is_some_and(|t| Instant::now() > t)
+            })));
+        }
+        let context = Context::full(&runtime).map_err(|e| fail(e.to_string()))?;
+        let mut host = PluginHost {
+            id: id.to_owned(),
+            context,
+            deadline,
+            storage: Rc::new(RefCell::new(storage)),
+            failures: Rc::new(RefCell::new(FailureLog::default())),
+            bytecode: None,
+        };
+        host.inject_with(granted, false)
+            .map_err(|e| fail(e.to_string()))?;
+        match source {
+            PluginSource::Js(code) => host.eval_source(&code).map_err(&fail)?,
+            PluginSource::Bytecode(bytes) => host.eval_bytecode(bytes).map_err(fail)?,
+        }
+        host.context.with(|ctx| {
+            let entry: Option<Function> = ctx.globals().get("__gumicord_settings").ok();
+            let Some(entry) = entry else {
+                return Ok(None);
+            };
+            host.set_deadline(Some(Instant::now() + INTERRUPT_BUDGET));
+            let out: Value = entry
+                .call::<_, Object>(())
+                .map(Value::from_object)
+                .map_err(|e| fail(js_error_text(&ctx, e)))?;
+            host.set_deadline(None);
+            let empty = std::collections::HashMap::new();
+            crate::convert::js_to_node(&ctx, &out, &empty)
+                .map(Some)
+                .map_err(|e| with_id(&host.id, e))
+        })
+    }
+
     fn inject(&self, granted: &HashSet<String>) -> rquickjs::Result<()> {
+        self.inject_with(granted, true)
+    }
+
+    /// Injects capabilities, optionally without storage writes. Settings
+    /// pages display: they may read, never save, until the event channel
+    /// for settings arrives.
+    fn inject_with(&self, granted: &HashSet<String>, writable: bool) -> rquickjs::Result<()> {
         self.context.with(|ctx| {
             let host = Object::new(ctx.clone())?;
 
@@ -199,6 +262,13 @@ impl PluginHost {
                 host.set(
                     "storage_set",
                     Function::new(ctx.clone(), move |key: String, value: String| {
+                        if !writable {
+                            tracing::warn!(
+                                plugin = %plugin,
+                                "settings pages cannot save yet; ignoring the write"
+                            );
+                            return;
+                        }
                         if let Err(e) = storage.borrow_mut().set(&key, &value) {
                             tracing::warn!(plugin = %plugin, %e, "storage_set lost a write");
                         }
@@ -209,6 +279,13 @@ impl PluginHost {
                 host.set(
                     "storage_remove",
                     Function::new(ctx.clone(), move |key: String| {
+                        if !writable {
+                            tracing::warn!(
+                                plugin = %plugin,
+                                "settings pages cannot save yet; ignoring the write"
+                            );
+                            return;
+                        }
                         if let Err(e) = storage.borrow_mut().remove(&key) {
                             tracing::warn!(plugin = %plugin, %e, "storage_remove lost a write");
                         }

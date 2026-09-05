@@ -141,6 +141,7 @@ if (manifestValidate) {
     ["entry escapes the directory", { ...manifestBase, entry: "../evil.js" }],
     ["entry in a subdirectory", { ...manifestBase, entry: "sub/plugin.js" }],
     ["unknown capability", { ...manifestBase, capabilities: ["network"] }],
+    ["settings escapes the directory", { ...manifestBase, settings: "../evil.js" }],
     ["unknown top-level key", { ...manifestBase, main: "plugin.js" }],
   ]) {
     if (manifestValidate(data)) ng(`${label} — it passed`);
@@ -151,6 +152,7 @@ if (manifestValidate) {
   for (const [label, data] of [
     ["the minimum", manifestBase],
     ["an entry and capabilities", { ...manifestBase, entry: "plugin.qjsc", capabilities: ["log", "storage"] }],
+    ["a settings page", { ...manifestBase, settings: "settings.js" }],
   ]) {
     if (manifestValidate(data)) ok(label);
     else ng(label, JSON.stringify(manifestValidate.errors?.slice(0, 2)));
