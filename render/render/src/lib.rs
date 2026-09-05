@@ -9,6 +9,7 @@
 //! machine this was measured on, DX12 held sixteen times the resident memory
 //! GL did.
 
+pub mod backgrounds;
 pub mod draw;
 pub mod font_cache;
 pub mod geom;
@@ -112,6 +113,10 @@ pub struct Renderer {
     text: TextEngine,
     /// Per-page bind groups, rebuilt when a page is added.
     atlas_binds: Vec<wgpu::BindGroup>,
+    /// One bind group per background texture, in draw-index order.
+    bg_binds: Vec<wgpu::BindGroup>,
+    /// Uploaded background textures by lookup key.
+    backgrounds: backgrounds::Backgrounds,
     scale: f32,
     scroll: ScrollState,
     /// The previous frame's layout, for hit testing.
@@ -168,6 +173,8 @@ impl Renderer {
             missing_images: Vec::new(),
             missing_backgrounds: Vec::new(),
             theme_namespace: None,
+            backgrounds: backgrounds::Backgrounds::default(),
+            bg_binds: Vec::new(),
             caret_visible: true,
         })
     }
@@ -376,6 +383,7 @@ impl Renderer {
         let dl = draw::build(
             &layout,
             &mut self.text,
+            &self.backgrounds,
             &self.gpu.device,
             &self.gpu.queue,
             self.scale,
@@ -392,7 +400,9 @@ impl Renderer {
             rects: dl.rect_count(),
             glyphs: dl.glyph_count(),
             draw_calls: dl.runs.len(),
-            presented: self.gpu.submit(&dl, &self.atlas_binds, CLEAR),
+            presented: self
+                .gpu
+                .submit(&dl, &self.atlas_binds, &self.bg_binds, CLEAR),
         }
     }
 
@@ -558,11 +568,39 @@ impl Renderer {
         &self.missing_backgrounds
     }
 
+    /// Puts a theme background in its own texture, with mipmaps. The
+    /// renderer never touches the network; this arrives already decoded.
+    ///
+    /// Unlike atlas images, backgrounds are never evicted: there are only a
+    /// handful per theme, and each has its own texture to lose.
+    pub fn put_background(&mut self, image: &crate::text::ImageData) {
+        if self
+            .backgrounds
+            .put(&self.gpu.device, &self.gpu.queue, image.url.clone(), image)
+            .is_some()
+        {
+            self.rebind_backgrounds();
+        }
+    }
+
     /// Which theme the background images currently drawing belong to.
+    /// Switching themes forgets the previous theme's textures, or stale keys
+    /// would draw old pictures under new colours.
     pub fn set_theme_namespace(&mut self, namespace: Option<&str>) {
         if self.theme_namespace.as_deref() != namespace {
             self.theme_namespace = namespace.map(str::to_owned);
+            self.backgrounds.clear();
+            self.bg_binds.clear();
         }
+    }
+
+    fn rebind_backgrounds(&mut self) {
+        self.bg_binds = self
+            .backgrounds
+            .views()
+            .into_iter()
+            .map(|view| self.gpu.background_bind_group(view))
+            .collect();
     }
 
     /// Whether images were forgotten; true once.

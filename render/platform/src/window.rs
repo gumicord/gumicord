@@ -203,6 +203,11 @@ pub trait Application {
         Vec::new()
     }
 
+    /// Takes arrived background images, for their own textures.
+    fn take_backgrounds(&mut self) -> Vec<gumicord_render::ImageData> {
+        Vec::new()
+    }
+
     /// Builds the screen-reader tree from the just-built UITree.
     fn accesskit_update(
         &mut self,
@@ -668,6 +673,7 @@ impl Host {
             }
         }
         let images = self.app.take_images();
+        let backgrounds = self.app.take_backgrounds();
         // Holds the scroll position for one frame after a prepend.
         let keep_place = self.app.keep_place();
         let moving;
@@ -681,6 +687,9 @@ impl Host {
             }
             for image in &images {
                 r.put_image(image);
+            }
+            for image in &backgrounds {
+                r.put_background(image);
             }
             let cx = FrameCx {
                 viewport: r.viewport(),

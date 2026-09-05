@@ -1,6 +1,6 @@
 //! Theme background assets: resolve, fetch, decode, hand to the renderer.
 //!
-//! Resolved pixels travel the same atlas path as avatars; what differs is
+//! Resolved pixels travel to their own textures; what differs from avatars is
 //! where the bytes come from. Bundled files stay local, data URIs decode in
 //! place, and remote hosts need a declaration plus the user's approval before
 //! anything leaves the machine.
@@ -13,11 +13,11 @@ use gumicord_platform::Waker;
 use gumicord_render::ImageData;
 use gumicord_uitree::value::{AssetRef, Fit};
 
-use crate::images::decode_png_capped;
+use crate::images::{box_blur, decode_image_capped};
 
-/// Longest side kept for a background, in pixels. Atlas pages are 2048
-/// square; anything larger never fits and falls back to the colour anyway.
-const MAX_SIDE: u32 = 2048;
+/// Longest side kept for a background, in pixels. Own textures lift the
+/// atlas page limit; past this the memory stops matching a background.
+const MAX_SIDE: u32 = 4096;
 /// One remote file may use this much memory; themes are someone else's.
 const MAX_BYTES: usize = 32 * 1024 * 1024;
 /// How long one fetch may take before it counts as failed.
@@ -42,7 +42,7 @@ pub struct ThemeAssets {
     dir: Option<PathBuf>,
     declared: Vec<String>,
     theme_name: String,
-    known: HashMap<String, AssetRef>,
+    known: HashMap<String, (AssetRef, f32)>,
     requested: HashSet<String>,
     ask: Option<HostAsk>,
     granted: HashSet<String>,
@@ -109,11 +109,8 @@ impl ThemeAssets {
         self.requested.clear();
         self.ask = None;
         for (r, _, blur) in refs {
-            if blur > 0.0 {
-                tracing::warn!("background blur waits for the texture path");
-            }
             let key = r.cache_key(&self.namespace);
-            self.known.entry(key).or_insert(r);
+            self.known.entry(key).or_insert((r, blur));
         }
         self.kick();
     }
@@ -124,8 +121,8 @@ impl ThemeAssets {
             if self.requested.contains(key) {
                 continue;
             }
-            if let Some(r) = self.known.get(key).cloned() {
-                self.resolve(key, &r);
+            if let Some((r, blur)) = self.known.get(key).cloned() {
+                self.resolve(key, &r, blur);
             }
         }
         self.collect_ask();
@@ -169,13 +166,6 @@ impl ThemeAssets {
         std::mem::take(&mut self.ready)
     }
 
-    /// Clears the "already asked" marks so images can be requested again, as
-    /// when the atlas drops them. Grants and denials are answers, not marks,
-    /// and stay.
-    pub fn forget_requested(&mut self) {
-        self.requested.clear();
-    }
-
     /// Starts every known asset that has neither an answer nor a fetch.
     fn kick(&mut self) {
         let keys: Vec<String> = self.known.keys().cloned().collect();
@@ -183,8 +173,8 @@ impl ThemeAssets {
             if self.requested.contains(key) {
                 continue;
             }
-            if let Some(r) = self.known.get(key).cloned() {
-                self.resolve(key, &r);
+            if let Some((r, blur)) = self.known.get(key).cloned() {
+                self.resolve(key, &r, blur);
             }
         }
         self.collect_ask();
@@ -198,7 +188,7 @@ impl ThemeAssets {
         let mut hosts: Vec<String> = self
             .known
             .values()
-            .filter_map(|r| match r {
+            .filter_map(|(r, _)| match r {
                 AssetRef::Remote { host, .. } => {
                     let h = host.to_lowercase();
                     (!self.granted.contains(&h) && !self.denied.contains(&h)).then_some(h)
@@ -216,8 +206,10 @@ impl ThemeAssets {
         }
     }
 
-    /// Starts one fetch unless it needs an answer first.
-    fn resolve(&mut self, key: &str, r: &AssetRef) {
+    /// Starts one fetch unless it needs an answer first. Decoding and the
+    /// one-time blur run off the async runtime; the pixels arrive ready to
+    /// upload.
+    fn resolve(&mut self, key: &str, r: &AssetRef, blur: f32) {
         let (Some(rt), Some(waker)) = (self.rt.clone(), self.waker.clone()) else {
             return;
         };
@@ -248,9 +240,10 @@ impl ThemeAssets {
             };
             let Some(bytes) = bytes else { return };
             let owned = key.clone();
-            if let Ok(Some(image)) =
-                tokio::task::spawn_blocking(move || decode_png_capped(&owned, &bytes, MAX_SIDE))
-                    .await
+            if let Ok(Some(image)) = tokio::task::spawn_blocking(move || {
+                decode_image_capped(&owned, &bytes, MAX_SIDE).map(|image| box_blur(image, blur))
+            })
+            .await
             {
                 let _ = tx.send(image);
                 waker.wake();

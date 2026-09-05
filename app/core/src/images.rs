@@ -213,6 +213,106 @@ fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
     decode_png_capped(url, bytes, MAX_SIDE)
 }
 
+/// Decodes PNG or JPEG to RGBA8, shrinking the longest side to `max_side`.
+///
+/// Anything else (WebP, AVIF, broken files) is `None`: the caller keeps its
+/// fallback colour rather than guessing at pixels.
+pub(crate) fn decode_image_capped(url: &str, bytes: &[u8], max_side: u32) -> Option<ImageData> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        decode_png_capped(url, bytes, max_side)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        decode_jpeg_capped(url, bytes, max_side)
+    } else {
+        tracing::debug!(url, "unsupported image format; keeping the fallback");
+        None
+    }
+}
+
+/// Decodes a JPEG to RGBA8. Photos are usually JPEG; icons and screenshots
+/// are usually PNG, so this path only runs for theme backgrounds.
+fn decode_jpeg_capped(url: &str, bytes: &[u8], max_side: u32) -> Option<ImageData> {
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        tracing::debug!(url, w, h, "the image is larger than we can handle");
+        return None;
+    }
+    let raw = decoder.decode().ok()?;
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => raw
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 0xff])
+            .collect(),
+        jpeg_decoder::PixelFormat::L8 => raw.iter().flat_map(|v| [*v, *v, *v, 0xff]).collect(),
+        // CMYK and the rest need colour management; refuse, don't guess.
+        other => {
+            tracing::debug!(url, ?other, "unreadable pixel format");
+            return None;
+        }
+    };
+    let mut image = ImageData {
+        url: url.to_owned(),
+        width: w,
+        height: h,
+        rgba,
+    };
+    if image.rgba.len() != (w as usize) * (h as usize) * 4 {
+        tracing::debug!(url, "pixel count does not match the dimensions");
+        return None;
+    }
+    image = shrink(image, max_side);
+    Some(image)
+}
+
+/// Blurs once, on the CPU, before upload: redoing it every frame would cost
+/// a fullscreen pass for a picture that never changes.
+///
+/// Three box passes approximate a gaussian. The radius is clamped: beyond a
+/// couple dozen pixels the wait stops matching a background blur.
+pub(crate) fn box_blur(mut image: ImageData, radius: f32) -> ImageData {
+    let r = radius.clamp(0.0, 24.0).round() as usize;
+    if r == 0 {
+        return image;
+    }
+    for _ in 0..3 {
+        box_pass(&mut image, r, true);
+        box_pass(&mut image, r, false);
+    }
+    image
+}
+
+/// One horizontal or vertical box pass, clamping at the edges. Clamped
+/// pixels still count, so a flat field comes back unchanged.
+fn box_pass(image: &mut ImageData, r: usize, horizontal: bool) {
+    let (w, h) = (image.width as usize, image.height as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let count = (2 * r + 1) as u32;
+    let half = count / 2;
+    let mut out = vec![0u8; image.rgba.len()];
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..4 {
+                let mut sum = 0u32;
+                for k in 0..count as usize {
+                    let o = k as isize - r as isize;
+                    let (ox, oy) = if horizontal { (o, 0) } else { (0, o) };
+                    let px = (x as isize + ox).clamp(0, w as isize - 1) as usize;
+                    let py = (y as isize + oy).clamp(0, h as isize - 1) as usize;
+                    sum += image.rgba[(py * w + px) * 4 + c] as u32;
+                }
+                out[(y * w + x) * 4 + c] = ((sum + half) / count) as u8;
+            }
+        }
+    }
+    image.rgba = out;
+}
+
 /// Decodes a PNG to RGBA8, shrinking the longest side to `max_side`.
 /// Backgrounds are larger than avatars, so the cap is the caller's call.
 pub(crate) fn decode_png_capped(url: &str, bytes: &[u8], max_side: u32) -> Option<ImageData> {
@@ -378,5 +478,63 @@ mod tests {
     fn cache_names_follow_the_url() {
         assert_eq!(cache_name("https://a/1.png"), cache_name("https://a/1.png"));
         assert_ne!(cache_name("https://a/1.png"), cache_name("https://a/2.png"));
+    }
+
+    /// Dispatch follows the magic bytes; the real wallpaper decodes.
+    #[test]
+    fn image_format_follows_the_magic() {
+        let wallpaper = include_bytes!("../../../examples/themes/wallpaper/assets/wallpaper.png");
+        let image = decode_image_capped("theme/bg", wallpaper, 4096).expect("読めない");
+        assert!(image.width > 0 && image.height > 0);
+        assert_eq!(
+            image.rgba.len(),
+            image.width as usize * image.height as usize * 4
+        );
+        // Truncated JPEG magic and WebP magic both refuse gracefully.
+        assert!(decode_image_capped("x", &[0xFF, 0xD8, 0xFF, 0x00], 4096).is_none());
+        assert!(decode_image_capped("x", b"RIFF....WEBP", 4096).is_none());
+        assert!(decode_image_capped("x", b"GIF89a", 4096).is_none());
+    }
+
+    fn solid(w: u32, h: u32, px: [u8; 4]) -> ImageData {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..w * h {
+            rgba.extend_from_slice(&px);
+        }
+        ImageData {
+            url: "x".to_owned(),
+            width: w,
+            height: h,
+            rgba,
+        }
+    }
+
+    /// A flat field comes back unchanged; blurring nothing blurs nothing.
+    #[test]
+    fn blur_leaves_flat_fields_alone() {
+        let flat = solid(8, 8, [10, 20, 30, 255]);
+        assert_eq!(box_blur(flat.clone(), 3.0).rgba, flat.rgba);
+        assert_eq!(box_blur(flat.clone(), 0.0).rgba, flat.rgba);
+        assert_eq!(box_blur(flat.clone(), -2.0).rgba, flat.rgba);
+    }
+
+    /// An impulse spreads symmetrically and roughly preserves the total.
+    #[test]
+    fn blur_spreads_an_impulse() {
+        let mut one = solid(5, 5, [0, 0, 0, 255]);
+        one.rgba[(2 * 5 + 2) * 4] = 255;
+        one.rgba[(2 * 5 + 2) * 4 + 3] = 255;
+        let blurred = box_blur(one, 1.0);
+        let at = |x: usize, y: usize| blurred.rgba[(y * 5 + x) * 4];
+        assert!(at(2, 2) < 255 && at(2, 2) > 0);
+        assert_eq!(at(1, 2), at(3, 2));
+        assert_eq!(at(2, 1), at(2, 3));
+        assert!(at(1, 2) > 0 && at(0, 2) < at(1, 2) && at(1, 2) < at(2, 2));
+        let total: u32 = blurred.rgba.iter().map(|v| *v as u32).sum();
+        let expect = 255 + 25 * 255;
+        assert!(
+            total.abs_diff(expect) <= 25,
+            "rounding drifted too far: {total} vs {expect}"
+        );
     }
 }

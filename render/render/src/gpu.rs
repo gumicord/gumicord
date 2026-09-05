@@ -53,6 +53,7 @@ pub struct Gpu {
     globals_bind: wgpu::BindGroup,
     atlas_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    mip_sampler: wgpu::Sampler,
 
     rect_buf: wgpu::Buffer,
     rect_capacity: usize,
@@ -181,6 +182,16 @@ impl Gpu {
             ..Default::default()
         });
 
+        // Backgrounds minify across whole screens, so they sail through
+        // mipmaps; the atlas above stays single-level and sharp.
+        let mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("background"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         let rect_pipeline = make_pipeline(
             &device,
             &shader,
@@ -276,6 +287,7 @@ impl Gpu {
             globals_bind,
             atlas_layout,
             sampler,
+            mip_sampler,
             rect_buf,
             rect_capacity: INITIAL_RECTS,
             glyph_buf,
@@ -305,8 +317,22 @@ impl Gpu {
 
     /// The bind group for the glyph atlas; recreate it when the atlas grows.
     pub fn atlas_bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.bind_texture(view, &self.sampler, "atlas")
+    }
+
+    /// The bind group for one background texture, with mip filtering.
+    pub fn background_bind_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.bind_texture(view, &self.mip_sampler, "gumicord-background")
+    }
+
+    fn bind_texture(
+        &self,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        label: &str,
+    ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas"),
+            label: Some(label),
             layout: &self.atlas_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -315,7 +341,7 @@ impl Gpu {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         })
@@ -357,12 +383,13 @@ impl Gpu {
     /// giving up leaves the window blank until the next input.
     ///
     /// One bind group per atlas page, since a bind group names a single
-    /// texture.
+    /// texture. Background textures ride alongside under their own runs.
     #[must_use]
     pub fn submit(
         &mut self,
         dl: &DrawList,
         atlas_binds: &[wgpu::BindGroup],
+        bg_binds: &[wgpu::BindGroup],
         clear: [f32; 4],
     ) -> Presented {
         let frame = match self.acquire() {
@@ -450,6 +477,17 @@ impl Gpu {
                             // A missing page is skipped; page zero would draw
                             // the wrong characters.
                             let Some(bind) = atlas_binds.get(run.page as usize) else {
+                                continue;
+                            };
+                            pass.set_bind_group(1, bind, &[]);
+                            pass.set_vertex_buffer(0, self.glyph_buf.slice(..));
+                        }
+                        RunKind::Image => {
+                            pass.set_pipeline(&self.text_pipeline);
+                            pass.set_bind_group(0, &self.globals_bind, &[]);
+                            // A missing texture is skipped; the colour
+                            // underneath already drew.
+                            let Some(bind) = bg_binds.get(run.page as usize) else {
                                 continue;
                             };
                             pass.set_bind_group(1, bind, &[]);

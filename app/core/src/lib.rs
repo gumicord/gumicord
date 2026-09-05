@@ -598,11 +598,11 @@ impl Application for Gumicord {
 
     /// Hands over fetched images, just before drawing.
     /// The atlas evicted images. They are still on disk, so this re-reads
-    /// rather than refetching; avatars vanish for one frame.
+    /// rather than refetching; avatars vanish for one frame. Backgrounds own
+    /// their textures and are untouched.
     fn images_dropped(&mut self) {
         tracing::debug!("the atlas evicted images; re-reading them");
         self.images.forget_requested();
-        self.assets.forget_requested();
     }
 
     /// Requests images that were about to draw and were missing.
@@ -617,9 +617,14 @@ impl Application for Gumicord {
     }
 
     fn take_images(&mut self) -> Vec<gumicord_render::ImageData> {
-        let mut out = self.images.take();
-        out.extend(self.assets.take());
-        out
+        self.images.take()
+    }
+
+    /// Takes arrived background images. Apart from avatars on purpose: those
+    /// share the atlas and recycle, while backgrounds own their textures and
+    /// outlive evictions.
+    fn take_backgrounds(&mut self) -> Vec<gumicord_render::ImageData> {
+        self.assets.take()
     }
 
     fn accesskit_update(

@@ -84,10 +84,10 @@ base64 = "0.22"
 # QR login: encoding only. The drawing is ours.
 qrcode = { version = "0.14", default-features = false }
 
-# Images. PNG only: the CDN is asked for .png, so a general image library
-# is not needed. Attachments, which are whatever the user uploaded, will
-# need another look.
+# Images. PNG for avatars (the CDN is asked for .png), plus JPEG for theme
+# backgrounds, which are usually photos. Anything else falls back.
 png = "0.18"
+jpeg-decoder = "0.3"
 
 # Persistence
 rusqlite = { version = "0.38", features = ["bundled", "backup"] }

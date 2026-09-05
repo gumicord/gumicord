@@ -60,13 +60,16 @@ const FALLBACK_TEXT: Color = Color {
 pub enum RunKind {
     Rect,
     Glyph,
+    /// A theme background: same instances as glyphs, another texture.
+    Image,
 }
 
 /// A run of draws sharing a pipeline and a clip.
 #[derive(Debug, Clone, Copy)]
 pub struct Run {
     pub kind: RunKind,
-    /// Which atlas page to read; unused for rects.
+    /// Which atlas page to read, or which background texture for
+    /// [`RunKind::Image`]; unused for rects.
     pub page: u32,
     /// The instance range.
     pub first: u32,
@@ -158,7 +161,8 @@ impl DrawList {
 
     /// Extends the previous run when it matches, otherwise starts one.
     /// A different page starts a new run: one draw binds one texture, and
-    /// glyphs from another page would read from the wrong one.
+    /// glyphs from another page would read from the wrong one. Background
+    /// textures ride the same rule under their own kind.
     fn extend_run(&mut self, kind: RunKind, first: u32, scissor: Option<[u32; 4]>, page: u32) {
         if let Some(last) = self.runs.last_mut()
             && last.kind == kind
@@ -175,6 +179,27 @@ impl DrawList {
             scissor,
             page,
         });
+    }
+
+    /// Adds a theme background quad. Same vertices as [`push_glyph`], but a
+    /// run of its own: backgrounds bind a different texture per image, so
+    /// sharing runs with glyphs would read from the wrong one.
+    #[allow(clippy::too_many_arguments)]
+    fn push_image(
+        &mut self,
+        r: [f32; 4],
+        uv: [f32; 4],
+        color: [f32; 4],
+        radius: f32,
+        scissor: Option<[u32; 4]>,
+        index: u32,
+    ) {
+        let first = self.glyph_count();
+        self.glyphs.extend_from_slice(&[
+            r[0], r[1], r[2], r[3], uv[0], uv[1], uv[2], uv[3], color[0], color[1], color[2],
+            color[3], 1.0, radius, 0.0, 0.0,
+        ]);
+        self.extend_run(RunKind::Image, first, scissor, index);
     }
 }
 
@@ -227,6 +252,7 @@ fn scissor_of(clip: Option<Rect>, scale: f32, viewport: (u32, u32)) -> Option<[u
 pub fn build(
     layout: &LayoutResult<'_>,
     text: &mut TextEngine,
+    backgrounds: &crate::backgrounds::Backgrounds,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     scale: f32,
@@ -261,7 +287,7 @@ pub fn build(
 
         draw_background(
             &mut dl,
-            text,
+            backgrounds,
             theme_namespace,
             style,
             rect,
@@ -360,7 +386,7 @@ fn draw_icon(
 #[allow(clippy::too_many_arguments)]
 fn draw_background(
     dl: &mut DrawList,
-    text: &TextEngine,
+    backgrounds: &crate::backgrounds::Backgrounds,
     namespace: Option<&str>,
     style: &Style,
     rect: [f32; 4],
@@ -381,13 +407,24 @@ fn draw_background(
     }
 
     // [2] image, drawn over the colour so a missing one degrades to it.
+    // Each background owns its texture, so these instances run apart from
+    // glyphs even though the vertices match.
     if let (Some(ns), Some(bg)) = (
         namespace,
         style.background.as_ref().filter(|b| b.image.is_some()),
     ) && let Some(image) = bg.image.as_ref()
     {
         let key = image.cache_key(ns);
-        if let Some(e) = text.image(&key) {
+        if let Some((index, w, h)) = backgrounds.get(&key) {
+            let e = GlyphEntry {
+                page: index,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                left: 0,
+                top: 0,
+                w,
+                h,
+                is_color: true,
+            };
             draw_background_image(dl, &e, bg, rect, radius_px, opacity, scale, scissor);
         } else {
             dl.missing_backgrounds.push(key);
@@ -466,7 +503,7 @@ fn draw_background_image(
                     continue;
                 }
                 let (uw, uh) = (e.uv[2] - e.uv[0], e.uv[3] - e.uv[1]);
-                dl.push_glyph(
+                dl.push_image(
                     [dx, dy, dw, dh],
                     [
                         e.uv[0],
@@ -475,7 +512,6 @@ fn draw_background_image(
                         e.uv[1] + uh * (dh / e.h as f32),
                     ],
                     colour,
-                    true,
                     0.0,
                     scissor,
                     e.page,
@@ -486,7 +522,7 @@ fn draw_background_image(
     }
 
     let (dest, uv) = background_quad(box_px, e, bg.fit, pos);
-    dl.push_glyph(dest, uv, colour, true, radius_px, scissor, e.page);
+    dl.push_image(dest, uv, colour, radius_px, scissor, e.page);
 }
 
 /// Destination rect and UV for a background image. Cover crops the overflow
