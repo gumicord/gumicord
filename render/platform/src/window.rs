@@ -28,7 +28,7 @@ use crate::text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument};
 use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
@@ -94,6 +94,12 @@ pub trait Application {
     /// Returning true takes the press whole, like [`Application::link_pressed`];
     /// false hands it back down.
     fn spoiler_pressed(&mut self, _owner: u64, _run: usize) -> bool {
+        false
+    }
+
+    /// A swipe ended over the client area, with what lay under its start.
+    /// Taps already arrive as presses; only true swipes come here.
+    fn swiped(&mut self, _hits: &[Hit], _swipe: crate::touch::Swipe) -> bool {
         false
     }
 
@@ -299,6 +305,7 @@ pub fn run(mut app: impl Application + 'static) -> Result<(), PlatformError> {
         hovering_link: false,
         hovering_spoiler: false,
         scroll_grab: None,
+        touch: crate::touch::Tracker::default(),
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
@@ -345,6 +352,8 @@ struct Host {
     hovering_spoiler: bool,
     /// The scrollbar being dragged, while held.
     scroll_grab: Option<ScrollGrab>,
+    /// The finger being tracked, if any.
+    touch: crate::touch::Tracker,
     /// A title-bar control button armed on press; acted on on release.
     ///
     /// Acting on press lets Windows hand the release to whatever is now under
@@ -392,10 +401,81 @@ impl Host {
 
     /// Nodes under the pointer, front to back.
     fn hits(&self) -> Vec<Hit> {
+        self.hits_at(self.cursor.0, self.cursor.1)
+    }
+
+    /// Nodes under a point, front to back.
+    fn hits_at(&self, x: f32, y: f32) -> Vec<Hit> {
         let Some(r) = &self.renderer else {
             return Vec::new();
         };
-        r.hit_test(self.cursor.0, self.cursor.1).cloned().collect()
+        r.hit_test(x, y).cloned().collect()
+    }
+
+    /// A primary press in the client area: links, spoilers, then the app.
+    fn press_client(&mut self) {
+        // Scrollbars come before the app: they overlap the
+        // list, and only one can answer.
+        let grabbed = self
+            .renderer
+            .as_mut()
+            .and_then(|r| r.grab_scrollbar(self.cursor.0, self.cursor.1));
+        if let Some(g) = grabbed {
+            self.scroll_grab = Some(g);
+            self.request_redraw();
+            return;
+        }
+
+        let hits = self.hits();
+
+        // A link takes the press whole: opening it and
+        // toggling whatever is underneath at the same time
+        // would be two answers to one press. The app may
+        // decline, which hands the press back below.
+        if let Some(url) = self.link_under_cursor()
+            && self.app.link_pressed(&url)
+        {
+            self.open_link(&url);
+            return;
+        }
+
+        // A spoiler run likewise: covered text presses as a
+        // whole, and the app may decline while a menu floats.
+        // A run with a link under it already went to the link.
+        if let Some((owner, run)) = self.spoiler_under_cursor()
+            && self.app.spoiler_pressed(owner, run)
+        {
+            self.request_redraw();
+            return;
+        }
+
+        if self.app.pressed(&hits) {
+            // A dark caret right after pressing the field
+            // leaves it unclear whether the press landed.
+            self.restart_caret();
+            self.request_redraw();
+        }
+    }
+
+    /// Scrolls the frontmost scroll region under a point.
+    fn scroll_at(&mut self, x: f32, y: f32, dy: f32) {
+        let hits = self.hits_at(x, y);
+        let Some(r) = &mut self.renderer else { return };
+        // The frontmost scroll region under the pointer.
+        let target = hits
+            .iter()
+            .find(|h| gumicord_render::intrinsic(h.id).scroll)
+            .map(|h| h.id);
+        let Some(id) = target else { return };
+        let moved = r.scroll_by(id, dy);
+        let (at, max) = r.scroll_place(id);
+        // Reported even when nothing moved: scrolling further at the
+        // top is the request for more history, and by then the
+        // position no longer changes.
+        self.app.scrolled(id, at, max);
+        if moved {
+            self.request_redraw();
+        }
     }
 
     /// The link run under the pointer, if any.
@@ -1088,47 +1168,44 @@ impl ApplicationHandler<LoopEvent> for Host {
                         tracing::debug!(slot = other, "unknown title bar button");
                     }
                     Zone::Client => {
-                        // Scrollbars come before the app: they overlap the
-                        // list, and only one can answer.
-                        let grabbed = self
-                            .renderer
-                            .as_mut()
-                            .and_then(|r| r.grab_scrollbar(self.cursor.0, self.cursor.1));
-                        if let Some(g) = grabbed {
-                            self.scroll_grab = Some(g);
-                            self.request_redraw();
-                            return;
-                        }
+                        self.press_client();
+                    }
+                }
+            }
 
-                        let hits = self.hits();
-
-                        // A link takes the press whole: opening it and
-                        // toggling whatever is underneath at the same time
-                        // would be two answers to one press. The app may
-                        // decline, which hands the press back below.
-                        if let Some(url) = self.link_under_cursor()
-                            && self.app.link_pressed(&url)
+            WindowEvent::Touch(touch) => {
+                let scale = self.renderer.as_ref().map_or(1.0, Renderer::scale) as f64;
+                let point = (
+                    (touch.location.x / scale) as f32,
+                    (touch.location.y / scale) as f32,
+                );
+                self.cursor = point;
+                match touch.phase {
+                    TouchPhase::Started => {
+                        self.touch.press(touch.id, point.0, point.1);
+                    }
+                    TouchPhase::Moved => {
+                        if let Some(crate::touch::TouchAction::Scroll { dy, .. }) =
+                            self.touch.mov(touch.id, point.0, point.1)
                         {
-                            self.open_link(&url);
-                            return;
+                            self.scroll_at(point.0, point.1, dy);
                         }
-
-                        // A spoiler run likewise: covered text presses as a
-                        // whole, and the app may decline while a menu floats.
-                        // A run with a link under it already went to the link.
-                        if let Some((owner, run)) = self.spoiler_under_cursor()
-                            && self.app.spoiler_pressed(owner, run)
-                        {
-                            self.request_redraw();
-                            return;
+                    }
+                    TouchPhase::Ended => match self.touch.release(touch.id, point.0, point.1) {
+                        Some(crate::touch::TouchAction::Tap { .. }) => {
+                            self.press_client();
                         }
-
-                        if self.app.pressed(&hits) {
-                            // A dark caret right after pressing the field
-                            // leaves it unclear whether the press landed.
-                            self.restart_caret();
-                            self.request_redraw();
+                        Some(crate::touch::TouchAction::Swipe(swipe)) => {
+                            let crate::touch::Swipe::Point { x, y, .. } = swipe;
+                            let hits = self.hits_at(x, y);
+                            if self.app.swiped(&hits, swipe) {
+                                self.request_redraw();
+                            }
                         }
+                        _ => {}
+                    },
+                    TouchPhase::Cancelled => {
+                        self.touch.cancel(touch.id);
                     }
                 }
             }
