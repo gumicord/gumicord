@@ -192,7 +192,7 @@ define_node_ids! {
     ChatMessageHeaderAuthor,  "chat.message.header.author",      Message, Core,   "送信者名 (FR-022)";
     ChatMessageHeaderBadges,  "chat.message.header.badges",      Message, Core,   "BOT タグなど";
     ChatMessageHeaderTime,    "chat.message.header.timestamp",   Message, Core,   "時刻";
-    ChatMessageReplyRef,      "chat.message.reply_ref",          Message, Core,   "返信元の参照表示 (FR-028)。小アイコンと1行文";
+    ChatMessageReplyRef,      "chat.message.reply_ref",          Message, Core,   "返信元の参照表示 (FR-028)。小アイコンと1行文。押すと元メッセージへ移動する";
     ChatMessageReplyRefAvatar, "chat.message.reply_ref.avatar",   None,    Core,   "参照表示の小アイコン";
     ChatMessageContent,       "chat.message.content",            Message, Core,   "本文 (FR-021)";
     ChatMessageQuoteRow,      "chat.message.content.quote",      None,    Core,   "引用ブロックの行。中身の高さにだけ合わせる";
