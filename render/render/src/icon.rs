@@ -41,6 +41,7 @@ pub static ICONS: &[(&str, IconDef)] = &[
     ("paste", PASTE),
     ("select_all", SELECT_ALL),
     ("logout", LOGOUT),
+    ("gear", GEAR),
 ];
 
 /// Looks an icon up, returning the interned name alongside it so the atlas can
@@ -288,6 +289,45 @@ const FOLDER: IconDef = IconDef {
         (0.14, 0.76),
     ]],
     width: 1.2 / 12.0,
+};
+
+/// A gear: two octagon rings with eight teeth. Octagons, not circles: at
+/// 16px a true circle's segments would alias unevenly, while eight straight
+/// runs read as a ring.
+const GEAR: IconDef = IconDef {
+    strokes: &[
+        &[
+            (0.80, 0.50),
+            (0.71, 0.71),
+            (0.50, 0.80),
+            (0.29, 0.71),
+            (0.20, 0.50),
+            (0.29, 0.29),
+            (0.50, 0.20),
+            (0.71, 0.29),
+            (0.80, 0.50),
+        ],
+        &[
+            (0.64, 0.50),
+            (0.60, 0.60),
+            (0.50, 0.64),
+            (0.40, 0.60),
+            (0.36, 0.50),
+            (0.40, 0.40),
+            (0.50, 0.36),
+            (0.60, 0.40),
+            (0.64, 0.50),
+        ],
+        &[(0.80, 0.50), (0.93, 0.50)],
+        &[(0.71, 0.71), (0.80, 0.80)],
+        &[(0.50, 0.80), (0.50, 0.93)],
+        &[(0.29, 0.71), (0.20, 0.80)],
+        &[(0.20, 0.50), (0.07, 0.50)],
+        &[(0.29, 0.29), (0.20, 0.20)],
+        &[(0.50, 0.20), (0.50, 0.07)],
+        &[(0.71, 0.29), (0.80, 0.20)],
+    ],
+    width: 1.1 / 12.0,
 };
 
 // ─────────────────────────────────────────────────────── Rasterising

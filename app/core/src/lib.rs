@@ -94,8 +94,8 @@ enum Showing {
 }
 
 /// Where the settings screen stands. Closed most of the time; while open it
-/// owns every press, like a menu, and the tree carries it last so it draws
-/// on top.
+/// takes the screen's place under the title bar and owns every press below
+/// it, like a menu.
 #[derive(Debug, Clone, Default)]
 struct SettingsView {
     open: bool,
@@ -134,6 +134,9 @@ const FOLDER_TILES: usize = 4;
 const CANCEL_COMPOSING: &str = "cancel_composing";
 /// Slot for the settings gear in the user panel; same use.
 const SETTINGS_OPEN: &str = "settings_open";
+/// The gear's icon. Unknown names draw nothing, so the registry and this
+/// string are pinned together by a test below.
+const SETTINGS_GEAR: &str = "gear";
 
 /// Leads the login screen after an involuntary sign-out. A silent kick back
 /// to the QR reads as a crash.
@@ -1628,8 +1631,11 @@ impl Gumicord {
     /// Rebuilds the whole tree every frame; diffing waits until the renderer's
     /// requirements settle.
     fn build_tree(&self, panes: Panes) -> UiNode {
-        // The only place the two screens diverge.
-        let screen = if self.shows_main() {
+        // The settings screen takes the screen's place, under the title bar:
+        // covering the window controls would strand the window.
+        let screen = if self.settings.open {
+            self.settings_screen()
+        } else if self.shows_main() {
             UiNode::new(NodeId::AppScreenMain)
                 .children(self.sidebar(panes))
                 .child(self.chat_view())
@@ -1660,9 +1666,6 @@ impl Gumicord {
             .child_if(tooltip.is_some(), || {
                 tooltip.clone().expect("直前に確かめた")
             })
-            // Last, so it draws above everything: while open it also owns
-            // every press.
-            .child_if(self.settings.open, || self.settings_screen())
     }
 
     /// Full date for a hovered timestamp. The header shows only the hour, and
@@ -2711,7 +2714,7 @@ impl Gumicord {
                             ),
                             State::Hover,
                         )
-                        .child(UiNode::icon(NodeId::PrimitiveIcon, "gear")),
+                        .child(UiNode::icon(NodeId::PrimitiveIcon, SETTINGS_GEAR)),
                 ),
         )
     }
@@ -4450,7 +4453,8 @@ mod tests {
         out
     }
 
-    /// The screen carries the nav and the page, in that order.
+    /// The screen carries the nav and the page, in that order, under the
+    /// title bar that never leaves.
     #[test]
     fn opening_settings_shows_screen_nav_and_page() {
         let a = with_settings();
@@ -4468,6 +4472,7 @@ mod tests {
             .position(|i| *i == NodeId::SettingsPage)
             .expect("中身がない");
         assert!(screen < nav && nav < page, "並びが逆");
+        assert!(ids.contains(&NodeId::ChromeTitlebar), "題名欄が消えている");
 
         let closed = app();
         assert!(
@@ -4525,6 +4530,23 @@ mod tests {
         assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]));
         assert_eq!(a.selected_channel, before, "下のチャンネルへ移動した");
         assert!(!a.settings.open, "外側の押下で閉じない");
+    }
+
+    /// The gear and its press handler address the same slot, and the icon
+    /// name exists in the registry: either link breaking leaves a dead,
+    /// invisible button.
+    #[test]
+    fn the_gear_opens_settings() {
+        assert!(
+            gumicord_render::icon::lookup(SETTINGS_GEAR).is_some(),
+            "歯車の絵がない"
+        );
+        let mut a = app();
+        assert!(a.pressed(&[hit_of(
+            NodeId::PrimitiveButton,
+            Some(Key::Slot(SETTINGS_OPEN))
+        )]));
+        assert!(a.settings.open, "歯車で開かない");
     }
 
     /// Escape closes it; an outside press does too, with nothing to decide.
