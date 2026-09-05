@@ -274,6 +274,12 @@ fn decode_jpeg_capped(url: &str, bytes: &[u8], max_side: u32) -> Option<ImageDat
 /// Three box passes approximate a gaussian. The radius is clamped: beyond a
 /// couple dozen pixels the wait stops matching a background blur.
 pub(crate) fn box_blur(mut image: ImageData, radius: f32) -> ImageData {
+    if radius > 24.0 {
+        tracing::warn!(
+            radius,
+            "background blur is clamped; larger radii wait for a faster path"
+        );
+    }
     let r = radius.clamp(0.0, 24.0).round() as usize;
     if r == 0 {
         return image;
