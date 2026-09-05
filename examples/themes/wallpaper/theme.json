@@ -32,6 +32,7 @@
     "font.body": { "size": 15, "lineHeight": 22 },
     "font.title": { "size": 16, "lineHeight": 22, "weight": 600 },
     "font.small": { "size": 12, "lineHeight": 16 },
+    "font.mono": { "family": "Cascadia Code", "size": 13, "lineHeight": 20 },
 
     "shadow.panel": { "x": 0, "y": 4, "blur": 16, "color": "#00000066" }
   },
@@ -58,39 +59,10 @@
       "style": { "background": "#00000000", "height": 32 }
     },
     {
-      "select": "chrome.titlebar.title",
-      "style": { "font": "$font.small", "color": "$color.text.muted" }
-    },
-    {
-      "select": "chrome.titlebar.control",
-      "when": { "state": "hover" },
-      "style": { "background": "$color.panel.hover" }
-    },
-
-    {
-      "select": "nav.guild_list",
-      "style": { "background": "$color.panel.deep", "padding": 8, "gap": 8 }
-    },
-    {
-      "select": "nav.guild_list.item",
-      "style": { "width": 48, "height": 48, "radius": "$radius.lg" }
-    },
-    {
       "select": "nav.guild_list.item",
       "when": { "state": "selected" },
       "style": { "radius": "$radius.md", "borderColor": "$color.accent", "borderWidth": 2 }
     },
-    {
-      "select": "nav.guild_list.item.badge",
-      "style": {
-        "background": "$color.danger",
-        "color": "#ffffff",
-        "font": "$font.small",
-        "radius": "$radius.full",
-        "padding": [2, 6, 2, 6]
-      }
-    },
-
     {
       "select": "nav.channel_list",
       "style": {
@@ -99,14 +71,6 @@
         "borderColor": "$color.border",
         "borderWidth": 1
       }
-    },
-    {
-      "select": "nav.channel_list.category",
-      "style": { "font": "$font.small", "color": "$color.text.muted", "padding": [12, 8, 4, 8] }
-    },
-    {
-      "select": "nav.channel_list.item",
-      "style": { "radius": "$radius.sm", "padding": [6, 8, 6, 8], "color": "$color.text.secondary" }
     },
     {
       "select": "nav.channel_list.item",
@@ -122,22 +86,6 @@
       "select": "nav.channel_list.item",
       "when": { "state": "mentioned" },
       "style": { "color": "$color.danger" }
-    },
-
-    {
-      "select": "chat.header",
-      "style": {
-        "background": "$color.panel",
-        "borderColor": "$color.border",
-        "borderWidth": 1,
-        "height": 48,
-        "padding": [0, 16, 0, 16],
-        "shadow": "$shadow.panel"
-      }
-    },
-    {
-      "select": "chat.header.title",
-      "style": { "font": "$font.title" }
     },
 
     {
@@ -196,13 +144,422 @@
       }
     },
     {
-      "select": "overlay.menu.item",
+      "select": "app.screen.login",
+      "style": { "gap": 16, "padding": [24, 24, 24, 24] }
+    },
+    {
+      "select": "app.screen.login.title",
+      "style": { "font": { "size": 22, "lineHeight": 30, "weight": 600 } }
+    },
+    {
+      "select": "app.screen.login.hint",
+      "style": { "color": "$color.text.secondary", "font": "$font.body" }
+    },
+    {
+      "select": "app.screen.login.field",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.md",
+        "padding": 16,
+        "minHeight": 44
+      }
+    },
+    {
+      "select": "app.screen.login.field",
+      "when": { "state": "focus" },
+      "style": { "borderColor": "$color.accent", "borderWidth": 1 }
+    },
+    {
+      "select": "app.screen.login.card",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.lg",
+        "padding": [16, 24, 16, 24],
+        "shadow": "$shadow.panel",
+        "gap": 16
+      }
+    },
+    {
+      "select": "app.screen.login.label",
+      "style": { "font": "$font.small", "color": "$color.text.secondary", "margin": [16, 0, 4, 0] }
+    },
+    {
+      "select": "app.screen.login.forgot",
+      "style": { "font": "$font.small", "color": "$color.accent" }
+    },
+    {
+      "select": "app.screen.login.forgot",
+      "when": { "state": "hover" },
+      "style": { "decoration": "underline" }
+    },
+    {
+      "select": "app.screen.login.error",
+      "style": { "font": "$font.small", "color": "$color.danger", "margin": [8, 0, 8, 0] }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_submit" },
+      "style": { "background": "$color.accent", "color": "#ffffff", "font": { "weight": 600 } }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_submit", "state": "hover" },
+      "style": { "background": "$color.accent", "opacity": 0.9 }
+    },
+    {
+      "select": "app.screen.login.divider",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.muted",
+        "margin": [16, 0, 16, 0]
+      }
+    },
+    {
+      "select": "app.screen.login.qr_button",
+      "style": { "gap": 8, "padding": [10, 16, 10, 16] }
+    },
+    {
+      "select": "app.screen.login.register",
+      "style": { "font": "$font.small", "color": "$color.accent", "margin": [16, 0, 0, 0] }
+    },
+    {
+      "select": "app.screen.login.register",
+      "when": { "state": "hover" },
+      "style": { "decoration": "underline" }
+    },
+    {
+      "select": "primitive.qr",
+      "style": {
+        "background": "#ffffff",
+        "color": "#000000",
+        "radius": "$radius.md",
+        "padding": [12, 12, 12, 12]
+      }
+    },
+
+    {
+      "select": "chrome.titlebar.title",
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+    {
+      "select": "chrome.titlebar.control",
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "chrome.titlebar.control",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover" }
+    },
+
+    {
+      "select": "nav.guild_list",
+      "style": { "background": "$color.panel.deep", "padding": [12, 12, 12, 4], "gap": 8 }
+    },
+    {
+      "select": "nav.guild_list.item",
+      "style": { "width": 56, "height": 48 }
+    },
+    {
+      "select": "nav.guild_list.item",
+      "when": { "state": "grouped" },
+      "style": { "width": 48, "height": 48 }
+    },
+    {
+      "select": "nav.guild_list.item",
+      "when": { "platform": "mobile" },
+      "style": { "width": 52, "height": 44 }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
+      "style": {
+        "width": 4,
+        "height": 8,
+        "margin": [0, 52, 0, 0],
+        "radius": "$radius.full",
+        "background": "$color.text.primary"
+      }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
+      "when": { "state": "hover" },
+      "style": { "height": 20 }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
       "when": { "state": "selected" },
+      "style": { "height": 40 }
+    },
+    {
+      "select": "nav.guild_list.item.pill",
+      "when": { "state": "grouped" },
+      "style": { "margin": [0, 44, 0, 0] }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "style": {
+        "width": 48,
+        "height": 48,
+        "margin": [0, 0, 0, 8],
+        "radius": "$radius.lg",
+        "background": "$color.panel.deep"
+      }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "hover" },
+      "style": { "radius": "$radius.md" }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "selected" },
+      "style": { "radius": "$radius.md" }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "grouped" },
+      "style": { "width": 48, "height": 48, "margin": [0, 0, 0, 0] }
+    },
+    {
+      "select": "nav.guild_list.item.icon",
+      "when": { "state": "collapsed" },
+      "style": {
+        "width": 14,
+        "height": 14,
+        "margin": [1, 1, 1, 1],
+        "radius": "$radius.sm",
+        "font": { "size": 9, "lineHeight": 14 }
+      }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "style": {
+        "width": 48,
+        "margin": [0, 0, 0, 8],
+        "radius": "$radius.lg",
+        "background": "$color.panel.hover",
+        "padding": [0, 0, 4, 0],
+        "gap": 4
+      }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "collapsed" },
+      "style": {
+        "height": 48,
+        "radius": "$radius.md",
+        "background": "$color.panel.deep",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "padding": [6, 6, 6, 6]
+      }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "hover" },
       "style": { "background": "$color.panel.selected" }
     },
     {
+      "select": "nav.guild_list.folder.icon",
+      "style": { "color": "$color.text.secondary", "font": { "size": 26, "lineHeight": 26 } }
+    },
+    {
+      "select": "nav.guild_list.folder.icon",
+      "style": { "color": "$data.tint" }
+    },
+    {
+      "select": "nav.guild_list.folder",
+      "when": { "state": "collapsed" },
+      "style": { "borderColor": "$data.tint" }
+    },
+    {
+      "select": "nav.guild_list.item.badge",
+      "style": {
+        "margin": [32, 0, 0, 38],
+        "borderColor": "$color.panel.deep",
+        "borderWidth": 2,
+        "background": "$color.danger",
+        "color": "#ffffff",
+        "font": { "size": 12, "lineHeight": 16, "weight": 600 },
+        "radius": "$radius.full",
+        "padding": [0, 5, 0, 5]
+      }
+    },
+
+    {
+      "select": "nav.channel_list.header",
+      "style": { "font": "$font.title", "padding": [0, 8, 0, 8] }
+    },
+    {
+      "select": "nav.guild_list.home",
+      "style": { "width": 48, "height": 48, "margin": [0, 0, 0, 8], "radius": "$radius.full", "background": "$color.accent", "color": "#ffffff" }
+    },
+    {
+      "select": "nav.channel_list.item",
+      "style": {
+        "radius": "$radius.sm",
+        "padding": [6, 8, 6, 8],
+        "gap": 6,
+        "color": "$color.text.secondary"
+      }
+    },
+    {
+      "select": "nav.channel_list.item",
+      "when": { "state": "unread" },
+      "style": { "color": "$color.text.primary" }
+    },
+    {
+      "select": "nav.channel_list.item.badge",
+      "style": {
+        "background": "$color.danger",
+        "color": "#ffffff",
+        "font": "$font.small",
+        "radius": "$radius.full",
+        "padding": [2, 6, 2, 6]
+      }
+    },
+    {
+      "select": "nav.channel_list.category",
+      "style": { "font": "$font.small", "color": "$color.text.muted", "padding": [12, 8, 4, 8] }
+    },
+
+    {
+      "select": "nav.user_panel",
+      "style": { "background": "$color.panel", "padding": [0, 8, 0, 8], "gap": 8 }
+    },
+    {
+      "select": "nav.user_panel.avatar",
+      "style": { "radius": "$radius.full", "background": "$color.panel.deep" }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "style": {
+        "width": 14,
+        "height": 14,
+        "margin": [20, 0, 0, 20],
+        "radius": "$radius.full",
+        "background": "$color.text.muted",
+        "borderColor": "$color.panel",
+        "borderWidth": 2
+      }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "when": { "slot": "online" },
+      "style": { "background": "#3ba55d" }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "when": { "slot": "idle" },
+      "style": { "background": "#faa81a" }
+    },
+    {
+      "select": "nav.user_panel.presence",
+      "when": { "slot": "dnd" },
+      "style": { "background": "$color.danger" }
+    },
+    {
+      "select": "nav.user_panel.name",
+      "style": { "font": "$font.small", "color": "$color.text.primary" }
+    },
+    {
+      "select": "nav.user_panel.status",
+      "style": { "font": { "size": 11, "lineHeight": 14 }, "color": "$color.text.muted" }
+    },
+
+    {
+      "select": "nav.member_list",
+      "style": { "background": "$color.panel", "padding": [8, 0, 8, 0], "gap": 2 }
+    },
+    {
+      "select": "nav.member_list.group",
+      "style": {
+        "font": { "size": 11, "lineHeight": 24, "weight": 600 },
+        "color": "$color.text.muted",
+        "padding": [16, 8, 4, 16]
+      }
+    },
+    {
+      "select": "nav.member_list.item",
+      "style": { "padding": [5, 8, 5, 8], "margin": [0, 8, 0, 8], "gap": 8, "radius": "$radius.md" }
+    },
+    {
+      "select": "nav.member_list.item",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover" }
+    },
+    {
+      "select": "nav.member_list.item.avatar",
+      "style": { "radius": "$radius.full", "background": "$color.panel.deep" }
+    },
+    {
+      "select": "nav.member_list.item.presence",
+      "style": {
+        "width": 14,
+        "height": 14,
+        "margin": [20, 0, 0, 20],
+        "radius": "$radius.full",
+        "background": "$color.text.muted",
+        "borderColor": "$color.panel",
+        "borderWidth": 2
+      }
+    },
+    {
+      "select": "nav.member_list.item.presence",
+      "when": { "slot": "online" },
+      "style": { "background": "#3ba55d" }
+    },
+    {
+      "select": "nav.member_list.item.presence",
+      "when": { "slot": "idle" },
+      "style": { "background": "#faa81a" }
+    },
+    {
+      "select": "nav.member_list.item.presence",
+      "when": { "slot": "dnd" },
+      "style": { "background": "$color.danger" }
+    },
+    {
+      "select": "nav.member_list.item.name",
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "nav.member_list.item.name",
+      "style": { "color": "$data.tint" }
+    },
+
+    {
+      "select": "chat.header",
+      "style": {
+        "background": "$color.panel",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "padding": [0, 16, 0, 16],
+        "height": 48,
+        "gap": 8,
+        "shadow": "$shadow.panel"
+      }
+    },
+    {
+      "select": "chat.header.title",
+      "style": { "font": "$font.title" }
+    },
+    {
+      "select": "chat.header.topic",
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+
+    {
       "select": "chat.message",
-      "style": { "padding": [4, 16, 4, 16], "gap": 8 }
+      "when": { "state": "grouped" },
+      "style": { "padding": [0, 16, 0, 64] }
+    },
+    {
+      "select": "chat.message.header.author",
+      "style": { "color": "$data.tint" }
+    },
+    {
+      "select": "chat.message.content",
+      "style": { "color": "$color.text.primary" }
     },
     {
       "select": "chat.message",
@@ -267,16 +624,6 @@
       "style": { "color": "$color.accent" }
     },
     {
-      "select": "primitive.code_block",
-      "style": {
-        "background": "$color.panel.deep",
-        "radius": "$radius.sm",
-        "padding": 8,
-        "borderColor": "$color.border",
-        "borderWidth": 1
-      }
-    },
-    {
       "select": "primitive.badge",
       "style": {
         "background": "$color.accent",
@@ -285,6 +632,353 @@
         "radius": "$radius.sm",
         "padding": [1, 4, 1, 4]
       }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "bold" },
+      "style": { "font": { "weight": 700 } }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "italic" },
+      "style": { "font": { "italic": true } }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "underline" },
+      "style": { "decoration": "underline" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "strike" },
+      "style": { "decoration": "strikethrough", "color": "$color.text.muted" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "spoiler" },
+      "style": { "color": "$color.panel.selected" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "code" },
+      "style": { "font": "$font.mono", "color": "$color.text.primary" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "link" },
+      "style": { "color": "$color.accent" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "mention" },
+      "style": { "color": "$color.accent", "font": { "weight": 600 } }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "h1" },
+      "style": { "font": { "size": 22, "lineHeight": 30, "weight": 700 }, "margin": [8, 0, 4, 0] }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "h2" },
+      "style": { "font": { "size": 18, "lineHeight": 26, "weight": 700 }, "margin": [8, 0, 4, 0] }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "h3" },
+      "style": { "font": { "size": 15, "lineHeight": 22, "weight": 700 }, "margin": [8, 0, 4, 0] }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "subtext" },
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "bullet" },
+      "style": { "color": "$color.text.secondary" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "reply" },
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "edit" },
+      "style": { "font": "$font.small", "color": "$color.accent" }
+    },
+    {
+      "select": "primitive.divider",
+      "when": { "slot": "quote_bar" },
+      "style": { "width": 4, "radius": "$radius.sm", "background": "$color.border", "margin": [2, 8, 2, 0] }
+    },
+    {
+      "select": "layout.column",
+      "when": { "slot": "list" },
+      "style": { "gap": 2, "margin": [2, 0, 2, 0] }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "li0" },
+      "style": { "gap": 6 }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "li1" },
+      "style": { "gap": 6, "margin": [0, 0, 0, 16] }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "li2" },
+      "style": { "gap": 6, "margin": [0, 0, 0, 32] }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "li3" },
+      "style": { "gap": 6, "margin": [0, 0, 0, 48] }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "li4" },
+      "style": { "gap": 6, "margin": [0, 0, 0, 64] }
+    },
+    {
+      "select": "primitive.code_block",
+      "style": {
+        "font": "$font.mono",
+        "background": "$color.panel.deep",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.sm",
+        "padding": [8, 10, 8, 10],
+        "margin": [4, 0, 4, 0]
+      }
+    },
+    {
+      "select": "chat.message.reply_ref",
+      "style": { "font": "$font.small", "color": "$color.text.muted", "opacity": 0.8 }
+    },
+    {
+      "select": "chat.typing_indicator",
+      "style": { "font": "$font.small", "color": "$color.text.muted" }
+    },
+    {
+      "select": "chat.input.toolbar",
+      "style": {
+        "background": "$color.panel.deep",
+        "radius": "$radius.md",
+        "padding": [6, 12, 6, 12],
+        "margin": [0, 0, 2, 0]
+      }
+    },
+
+    {
+      "select": "overlay.scrim",
+      "when": { "slot": "dim" },
+      "style": { "background": "#00000080" }
+    },
+    {
+      "select": "overlay.popover",
+      "style": {
+        "background": "$color.panel",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.md",
+        "padding": [6, 0, 6, 0],
+        "shadow": "$shadow.panel",
+        "minWidth": 180
+      }
+    },
+    {
+      "select": "overlay.sheet",
+      "style": {
+        "background": "$color.panel",
+        "radius": "$radius.lg",
+        "padding": [8, 0, 16, 0],
+        "shadow": "$shadow.panel"
+      }
+    },
+    {
+      "select": "overlay.sheet.handle",
+      "style": {
+        "width": 36,
+        "height": 4,
+        "radius": "$radius.sm",
+        "background": "$color.text.muted",
+        "margin": [4, 0, 10, 0]
+      }
+    },
+    {
+      "select": "overlay.menu",
+      "style": { "gap": 1, "padding": [0, 6, 0, 6] }
+    },
+    {
+      "select": "overlay.menu.item",
+      "style": {
+        "gap": 10,
+        "padding": [7, 10, 7, 10],
+        "radius": "$radius.sm"
+      }
+    },
+    {
+      "select": "overlay.menu.item",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover" }
+    },
+    {
+      "select": "overlay.menu.item",
+      "when": { "state": "selected" },
+      "style": { "background": "$color.panel.selected" }
+    },
+    {
+      "select": "overlay.menu.item.icon",
+      "style": { "width": 16, "height": 16, "color": "$color.text.secondary" }
+    },
+    {
+      "select": "overlay.menu.item.icon",
+      "when": { "slot": "danger" },
+      "style": { "color": "$color.danger" }
+    },
+    {
+      "select": "overlay.menu.item.label",
+      "style": { "font": "$font.small", "color": "$color.text.primary" }
+    },
+    {
+      "select": "overlay.menu.item.label",
+      "when": { "slot": "danger" },
+      "style": { "color": "$color.danger" }
+    },
+    {
+      "select": "overlay.menu.separator",
+      "style": { "height": 1, "background": "$color.border", "margin": [4, 0, 4, 0] }
+    },
+    {
+      "select": "overlay.modal",
+      "style": {
+        "background": "$color.panel",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.lg",
+        "padding": [20, 20, 16, 20],
+        "shadow": "$shadow.panel",
+        "gap": 8,
+        "minWidth": 320,
+        "maxWidth": 440
+      }
+    },
+    {
+      "select": "overlay.modal.title",
+      "style": { "font": "$font.title", "color": "$color.text.primary" }
+    },
+    {
+      "select": "overlay.modal.body",
+      "style": { "font": "$font.small", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "overlay.modal.preview",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.muted",
+        "background": "$color.panel.deep",
+        "radius": "$radius.sm",
+        "padding": [8, 10, 8, 10]
+      }
+    },
+    {
+      "select": "overlay.modal.actions",
+      "style": { "gap": 8, "margin": [8, 0, 0, 0] }
+    },
+    {
+      "select": "overlay.modal.action",
+      "style": {
+        "background": "$color.panel.hover",
+        "radius": "$radius.sm",
+        "padding": [9, 12, 9, 12]
+      }
+    },
+    {
+      "select": "overlay.modal.action",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.selected" }
+    },
+    {
+      "select": "overlay.modal.action.label",
+      "style": { "font": "$font.small", "color": "$color.text.primary" }
+    },
+    {
+      "select": "overlay.modal.action.label",
+      "when": { "slot": "danger" },
+      "style": { "color": "$color.danger" }
+    },
+    {
+      "select": "primitive.button",
+      "style": { "background": "$color.panel", "radius": "$radius.sm", "padding": [6, 12, 6, 12] }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "state": "hover" },
+      "style": { "background": "$color.panel.hover" }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "cancel_composing" },
+      "style": {
+        "width": 20,
+        "height": 20,
+        "padding": [0, 0, 0, 0],
+        "background": "#00000000",
+        "radius": "$radius.sm",
+        "color": "$color.text.muted"
+      }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "cancel_composing", "state": "hover" },
+      "style": { "background": "$color.panel.hover", "color": "$color.text.primary" }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "state": "disabled" },
+      "style": { "opacity": 0.4 }
+    },
+    {
+      "select": "primitive.divider",
+      "style": { "background": "$color.border", "height": 1 }
+    },
+    {
+      "select": "primitive.spoiler",
+      "style": { "background": "$color.panel.selected", "color": "#00000000", "radius": "$radius.sm" }
+    },
+    {
+      "select": "primitive.spoiler",
+      "when": { "state": "active" },
+      "style": { "background": "$color.panel.hover", "color": "$color.text.primary" }
+    },
+
+    {
+      "select": "layout.scrollbar",
+      "style": { "width": 10, "padding": [4, 3, 4, 3] }
+    },
+    {
+      "select": "layout.scrollbar.thumb",
+      "style": { "background": "#ffffff26", "radius": "$radius.full" }
+    },
+    {
+      "select": "layout.scrollbar.thumb",
+      "when": { "state": "hover" },
+      "style": { "background": "#ffffff4d" }
+    },
+
+    {
+      "select": "chat.message",
+      "when": { "maxWidth": 600 },
+      "style": { "padding": [4, 8, 4, 8] }
+    },
+    {
+      "select": "layout.column",
+      "when": { "slot": "qr_column" },
+      "style": { "minWidth": 400, "maxWidth": 400 }
     },
 
     {
