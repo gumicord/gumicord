@@ -176,6 +176,107 @@ jobs:
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
+  # Android APK. The shell (Gradle + GameActivity) is new and has never
+  # run on hardware: this job proves it at least assembles. Versions it
+  # pins (NDK, AGP, games-activity) exist at the time of writing; if a
+  # mirror says otherwise, bump and note why.
+  # ────────────────────────────────────────────────────────────
+  android:
+    name: APK (Android arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK and platform
+        # Must match app/android/app/build.gradle (ndkVersion).
+        run: sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build the Rust cdylib
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          cargo ndk -t arm64-v8a -o app/android/app/src/main/jniLibs build --release -p gumicord-android
+          # Rust's C++ runtime is not inside the APK otherwise.
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            app/android/app/src/main/jniLibs/arm64-v8a/
+
+      - name: Assemble debug APK
+        run: gradle -p app/android assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-android-${{ github.sha }}
+          path: app/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────
+  # Unsigned iOS IPA. No signing identity exists, so the .app is zipped
+  # as Payload for sideloading. Like Android, this proves assembly, not
+  # a working phone run.
+  # ────────────────────────────────────────────────────────────
+  ios:
+    name: IPA (iOS, unsigned)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios
+
+      - name: Build the Rust staticlib
+        run: |
+          cargo build --release --target aarch64-apple-ios -p gumicord-ios
+          mkdir -p app/ios/lib
+          cp target/aarch64-apple-ios/release/libgumicord_ios.a app/ios/lib/
+
+      - name: Build unsigned .app
+        run: |
+          xcodebuild -project app/ios/Gumicord.xcodeproj -scheme Gumicord \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-dd \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Zip Payload into .ipa
+        run: |
+          cd build/ios-dd/Build/Products/Release-iphoneos
+          mkdir Payload
+          cp -r Gumicord.app Payload/
+          zip -r Gumicord-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-ios-${{ github.sha }}
+          path: build/ios-dd/Build/Products/Release-iphoneos/Gumicord-unsigned.ipa
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────
   # Confirms rust-version in Cargo.toml is true. A declared value nobody
   # checks always drifts eventually.
   # ────────────────────────────────────────────────────────────
