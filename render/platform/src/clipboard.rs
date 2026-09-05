@@ -369,12 +369,24 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// The clipboard is one machine-wide slot: the two round trips run in
+    /// parallel threads and would otherwise overwrite each other mid-test.
+    static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_clipboard() -> std::sync::MutexGuard<'static, ()> {
+        CLIPBOARD_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// A forgotten terminator trails extra bytes; a miscount drops the last
     /// character. Both look nearly right by eye.
     #[test]
     #[cfg_attr(not(windows), ignore = "not implemented on this platform yet")]
     fn text_comes_back_unchanged() {
+        let _guard = lock_clipboard();
         // The clipboard belongs to the machine, not this process; restore
         // whatever was there.
         let before = text().ok().flatten();
@@ -405,6 +417,7 @@ mod tests {
     #[test]
     #[cfg_attr(not(windows), ignore = "not implemented on this platform yet")]
     fn images_come_back_unchanged() {
+        let _guard = lock_clipboard();
         let before_text = text().ok().flatten();
         let before_image = image().ok().flatten();
 
