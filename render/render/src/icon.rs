@@ -43,6 +43,7 @@ pub static ICONS: &[(&str, IconDef)] = &[
     ("logout", LOGOUT),
     ("gear", GEAR),
     ("members", MEMBERS),
+    ("back", BACK),
 ];
 
 /// Looks an icon up, returning the interned name alongside it so the atlas can
@@ -372,6 +373,12 @@ const MEMBERS: IconDef = IconDef {
         ],
     ],
     width: 1.1 / 12.0,
+};
+
+/// A left chevron: back to the lists.
+const BACK: IconDef = IconDef {
+    strokes: &[&[(0.62, 0.24), (0.36, 0.50), (0.62, 0.76)]],
+    width: 1.4 / 12.0,
 };
 
 // ─────────────────────────────────────────────────────── Rasterising

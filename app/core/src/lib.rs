@@ -144,9 +144,14 @@ const SETTINGS_OPEN: &str = "settings_open";
 /// Slot for the member-list button in the chat header; same use. Only
 /// built while the member pane is hidden.
 const MEMBERS_OPEN: &str = "members_open";
+/// Slot for the back button in the chat header; same use. Only built
+/// while the guild list is hidden.
+const BACK_OPEN: &str = "back_open";
 /// The member-list button's icon. Unknown names draw nothing, so the
 /// registry and this string are pinned together by a test below.
 const MEMBERS_ICON: &str = "members";
+/// The back button's icon; same guarantee.
+const BACK_ICON: &str = "back";
 /// A swipe starting this close to the left edge opens the drawer.
 const DRAWER_EDGE: f32 = 24.0;
 /// The gear's icon. Unknown names draw nothing, so the registry and this
@@ -892,6 +897,10 @@ impl Gumicord {
                 // The member-list button in the chat header.
                 (NodeId::PrimitiveButton, Some(Key::Slot(MEMBERS_OPEN))) => {
                     changed |= self.open_member_sheet();
+                }
+                // The back button in the chat header.
+                (NodeId::PrimitiveButton, Some(Key::Slot(BACK_OPEN))) => {
+                    changed |= self.open_drawer();
                 }
                 // A press anywhere else on the message still opens all of it:
                 // a single run is a small target.
@@ -3299,8 +3308,19 @@ impl Gumicord {
             None => (0, String::new(), "channel.text", None),
         };
 
-        let header = UiNode::new(NodeId::ChatHeader)
-            .with_data(id)
+        let mut header = UiNode::new(NodeId::ChatHeader).with_data(id);
+        // First, so it sits left of the channel name: only built while
+        // the guild list hides.
+        header = header.child_if(!self.panes().guilds(), || {
+            UiNode::new(NodeId::PrimitiveButton)
+                .with_key(Key::Slot(BACK_OPEN))
+                .with_state_if(
+                    self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot(BACK_OPEN))),
+                    State::Hover,
+                )
+                .child(UiNode::icon(NodeId::PrimitiveIcon, BACK_ICON))
+        });
+        let header = header
             .child(UiNode::icon(NodeId::PrimitiveIcon, icon))
             .child(UiNode::text(NodeId::ChatHeaderTitle, &name).with_data(id))
             .child(UiNode::text(NodeId::ChatHeaderTopic, topic.unwrap_or_default()).with_data(id))
@@ -4812,6 +4832,10 @@ mod tests {
             gumicord_render::icon::lookup(MEMBERS_ICON).is_some(),
             "人形札の絵がない"
         );
+        assert!(
+            gumicord_render::icon::lookup(BACK_ICON).is_some(),
+            "戻る札の絵がない"
+        );
     }
 
     /// The drawer stands at the left edge, narrower than the window.
@@ -4832,6 +4856,45 @@ mod tests {
             .expect("棚が置かれていない");
         assert!(drawer.x.abs() < 1.0, "左端にいない {drawer:?}");
         assert!(drawer.w < w, "全画面を覆っている {drawer:?}");
+    }
+
+    /// The sheet spans the width, rises to ~70% at most, and sits at
+    /// the bottom.
+    #[test]
+    fn member_sheet_spans_and_caps() {
+        let (w, h) = (400.0, 800.0);
+        let mut a = narrow();
+        assert!(a.open_member_sheet());
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(w, h),
+            scale: 1.0,
+        };
+        let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+        let sheet = placed
+            .iter()
+            .find(|(id, _)| *id == NodeId::OverlaySheet)
+            .map(|(_, r)| *r)
+            .expect("面が置かれていない");
+        assert!((sheet.w - w).abs() < 1.0, "横いっぱいでない {sheet:?}");
+        assert!(sheet.h <= h * 0.7 + 1.0, "高すぎる {sheet:?}");
+        assert!(
+            (sheet.y + sheet.h - h).abs() < 1.0,
+            "下に付いていない {sheet:?}"
+        );
+    }
+
+    /// The back button opens the drawer from a press too.
+    #[test]
+    fn back_button_opens_the_drawer() {
+        let mut a = narrow();
+        let mut found = false;
+        a.build_tree(Panes::One).walk(&mut |n, _| {
+            found =
+                found || (n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(BACK_OPEN)));
+        });
+        assert!(found, "戻る札が出ていない");
+        assert!(a.pressed(&[hit_of(NodeId::PrimitiveButton, Some(Key::Slot(BACK_OPEN)))]));
+        assert!(a.drawer_open, "戻る札で開かない");
     }
 
     // ═══════════════════════════════════════════════════════════════

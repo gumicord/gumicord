@@ -36,6 +36,9 @@ pub type ScrollState = HashMap<NodeId, f32>;
 
 /// Below this the thumb cannot be grabbed.
 const MIN_THUMB: f32 = 24.0;
+/// Bottom sheets rise to this share of the window at most, like the
+/// official client; taller content scrolls inside.
+const SHEET_MAX_H: f32 = 0.7;
 
 /// Pinned to the bottom; the message list starts here.
 pub const SCROLL_TO_END: f32 = f32::MAX;
@@ -517,12 +520,25 @@ impl<'a> Cx<'a, '_, '_> {
                 anchored(a, s, inner, m)
             } else if it.axis == Axis::Stack {
                 let s = Self::stack_size(child, &ci, size, inner);
-                Rect::new(
-                    inner.x + m.left + (inner.w - m.horizontal() - s.w).max(0.0) * 0.5,
-                    inner.y + m.top + (inner.h - m.vertical() - s.h).max(0.0) * 0.5,
-                    s.w,
-                    s.h,
-                )
+                if child.id == NodeId::OverlaySheet {
+                    // Bottom sheets span the width and rise to ~70% of the
+                    // window; taller content scrolls inside. Centring a
+                    // capped sheet would strand it mid-screen.
+                    let h = s.h.min(inner.h * SHEET_MAX_H);
+                    Rect::new(
+                        inner.x + m.left,
+                        inner.y + inner.h - h - m.bottom,
+                        inner.w - m.horizontal(),
+                        h,
+                    )
+                } else {
+                    Rect::new(
+                        inner.x + m.left + (inner.w - m.horizontal() - s.w).max(0.0) * 0.5,
+                        inner.y + m.top + (inner.h - m.vertical() - s.h).max(0.0) * 0.5,
+                        s.w,
+                        s.h,
+                    )
+                }
             } else if horizontal {
                 let avail = inner.h - m.vertical();
                 let h = Self::cross_size(child, &ci, size.h, avail, it.cross, false);
