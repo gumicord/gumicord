@@ -714,6 +714,11 @@
       "style": { "background": "$color.bg.hover" }
     },
     {
+      "select": "overlay.menu.item",
+      "when": { "state": "selected" },
+      "style": { "background": "$color.bg.selected" }
+    },
+    {
       "select": "overlay.menu.item.icon",
       "style": { "width": 16, "height": 16, "color": "$color.text.secondary" }
     },

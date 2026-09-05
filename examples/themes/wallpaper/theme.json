@@ -196,6 +196,11 @@
       }
     },
     {
+      "select": "overlay.menu.item",
+      "when": { "state": "selected" },
+      "style": { "background": "$color.panel.selected" }
+    },
+    {
       "select": "chat.message",
       "style": { "padding": [4, 16, 4, 16], "gap": 8 }
     },

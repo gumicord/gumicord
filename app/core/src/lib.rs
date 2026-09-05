@@ -4549,6 +4549,27 @@ mod tests {
         assert!(a.settings.open, "歯車で開かない");
     }
 
+    /// The open tab's row carries Selected, so the theme can highlight it.
+    #[test]
+    fn the_open_tab_is_marked_selected() {
+        use gumicord_uitree::State;
+        let selected_index = |a: &Gumicord| {
+            let mut out = Vec::new();
+            a.build_tree(Panes::Four).walk(&mut |n, _| {
+                if n.id == NodeId::OverlayMenuItem && n.states.contains(State::Selected) {
+                    if let Some(Key::Index(i)) = &n.key {
+                        out.push(*i);
+                    }
+                }
+            });
+            out
+        };
+        let mut a = with_settings();
+        assert_eq!(selected_index(&a), [1], "開いている分類行がない");
+        press_menu(&mut a, 2);
+        assert_eq!(selected_index(&a), [2], "移っていない");
+    }
+
     /// Escape closes it; an outside press does too, with nothing to decide.
     #[test]
     fn escape_and_outside_press_close_settings() {
