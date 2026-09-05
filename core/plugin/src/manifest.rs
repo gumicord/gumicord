@@ -224,9 +224,9 @@ mod tests {
         assert!(Manifest::load(&dir).unwrap().settings.is_none());
 
         for (tag, settings) in [
-            ("escape", "../evil.js"),
-            ("subdir", "sub/settings.js"),
-            ("bad-ext", "settings.ts"),
+            ("settings-escape", "../evil.js"),
+            ("settings-subdir", "sub/settings.js"),
+            ("settings-bad-ext", "settings.ts"),
         ] {
             let dir = scratch(tag);
             write(
