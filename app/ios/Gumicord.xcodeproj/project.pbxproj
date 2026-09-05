@@ -1,0 +1,239 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* AppDelegate.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000002 /* Gumicord.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gumicord.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000004 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		A10000000000000000000005 /* Gumicord-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Gumicord-Bridging-Header.h"; sourceTree = "<group>"; };
+		A10000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000007 /* libgumicord_ios.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libgumicord_ios.a; path = "lib/libgumicord_ios.a"; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000008 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000009 /* Gumicord */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000004 /* AppDelegate.swift */,
+				A10000000000000000000005 /* Gumicord-Bridging-Header.h */,
+				A10000000000000000000006 /* Info.plist */,
+			);
+			path = Gumicord;
+			sourceTree = "<group>";
+		};
+		A1000000000000000000000A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000002 /* Gumicord.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A1000000000000000000000B = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000009 /* Gumicord */,
+				A1000000000000000000000A /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A1000000000000000000000C /* Gumicord */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1000000000000000000000D /* Build configuration list for PBXNativeTarget "Gumicord" */;
+			buildPhases = (
+				A1000000000000000000000E /* Sources */,
+				A10000000000000000000008 /* Frameworks */,
+				A1000000000000000000000F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Gumicord;
+			packageProductDependencies = (
+			);
+			productName = Gumicord;
+			productReference = A10000000000000000000002 /* Gumicord.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000010 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A1000000000000000000000C = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000000011 /* Build configuration list for PBXProject "Gumicord" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = A1000000000000000000000B;
+			productRefGroup = A1000000000000000000000A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1000000000000000000000C /* Gumicord */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A1000000000000000000000F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A1000000000000000000000E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* AppDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000000012 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		A10000000000000000000013 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+		A10000000000000000000014 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_REQUIRED = NO;
+				INFOPLIST_FILE = "Gumicord/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/lib",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lgumicord_ios",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.gumicord.app;
+				PRODUCT_NAME = Gumicord;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "Gumicord/Gumicord-Bridging-Header.h";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10000000000000000000015 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_REQUIRED = NO;
+				INFOPLIST_FILE = "Gumicord/Info.plist";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/lib",
+				);
+				ONLY_ACTIVE_ARCH = NO;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lgumicord_ios",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.gumicord.app;
+				PRODUCT_NAME = Gumicord;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "Gumicord/Gumicord-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000011 /* Build configuration list for PBXProject "Gumicord" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000012 /* Debug */,
+				A10000000000000000000013 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1000000000000000000000D /* Build configuration list for PBXNativeTarget "Gumicord" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000014 /* Debug */,
+				A10000000000000000000015 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+	};
+	rootObject = A10000000000000000000010 /* Project object */;
+}

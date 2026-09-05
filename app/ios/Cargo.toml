@@ -1,0 +1,17 @@
+[package]
+name = "gumicord-ios"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "gumicord_ios"
+crate-type = ["staticlib"]
+
+[dependencies]
+gumicord-app.workspace = true
+gumicord-platform.workspace = true
+tracing.workspace = true
