@@ -11,10 +11,28 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const sdk = join(here, "..");
 const TSC = join(sdk, "node_modules", "typescript", "lib", "tsc.js");
+// Bundled through the installed package's JS API, never through its bin
+// path: the bin is a JS shim on some installs and a native binary on
+// others, and only the API resolves the platform binary the same way
+// everywhere. (This is also how sdk/bin/gumicord-plugin.mjs builds.)
+const { buildSync } = createRequire(import.meta.url)("esbuild");
+
+/** Bundles one SDK source to a file, throwing with details on failure. */
+function bundleSdk(entry, outfile) {
+  buildSync({
+    entryPoints: [join(sdk, entry)],
+    bundle: true,
+    format: "esm",
+    outfile,
+    absWorkingDir: sdk,
+    logLevel: "warning",
+  });
+}
 
 let failed = 0;
 const ok = (m) => console.log(`  \x1b[32mOK\x1b[0m   ${m}`);
@@ -102,16 +120,10 @@ console.log("\x1b[32mall as expected\x1b[0m");
 
 console.log("\nruntime resolves ctx.data per node");
 {
-  // Run through node directly: .cmd shims do not spawn cleanly everywhere.
-  const ESBUILD = join(sdk, "node_modules", "esbuild", "bin", "esbuild");
   const bundle = join(here, ".runtime.tmp.mjs");
   const script = join(here, ".runtime-test.tmp.mjs");
   try {
-    execFileSync(
-      process.execPath,
-      [ESBUILD, "src/runtime.ts", "--bundle", "--format=esm", `--outfile=${bundle}`],
-      { cwd: sdk, stdio: "pipe" },
-    );
+    bundleSdk("src/runtime.ts", bundle);
     writeFileSync(
       script,
       `import { registerPatch } from ${JSON.stringify("./.runtime.tmp.mjs")};
@@ -154,15 +166,10 @@ console.log("\nui.settings registers the settings page");
 {
   // The bundle is the SDK entry itself: importing it must not touch the
   // host, only define the helpers.
-  const ESBUILD = join(sdk, "node_modules", "esbuild", "bin", "esbuild");
   const bundle = join(here, ".settings.tmp.mjs");
   const script = join(here, ".settings-test.tmp.mjs");
   try {
-    execFileSync(
-      process.execPath,
-      [ESBUILD, "src/index.ts", "--bundle", "--format=esm", `--outfile=${bundle}`],
-      { cwd: sdk, stdio: "pipe" },
-    );
+    bundleSdk("src/index.ts", bundle);
     writeFileSync(
       script,
       `import { ui } from ${JSON.stringify("./.settings.tmp.mjs")};
