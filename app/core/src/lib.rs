@@ -269,6 +269,9 @@ pub struct Gumicord {
     /// Where the current theme came from. Decides which settings row shows
     /// as active.
     theme_source: ThemeSource,
+    /// Where installed themes live and the selection is saved. `None`
+    /// means nowhere: the bundled theme, always.
+    themes_dir: Option<std::path::PathBuf>,
     /// What the watched file looked like when last loaded. Compared every
     /// frame; the file itself is only read when this moves.
     theme_mtime: Option<std::time::SystemTime>,
@@ -382,6 +385,18 @@ impl Gumicord {
         )
     }
 
+    /// Demo data with no theme folder: settings tests must neither read
+    /// the machine's selection nor write it.
+    #[cfg(test)]
+    fn demo_unthemed() -> Self {
+        Self::with_themes(
+            Login::skipped(),
+            Live::without_cache(),
+            PluginManager::disabled(),
+            None,
+        )
+    }
+
     /// Plugin hosts for this machine, unless safe mode says otherwise.
     fn start_plugins() -> PluginManager {
         if safe_mode_enabled(std::env::var(SAFE_MODE_ENV).as_deref().ok()) {
@@ -398,6 +413,15 @@ impl Gumicord {
     }
 
     fn with(login: Login, live: Live, plugins: PluginManager) -> Self {
+        Self::with_themes(login, live, plugins, themes_dir())
+    }
+
+    fn with_themes(
+        login: Login,
+        live: Live,
+        plugins: PluginManager,
+        themes_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         // Restore the last channel, and the guild it belongs to.
         let (guild, channel) = match live.last_channel() {
             Some(ch) => {
@@ -413,8 +437,8 @@ impl Gumicord {
         };
 
         let (account_switch_tx, account_switch_rx) = std::sync::mpsc::channel();
-        let (theme, theme_path, theme_source) = match themes_dir() {
-            Some(dir) => initial_theme_in(&dir),
+        let (theme, theme_path, theme_source) = match &themes_dir {
+            Some(dir) => initial_theme_in(dir),
             // Nowhere to install themes; the bundled one it is.
             None => (parse_theme_file(DEFAULT_THEME), None, ThemeSource::Bundled),
         };
@@ -424,6 +448,7 @@ impl Gumicord {
             theme,
             theme_path,
             theme_source,
+            themes_dir,
             theme_mtime,
             assets: crate::assets::ThemeAssets::new(),
             theme_namespace: None,
@@ -723,16 +748,20 @@ impl Gumicord {
     /// Re-lists installed themes. Scanning parses files, so only on open
     /// and after a switch — never per frame.
     fn refresh_theme_list(&mut self) {
-        self.settings.themes = themes_dir().map(|d| scan_themes_in(&d)).unwrap_or_default();
+        self.settings.themes = self
+            .themes_dir
+            .as_deref()
+            .map(scan_themes_in)
+            .unwrap_or_default();
     }
 
     fn select_theme(&mut self, id: String) {
-        self.select_theme_in(id, themes_dir().as_deref());
+        self.select_theme_in(id, self.themes_dir.clone());
     }
 
     /// Applies an installed theme and remembers it. Tests pass their own
     /// folder so the machine's selection stays untouched.
-    fn select_theme_in(&mut self, id: String, dir: Option<&std::path::Path>) {
+    fn select_theme_in(&mut self, id: String, dir: Option<std::path::PathBuf>) {
         let Some(t) = self.settings.themes.iter().find(|t| t.id == id).cloned() else {
             return;
         };
@@ -741,7 +770,7 @@ impl Gumicord {
             return;
         }
         self.theme_source = ThemeSource::Saved(id.clone());
-        if let Some(dir) = dir {
+        if let Some(dir) = &dir {
             save_active_id_in(dir, Some(&id));
         }
         self.refresh_theme_list();
@@ -749,16 +778,16 @@ impl Gumicord {
     }
 
     fn use_bundled_theme(&mut self) {
-        self.use_bundled_theme_in(themes_dir().as_deref());
+        self.use_bundled_theme_in(self.themes_dir.clone());
     }
 
-    fn use_bundled_theme_in(&mut self, dir: Option<&std::path::Path>) {
+    fn use_bundled_theme_in(&mut self, dir: Option<std::path::PathBuf>) {
         self.theme = parse_theme_file(DEFAULT_THEME);
         self.theme_path = None;
         self.theme_mtime = None;
         self.theme_source = ThemeSource::Bundled;
         self.refresh_theme_assets();
-        if let Some(dir) = dir {
+        if let Some(dir) = &dir {
             save_active_id_in(dir, None);
         }
         self.notify_toast("標準のテーマに戻しました".to_owned());
@@ -4631,7 +4660,7 @@ mod tests {
     //  Settings screen
 
     fn with_settings() -> Gumicord {
-        let mut a = app();
+        let mut a = Gumicord::demo_unthemed();
         assert!(a.open_settings(), "開かなかった");
         a
     }
@@ -5243,10 +5272,11 @@ mod login_tests {
     /// A signed-out app. `Gumicord::new` reads the environment, and a
     /// developer's variables must not change test results.
     fn pending() -> Gumicord {
-        Gumicord::with(
+        Gumicord::with_themes(
             Login::fresh_for_test(),
             Live::without_cache(),
             PluginManager::disabled(),
+            None,
         )
     }
 
@@ -6998,10 +7028,10 @@ mod theme_select_tests {
     fn selecting_applies_and_standard_restores() {
         let root = themes_root("select");
         install_theme(&root, "wall", "dev.example.wall", "Wall");
-        let mut a = Gumicord::demo();
+        let mut a = Gumicord::demo_unthemed();
         a.settings.themes = scan_themes_in(&root);
 
-        a.select_theme_in("dev.example.wall".to_owned(), Some(&root));
+        a.select_theme_in("dev.example.wall".to_owned(), Some(root.clone()));
         assert_eq!(
             a.theme_source,
             ThemeSource::Saved("dev.example.wall".to_owned())
@@ -7016,7 +7046,7 @@ mod theme_select_tests {
             Some("dev.example.wall")
         );
 
-        a.use_bundled_theme_in(Some(&root));
+        a.use_bundled_theme_in(Some(root.clone()));
         assert_eq!(a.theme_source, ThemeSource::Bundled);
         assert!(a.theme_path.is_none());
         assert_eq!(
@@ -7032,7 +7062,7 @@ mod theme_select_tests {
         let root = themes_root("broken-select");
         install_theme(&root, "wall", "dev.example.wall", "Wall");
         std::fs::write(root.join("wall").join("theme.json"), "{broken").unwrap();
-        let mut a = Gumicord::demo();
+        let mut a = Gumicord::demo_unthemed();
         a.settings.themes = scan_themes_in(&root);
         assert!(a.settings.themes.is_empty(), "broken theme got listed");
 
@@ -7040,7 +7070,7 @@ mod theme_select_tests {
         install_theme(&root, "wall", "dev.example.wall", "Wall");
         a.settings.themes = scan_themes_in(&root);
         std::fs::write(root.join("wall").join("theme.json"), "{broken").unwrap();
-        a.select_theme_in("dev.example.wall".to_owned(), Some(&root));
+        a.select_theme_in("dev.example.wall".to_owned(), Some(root.clone()));
         assert_eq!(a.theme_source, ThemeSource::Bundled, "broken theme applied");
         assert_eq!(load_active_id_in(&root), None, "broken theme remembered");
     }
@@ -7052,7 +7082,7 @@ mod theme_select_tests {
         use gumicord_uitree::State;
         let root = themes_root("rows");
         install_theme(&root, "wall", "dev.example.wall", "Wall");
-        let mut a = Gumicord::demo();
+        let mut a = Gumicord::demo_unthemed();
         a.settings.themes = scan_themes_in(&root);
         a.settings.open = true;
         a.settings.category = crate::menu::SettingsCategory::Theme;
@@ -7085,8 +7115,8 @@ mod theme_select_tests {
             a.theme_source,
             ThemeSource::Saved("dev.example.wall".to_owned())
         );
-        // Selecting rescans the real folder; put the test install back the
-        // way production's rescan would keep it.
+        // Selecting rescans the folder, which is empty for this app;
+        // put the test install back the way production's rescan keeps it.
         a.settings.themes = scan_themes_in(&root);
         assert_eq!(selected(&a), [2, 4], "active mark did not follow");
         assert!(press(&mut a, 3));
