@@ -288,7 +288,7 @@ jobs:
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy
           ./linuxdeploy --appdir AppDir -e "target/$PROFILE/gumicord" \
-            -d packaging/linux/gumicord.desktop -i packaging/icons/app-icon.png \
+            -d packaging/linux/gumicord.desktop -i packaging/icons/app-icon-512.png \
             --output appimage
           ls -l Gumicord-*.AppImage
 

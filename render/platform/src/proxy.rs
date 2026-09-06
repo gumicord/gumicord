@@ -29,6 +29,7 @@ pub struct Proxy {
     pass: Retained<UITextField>,
     active: Option<super::ImeProxy>,
     last: [String; 2],
+    parent: Option<std::ptr::NonNull<std::ffi::c_void>>,
 }
 
 fn idx(kind: super::ImeProxy) -> usize {

@@ -4,7 +4,8 @@ Built by CI (the `dist` job), never by hand.
 
 | | |
 |---|---|
-| `icons/app-icon.png` | The application icon master (4096px). Used as-is for Linux, scaled with `sips` for macOS |
+| `icons/app-icon.png` | The application icon master (4096px). Scaled with `sips` for macOS |
+| `icons/app-icon-512.png` | Same mark at 512px. `linuxdeploy` rejects anything bigger |
 | `linux/gumicord.desktop` | Desktop entry for the AppImage |
 | `macos/Info.plist` | Bundle metadata for `Gumicord.app` |
 
