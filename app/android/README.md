@@ -25,7 +25,7 @@ and passing native handles across lives in `app/core`.
 |---|---|
 | JNI bridge for `InputConnection` | The biggest mobile risk (roadmap A2). Try the platform's standard path first |
 | GLES backend tuning | Rendering avoids compute shaders, so GLES is enough; wgpu picks GL before Vulkan on Android like on Windows |
-| Exact dependency pins | `games-activity`, `appcompat`, NDK and AGP versions are pinned to releases that exist at the time of writing; if Maven/CI says otherwise, bump and note why |
+| Exact dependency pins | `games-activity`, `appcompat`, NDK and AGP versions are pinned to releases that exist at the time of writing; if Maven/CI says otherwise, bump and note why. `games-activity` must stay on the 4.x line: `android-activity` 0.6 only speaks that Java interface, and 2.x dies before any Rust runs |
 
 ## Building
 

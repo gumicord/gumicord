@@ -53,7 +53,9 @@ android {
 dependencies {
     // GameActivity itself, from Google Maven. The Rust side drives through
     // winit's android-game-activity feature; nothing here subclasses it.
-    implementation 'androidx.games:games-activity:2.0.0'
+    // Version paired with android-activity 0.6, which supports the 4.x
+    // Java interface only; 2.x crashes before any Rust runs.
+    implementation 'androidx.games:games-activity:4.4.0'
     implementation 'androidx.appcompat:appcompat:1.7.0'
 }
 
