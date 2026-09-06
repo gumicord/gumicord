@@ -226,7 +226,7 @@ mod imp {
             return Ok(None);
         };
         // Anything the board cannot render as PNG is not ours to guess.
-        let data = unsafe { Retained::from_raw(objc2_ui_kit::UIImagePNGRepresentation(&picture)) };
+        let data = UIImage::png_representation(&picture);
         let Some(data) = data else {
             return Ok(None);
         };
@@ -254,7 +254,9 @@ mod imp {
     fn decode_png(png: &[u8]) -> Option<ClipboardImage> {
         use png::{BitDepth, ColorType};
 
-        let mut reader = png::Decoder::new(png).read_info().ok()?;
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .ok()?;
         let (width, height, color) = {
             let info = reader.info();
             (info.width as usize, info.height as usize, info.color_type)
