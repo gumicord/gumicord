@@ -83,7 +83,9 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 # Linux secret storage (Secret Service) and macOS Keychain. No default
 # features in keyring do anything: without these every entry is a mock
 # that forgets on drop. The Linux combo keeps a session cache and
-# persists beyond reboot; crypto-rust keeps it dependency-free.
+# persists beyond reboot; crypto-rust keeps the crypto itself pure Rust,
+# but Linux builds still link the system D-Bus library (CI installs
+# libdbus-1-dev).
 keyring = { version = "3", features = ["apple-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 # QR login, for RSA-2048 OAEP-SHA256 decryption.
