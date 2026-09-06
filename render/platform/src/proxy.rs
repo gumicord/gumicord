@@ -33,9 +33,10 @@ pub struct Proxy {
 
 fn make_field() -> Retained<UITextField> {
     let field: Retained<UITextField> = unsafe { msg_send![class!(UITextField), new] };
-    field.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(1.0, 1.0)));
+    // Off-screen, not untouchable: a view that takes no interaction may
+    // refuse first responder, and outside the parent bounds no touch lands.
+    field.setFrame(NSRect::new(NSPoint::new(-5.0, -5.0), NSSize::new(1.0, 1.0)));
     field.setAlpha(0.0);
-    field.setUserInteractionEnabled(false);
     field.setAutocapitalizationType(UITextAutocapitalizationType::None);
     field.setAutocorrectionType(UITextAutocorrectionType::No);
     field
@@ -115,7 +116,13 @@ impl Proxy {
             let field = self.field(kind);
             set_text(field, text);
             field.becomeFirstResponder();
-            self.last = text.to_owned();
+            // A refused responder means no keyboard from here; drop back to
+            // winit's field instead of sitting focused with no keyboard.
+            if !field.isFirstResponder() {
+                self.active = None;
+            } else {
+                self.last = text.to_owned();
+            }
         }
     }
 
