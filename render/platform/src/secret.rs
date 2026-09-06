@@ -141,29 +141,25 @@ impl SecretStore {
             .map_err(|_| SecretError::Unsupported)
     }
 
-    /// Reads one back. Unreachable storage holds nothing of ours, which
-    /// reads the same as absent.
+    /// Reads one back. Anything unreadable — absent, unreachable, locked —
+    /// reads as absent: callers log in again either way, and an error here
+    /// must not strand the startup.
     pub fn load(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
         let Some(entry) = self.entry(name) else {
             return Ok(None);
         };
         match entry.get_password() {
             Ok(text) => Ok(Some(text.into_bytes())),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(SecretError::Unsupported),
+            Err(_) => Ok(None),
         }
     }
 
-    /// Discards one. Absent — or unreachable — still succeeds.
+    /// Discards one, best-effort. Absent — or unreachable — still succeeds.
     pub fn clear(&self, name: &str) -> Result<(), SecretError> {
-        let Some(entry) = self.entry(name) else {
-            return Ok(());
-        };
-        match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(SecretError::Unsupported),
+        if let Some(entry) = self.entry(name) {
+            let _ = entry.delete_credential();
         }
+        Ok(())
     }
 }
 
