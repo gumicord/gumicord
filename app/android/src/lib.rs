@@ -36,8 +36,25 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     unsafe { std::env::set_var("GUMICORD_DATA_DIR", data_dir(&app)) };
     gumicord_platform::init_file_logging();
     gumicord_platform::install_panic_hook();
+    init_tls_verifier();
 
     if let Err(e) = gumicord_platform::run_android(Gumicord::new(), app) {
         tracing::error!(%e, "could not start");
+    }
+}
+
+/// Hands the JVM to the TLS verifier. reqwest checks certificates against
+/// the system trust store through it; without this the first HTTPS call
+/// panics instead of connecting.
+#[cfg(target_os = "android")]
+fn init_tls_verifier() {
+    let ctx = ndk_context::android_context();
+    // Safe: the host set both pointers up before this ran.
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+    let context = unsafe { jni::objects::JObject::from_raw(ctx.context() as jni::sys::jobject) };
+    if let Err(e) = vm
+        .attach_current_thread(|env| rustls_platform_verifier::android::init_with_env(env, context))
+    {
+        tracing::warn!(?e, "TLS verifier has no JVM; HTTPS will fail");
     }
 }

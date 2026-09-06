@@ -1973,7 +1973,10 @@ dependencies = [
  "android_logger",
  "gumicord-app",
  "gumicord-platform",
+ "jni 0.22.4",
  "log",
+ "ndk-context",
+ "rustls-platform-verifier",
  "tracing",
  "winit",
 ]
