@@ -156,7 +156,12 @@ fn system_dirs() -> Vec<PathBuf> {
             dirs.push(PathBuf::from(home).join("Library/Fonts"));
         }
     }
-    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+    #[cfg(all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "android"),
+        not(target_os = "ios")
+    ))]
     {
         if let Ok(home) = std::env::var("HOME") {
             let home = PathBuf::from(home);
@@ -168,6 +173,12 @@ fn system_dirs() -> Vec<PathBuf> {
         }
         dirs.push(PathBuf::from("/usr/local/share/fonts"));
         dirs.push(PathBuf::from("/usr/share/fonts"));
+    }
+    // iOS keeps its own set (Hiragino and friends) outside the macOS
+    // paths; the sandbox can still read them.
+    #[cfg(target_os = "ios")]
+    {
+        dirs.push(PathBuf::from("/System/Library/Fonts"));
     }
     dirs
 }

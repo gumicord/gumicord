@@ -409,7 +409,15 @@ impl Gumicord {
         {
             live.open_cache(active.is_bot, active.id);
         }
-        Gumicord::with(Login::new(), live, Self::start_plugins())
+        let login = Login::new();
+        let mut app = Gumicord::with(login, live, Self::start_plugins());
+        // Phones scan QR codes; they are not scanned. Start where typing
+        // starts instead of on a code nobody can read.
+        if is_mobile() {
+            app.login.start_password();
+            app.login_form = Some(LoginField::Password);
+        }
+        app
     }
 
     /// Skips login and builds from fixed demo data, as `GUMICORD_SKIP_LOGIN`
@@ -871,9 +879,18 @@ impl Gumicord {
         for h in hits {
             match (h.id, &h.key) {
                 // The way into the password form (or its submit / back).
+                // Every login_* slot routes here; the handler ignores what
+                // it does not know, but the press must not fall through.
                 (
                     NodeId::PrimitiveButton,
-                    Some(Key::Slot(slot @ ("login_submit" | "login_back" | "login_password"))),
+                    Some(Key::Slot(
+                        slot @ ("login_submit"
+                        | "login_back"
+                        | "login_password"
+                        | "login_forgot_password"
+                        | "login_qr"
+                        | "login_register"),
+                    )),
                 ) => {
                     changed |= self.login_button(slot);
                 }
@@ -1326,6 +1343,13 @@ impl Application for Gumicord {
         {
             self.login_field = Some(field);
             self.input_focused = false;
+            changed = true;
+        }
+
+        // A press outside every field releases focus; otherwise the keyboard
+        // stays up on phones with no other way to dismiss it.
+        if self.login_field.is_some() && !hits.iter().any(|h| h.id == NodeId::AppScreenLoginField) {
+            self.login_field = None;
             changed = true;
         }
 
@@ -1838,11 +1862,12 @@ impl Gumicord {
         }
     }
 
-    /// Drops the login form and returns to the QR screen.
+    /// Drops the login form and returns to the QR screen. Phones never
+    /// show the QR screen, so there it backs out to the password form.
     fn leave_login_form(&mut self) {
         self.login.cancel_password();
         self.login_field = None;
-        self.login_form = None;
+        self.login_form = is_mobile().then_some(LoginField::Password);
         self.login_error = None;
         self.login_input.take();
     }
@@ -2714,7 +2739,8 @@ impl Gumicord {
                         .child_if(self.login_error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン"))
                         .child(self.login_divider())
-                        .child(self.login_qr_button())
+                        // No QR screen on phones, so nowhere to go back to.
+                        .child_if(!is_mobile(), || self.login_qr_button())
                         .child(self.login_register_link())
                 }))
             }
@@ -6110,6 +6136,41 @@ mod login_tests {
         assert!(seen.contains(&NodeId::AppScreenLoginField), "入力欄が無い");
         seen.retain(|id| *id == NodeId::PrimitiveQr);
         assert!(seen.is_empty(), "パスワード画面なのに QR が残る");
+    }
+
+    /// The QR button on the password form leaves it; its press used to fall
+    /// through the dispatch and do nothing.
+    #[test]
+    fn the_qr_button_leaves_the_password_form() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        assert!(a.login_form.is_some());
+
+        let back = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_qr"));
+        assert!(a.pressed(std::slice::from_ref(&back)), "QRボタンが効かない");
+        assert!(a.login_form.is_none(), "QRに戻っていない");
+    }
+
+    /// A press outside every login field releases focus; otherwise the
+    /// keyboard stays up with no way to dismiss it.
+    #[test]
+    fn pressing_outside_a_login_field_releases_focus() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        assert!(a.login_field.is_some());
+
+        assert!(a.pressed(&[]));
+        assert_eq!(a.login_field, None, "欄外を押してもフォーカスが残る");
     }
 
     /// Clicking a login field focuses exactly that one, and typing lands in the
