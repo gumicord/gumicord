@@ -1198,7 +1198,31 @@ impl Live {
             }
             LiveEvent::Members(update) => {
                 let guild = update.guild;
+                // Small shapes only, never member payloads.
+                let ops: Vec<String> = update
+                    .ops
+                    .iter()
+                    .map(|op| match op {
+                        gumicord_gateway::member_list::ListOp::Invalidate => {
+                            "invalidate".to_owned()
+                        }
+                        gumicord_gateway::member_list::ListOp::Sync { start, rows } => {
+                            format!("sync@{start}x{}", rows.len())
+                        }
+                        gumicord_gateway::member_list::ListOp::Insert { at, .. } => {
+                            format!("insert@{at}")
+                        }
+                        gumicord_gateway::member_list::ListOp::Update { at, .. } => {
+                            format!("update@{at}")
+                        }
+                        gumicord_gateway::member_list::ListOp::Delete { at } => {
+                            format!("delete@{at}")
+                        }
+                    })
+                    .collect();
+                tracing::debug!(%guild, online = update.online, total = update.total, ?ops, "member list update");
                 let changed = self.members.entry(guild).or_default().apply(*update);
+                tracing::debug!(%guild, held = self.members.get(&guild).map_or(0, |m| m.rows().len()), "member list held");
 
                 // Remember members seen here: for REST messages this can be
                 // the only source of nicknames and role colours.
