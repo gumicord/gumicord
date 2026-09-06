@@ -197,6 +197,12 @@ pub enum Panes {
     One,
 }
 
+/// Phones have no window to drag or minimize; the OS owns the chrome.
+/// By target, not width: a narrowed desktop window keeps its controls.
+const fn is_mobile() -> bool {
+    cfg!(target_os = "ios") || cfg!(target_os = "android")
+}
+
 impl Panes {
     /// Narrowest width that still fits the member list, which is the first
     /// thing to go: who is present matters less than what was said.
@@ -360,6 +366,8 @@ pub struct Gumicord {
     /// How long the built tree stays valid. `None` means nothing changes
     /// with time. A `Cell` because building takes `&self`.
     holds: std::cell::Cell<Option<i64>>,
+    /// First-frame diagnostics, written once for field debugging.
+    startup_diag: std::cell::Cell<bool>,
     account_switch_rx: std::sync::mpsc::Receiver<
         Result<session::LoggedIn, (crate::account::AccountKey, String, bool)>,
     >,
@@ -508,6 +516,7 @@ impl Gumicord {
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
             holds: std::cell::Cell::new(None),
+            startup_diag: std::cell::Cell::new(false),
             account_switch_rx,
             account_switch_tx,
             plugins,
@@ -1662,8 +1671,35 @@ impl Application for Gumicord {
             }
             None => gumicord_theme::resolve::clear(&mut tree),
         }
+        write_startup_diag(self, &tree, cx, panes);
         tree
     }
+}
+
+/// First-frame facts for field debugging, where no debugger reaches.
+fn write_startup_diag(app: &Gumicord, tree: &UiNode, cx: &FrameCx, panes: Panes) {
+    if app.startup_diag.get() {
+        return;
+    }
+    app.startup_diag.set(true);
+    let screen = if app.settings.open {
+        "settings"
+    } else if app.shows_main() {
+        "main"
+    } else {
+        "login"
+    };
+    gumicord_platform::write_diag_file(
+        "diag.log",
+        &format!(
+            "viewport={}x{} scale={} panes={panes:?} screen={screen} theme={} nodes={}\n",
+            cx.viewport.w,
+            cx.viewport.h,
+            cx.scale,
+            if app.theme.is_some() { "yes" } else { "none" },
+            tree.count(),
+        ),
+    );
 }
 
 /// A dialog waiting for room: plugin flows share one modal at a time.
@@ -2087,7 +2123,7 @@ impl Gumicord {
         UiNode::new(NodeId::AppRoot)
             .child(
                 UiNode::new(NodeId::AppWindow)
-                    .child(self.titlebar())
+                    .child_if(!is_mobile(), || self.titlebar())
                     .child(UiNode::new(NodeId::AppScreen).child(screen)),
             )
             // Only while open: a full-window layer would absorb every press.

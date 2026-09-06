@@ -55,12 +55,18 @@ pub fn install_panic_hook() {
             let _ = write!(msg, " at {}:{}", loc.file(), loc.line());
         }
         eprintln!("{msg}");
-        if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
-            let dir = std::path::Path::new(&dir);
-            // Fresh installs have no directory yet; writing alone fails.
-            if std::fs::create_dir_all(dir).is_ok() {
-                let _ = std::fs::write(dir.join("panic.log"), format!("{msg}\n"));
-            }
-        }
+        write_diag_file("panic.log", &format!("{msg}\n"));
     }));
+}
+
+/// Writes one file into the data directory, creating it first. Everything
+/// is best-effort: field diagnostics must never crash the app they watch.
+pub fn write_diag_file(name: &str, contents: &str) {
+    if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
+        let dir = std::path::Path::new(&dir);
+        // Fresh installs have no directory yet; writing alone fails.
+        if std::fs::create_dir_all(dir).is_ok() {
+            let _ = std::fs::write(dir.join(name), contents);
+        }
+    }
 }
