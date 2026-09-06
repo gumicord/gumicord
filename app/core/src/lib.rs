@@ -1484,6 +1484,21 @@ impl Application for Gumicord {
         }
     }
 
+    /// Writes polled native text into the named login field, wherever focus
+    /// currently sits: a paired fill lands in both fields at once.
+    fn proxy_text(&mut self, field: gumicord_platform::ImeProxy, text: String) -> bool {
+        let doc = match field {
+            gumicord_platform::ImeProxy::Username => &mut self.login_email,
+            gumicord_platform::ImeProxy::Password => &mut self.login_input,
+        };
+        if doc.text() == text {
+            return false;
+        }
+        doc.take();
+        doc.insert(&text);
+        true
+    }
+
     /// Sends, edits or replies, depending on [`Composing`]. Missing that
     /// turns an intended edit into a new message.
     ///
@@ -6199,6 +6214,22 @@ mod login_tests {
         a.login_field = None;
         a.input_focused = true;
         assert_eq!(a.ime_proxy(), None);
+    }
+
+    /// Polled native text lands in the named field, wherever focus sits: a
+    /// paired fill reaches both fields from one poll.
+    #[test]
+    fn proxy_text_reaches_the_named_field() {
+        use gumicord_platform::ImeProxy;
+
+        let mut a = pending();
+        a.login_field = Some(LoginField::Email);
+        assert!(a.proxy_text(ImeProxy::Password, "secret".to_owned()));
+        assert_eq!(a.login_input.text(), "secret");
+        assert!(a.login_email.text().is_empty());
+        assert!(!a.proxy_text(ImeProxy::Password, "secret".to_owned()));
+        assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
+        assert_eq!(a.login_email.text(), "a@b.c");
     }
 
     /// Clicking a login field focuses exactly that one, and typing lands in the

@@ -28,8 +28,14 @@ pub struct Proxy {
     user: Retained<UITextField>,
     pass: Retained<UITextField>,
     active: Option<super::ImeProxy>,
-    last: String,
-    parent: Option<std::ptr::NonNull<std::ffi::c_void>>,
+    last: [String; 2],
+}
+
+fn idx(kind: super::ImeProxy) -> usize {
+    match kind {
+        super::ImeProxy::Username => 0,
+        super::ImeProxy::Password => 1,
+    }
 }
 
 fn make_field() -> Retained<UITextField> {
@@ -77,7 +83,7 @@ impl Proxy {
             user,
             pass,
             active: None,
-            last: String::new(),
+            last: [String::new(), String::new()],
             parent: None,
         }
     }
@@ -121,29 +127,41 @@ impl Proxy {
             if !field.isFirstResponder() {
                 self.active = None;
             } else {
-                self.last = text.to_owned();
+                self.last[idx(kind)] = text.to_owned();
+                // Snapshot the sibling too: a paired fill moves both, and
+                // the poll below must see whose text actually changed.
+                let other = match kind {
+                    super::ImeProxy::Username => super::ImeProxy::Password,
+                    super::ImeProxy::Password => super::ImeProxy::Username,
+                };
+                self.last[idx(other)] = field_text(self.field(other));
             }
         }
     }
 
-    /// Reads the active field. Returns text when it moved, or a submit when
-    /// a return key arrived inside it.
+    /// Reads both fields. The manager fills username and password as a
+    /// pair, so the idle sibling moves too — watching only the focused
+    /// one drops the other half of the fill. One event per call; the
+    /// caller polls every frame while up.
     pub fn poll(&mut self) -> Option<(super::ImeProxy, ProxyEvent)> {
-        let kind = self.active?;
-        let current = field_text(self.field(kind));
-        if current == self.last {
-            return None;
+        self.active?;
+        for kind in [super::ImeProxy::Username, super::ImeProxy::Password] {
+            let current = field_text(self.field(kind));
+            if current == self.last[idx(kind)] {
+                continue;
+            }
+            // Return is the only way a newline reaches a login field.
+            let clean = current.replace('\n', "");
+            if clean != current {
+                let field = self.field(kind);
+                set_text(field, &clean);
+                self.last[idx(kind)] = clean.clone();
+                return Some((kind, ProxyEvent::Submitted(clean)));
+            }
+            self.last[idx(kind)] = current.clone();
+            return Some((kind, ProxyEvent::Text(current)));
         }
-        // Return is the only way a newline reaches a login field.
-        let clean = current.replace('\n', "");
-        if clean != current {
-            let field = self.field(kind);
-            set_text(field, &clean);
-            self.last = clean.clone();
-            return Some((kind, ProxyEvent::Submitted(clean)));
-        }
-        self.last = current.clone();
-        Some((kind, ProxyEvent::Text(current)))
+        None
     }
 
     pub fn is_active(&self) -> bool {

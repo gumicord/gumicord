@@ -157,6 +157,12 @@ pub trait Application {
         None
     }
 
+    /// Writes polled native text into the named login field. Only iOS
+    /// proxies call this; elsewhere it is never invoked.
+    fn proxy_text(&mut self, _field: ImeProxy, _text: String) -> bool {
+        false
+    }
+
     /// The login field an iOS proxy should mirror, if any. Only iOS reads
     /// this; elsewhere the value is ignored.
     fn ime_proxy(&self) -> Option<ImeProxy> {
@@ -794,30 +800,26 @@ impl Host {
         };
         let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
-        let Some((_, event)) = proxy.poll() else {
-            return false;
-        };
-        match event {
-            crate::proxy::ProxyEvent::Text(text) => {
-                if let Some(doc) = self.app.focused_document() {
-                    if doc.text() != text {
-                        doc.take();
-                        doc.insert(&text);
-                        return true;
-                    }
+        // Keystrokes raise no events while winit IME is off, so nothing
+        // would wake the loop to poll them. Spin while up; the login
+        // screen is tiny and the spin stops on blur.
+        let spinning = proxy.is_active();
+        let mut changed = false;
+        if let Some((kind, event)) = proxy.poll() {
+            match event {
+                crate::proxy::ProxyEvent::Text(text) => {
+                    changed |= self.app.proxy_text(kind, text);
                 }
-                false
-            }
-            crate::proxy::ProxyEvent::Submitted(text) => {
-                if let Some(doc) = self.app.focused_document() {
-                    if doc.text() != text {
-                        doc.take();
-                        doc.insert(&text);
-                    }
+                crate::proxy::ProxyEvent::Submitted(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                    changed |= self.app.submit();
                 }
-                self.app.submit()
             }
         }
+        if spinning {
+            self.request_redraw();
+        }
+        changed
     }
 
     #[cfg(target_os = "ios")]

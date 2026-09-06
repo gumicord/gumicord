@@ -315,9 +315,40 @@ impl RestClient {
                 tracing::error!("a response body contained the token; redacting it");
                 "<redacted>".to_owned()
             }
-            _ => body,
+            _ => message_or_body(&body),
         };
         Err(RestError::Api { status, body })
+    }
+}
+
+/// Discord's error envelope. Showing its message instead of the raw body
+/// also decodes the \uXXXX escapes JSON carries.
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    code: Option<i64>,
+}
+
+fn message_or_body(body: &str) -> String {
+    let parsed: Result<ErrorBody, _> = serde_json::from_str(body);
+    match parsed
+        .ok()
+        .filter(|e| e.message.is_some() || e.code.is_some())
+    {
+        Some(ErrorBody {
+            message: Some(message),
+            code: Some(code),
+        }) => format!("{message} ({code})"),
+        Some(ErrorBody {
+            message: Some(message),
+            ..
+        }) => message,
+        Some(ErrorBody {
+            code: Some(code), ..
+        }) => format!("エラーコード {code}"),
+        _ => body.to_owned(),
     }
 }
 
@@ -445,6 +476,24 @@ mod tests {
     #[test]
     fn the_api_base_is_pinned() {
         assert_eq!(API_BASE, "https://discord.com/api/v9");
+    }
+
+    /// The screen shows Discord's message, decoded, not the raw envelope.
+    #[test]
+    fn error_bodies_show_the_message() {
+        assert_eq!(
+            message_or_body(r#"{"message":"401: Unauthorized","code":0}"#),
+            "401: Unauthorized (0)"
+        );
+        assert_eq!(
+            message_or_body(
+                r#"{"message":"\u767b\u9332\u306b\u5931\u6557\u3057\u307e\u3057\u305f"}"#
+            ),
+            "登録に失敗しました"
+        );
+        assert_eq!(message_or_body(r#"{"code":50035}"#), "エラーコード 50035");
+        assert_eq!(message_or_body("not even JSON"), "not even JSON");
+        assert_eq!(message_or_body("{}"), "{}");
     }
 
     /// Ending the session on anything else would throw people offline for a
