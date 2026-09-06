@@ -29,6 +29,7 @@ pub struct Proxy {
     pass: Retained<UITextField>,
     active: Option<super::ImeProxy>,
     last: String,
+    parent: Option<std::ptr::NonNull<std::ffi::c_void>>,
 }
 
 fn make_field() -> Retained<UITextField> {
@@ -77,6 +78,7 @@ impl Proxy {
             pass,
             active: None,
             last: String::new(),
+            parent: None,
         }
     }
 
@@ -90,18 +92,15 @@ impl Proxy {
     /// Shows the wanted field under the given view. Both siblings stay
     /// attached while either is up: the manager pairs a username field
     /// with a password field by proximity, and a lone field fills alone.
-    /// The parent is re-attached every time: the window (and its view) is
-    /// recreated across suspend/resume, and a stale parent draws nothing.
+    /// Steady state does nothing: re-attaching every frame resigns the
+    /// first responder (killing the keyboard) and churns layout. Only a
+    /// new parent (the view is recreated across suspend/resume) or a new
+    /// kind re-attaches.
     /// `text` seeds a freshly shown field; while one stays up it is only
     /// read, never written, so typing never fights the sync.
     pub fn set_active(&mut self, parent: &UIView, kind: Option<super::ImeProxy>, text: &str) {
-        if self.active == kind {
-            if kind.is_some() {
-                for field in [&self.user, &self.pass] {
-                    field.removeFromSuperview();
-                    parent.addSubview(field);
-                }
-            }
+        let ptr = std::ptr::NonNull::from(parent).cast::<std::ffi::c_void>();
+        if self.active == kind && self.parent == Some(ptr) {
             return;
         }
         for field in [&self.user, &self.pass] {
@@ -109,6 +108,7 @@ impl Proxy {
             field.removeFromSuperview();
         }
         self.active = kind;
+        self.parent = kind.map(|_| ptr);
         if let Some(kind) = kind {
             for field in [&self.user, &self.pass] {
                 parent.addSubview(field);
