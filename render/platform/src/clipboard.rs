@@ -195,7 +195,7 @@ mod imp {
 
     pub fn set_text(text: &str) -> Result<(), ClipboardError> {
         let value = NSString::from_str(text);
-        unsafe { msg_send![&board(), setString: &*value] }
+        unsafe { msg_send![&board(), setString: Some(&*value)] }
         Ok(())
     }
 
@@ -207,14 +207,15 @@ mod imp {
 
     pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
         let png = encode_png(image)?;
-        let data: Retained<NSData> =
-            unsafe { msg_send![class!(NSData), dataWithBytes:png.as_ptr(), length:png.len()] };
+        let data: Retained<NSData> = unsafe {
+            msg_send![class!(NSData), dataWithBytes:png.as_ptr().cast::<std::ffi::c_void>(), length:png.len()]
+        };
         let picture: Option<Retained<UIImage>> =
             unsafe { msg_send![class!(UIImage), imageWithData: &*data] };
         let Some(picture) = picture else {
             return Err(ClipboardError::Failed("cannot encode image"));
         };
-        unsafe { msg_send![&board(), setImage: &*picture] }
+        unsafe { msg_send![&board(), setImage: Some(&*picture)] }
         Ok(())
     }
 
@@ -225,15 +226,11 @@ mod imp {
             return Ok(None);
         };
         // Anything the board cannot render as PNG is not ours to guess.
-        let data: Option<Retained<NSData>> =
-            unsafe { objc2_ui_kit::UIImagePNGRepresentation(&picture) };
+        let data = unsafe { Retained::from_raw(objc2_ui_kit::UIImagePNGRepresentation(&picture)) };
         let Some(data) = data else {
             return Ok(None);
         };
-        let bytes: *const std::ffi::c_void = unsafe { msg_send![&data, bytes] };
-        let len: usize = unsafe { msg_send![&data, length] };
-        let raw = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), len) };
-        Ok(decode_png(raw))
+        Ok(decode_png(&data.to_vec()))
     }
 
     fn encode_png(image: &ClipboardImage) -> Result<Vec<u8>, ClipboardError> {

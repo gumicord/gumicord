@@ -65,15 +65,14 @@ pub fn install_panic_hook() {
 fn append_log(line: &str) {
     if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
         let dir = std::path::Path::new(&dir).join("logs");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
+        if std::fs::create_dir_all(&dir).is_ok()
+            && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(dir.join("gumicord.log"))
-            {
-                use std::io::Write as _;
-                let _ = write!(file, "{line}");
-            }
+        {
+            use std::io::Write as _;
+            let _ = write!(file, "{line}");
         }
     }
 }
