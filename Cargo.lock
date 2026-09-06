@@ -2127,6 +2127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gumicord-screenshot"
+version = "0.0.0"
+dependencies = [
+ "gumicord-render",
+ "gumicord-theme",
+ "gumicord-uitree",
+ "png",
+]
+
+[[package]]
 name = "gumicord-store"
 version = "0.0.0"
 dependencies = [

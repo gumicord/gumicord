@@ -189,6 +189,43 @@ impl Renderer {
         self.gpu.resize(width, height);
     }
 
+    /// No window: draws into a texture for screenshots instead. The caller
+    /// polls [`Renderer::fonts_pending`] and [`Renderer::process_font_update`]
+    /// like the platform layer does, then reads back with [`Gpu::read_pixels`].
+    pub fn headless(
+        width: u32,
+        height: u32,
+        scale: f32,
+        wake: Box<dyn Fn() + Send + Sync + 'static>,
+        font_cache_dir: Option<std::path::PathBuf>,
+        probe_cache_dir: Option<std::path::PathBuf>,
+    ) -> Result<Self, GpuError> {
+        let gpu = Gpu::headless(width, height, probe_cache_dir.as_deref())?;
+        let text = TextEngine::new(&gpu.device, scale, wake, font_cache_dir);
+        let atlas_binds = bind_pages(&gpu, &text);
+        Ok(Renderer {
+            gpu,
+            text,
+            atlas_binds,
+            scale,
+            scroll: ScrollState::new(),
+            hits: Vec::new(),
+            links: Vec::new(),
+            spoilers: Vec::new(),
+            overflow: std::collections::HashMap::new(),
+            scrollbars: Vec::new(),
+            keep_place: None,
+            missing_images: Vec::new(),
+            missing_backgrounds: Vec::new(),
+            theme_namespace: None,
+            backgrounds: backgrounds::Backgrounds::default(),
+            bg_binds: Vec::new(),
+            upload_us: std::collections::VecDeque::new(),
+            present_us: std::collections::VecDeque::new(),
+            caret_visible: true,
+        })
+    }
+
     /// The DPI changed. Glyphs are rasterised in physical pixels, so the
     /// atlas is rebuilt.
     pub fn set_scale(&mut self, scale: f32) {
@@ -240,6 +277,12 @@ impl Renderer {
     /// What the last fold brought in, if it ran. For field diagnostics.
     pub fn font_stats(&self) -> Option<font_cache::Stats> {
         self.text.font_stats()
+    }
+
+    /// Copies the last headless frame into host memory as tightly packed
+    /// RGBA8. `None` for window output.
+    pub fn read_pixels(&self) -> Option<Vec<u8>> {
+        self.gpu.read_pixels()
     }
 
     /// Scrolls, and reports whether a redraw is needed.

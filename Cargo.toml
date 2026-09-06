@@ -16,6 +16,7 @@ members = [
     "app/android",
     "app/ios",
     "xtask",
+    "tools/screenshot",
 ]
 # Spikes are throwaway code, so they stay out of the workspace.
 exclude = ["spike"]

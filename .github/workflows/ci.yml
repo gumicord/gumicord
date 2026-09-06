@@ -346,6 +346,43 @@ jobs:
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
+  # Conformance screenshots (NFR-015). Fixed scenes render headlessly
+  # (software GL on Linux, WARP on Windows) and compare against blessed
+  # images with the spec tolerance. macOS has no headless Metal on hosted
+  # runners, so it sits out until a GPU-backed runner exists.
+  # ────────────────────────────────────────────────────────────
+  screenshot:
+    name: Screenshots (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: screenshot
+
+      - name: Render and compare
+        shell: bash
+        env:
+          # Software rasterizer where no GPU exists.
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: cargo run -p gumicord-screenshot
+
+      - name: Upload shots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-${{ matrix.os }}-${{ github.sha }}
+          path: target/screenshots/
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────
   # Nightly releases in a separate repo. Dated tags keep history;
   # plain releases, no prerelease flag: the repo itself is the
   # nightly channel. GITHUB_TOKEN cannot cross the repo boundary,

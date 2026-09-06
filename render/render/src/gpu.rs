@@ -41,10 +41,9 @@ const INITIAL_RECTS: usize = 4096;
 const INITIAL_GLYPHS: usize = 16384;
 
 pub struct Gpu {
-    surface: wgpu::Surface<'static>,
+    output: Output,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
 
     rect_pipeline: wgpu::RenderPipeline,
     text_pipeline: wgpu::RenderPipeline,
@@ -71,6 +70,30 @@ pub struct Gpu {
     pub adapter_name: String,
 }
 
+/// Where frames go. Screenshots render into a texture with a pinned format
+/// instead of whatever the surface negotiated, so every machine compares
+/// against the same bytes.
+enum Output {
+    Surface {
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+    },
+    Texture {
+        texture: wgpu::Texture,
+        size: (u32, u32),
+    },
+}
+
+/// Fixed screenshot format. Surface formats may differ by platform.
+const HEADLESS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// What the frame draws into. A surface frame presents afterwards; a
+/// texture view is used as-is.
+enum Frame {
+    Surface(wgpu::SurfaceTexture),
+    Texture,
+}
+
 impl Gpu {
     pub fn new(
         target: wgpu::SurfaceTarget<'static>,
@@ -78,35 +101,14 @@ impl Gpu {
         height: u32,
         probe_cache: Option<&std::path::Path>,
     ) -> Result<Self, GpuError> {
-        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        // Narrowed before the instance exists: a broken driver crashes while
-        // one is being created, not while adapters are enumerated. Each
-        // candidate is created in a probe child first, so only survivors
-        // reach this process.
-        if std::env::var("WGPU_BACKEND").is_err() {
-            desc.backends = crate::probe::surviving_backends(CANDIDATES, probe_cache);
-            if desc.backends.is_empty() {
-                return Err(GpuError::NoAdapter);
-            }
-        }
-        let backends = desc.backends;
-
-        let instance = wgpu::Instance::new(desc);
+        let (instance, backends) = Self::open_instance(probe_cache)?;
         let surface = instance.create_surface(target)?;
 
-        let adapter = pick_adapter(&instance, &surface, backends).ok_or(GpuError::NoAdapter)?;
+        let adapter =
+            pick_adapter(&instance, Some(&surface), backends).ok_or(GpuError::NoAdapter)?;
         let info = adapter.get_info();
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("gumicord"),
-                required_features: wgpu::Features::empty(),
-                // Downlevel defaults still work on GLES 3.0 class hardware,
-                // which mobile will need.
-                required_limits:
-                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-                ..Default::default()
-            }))?;
+        let (device, queue) = Self::open_device(&adapter)?;
 
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
@@ -123,7 +125,98 @@ impl Gpu {
         // Fifo = VSync
         config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&device, &config);
+        let format = config.format;
 
+        Self::assemble(
+            device,
+            queue,
+            Output::Surface { surface, config },
+            format,
+            info,
+        )
+    }
+
+    /// No window: draws into a texture for screenshots instead. The format
+    /// is pinned rather than negotiated, so shots compare across machines.
+    pub fn headless(
+        width: u32,
+        height: u32,
+        probe_cache: Option<&std::path::Path>,
+    ) -> Result<Self, GpuError> {
+        let (instance, backends) = Self::open_instance(probe_cache)?;
+        let adapter = pick_adapter(&instance, None, backends).ok_or(GpuError::NoAdapter)?;
+        let info = adapter.get_info();
+
+        let (device, queue) = Self::open_device(&adapter)?;
+
+        let size = (width.max(1), height.max(1));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gumicord-shot"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HEADLESS_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        Self::assemble(
+            device,
+            queue,
+            Output::Texture { texture, size },
+            HEADLESS_FORMAT,
+            info,
+        )
+    }
+
+    /// Shared instance setup: backend narrowing before anything exists.
+    /// A broken driver crashes while the instance is being created, not
+    /// while adapters are enumerated, so this runs first in both modes.
+    fn open_instance(
+        probe_cache: Option<&std::path::Path>,
+    ) -> Result<(wgpu::Instance, wgpu::Backends), GpuError> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        // Narrowed before the instance exists: a broken driver crashes while
+        // one is being created, not while adapters are enumerated. Each
+        // candidate is created in a probe child first, so only survivors
+        // reach this process.
+        if std::env::var("WGPU_BACKEND").is_err() {
+            desc.backends = crate::probe::surviving_backends(CANDIDATES, probe_cache);
+            if desc.backends.is_empty() {
+                return Err(GpuError::NoAdapter);
+            }
+        }
+        let backends = desc.backends;
+        Ok((wgpu::Instance::new(desc), backends))
+    }
+
+    fn open_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), GpuError> {
+        Ok(pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("gumicord"),
+                required_features: wgpu::Features::empty(),
+                // Downlevel defaults still work on GLES 3.0 class hardware,
+                // which mobile will need.
+                required_limits:
+                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+                ..Default::default()
+            },
+        ))?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        output: Output,
+        format: wgpu::TextureFormat,
+        info: wgpu::AdapterInfo,
+    ) -> Result<Self, GpuError> {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gumicord"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -203,7 +296,7 @@ impl Gpu {
             &device,
             &shader,
             &[&globals_layout],
-            config.format,
+            format,
             "rect",
             "vs_rect",
             "fs_rect",
@@ -235,7 +328,7 @@ impl Gpu {
             &device,
             &shader,
             &[&globals_layout, &atlas_layout],
-            config.format,
+            format,
             "text",
             "vs_text",
             "fs_text",
@@ -284,10 +377,9 @@ impl Gpu {
         );
 
         Ok(Gpu {
-            surface,
+            output,
             device,
             queue,
-            config,
             rect_pipeline,
             text_pipeline,
             globals_buf,
@@ -309,7 +401,10 @@ impl Gpu {
     }
 
     pub fn size(&self) -> (u32, u32) {
-        (self.config.width, self.config.height)
+        match &self.output {
+            Output::Surface { config, .. } => (config.width, config.height),
+            Output::Texture { size, .. } => *size,
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -321,9 +416,30 @@ impl Gpu {
             to = ?(width, height),
             "サーフェスを作り直す"
         );
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        match &mut self.output {
+            Output::Surface { surface, config } => {
+                config.width = width;
+                config.height = height;
+                surface.configure(&self.device, config);
+            }
+            Output::Texture { texture, size } => {
+                *texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("gumicord-shot"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: HEADLESS_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                *size = (width, height);
+            }
+        }
     }
 
     /// The bind group for the glyph atlas; recreate it when the atlas grows.
@@ -363,13 +479,16 @@ impl Gpu {
     /// A resize almost always yields `Outdated` first. Giving up there leaves
     /// the window blank until the next input under `ControlFlow::Wait`, so it
     /// reconfigures and tries once more.
-    fn acquire(&mut self) -> Result<wgpu::SurfaceTexture, Presented> {
+    fn acquire(&mut self) -> Result<Frame, Presented> {
+        let Output::Surface { surface, config } = &mut self.output else {
+            return Ok(Frame::Texture);
+        };
         for attempt in 0..2 {
-            match self.surface.get_current_texture() {
+            match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(f)
-                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => return Ok(f),
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => return Ok(Frame::Surface(f)),
                 wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                    self.surface.configure(&self.device, &self.config);
+                    surface.configure(&self.device, config);
                     if attempt == 1 {
                         tracing::debug!("再構成してもサーフェスを取れなかった");
                     }
@@ -408,18 +527,14 @@ impl Gpu {
             Ok(f) => f,
             Err(why) => return why,
         };
+        let (width, height) = self.size();
 
         let grew = self.ensure_capacity(dl);
 
         self.queue.write_buffer(
             &self.globals_buf,
             0,
-            bytemuck::cast_slice(&[
-                self.config.width as f32,
-                self.config.height as f32,
-                0.0,
-                0.0,
-            ]),
+            bytemuck::cast_slice(&[width as f32, height as f32, 0.0, 0.0]),
         );
         upload_instances(
             &self.queue,
@@ -436,9 +551,27 @@ impl Gpu {
             grew,
         );
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view;
+        let mut presentable = None;
+        match frame {
+            Frame::Surface(frame) => {
+                view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                presentable = Some(frame);
+            }
+            Frame::Texture => {
+                // Cloned, so the view below does not borrow the output
+                // while the pass below needs `&mut self`.
+                let texture = match &self.output {
+                    Output::Texture { texture, .. } => texture.clone(),
+                    Output::Surface { .. } => {
+                        unreachable!("texture frame without texture output")
+                    }
+                };
+                view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            }
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -467,7 +600,7 @@ impl Gpu {
                 multiview_mask: None,
             });
 
-            let (w, h) = (self.config.width, self.config.height);
+            let (w, h) = (width, height);
             let mut current: Option<(RunKind, u32)> = None;
             let mut current_scissor: Option<Option<[u32; 4]>> = None;
 
@@ -529,9 +662,77 @@ impl Gpu {
         self.last_upload_us = submit_start.elapsed().as_micros() as u64;
         let presented_at = std::time::Instant::now();
         self.queue.submit(Some(encoder.finish()));
-        self.queue.present(frame);
+        if let Some(frame) = presentable {
+            self.queue.present(frame);
+        }
         self.last_present_us = presented_at.elapsed().as_micros() as u64;
         Presented::Yes
+    }
+
+    /// Copies the texture output into host memory as tightly packed RGBA8.
+    /// `None` for window output, which presents instead of reading back.
+    pub fn read_pixels(&self) -> Option<Vec<u8>> {
+        let (texture, (width, height)) = match &self.output {
+            Output::Texture { texture, size } => (texture, *size),
+            Output::Surface { .. } => return None,
+        };
+        // Rows copy padded to 256 bytes; the padding is stripped below.
+        let stride = width as usize * 4;
+        let padded = stride.div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gumicord-shot-read"),
+            size: (padded * height as usize) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("gumicord-shot-read"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        match rx.recv() {
+            Ok(Ok(())) => {}
+            _ => return None,
+        }
+        let mapped = slice.get_mapped_range().ok()?;
+        let mut out = vec![0u8; stride * height as usize];
+        for (dst, src) in out
+            .chunks_exact_mut(stride)
+            .zip(mapped.chunks_exact(padded))
+        {
+            dst.copy_from_slice(&src[..stride]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        Some(out)
     }
 
     /// Microseconds of the last submit: uploading and encoding first, then
@@ -677,9 +878,23 @@ const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::VULKAN, wgpu::Backends::
 /// lighter than DX12 on Windows, it is not a choice to delegate.
 fn pick_adapter(
     instance: &wgpu::Instance,
-    surface: &wgpu::Surface<'_>,
+    surface: Option<&wgpu::Surface<'_>>,
     backends: wgpu::Backends,
 ) -> Option<wgpu::Adapter> {
+    // Headless screenshots prefer software rendering everywhere, so one
+    // blessed image holds across machines. The instance backends above
+    // still apply, so probed-out drivers stay out.
+    if surface.is_none() {
+        let fallback = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: true,
+            ..Default::default()
+        }));
+        if let Ok(a) = fallback {
+            return Some(a);
+        }
+    }
     let adapters = pollster::block_on(instance.enumerate_adapters(backends));
     for wanted in CANDIDATES {
         if !backends.contains(*wanted) {
@@ -687,16 +902,17 @@ fn pick_adapter(
         }
         let found = adapters.iter().find(|a| {
             wanted.contains(wgpu::Backends::from(a.get_info().backend))
-                && a.is_surface_supported(surface)
+                && surface.is_none_or(|s| a.is_surface_supported(s))
         });
         if let Some(a) = found {
             return Some(a.clone());
         }
     }
     // Failing that, anything will do. An explicit `WGPU_BACKEND` lands here.
+    // (The headless fallback above already tried software first.)
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: Some(surface),
+        compatible_surface: surface,
         ..Default::default()
     }))
     .ok()
