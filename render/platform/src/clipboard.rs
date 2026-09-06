@@ -3,8 +3,7 @@
 //! | platform | implementation | status |
 //! |---|---|---|
 //! | Windows | Win32 (`CF_UNICODETEXT`, `CF_DIB`) | done |
-//! | Linux | `arboard` (X11 / Wayland) | done |
-//! | macOS | `NSPasteboard` | not yet |
+//! | Linux / macOS | `arboard` (X11 / Wayland / `NSPasteboard`) | done |
 //! | Android / iOS | the OS API | not yet |
 //!
 //! Images ride as `CF_DIB`: 32- and 24-bit, uncompressed. Paletted and
@@ -72,7 +71,7 @@ pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
     imp::image()
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
 
@@ -93,7 +92,7 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
 
@@ -450,7 +449,7 @@ mod tests {
     /// character. Both look nearly right by eye.
     #[test]
     #[cfg_attr(
-        not(any(windows, target_os = "linux")),
+        not(any(windows, target_os = "linux", target_os = "macos")),
         ignore = "not implemented on this platform yet"
     )]
     fn text_comes_back_unchanged() {
@@ -484,7 +483,7 @@ mod tests {
     /// An image survives the round trip, alpha and all.
     #[test]
     #[cfg_attr(
-        not(any(windows, target_os = "linux")),
+        not(any(windows, target_os = "linux", target_os = "macos")),
         ignore = "not implemented on this platform yet"
     )]
     fn images_come_back_unchanged() {
