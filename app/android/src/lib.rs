@@ -41,6 +41,10 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     if let Err(e) = gumicord_platform::run_android(Gumicord::new(), app) {
         tracing::error!(%e, "could not start");
     }
+    // The activity can come back in the same process (relaunch, recreation),
+    // but winit allows one event loop per process. Die here so the next
+    // launch starts fresh instead of failing to recreate the loop.
+    std::process::exit(0);
 }
 
 /// Hands the JVM to the TLS verifier. reqwest checks certificates against

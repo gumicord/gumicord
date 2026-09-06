@@ -38,4 +38,7 @@ pub unsafe extern "C" fn gumicord_ios_main(documents_dir: *const std::ffi::c_cha
     if let Err(e) = gumicord_platform::run(Gumicord::new()) {
         tracing::error!(%e, "could not start");
     }
+    // Same one-loop-per-process rule as Android: a relaunched guest must
+    // start fresh rather than reuse a spent loop.
+    std::process::exit(0);
 }
