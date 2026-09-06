@@ -133,7 +133,9 @@ pub enum LiveEvent {
     MemberChunk {
         guild: GuildId,
         members: Vec<gumicord_model::Member>,
-        /// Present for bot OP 8 responses; absent for targeted user requests.
+        /// Chunk position. Present for bot rosters, and also for targeted
+        /// answers that fit in one chunk — so it never decides the path
+        /// alone (account kind does).
         index: Option<usize>,
         count: Option<usize>,
         /// Who is online, from the chunk's own `presences`. Empty for
@@ -1250,46 +1252,56 @@ impl Live {
                 count,
                 presences,
             } => {
-                if let Some(index) = index {
-                    // Bot roster chunks: accumulate by user and regroup.
-                    // Chunks arrive flat and in any order, so offsets are
-                    // never trusted and counts are the roster held.
-                    if members.is_empty() {
-                        tracing::warn!(%guild, "empty member chunk; the bot may lack the Server Members intent");
-                    }
-                    let table: std::collections::HashMap<UserId, Status> =
-                        presences.into_iter().collect();
-                    let roster = self.bot_roster.entry(guild).or_default();
-                    for member in members {
-                        let Some(user) = member.user.as_ref().map(|u| u.id) else {
+                // Roster chunks rebuild the subscribed list; targeted answers
+                // only fill the cache. A targeted answer that fits in one
+                // chunk carries its index too, so the account kind — not the
+                // index — decides the path. Rebuilding from speakers once
+                // wiped a hundred-row list down to them, and every later
+                // update fell outside the held rows.
+                let roster = index.is_some() && !self.rest.as_ref().is_some_and(|r| !r.is_bot());
+                if !roster {
+                    let mut changed = false;
+                    for m in members {
+                        // Skip entries with no user.
+                        let Some(user) = m.user.as_ref().map(|u| u.id) else {
                             continue;
                         };
-                        let status = table.get(&user).copied().unwrap_or(Status::Offline);
-                        roster.insert(user, (member.clone(), status));
-                        self.store.remember_member(guild, user, member);
+                        self.store.remember_member(guild, user, m);
+                        changed = true;
                     }
-                    if count.is_some_and(|c| index + 1 >= c) {
-                        self.bot_complete.insert(guild);
-                    }
-                    tracing::debug!(
-                        %guild,
-                        roster = self.bot_roster.get(&guild).map_or(0, |r| r.len()),
-                        index,
-                        count,
-                        "bot roster merged"
-                    );
-                    return self.rebuild_bot_rows(guild);
+                    return changed;
                 }
-                let mut changed = false;
-                for m in members {
-                    // Skip entries with no user.
-                    let Some(user) = m.user.as_ref().map(|u| u.id) else {
+                // Bot roster chunks: accumulate by user and regroup.
+                // Chunks arrive flat and in any order, so offsets are
+                // never trusted and counts are the roster held.
+                let Some(index) = index else {
+                    return false;
+                };
+                if members.is_empty() {
+                    tracing::warn!(%guild, "empty member chunk; the bot may lack the Server Members intent");
+                }
+                let table: std::collections::HashMap<UserId, Status> =
+                    presences.into_iter().collect();
+                let roster = self.bot_roster.entry(guild).or_default();
+                for member in members {
+                    let Some(user) = member.user.as_ref().map(|u| u.id) else {
                         continue;
                     };
-                    self.store.remember_member(guild, user, m);
-                    changed = true;
+                    let status = table.get(&user).copied().unwrap_or(Status::Offline);
+                    roster.insert(user, (member.clone(), status));
+                    self.store.remember_member(guild, user, member);
                 }
-                changed
+                if count.is_some_and(|c| index + 1 >= c) {
+                    self.bot_complete.insert(guild);
+                }
+                tracing::debug!(
+                    %guild,
+                    roster = self.bot_roster.get(&guild).map_or(0, |r| r.len()),
+                    index,
+                    count,
+                    "bot roster merged"
+                );
+                self.rebuild_bot_rows(guild)
             }
             LiveEvent::Link(link) => {
                 let changed = self.link != link;
@@ -2533,6 +2545,40 @@ mod tests {
         assert_eq!(list.online(), 2);
         assert_eq!(list.total(), 4);
         assert!(live.bot_complete.contains(&guild));
+    }
+
+    /// A targeted answer that fits in one chunk carries its index too; on
+    /// a user account it must only fill the cache, never rebuild the
+    /// subscribed list. Rebuilding once wiped a synced hundred rows down
+    /// to the speakers, freezing the list until a guild switch.
+    #[test]
+    fn a_single_chunk_answer_does_not_rebuild_the_list() {
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        live.rest = Some(RestClient::anonymous().unwrap().with_token(Token::new("x")));
+        live.members.insert(guild, held_list(100));
+        assert_eq!(live.members.get(&guild).map_or(0, |m| m.rows().len()), 100);
+
+        let chunk = serde_json::json!({
+            "guild_id": "7",
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "members": [
+                {"user": {"id": "1001", "username": "speaker"}, "roles": []},
+            ],
+        });
+        live.apply_for_test(members_chunk(&chunk).expect("読める"));
+
+        assert_eq!(
+            live.members.get(&guild).map_or(0, |m| m.rows().len()),
+            100,
+            "speakers overwrote the subscribed list"
+        );
+        assert!(!live.bot_complete.contains(&guild));
+        assert!(
+            live.store.member(guild, UserId::from(1001u64)).is_some(),
+            "the answer still fills the cache"
+        );
     }
 
     /// Roles arriving after the chunks regroup what is held.
