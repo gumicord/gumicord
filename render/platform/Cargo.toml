@@ -25,6 +25,12 @@ wry.workspace = true
 arboard.workspace = true
 keyring.workspace = true
 
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-ui-kit.workspace = true
+png.workspace = true
+
 # GameActivity backend for the Android shell. Desktop builds never see it.
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { workspace = true, features = ["android-game-activity"] }

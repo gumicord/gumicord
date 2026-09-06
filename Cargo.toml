@@ -88,6 +88,11 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 # libdbus-1-dev).
 keyring = { version = "3", features = ["apple-native", "linux-native-sync-persistent", "crypto-rust"] }
 
+# iOS clipboard (UIPasteboard) and friends, via direct ObjC calls.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-ui-kit = "0.3"
+
 # QR login, for RSA-2048 OAEP-SHA256 decryption.
 # sha2 and rand_core come from rsa's re-exports; adding them separately would
 # drift in version.

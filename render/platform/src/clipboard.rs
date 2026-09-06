@@ -4,7 +4,8 @@
 //! |---|---|---|
 //! | Windows | Win32 (`CF_UNICODETEXT`, `CF_DIB`) | done |
 //! | Linux / macOS | `arboard` (X11 / Wayland / `NSPasteboard`) | done |
-//! | Android / iOS | the OS API | not yet |
+//! | iOS | `UIPasteboard` | done |
+//! | Android | the OS API | not yet |
 //!
 //! Images ride as `CF_DIB`: 32- and 24-bit, uncompressed. Paletted and
 //! compressed DIBs are refused rather than guessed.
@@ -71,7 +72,7 @@ pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
     imp::image()
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")))]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
 
@@ -177,6 +178,151 @@ mod imp {
                 rgba: img.bytes.into_owned(),
             }))
         })
+    }
+}
+
+#[cfg(target_os = "ios")]
+mod imp {
+    use super::{ClipboardError, ClipboardImage};
+    use objc2::rc::Retained;
+    use objc2::{class, msg_send};
+    use objc2_foundation::{NSData, NSString};
+    use objc2_ui_kit::{UIImage, UIPasteboard};
+
+    fn board() -> Retained<UIPasteboard> {
+        unsafe { msg_send![class!(UIPasteboard), generalPasteboard] }
+    }
+
+    pub fn set_text(text: &str) -> Result<(), ClipboardError> {
+        let value = NSString::from_str(text);
+        unsafe { msg_send![&board(), setString: &*value] }
+        Ok(())
+    }
+
+    pub fn text() -> Result<Option<String>, ClipboardError> {
+        let board = board();
+        let current: Option<Retained<NSString>> = unsafe { msg_send![&board, string] };
+        Ok(current.map(|s| s.to_string()))
+    }
+
+    pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
+        let png = encode_png(image)?;
+        let data: Retained<NSData> =
+            unsafe { msg_send![class!(NSData), dataWithBytes:png.as_ptr(), length:png.len()] };
+        let picture: Option<Retained<UIImage>> =
+            unsafe { msg_send![class!(UIImage), imageWithData: &*data] };
+        let Some(picture) = picture else {
+            return Err(ClipboardError::Failed("cannot encode image"));
+        };
+        unsafe { msg_send![&board(), setImage: &*picture] }
+        Ok(())
+    }
+
+    pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
+        let board = board();
+        let picture: Option<Retained<UIImage>> = unsafe { msg_send![&board, image] };
+        let Some(picture) = picture else {
+            return Ok(None);
+        };
+        // Anything the board cannot render as PNG is not ours to guess.
+        let data: Option<Retained<NSData>> =
+            unsafe { objc2_ui_kit::UIImagePNGRepresentation(&picture) };
+        let Some(data) = data else {
+            return Ok(None);
+        };
+        let bytes: *const std::ffi::c_void = unsafe { msg_send![&data, bytes] };
+        let len: usize = unsafe { msg_send![&data, length] };
+        let raw = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), len) };
+        Ok(decode_png(raw))
+    }
+
+    fn encode_png(image: &ClipboardImage) -> Result<Vec<u8>, ClipboardError> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, image.width, image.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder
+                .write_header()
+                .map_err(|_| ClipboardError::Failed("cannot encode image"))?;
+            writer
+                .write_image_data(&image.rgba)
+                .map_err(|_| ClipboardError::Failed("cannot encode image"))?;
+        }
+        Ok(out)
+    }
+
+    /// Reads 8-bit RGBA, RGB and grayscale PNGs. Anything else is not an
+    /// error, just not ours.
+    fn decode_png(png: &[u8]) -> Option<ClipboardImage> {
+        use png::{BitDepth, ColorType};
+
+        let mut reader = png::Decoder::new(png).read_info().ok()?;
+        let (width, height, color) = {
+            let info = reader.info();
+            (info.width as usize, info.height as usize, info.color_type)
+        };
+        if width == 0 || height == 0 || width > 16384 || height > 16384 {
+            return None;
+        }
+        if reader.info().bit_depth != BitDepth::Eight {
+            return None;
+        }
+        let channels = match color {
+            ColorType::Rgba => 4,
+            ColorType::Rgb => 3,
+            ColorType::Grayscale => 1,
+            ColorType::GrayscaleAlpha => 2,
+            _ => return None,
+        };
+        let stride = width.checked_mul(channels)?;
+        let total = stride.checked_mul(height)?;
+        // Decoded pixels dwarf the file; cap them before allocating.
+        if total == 0 || total > 64 * 1024 * 1024 {
+            return None;
+        }
+        let mut raw = vec![0u8; total];
+        reader.next_frame(&mut raw).ok()?;
+        if raw.len() != total {
+            return None;
+        }
+        let mut rgba = vec![0u8; width * height * 4];
+        match color {
+            ColorType::Rgba => rgba.copy_from_slice(&raw),
+            ColorType::Rgb => {
+                for (d, s) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(3)) {
+                    d[0] = s[0];
+                    d[1] = s[1];
+                    d[2] = s[2];
+                    d[3] = 0xff;
+                }
+            }
+            ColorType::Grayscale => {
+                for (d, s) in rgba.chunks_exact_mut(4).zip(raw.iter()) {
+                    d[0] = *s;
+                    d[1] = *s;
+                    d[2] = *s;
+                    d[3] = 0xff;
+                }
+            }
+            ColorType::GrayscaleAlpha => {
+                for (d, s) in rgba.chunks_exact_mut(4).zip(raw.chunks_exact(2)) {
+                    d[0] = s[0];
+                    d[1] = s[0];
+                    d[2] = s[0];
+                    d[3] = s[1];
+                }
+            }
+            _ => return None,
+        }
+        u32::try_from(width)
+            .ok()
+            .zip(u32::try_from(height).ok())
+            .map(|(width, height)| ClipboardImage {
+                width,
+                height,
+                rgba,
+            })
     }
 }
 
@@ -472,7 +618,7 @@ mod tests {
     /// character. Both look nearly right by eye.
     #[test]
     #[cfg_attr(
-        not(any(windows, target_os = "linux", target_os = "macos")),
+        not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")),
         ignore = "not implemented on this platform yet"
     )]
     fn text_comes_back_unchanged() {
@@ -506,7 +652,7 @@ mod tests {
     /// An image survives the round trip, alpha and all.
     #[test]
     #[cfg_attr(
-        not(any(windows, target_os = "linux", target_os = "macos")),
+        not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")),
         ignore = "not implemented on this platform yet"
     )]
     fn images_come_back_unchanged() {
