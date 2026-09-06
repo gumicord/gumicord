@@ -34,6 +34,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
 
     // Safe: set once here, before any thread reads it.
     unsafe { std::env::set_var("GUMICORD_DATA_DIR", data_dir(&app)) };
+    gumicord_platform::init_file_logging();
     gumicord_platform::install_panic_hook();
 
     if let Err(e) = gumicord_platform::run_android(Gumicord::new(), app) {

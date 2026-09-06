@@ -20,6 +20,7 @@ passing the Documents directory across lives in `app/core`.
   LiveContainer also jumps to the guest's main, so this suits both.
 - **No signing.** `CODE_SIGNING_ALLOWED=NO`; CI zips the unsigned `.app` as `Payload/` into an `.ipa` for sideloading. Passing App Store review is unlikely anyway.
 - **Files-visible Documents.** `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`, so themes, logs and the database get on and off the phone through the Files app.
+- **Logs are files.** `logs/gumicord.log` (plus `panic.log`) sits in Documents for the same reason: no Mac is needed to read a crash.
 - **Staticlib, not a framework.** One archive, linked with `-lgumicord_ios`; no module maps or umbrella headers to maintain.
 
 ## Still open

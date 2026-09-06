@@ -56,7 +56,26 @@ pub fn install_panic_hook() {
         }
         eprintln!("{msg}");
         write_diag_file("panic.log", &format!("{msg}\n"));
+        append_log(&format!("{msg}\n"));
     }));
+}
+
+/// Appends one line to the log file, opening it fresh. The panic hook
+/// cannot reuse the logger: its lock may be the thing that panicked.
+fn append_log(line: &str) {
+    if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
+        let dir = std::path::Path::new(&dir).join("logs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("gumicord.log"))
+            {
+                use std::io::Write as _;
+                let _ = write!(file, "{line}");
+            }
+        }
+    }
 }
 
 /// Writes one file into the data directory, creating it first. Everything
@@ -68,5 +87,125 @@ pub fn write_diag_file(name: &str, contents: &str) {
         if std::fs::create_dir_all(dir).is_ok() {
             let _ = std::fs::write(dir.join(name), contents);
         }
+    }
+}
+
+/// Logs to a file beside the data directory. Phones have no console to
+/// read: without this, a crash leaves nothing behind but the panic line.
+///
+/// Same levels as the desktop logger: `info` for our crates, `warn` for
+/// dependencies, raised with `GUMICORD_LOG` / `GUMICORD_LOG_DEPS`.
+/// One backup generation is kept; both live in `logs/` next to the data.
+pub fn init_file_logging() {
+    let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir).join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("gumicord.log");
+    rotate_log(&path, 2 * 1024 * 1024);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let _ = tracing::subscriber::set_global_default(FileLogger {
+        file: std::sync::Mutex::new(file),
+        ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
+        theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
+    });
+}
+
+/// Moves an overgrown log aside, keeping one backup generation.
+fn rotate_log(path: &std::path::Path, limit: u64) {
+    let overgrown = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > limit;
+    if overgrown {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+}
+
+fn level_from(var: &str, default: tracing::Level) -> tracing::Level {
+    match std::env::var(var).as_deref() {
+        Ok("trace") => tracing::Level::TRACE,
+        Ok("debug") => tracing::Level::DEBUG,
+        Ok("info") => tracing::Level::INFO,
+        Ok("warn") => tracing::Level::WARN,
+        Ok("error") => tracing::Level::ERROR,
+        _ => default,
+    }
+}
+
+/// One line per event, like the desktop logger but into a file.
+struct FileLogger {
+    file: std::sync::Mutex<std::fs::File>,
+    ours: tracing::Level,
+    theirs: tracing::Level,
+}
+
+impl tracing::Subscriber for FileLogger {
+    fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+        let max = if meta.target().starts_with("gumicord") {
+            self.ours
+        } else {
+            self.theirs
+        };
+        *meta.level() <= max
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+        tracing::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let meta = event.metadata();
+        let mut msg = String::new();
+        event.record(&mut Visitor(&mut msg));
+        if let Ok(mut file) = self.file.lock() {
+            use std::io::Write as _;
+            let _ = writeln!(file, "[{}] {}{}", meta.level(), meta.target(), msg);
+        }
+    }
+
+    fn enter(&self, _: &tracing::Id) {}
+    fn exit(&self, _: &tracing::Id) {}
+}
+
+struct Visitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for Visitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, " {value:?}");
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_overgrown_log_moves_aside() {
+        let dir = std::env::temp_dir().join("gumicord-log-test-rotate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gumicord.log");
+
+        std::fs::write(&path, vec![b'x'; 100]).unwrap();
+        super::rotate_log(&path, 10);
+        assert!(!path.exists());
+        assert!(dir.join("gumicord.log.old").exists());
+
+        std::fs::write(&path, vec![b'x'; 5]).unwrap();
+        super::rotate_log(&path, 10);
+        assert!(path.exists());
     }
 }

@@ -16,6 +16,7 @@ and passing native handles across lives in `app/core`.
 - **GameActivity**, not NativeActivity: `accesskit`'s Android backend supports GameActivity only.
 - **arm64-v8a only** for now; 32-bit ARM and x86 emulators when needed.
 - **External storage first** for the data dir (`getExternalFilesDir`, USB-visible), internal as fallback. Set once as `GUMICORD_DATA_DIR` before the loop starts.
+- **Logs are files.** `logs/gumicord.log` (plus `panic.log`) sits next to the data, USB-visible like everything else. `logcat` works too, but nothing requires `adb`.
 - **No Java/Kotlin of our own**: the manifest points at `GameActivity` directly.
 
 ## Still open
