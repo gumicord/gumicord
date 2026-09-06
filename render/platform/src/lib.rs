@@ -56,8 +56,11 @@ pub fn install_panic_hook() {
         }
         eprintln!("{msg}");
         if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
-            let path = std::path::Path::new(&dir).join("panic.log");
-            let _ = std::fs::write(&path, format!("{msg}\n"));
+            let dir = std::path::Path::new(&dir);
+            // Fresh installs have no directory yet; writing alone fails.
+            if std::fs::create_dir_all(dir).is_ok() {
+                let _ = std::fs::write(dir.join("panic.log"), format!("{msg}\n"));
+            }
         }
     }));
 }

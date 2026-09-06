@@ -21,3 +21,8 @@ xtask = "run --package xtask --"
 # With more memory, override it:
 #     CARGO_BUILD_JOBS=8 cargo build
 jobs = 2
+
+[target.aarch64-linux-android]
+# Android 15+ on 16 KB page devices refuses libraries without 16 KB
+# segments; without this the app dies at load with no code running.
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
