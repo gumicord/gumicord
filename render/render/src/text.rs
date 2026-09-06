@@ -361,10 +361,12 @@ pub struct Shaper {
     /// Normalised once and reused when the font set is extended.
     locale: String,
     /// System fonts waiting to be folded in; `None` when they load eagerly.
-    fonts_rx: Option<std::sync::mpsc::Receiver<fontdb::Database>>,
+    fonts_rx: Option<std::sync::mpsc::Receiver<(fontdb::Database, crate::font_cache::Stats)>>,
     /// Set by the background thread once fonts are waiting; read without
     /// consuming to wake a sleeping loop.
     fonts_ready: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// What the last fold brought in, for field diagnostics.
+    font_stats: Option<crate::font_cache::Stats>,
 }
 
 impl Shaper {
@@ -404,6 +406,7 @@ impl Shaper {
             locale,
             fonts_rx: None,
             fonts_ready: None,
+            font_stats: None,
         }
     }
 
@@ -428,11 +431,11 @@ impl Shaper {
         let th_ready = ready.clone();
         std::thread::spawn(move || {
             let mut db = fontdb::Database::new();
-            crate::font_cache::populate(&mut db, cache_dir.as_deref());
+            let stats = crate::font_cache::populate(&mut db, cache_dir.as_deref());
             // Ready before the send is observed, so a poll right after the
             // wake always finds the fonts.
             th_ready.store(true, std::sync::atomic::Ordering::Release);
-            let _ = tx.send(db);
+            let _ = tx.send((db, stats));
             wake();
         });
         let font_system = Self::font_system(&locale, fontdb::Database::new());
@@ -445,6 +448,7 @@ impl Shaper {
             locale,
             fonts_rx: Some(rx),
             fonts_ready: Some(ready),
+            font_stats: None,
         }
     }
 
@@ -465,10 +469,11 @@ impl Shaper {
         let Some(rx) = &self.fonts_rx else {
             return false;
         };
-        let Ok(system) = rx.try_recv() else {
+        let Ok((system, stats)) = rx.try_recv() else {
             return false;
         };
         self.font_system = Self::font_system(&self.locale, system);
+        self.font_stats = Some(stats);
         // New font ids mean old swash and shape results are unreachable or
         // wrong; drop both so the next draw starts clean.
         self.swash = SwashCache::new();
@@ -477,6 +482,12 @@ impl Shaper {
             ready.store(false, std::sync::atomic::Ordering::Release);
         }
         true
+    }
+
+    /// What the last fold brought in, if it ran. Stays empty when fonts
+    /// load eagerly or never arrive.
+    pub fn font_stats(&self) -> Option<crate::font_cache::Stats> {
+        self.font_stats
     }
 
     pub fn scale(&self) -> f32 {
@@ -697,6 +708,11 @@ impl TextEngine {
         } else {
             false
         }
+    }
+
+    /// What the last fold brought in, if it ran.
+    pub fn font_stats(&self) -> Option<crate::font_cache::Stats> {
+        self.shaper.font_stats()
     }
 
     /// For callers that only need shaping.

@@ -237,6 +237,11 @@ impl Renderer {
         }
     }
 
+    /// What the last fold brought in, if it ran. For field diagnostics.
+    pub fn font_stats(&self) -> Option<font_cache::Stats> {
+        self.text.font_stats()
+    }
+
     /// Scrolls, and reports whether a redraw is needed.
     ///
     /// Bounded by the previous frame's overflow: a frame behind, but measuring

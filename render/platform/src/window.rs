@@ -765,10 +765,23 @@ impl Host {
         // building the tree, so the redraw they woke shows them. The result
         // is not needed: whatever the draw below re-shapes will use the new
         // set either way.
-        let _ = self
+        if self
             .renderer
             .as_mut()
-            .is_some_and(Renderer::process_font_update);
+            .is_some_and(Renderer::process_font_update)
+        {
+            // Once, when the fold lands: files seen, faces parsed, CJK among
+            // them. Phones have no debugger; this file says why glyphs miss.
+            if let Some(stats) = self.renderer.as_ref().and_then(Renderer::font_stats) {
+                crate::write_diag_file(
+                    "fonts.log",
+                    &format!(
+                        "files={} faces={} cjk={} cached={}\n",
+                        stats.files, stats.faces, stats.cjk, stats.from_cache,
+                    ),
+                );
+            }
+        }
 
         let caret_on = self.caret_on;
         // Before drawing, so this frame can use them.

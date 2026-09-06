@@ -17,24 +17,81 @@ use cosmic_text::fontdb::{self, Database};
 const FORMAT_VERSION: u32 = 1;
 const CACHE_FILE: &str = "enumeration.json";
 
+/// What the enumeration found. Written to the diagnostics log so a phone
+/// with no debugger still tells us why glyphs are missing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stats {
+    /// Font files the walk saw.
+    pub files: usize,
+    /// Faces parsed into the database.
+    pub faces: usize,
+    /// Faces with a CJK-named family among them.
+    pub cjk: usize,
+    /// The cache matched and only verified instead of rescanning.
+    pub from_cache: bool,
+}
+
 /// Fills the database, from cache where the files did not move.
-pub fn populate(db: &mut Database, dir: Option<&Path>) {
+pub fn populate(db: &mut Database, dir: Option<&Path>) -> Stats {
     let Some(dir) = dir else {
         db.load_system_fonts();
-        return;
+        return stats_of(db, 0, false);
     };
     let walked = walk_fonts();
-    match load(dir) {
+    let from_cache = match load(dir) {
         Some(cache) if totals_match(&walked, &cache) => {
             let verified = verify_and_push(db, &cache);
             fill_unverified(db, &walked.files, &verified);
             store(db, dir, &walked);
+            true
         }
         _ => {
             db.load_system_fonts();
             store(db, dir, &walked);
+            false
+        }
+    };
+    stats_of(db, walked.total_files, from_cache)
+}
+
+fn stats_of(db: &Database, files: usize, from_cache: bool) -> Stats {
+    let mut faces = 0;
+    let mut cjk = 0;
+    for face in db.faces() {
+        faces += 1;
+        if face.families.iter().any(|(name, _)| is_cjk_family(name)) {
+            cjk += 1;
         }
     }
+    Stats {
+        files,
+        faces,
+        cjk,
+        from_cache,
+    }
+}
+
+/// Family names that carry Japanese. Heuristic, for diagnostics only.
+fn is_cjk_family(name: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "hiragino",
+        "noto sans cjk",
+        "noto serif cjk",
+        "noto sans jp",
+        "noto serif jp",
+        "source han",
+        "pingfang",
+        "heiti",
+        "songti",
+        "kaku",
+        "mincho",
+        "gothic",
+        "yugothic",
+        "meiryo",
+        "osaka",
+    ];
+    let lower = name.to_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +236,7 @@ fn system_dirs() -> Vec<PathBuf> {
     #[cfg(target_os = "ios")]
     {
         dirs.push(PathBuf::from("/System/Library/Fonts"));
+        dirs.push(PathBuf::from("/System/Library/Fonts/Cache"));
     }
     dirs
 }
