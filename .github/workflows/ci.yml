@@ -321,10 +321,13 @@ jobs:
           mv "dist/gumicord-ios-$SHA/Gumicord-unsigned.ipa" "dist/gumicord-$TAG.ipa"
           for entry in windows-latest ubuntu-latest macos-latest; do
             case "$entry" in
-              windows-latest) short=windows ;;
-              ubuntu-latest) short=linux ;;
-              macos-latest) short=macos ;;
+              windows-latest) short=windows; bin=gumicord.exe ;;
+              ubuntu-latest) short=linux; bin=gumicord ;;
+              macos-latest) short=macos; bin=gumicord ;;
             esac
+            # Artifacts lose the executable bit on the way; restore it, or
+            # the unzipped binary refuses to start.
+            chmod +x "dist/gumicord-$entry-$SHA/$bin"
             (cd "dist/gumicord-$entry-$SHA" && zip -qr "../gumicord-$TAG-$short.zip" .)
           done
           ls -l dist
