@@ -277,6 +277,56 @@ jobs:
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
+  # Nightly releases in a separate repo. Dated tags keep history;
+  # plain releases, no prerelease flag: the repo itself is the
+  # nightly channel. GITHUB_TOKEN cannot cross the repo boundary,
+  # so this needs a PAT with Contents write on
+  # gumicord/gumicord-nightly, stored as NIGHTLY_RELEASE_TOKEN.
+  # ────────────────────────────────────────────────────────────
+  nightly:
+    name: Nightly release
+    needs: [android, ios]
+    # Main pushes only: PRs must not publish.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gumicord-{android,ios}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Compute tag
+        id: tag
+        run: echo "name=nightly-$(date +'%Y%m%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # The build filenames carry no version, so rename with the tag to
+      # keep downloads distinguishable across releases.
+      - name: Rename assets
+        run: |
+          mv dist/app-debug.apk "dist/gumicord-${{ steps.tag.outputs.name }}.apk"
+          mv dist/Gumicord-unsigned.ipa "dist/gumicord-${{ steps.tag.outputs.name }}.ipa"
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          repository: gumicord/gumicord-nightly
+          token: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            Automated nightly from gumicord/gumicord@${{ github.sha }}.
+
+            - Debug APK (arm64) and unsigned IPA for sideloading.
+            - Debug builds: slower, larger, logging enabled. No signing identity exists yet.
+            - WARNING: connecting to Discord with a third-party client breaks
+              their terms of service and can cost you your account.
+
+  # ────────────────────────────────────────────────────────────
   # Confirms rust-version in Cargo.toml is true. A declared value nobody
   # checks always drifts eventually.
   # ────────────────────────────────────────────────────────────
