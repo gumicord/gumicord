@@ -35,3 +35,29 @@ pub use url::{OpenUrlError, open_url};
 #[cfg(target_os = "android")]
 pub use window::run_android;
 pub use window::{Application, FrameCx, PlatformError, RevealRequest, Waker, run};
+
+/// Writes panics where they can be found: stderr vanishes on the phone,
+/// but the data directory is user-visible, so the message survives the
+/// crash that follows. Best-effort throughout: a failing hook must not
+/// panic again.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let mut msg = String::from("panic: ");
+        if let Some(s) = info.payload().downcast_ref::<&str>() {
+            msg.push_str(s);
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            msg.push_str(s);
+        } else {
+            msg.push_str("<non-string payload>");
+        }
+        if let Some(loc) = info.location() {
+            use std::fmt::Write as _;
+            let _ = write!(msg, " at {}:{}", loc.file(), loc.line());
+        }
+        eprintln!("{msg}");
+        if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
+            let path = std::path::Path::new(&dir).join("panic.log");
+            let _ = std::fs::write(&path, format!("{msg}\n"));
+        }
+    }));
+}

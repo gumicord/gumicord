@@ -29,6 +29,7 @@ pub unsafe extern "C" fn gumicord_ios_main(documents_dir: *const std::ffi::c_cha
         // Safe: set once here, before any thread reads it.
         unsafe { std::env::set_var("GUMICORD_DATA_DIR", dir) };
     }
+    gumicord_platform::install_panic_hook();
 
     if let Err(e) = gumicord_platform::run(Gumicord::new()) {
         tracing::error!(%e, "could not start");
