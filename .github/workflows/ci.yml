@@ -99,32 +99,56 @@ jobs:
         run: cargo test --workspace
 
   # ────────────────────────────────────────────────────────────
-  # Builds something runnable every time.
+  # Builds something runnable every time, on every platform.
   #
   # Passing checks say nothing about whether the app starts and draws. Having
   # a downloadable build always available shortens both reviews and bug
   # reports.
   #
-  # Windows is the current target, but a runnable build on macOS and Linux is
-  # the point of the porting work, so all three are produced.
+  # One matrix, five entries: desktop on Windows/macOS/Linux plus the
+  # Android APK and the unsigned iOS IPA. Mobile entries came from their
+  # own jobs; keeping them here means one place lists everything the
+  # nightly release publishes. Steps that do not apply to an entry are
+  # skipped by kind, so each leg reads top to bottom as its own recipe.
   #
   # PRs use thin LTO for speed; pushes to main and manual runs use the same
   # fat LTO profile as releases, which is what the recorded binary size and
   # startup figures were measured with.
   # ────────────────────────────────────────────────────────────
   dist:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
+      # Legs fail independently; one red phone build must not eat the rest.
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         include:
-          - os: windows-latest
+          - kind: desktop
+            label: windows
+            os: windows-latest
             bin: gumicord.exe
-          - os: ubuntu-latest
+            target: ''
+          - kind: desktop
+            label: linux
+            os: ubuntu-latest
             bin: gumicord
-          - os: macos-latest
+            target: ''
+          - kind: desktop
+            label: macos
+            os: macos-latest
             bin: gumicord
+            target: ''
+          # Only 64-bit ARM for now: that is every phone shipped in years,
+          # and each ABI multiplies native build time. 32-bit ARM and x86
+          # emulators come back when someone needs them.
+          - kind: android
+            label: android
+            os: ubuntu-latest
+            target: aarch64-linux-android
+          - kind: ios
+            label: ios
+            os: macos-latest
+            target: aarch64-apple-ios
     env:
       PROFILE: ${{ github.event_name == 'pull_request' && 'release' || 'dist' }}
     steps:
@@ -132,17 +156,46 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Add mobile target
+        if: matrix.kind != 'desktop'
+        run: rustup target add ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           # A different profile, so artifacts cannot be shared with the checks.
           shared-key: dist
 
+      - name: Install cargo-ndk
+        if: matrix.kind == 'android'
+        run: cargo install cargo-ndk --locked
+
+      - uses: actions/setup-java@v4
+        if: matrix.kind == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        if: matrix.kind == 'android'
+
+      - name: Install NDK and platform
+        if: matrix.kind == 'android'
+        # Must match app/android/app/build.gradle (ndkVersion).
+        run: sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: matrix.kind == 'android'
+        with:
+          gradle-version: '8.7'
+
       - name: Build
+        if: matrix.kind == 'desktop'
         shell: bash
         run: cargo build -p gumicord-desktop --profile "$PROFILE"
 
       # Ship the themes so they can be swapped with GUMICORD_THEME.
       - name: Assemble
+        if: matrix.kind == 'desktop'
         shell: bash
         run: |
           mkdir -p dist
@@ -169,51 +222,8 @@ jobs:
           TXT
           ls -l "dist/${{ matrix.bin }}"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gumicord-${{ matrix.os }}-${{ github.sha }}
-          path: dist/
-          retention-days: 14
-
-  # ────────────────────────────────────────────────────────────
-  # Android APK. The shell (Gradle + GameActivity) is new and has never
-  # run on hardware: this job proves it at least assembles. Versions it
-  # pins (NDK, AGP, games-activity) exist at the time of writing; if a
-  # mirror says otherwise, bump and note why.
-  # ────────────────────────────────────────────────────────────
-  android:
-    name: APK (Android arm64)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: android
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - uses: android-actions/setup-android@v3
-
-      - name: Install NDK and platform
-        # Must match app/android/app/build.gradle (ndkVersion).
-        run: sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-
       - name: Build the Rust cdylib
+        if: matrix.kind == 'android'
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
         run: |
@@ -223,40 +233,18 @@ jobs:
             app/android/app/src/main/jniLibs/arm64-v8a/
 
       - name: Assemble debug APK
+        if: matrix.kind == 'android'
         run: gradle -p app/android assembleDebug
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gumicord-android-${{ github.sha }}
-          path: app/android/app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 14
-
-  # ────────────────────────────────────────────────────────────
-  # Unsigned iOS IPA. No signing identity exists, so the .app is zipped
-  # as Payload for sideloading. Like Android, this proves assembly, not
-  # a working phone run.
-  # ────────────────────────────────────────────────────────────
-  ios:
-    name: IPA (iOS, unsigned)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ios
-
       - name: Build the Rust staticlib
+        if: matrix.kind == 'ios'
         run: |
           cargo build --release --target aarch64-apple-ios -p gumicord-ios
           mkdir -p app/ios/lib
           cp target/aarch64-apple-ios/release/libgumicord_ios.a app/ios/lib/
 
       - name: Build unsigned .app
+        if: matrix.kind == 'ios'
         run: |
           xcodebuild -project app/ios/Gumicord.xcodeproj -scheme Gumicord \
             -configuration Release -destination 'generic/platform=iOS' \
@@ -264,13 +252,32 @@ jobs:
             CODE_SIGNING_ALLOWED=NO build
 
       - name: Zip Payload into .ipa
+        if: matrix.kind == 'ios'
         run: |
           cd build/ios-dd/Build/Products/Release-iphoneos
           mkdir Payload
           cp -r Gumicord.app Payload/
           zip -r Gumicord-unsigned.ipa Payload
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload desktop build
+        if: matrix.kind == 'desktop'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-${{ matrix.os }}-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+
+      - name: Upload APK
+        if: matrix.kind == 'android'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-android-${{ github.sha }}
+          path: app/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
+
+      - name: Upload IPA
+        if: matrix.kind == 'ios'
+        uses: actions/upload-artifact@v4
         with:
           name: gumicord-ios-${{ github.sha }}
           path: build/ios-dd/Build/Products/Release-iphoneos/Gumicord-unsigned.ipa
@@ -287,7 +294,7 @@ jobs:
   # Contents read and write.
   nightly:
     name: Nightly release
-    needs: [android, ios]
+    needs: [dist]
     # Main pushes only: PRs must not publish.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -296,20 +303,30 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: gumicord-{android,ios}-*
+          pattern: gumicord-*
           path: dist
-          merge-multiple: true
 
       - name: Compute tag
         id: tag
         run: echo "name=nightly-$(date +'%Y%m%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       # The build filenames carry no version, so rename with the tag to
-      # keep downloads distinguishable across releases.
+      # keep downloads distinguishable across releases. Desktop entries
+      # are directories; zip one per OS.
       - name: Rename assets
         run: |
-          mv dist/app-debug.apk "dist/gumicord-${{ steps.tag.outputs.name }}.apk"
-          mv dist/Gumicord-unsigned.ipa "dist/gumicord-${{ steps.tag.outputs.name }}.ipa"
+          TAG="${{ steps.tag.outputs.name }}"
+          SHA="${{ github.sha }}"
+          mv "dist/gumicord-android-$SHA/app-debug.apk" "dist/gumicord-$TAG.apk"
+          mv "dist/gumicord-ios-$SHA/Gumicord-unsigned.ipa" "dist/gumicord-$TAG.ipa"
+          for entry in windows-latest ubuntu-latest macos-latest; do
+            case "$entry" in
+              windows-latest) short=windows ;;
+              ubuntu-latest) short=linux ;;
+              macos-latest) short=macos ;;
+            esac
+            (cd "dist/gumicord-$entry-$SHA" && zip -qr "../gumicord-$TAG-$short.zip" .)
+          done
           ls -l dist
 
       # Short-lived installation token (expires after the run); the key
@@ -328,12 +345,17 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
-          files: dist/*
+          files: |
+            dist/*.apk
+            dist/*.ipa
+            dist/*.zip
           fail_on_unmatched_files: true
           body: |
-            Automated nightly from gumicord/gumicord@${{ github.sha }}.
+            Automated nightly for https://github.com/${{ github.repository }}/commit/${{ github.sha }}.
 
-            - Debug APK (arm64) and unsigned IPA for sideloading.
+            ${{ github.event.head_commit.message }}
+
+            - Desktop builds (Windows / Linux / macOS), debug APK (arm64) and unsigned IPA for sideloading.
             - Debug builds: slower, larger, logging enabled. No signing identity exists yet.
             - WARNING: connecting to Discord with a third-party client breaks
               their terms of service and can cost you your account.
