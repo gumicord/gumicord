@@ -8,12 +8,16 @@ passing the Documents directory across lives in `app/core`.
 | | |
 |---|---|
 | `Cargo.toml` / `src/lib.rs` | The `gumicord-ios` staticlib. `gumicord_ios_main(documents_dir)` runs the shared loop; the pointer is copied before returning |
-| `Gumicord/` | Swift bootstrap (`AppDelegate`), bridging header, `Info.plist` |
+| `Gumicord/` | Swift entry (`main.swift`), bridging header, `Info.plist` |
 | `Gumicord.xcodeproj/` | Hand-written minimal project. No Xcodegen, no CocoaPods, no SPM |
 | `lib/` | Staging for `libgumicord_ios.a`, copied here by CI. Git-ignored |
 
 ## Decisions
 
+- **winit owns the lifecycle.** Swift is only `main.swift` handing over the
+  Documents directory; `EventLoop::run` calls `UIApplicationMain` itself. A
+  Swift `@main` entry calls it first and makes winit abort at startup.
+  LiveContainer also jumps to the guest's main, so this suits both.
 - **No signing.** `CODE_SIGNING_ALLOWED=NO`; CI zips the unsigned `.app` as `Payload/` into an `.ipa` for sideloading. Passing App Store review is unlikely anyway.
 - **Files-visible Documents.** `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`, so themes, logs and the database get on and off the phone through the Files app.
 - **Staticlib, not a framework.** One archive, linked with `-lgumicord_ios`; no module maps or umbrella headers to maintain.

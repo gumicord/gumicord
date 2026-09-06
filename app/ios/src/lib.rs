@@ -9,6 +9,9 @@ use gumicord_app::Gumicord;
 /// Starts the shared loop. Called once from Swift, on the main thread —
 /// winit requires the event loop there. Never returns while the app runs.
 ///
+/// Swift must not call `UIApplicationMain` first: winit calls it itself
+/// from `EventLoop::run` and aborts when it already ran.
+///
 /// `documents_dir` is the app's Documents directory as UTF-8 (from
 /// `NSSearchPathForDirectoriesInDomains`). It is Files-visible when the
 /// bundle enables file sharing, which is how themes, logs and the database

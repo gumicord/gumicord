@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000000000000000000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* AppDelegate.swift */; };
+		A10000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* main.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -15,7 +15,7 @@
 
 /* Begin PBXFileReference section */
 		A10000000000000000000002 /* Gumicord.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gumicord.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A10000000000000000000004 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		A10000000000000000000004 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		A10000000000000000000005 /* Gumicord-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Gumicord-Bridging-Header.h"; sourceTree = "<group>"; };
 		A10000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000007 /* libgumicord_ios.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libgumicord_ios.a; path = "lib/libgumicord_ios.a"; sourceTree = SOURCE_ROOT; };
@@ -35,7 +35,7 @@
 		A10000000000000000000009 /* Gumicord */ = {
 			isa = PBXGroup;
 			children = (
-				A10000000000000000000004 /* AppDelegate.swift */,
+				A10000000000000000000004 /* main.swift */,
 				A10000000000000000000005 /* Gumicord-Bridging-Header.h */,
 				A10000000000000000000006 /* Info.plist */,
 			);
@@ -125,7 +125,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000001 /* AppDelegate.swift in Sources */,
+				A10000000000000000000001 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
