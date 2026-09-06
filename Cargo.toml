@@ -80,8 +80,11 @@ windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Wi
 # Wayland sessions without XWayland need the data-control backend.
 arboard = { version = "3", features = ["wayland-data-control"] }
 
-# Linux secret storage (Secret Service); Windows uses DPAPI directly.
-keyring = "3"
+# Linux secret storage (Secret Service) and macOS Keychain. No default
+# features in keyring do anything: without these every entry is a mock
+# that forgets on drop. The Linux combo keeps a session cache and
+# persists beyond reboot; crypto-rust keeps it dependency-free.
+keyring = { version = "3", features = ["apple-native", "linux-native-sync-persistent", "crypto-rust"] }
 
 # QR login, for RSA-2048 OAEP-SHA256 decryption.
 # sha2 and rand_core come from rsa's re-exports; adding them separately would

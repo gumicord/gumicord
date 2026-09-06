@@ -8,7 +8,7 @@
 //! | Platform | Backend | State |
 //! |---|---|---|
 //! | Windows | DPAPI (`CryptProtectData`) | done |
-//! | Linux | Secret Service (`keyring`) | done |
+//! | Linux | Secret Service, cached in-session (`keyring`) | done |
 //! | macOS | Keychain (`keyring`) | done |
 //! | Android | Keystore | to come |
 //! | iOS | Keychain | to come |
