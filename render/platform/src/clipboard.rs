@@ -3,8 +3,8 @@
 //! | platform | implementation | status |
 //! |---|---|---|
 //! | Windows | Win32 (`CF_UNICODETEXT`, `CF_DIB`) | done |
+//! | Linux | `arboard` (X11 / Wayland) | done |
 //! | macOS | `NSPasteboard` | not yet |
-//! | Linux | Wayland / X11 | not yet |
 //! | Android / iOS | the OS API | not yet |
 //!
 //! Images ride as `CF_DIB`: 32- and 24-bit, uncompressed. Paletted and
@@ -72,7 +72,7 @@ pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
     imp::image()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
 
@@ -90,6 +90,71 @@ mod imp {
 
     pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
         Err(ClipboardError::Unsupported)
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::{ClipboardError, ClipboardImage};
+
+    fn clipboard() -> Result<arboard::Clipboard, ClipboardError> {
+        // Headless sessions have no display to talk to.
+        arboard::Clipboard::new().map_err(|_| ClipboardError::Failed("cannot open clipboard"))
+    }
+
+    fn map_error(e: arboard::Error, op: &'static str) -> ClipboardError {
+        match e {
+            arboard::Error::ClipboardOccupied => ClipboardError::Busy,
+            _ => ClipboardError::Failed(op),
+        }
+    }
+
+    pub fn set_text(text: &str) -> Result<(), ClipboardError> {
+        clipboard()?
+            .set_text(text.to_owned())
+            .map_err(|e| map_error(e, "cannot set text"))
+    }
+
+    pub fn text() -> Result<Option<String>, ClipboardError> {
+        match clipboard()?.get_text() {
+            Ok(s) => Ok(Some(s)),
+            // Only an image is present, which is not an error.
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(map_error(e, "cannot read text")),
+        }
+    }
+
+    pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
+        let data = arboard::ImageData {
+            width: image.width as usize,
+            height: image.height as usize,
+            bytes: image.rgba.as_slice().into(),
+        };
+        clipboard()?
+            .set_image(data)
+            .map_err(|e| map_error(e, "cannot set image"))
+    }
+
+    pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
+        let img = match clipboard()?.get_image() {
+            Ok(img) => img,
+            Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+            Err(e) => return Err(map_error(e, "cannot read image")),
+        };
+        let width = u32::try_from(img.width).map_err(|_| ClipboardError::Failed("too large"))?;
+        let height = u32::try_from(img.height).map_err(|_| ClipboardError::Failed("too large"))?;
+        let pixels = img
+            .width
+            .checked_mul(img.height)
+            .and_then(|p| p.checked_mul(4));
+        if pixels.is_none_or(|p| p != img.bytes.len()) {
+            return Ok(None);
+        }
+        Ok(Some(ClipboardImage {
+            width,
+            height,
+            rgba: img.bytes.into_owned(),
+        }))
     }
 }
 
@@ -384,7 +449,10 @@ mod tests {
     /// A forgotten terminator trails extra bytes; a miscount drops the last
     /// character. Both look nearly right by eye.
     #[test]
-    #[cfg_attr(not(windows), ignore = "not implemented on this platform yet")]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux")),
+        ignore = "not implemented on this platform yet"
+    )]
     fn text_comes_back_unchanged() {
         let _guard = lock_clipboard();
         // The clipboard belongs to the machine, not this process; restore
@@ -415,7 +483,10 @@ mod tests {
 
     /// An image survives the round trip, alpha and all.
     #[test]
-    #[cfg_attr(not(windows), ignore = "not implemented on this platform yet")]
+    #[cfg_attr(
+        not(any(windows, target_os = "linux")),
+        ignore = "not implemented on this platform yet"
+    )]
     fn images_come_back_unchanged() {
         let _guard = lock_clipboard();
         let before_text = text().ok().flatten();

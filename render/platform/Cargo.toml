@@ -21,6 +21,9 @@ tracing.workspace = true
 windows-sys.workspace = true
 wry.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard.workspace = true
+
 # GameActivity backend for the Android shell. Desktop builds never see it.
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { workspace = true, features = ["android-game-activity"] }
