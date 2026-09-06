@@ -278,6 +278,59 @@ jobs:
           path: dist/
           retention-days: 14
 
+      # One file to run, built from the binary above with stock tooling.
+      - name: Build AppImage
+        if: matrix.kind == 'desktop' && matrix.os == 'ubuntu-latest'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          python3 packaging/make-icon.py 256 "$RUNNER_TEMP/gumicord-icon.png"
+          curl -L -o linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          ./linuxdeploy --appdir AppDir -e "target/$PROFILE/gumicord" \
+            -d packaging/linux/gumicord.desktop -i "$RUNNER_TEMP/gumicord-icon.png" \
+            --output appimage
+          ls -l Gumicord-*.AppImage
+
+      - name: Upload AppImage
+        if: matrix.kind == 'desktop' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-appimage-${{ github.sha }}
+          path: Gumicord-*.AppImage
+          retention-days: 14
+
+      - name: Build app bundle and dmg
+        if: matrix.kind == 'desktop' && matrix.os == 'macos-latest'
+        run: |
+          mkdir -p Gumicord.app/Contents/MacOS Gumicord.app/Contents/Resources dmg-staging
+          cp "target/$PROFILE/gumicord" Gumicord.app/Contents/MacOS/
+          cp packaging/macos/Info.plist Gumicord.app/Contents/
+          python3 packaging/make-icon.py 1024 "$RUNNER_TEMP/icon-1024.png"
+          rm -rf "$RUNNER_TEMP/icon.iconset"
+          mkdir "$RUNNER_TEMP/icon.iconset"
+          for s in 16 32 128 256 512; do
+            sips -s format png -z $s $s "$RUNNER_TEMP/icon-1024.png" \
+              --out "$RUNNER_TEMP/icon.iconset/icon_${s}x${s}.png" >/dev/null
+            sips -s format png -z $((s*2)) $((s*2)) "$RUNNER_TEMP/icon-1024.png" \
+              --out "$RUNNER_TEMP/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$RUNNER_TEMP/icon.iconset" \
+            -o Gumicord.app/Contents/Resources/Gumicord.icns
+          mv Gumicord.app dmg-staging/
+          cp -r dist/themes dist/LICENSE dist/README.txt dmg-staging/
+          hdiutil create -volname Gumicord -srcfolder dmg-staging -ov Gumicord.dmg
+          ls -l Gumicord.dmg
+
+      - name: Upload dmg
+        if: matrix.kind == 'desktop' && matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-dmg-${{ github.sha }}
+          path: Gumicord.dmg
+          retention-days: 14
+
       - name: Upload APK
         if: matrix.kind == 'android'
         uses: actions/upload-artifact@v4
@@ -330,6 +383,8 @@ jobs:
           SHA="${{ github.sha }}"
           mv "dist/gumicord-android-$SHA/app-debug.apk" "dist/gumicord-$TAG.apk"
           mv "dist/gumicord-ios-$SHA/Gumicord-unsigned.ipa" "dist/gumicord-$TAG.ipa"
+          mv "dist/gumicord-appimage-$SHA/"*.AppImage "dist/gumicord-$TAG-linux.AppImage"
+          mv "dist/gumicord-dmg-$SHA/"*.dmg "dist/gumicord-$TAG-macos.dmg"
           for entry in windows-latest ubuntu-latest macos-latest; do
             case "$entry" in
               windows-latest) short=windows; bin=gumicord.exe ;;
@@ -363,13 +418,16 @@ jobs:
             dist/*.apk
             dist/*.ipa
             dist/*.zip
+            dist/*.AppImage
+            dist/*.dmg
           fail_on_unmatched_files: true
           body: |
             Automated nightly for https://github.com/${{ github.repository }}/commit/${{ github.sha }}.
 
             ${{ github.event.head_commit.message }}
 
-            - Desktop builds (Windows / Linux / macOS), debug APK (arm64) and unsigned IPA for sideloading.
+            - Desktop builds (Windows / Linux / macOS), Linux AppImage, unsigned macOS dmg,
+              debug APK (arm64 + x86_64) and unsigned IPA for sideloading.
             - Debug builds: slower, larger, logging enabled. No signing identity exists yet.
             - WARNING: connecting to Discord with a third-party client breaks
               their terms of service and can cost you your account.
