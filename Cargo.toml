@@ -77,7 +77,11 @@ zstd = "0.13"
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_Graphics_Gdi"] }
 
 # Linux clipboard (X11 and Wayland); other platforms use their own APIs.
-arboard = "3"
+# Wayland sessions without XWayland need the data-control backend.
+arboard = { version = "3", features = ["wayland-data-control"] }
+
+# Linux secret storage (Secret Service); Windows uses DPAPI directly.
+keyring = "3"
 
 # QR login, for RSA-2048 OAEP-SHA256 decryption.
 # sha2 and rand_core come from rsa's re-exports; adding them separately would

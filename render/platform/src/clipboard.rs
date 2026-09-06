@@ -95,10 +95,25 @@ mod imp {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
+    use std::sync::{Mutex, OnceLock};
 
-    fn clipboard() -> Result<arboard::Clipboard, ClipboardError> {
-        // Headless sessions have no display to talk to.
-        arboard::Clipboard::new().map_err(|_| ClipboardError::Failed("cannot open clipboard"))
+    /// One clipboard for the process, kept alive. X11 and Wayland both
+    /// serve pastes from the owner, so dropping it after every copy loses
+    /// the content before anything can paste it.
+    static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+
+    fn with_clipboard<T>(
+        op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, ClipboardError>,
+    ) -> Result<T, ClipboardError> {
+        let slot = CLIPBOARD.get_or_init(|| Mutex::new(arboard::Clipboard::new().ok()));
+        let mut guard = slot
+            .lock()
+            .map_err(|_| ClipboardError::Failed("clipboard taken"))?;
+        let Some(clipboard) = guard.as_mut() else {
+            // Headless sessions have no display to talk to.
+            return Err(ClipboardError::Failed("cannot open clipboard"));
+        };
+        op(clipboard)
     }
 
     fn map_error(e: arboard::Error, op: &'static str) -> ClipboardError {
@@ -109,18 +124,20 @@ mod imp {
     }
 
     pub fn set_text(text: &str) -> Result<(), ClipboardError> {
-        clipboard()?
-            .set_text(text.to_owned())
-            .map_err(|e| map_error(e, "cannot set text"))
+        with_clipboard(|clipboard| {
+            clipboard
+                .set_text(text.to_owned())
+                .map_err(|e| map_error(e, "cannot set text"))
+        })
     }
 
     pub fn text() -> Result<Option<String>, ClipboardError> {
-        match clipboard()?.get_text() {
+        with_clipboard(|clipboard| match clipboard.get_text() {
             Ok(s) => Ok(Some(s)),
             // Only an image is present, which is not an error.
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
             Err(e) => Err(map_error(e, "cannot read text")),
-        }
+        })
     }
 
     pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
@@ -129,31 +146,37 @@ mod imp {
             height: image.height as usize,
             bytes: image.rgba.as_slice().into(),
         };
-        clipboard()?
-            .set_image(data)
-            .map_err(|e| map_error(e, "cannot set image"))
+        with_clipboard(|clipboard| {
+            clipboard
+                .set_image(data)
+                .map_err(|e| map_error(e, "cannot set image"))
+        })
     }
 
     pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
-        let img = match clipboard()?.get_image() {
-            Ok(img) => img,
-            Err(arboard::Error::ContentNotAvailable) => return Ok(None),
-            Err(e) => return Err(map_error(e, "cannot read image")),
-        };
-        let width = u32::try_from(img.width).map_err(|_| ClipboardError::Failed("too large"))?;
-        let height = u32::try_from(img.height).map_err(|_| ClipboardError::Failed("too large"))?;
-        let pixels = img
-            .width
-            .checked_mul(img.height)
-            .and_then(|p| p.checked_mul(4));
-        if pixels.is_none_or(|p| p != img.bytes.len()) {
-            return Ok(None);
-        }
-        Ok(Some(ClipboardImage {
-            width,
-            height,
-            rgba: img.bytes.into_owned(),
-        }))
+        with_clipboard(|clipboard| {
+            let img = match clipboard.get_image() {
+                Ok(img) => img,
+                Err(arboard::Error::ContentNotAvailable) => return Ok(None),
+                Err(e) => return Err(map_error(e, "cannot read image")),
+            };
+            let width =
+                u32::try_from(img.width).map_err(|_| ClipboardError::Failed("too large"))?;
+            let height =
+                u32::try_from(img.height).map_err(|_| ClipboardError::Failed("too large"))?;
+            let pixels = img
+                .width
+                .checked_mul(img.height)
+                .and_then(|p| p.checked_mul(4));
+            if pixels.is_none_or(|p| p != img.bytes.len()) {
+                return Ok(None);
+            }
+            Ok(Some(ClipboardImage {
+                width,
+                height,
+                rgba: img.bytes.into_owned(),
+            }))
+        })
     }
 }
 

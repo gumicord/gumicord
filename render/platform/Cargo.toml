@@ -24,6 +24,9 @@ wry.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 arboard.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring.workspace = true
+
 # GameActivity backend for the Android shell. Desktop builds never see it.
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { workspace = true, features = ["android-game-activity"] }
