@@ -1474,6 +1474,16 @@ impl Application for Gumicord {
         }
     }
 
+    /// Email and password mirror into native fields on iOS so the password
+    /// manager can fill them. Read on every platform; only iOS acts on it.
+    fn ime_proxy(&self) -> Option<gumicord_platform::ImeProxy> {
+        match self.login_field {
+            Some(LoginField::Email) => Some(gumicord_platform::ImeProxy::Username),
+            Some(LoginField::Password) => Some(gumicord_platform::ImeProxy::Password),
+            _ => None,
+        }
+    }
+
     /// Sends, edits or replies, depending on [`Composing`]. Missing that
     /// turns an intended edit into a new message.
     ///
@@ -6171,6 +6181,24 @@ mod login_tests {
 
         assert!(a.pressed(&[]));
         assert_eq!(a.login_field, None, "欄外を押してもフォーカスが残る");
+    }
+
+    /// Email and password ask for native mirrors; nothing else does.
+    #[test]
+    fn login_fields_report_their_proxy_kind() {
+        use gumicord_platform::ImeProxy;
+
+        let mut a = pending();
+        assert_eq!(a.ime_proxy(), None);
+        a.login_field = Some(LoginField::Email);
+        assert_eq!(a.ime_proxy(), Some(ImeProxy::Username));
+        a.login_field = Some(LoginField::Password);
+        assert_eq!(a.ime_proxy(), Some(ImeProxy::Password));
+        a.login_field = Some(LoginField::Totp);
+        assert_eq!(a.ime_proxy(), None);
+        a.login_field = None;
+        a.input_focused = true;
+        assert_eq!(a.ime_proxy(), None);
     }
 
     /// Clicking a login field focuses exactly that one, and typing lands in the

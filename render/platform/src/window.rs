@@ -64,6 +64,14 @@ pub struct RevealRequest {
     pub key: Option<Key>,
 }
 
+/// Which login field an iOS proxy mirrors, if any. Only these two pair
+/// for password autofill; everything else keeps winit's keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImeProxy {
+    Username,
+    Password,
+}
+
 /// The application, as the platform layer sees it. No OS types appear here,
 /// so winit never leaks into the app crate.
 pub trait Application {
@@ -146,6 +154,12 @@ pub trait Application {
     /// The document receiving input, if any. This layer has no notion of
     /// focus; the app decides.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
+        None
+    }
+
+    /// The login field an iOS proxy should mirror, if any. Only iOS reads
+    /// this; elsewhere the value is ignored.
+    fn ime_proxy(&self) -> Option<ImeProxy> {
         None
     }
 
@@ -333,6 +347,9 @@ fn run_loop(
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
+        #[cfg(target_os = "ios")]
+        proxy: None,
+        frame_us: std::collections::VecDeque::new(),
         first_frame: true,
         started: std::time::Instant::now(),
         blink: crate::clock::caret_blink_interval(),
@@ -391,6 +408,11 @@ struct Host {
     modifiers: ModifiersState,
     /// Whether IME is allowed; only changes are told to the OS.
     ime_allowed: bool,
+    /// Native login-field mirrors for iOS password autofill.
+    #[cfg(target_os = "ios")]
+    proxy: Option<crate::proxy::Proxy>,
+    /// Last frame times in microseconds, for the pacing log.
+    frame_us: std::collections::VecDeque<u128>,
     first_frame: bool,
     /// When `run` started, for measuring time to first frame.
     started: std::time::Instant,
@@ -720,7 +742,15 @@ impl Host {
         let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
             return;
         };
-        let has_input = self.app.focused_document().is_some();
+        // While a native proxy mirrors a login field it owns the keyboard;
+        // winit's key-only view would fight it for first responder.
+        #[cfg(target_os = "ios")]
+        let proxy_changed = self.sync_ime_proxy();
+        #[cfg(target_os = "ios")]
+        if proxy_changed {
+            self.request_redraw();
+        }
+        let has_input = self.app.focused_document().is_some() && !self.proxy_active();
 
         // No IME events arrive until this is allowed; winit defaults to off.
         //
@@ -748,7 +778,55 @@ impl Host {
         );
     }
 
+    /// Mirrors the login fields into the native proxies and polls their
+    /// text back. True when the tree needs another look.
+    #[cfg(target_os = "ios")]
+    fn sync_ime_proxy(&mut self) -> bool {
+        let want = self.app.ime_proxy();
+        let text = self.app.focused_document().map(|d| d.text().to_owned());
+        let Some(parent) = self.window.as_ref().and_then(crate::proxy::parent_view) else {
+            return false;
+        };
+        let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
+        proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
+        let Some((_, event)) = proxy.poll() else {
+            return false;
+        };
+        match event {
+            crate::proxy::ProxyEvent::Text(text) => {
+                if let Some(doc) = self.app.focused_document() {
+                    if doc.text() != text {
+                        doc.take();
+                        doc.insert(&text);
+                        return true;
+                    }
+                }
+                false
+            }
+            crate::proxy::ProxyEvent::Submitted(text) => {
+                if let Some(doc) = self.app.focused_document() {
+                    if doc.text() != text {
+                        doc.take();
+                        doc.insert(&text);
+                    }
+                }
+                self.app.submit()
+            }
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    fn proxy_active(&self) -> bool {
+        self.proxy.as_ref().is_some_and(|p| p.is_active())
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    fn proxy_active(&self) -> bool {
+        false
+    }
+
     fn redraw(&mut self) {
+        let frame_start = std::time::Instant::now();
         // Resize the surface from the window's real size, right before
         // drawing.
         //
@@ -893,6 +971,27 @@ impl Host {
                 // way to tell whether it is met.
                 ms = self.started.elapsed().as_millis() as u64,
                 "最初のフレームを描いた"
+            );
+        }
+
+        // Frame pacing for field diagnostics: average and p95 over the last
+        // window, rewritten as it fills. Present waits are included, so this
+        // reads the display rate, not just our own cost.
+        self.frame_us.push_back(frame_start.elapsed().as_micros());
+        if self.frame_us.len() >= 300 {
+            let mut sorted: Vec<u128> = self.frame_us.drain(..).collect();
+            sorted.sort_unstable();
+            let sum: u128 = sorted.iter().sum();
+            let avg = sum / sorted.len() as u128;
+            let p95 = sorted[sorted.len() * 95 / 100];
+            crate::write_diag_file(
+                "fps.log",
+                &format!(
+                    "frames={} avg_ms={:.1} p95_ms={:.1}\n",
+                    sorted.len(),
+                    avg as f64 / 1000.0,
+                    p95 as f64 / 1000.0,
+                ),
             );
         }
     }

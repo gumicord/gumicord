@@ -93,6 +93,9 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-ui-kit = "0.3"
 
+# Native window handle, to attach iOS autofill fields to winit's view.
+raw-window-handle = "0.6"
+
 # QR login, for RSA-2048 OAEP-SHA256 decryption.
 # sha2 and rand_core come from rsa's re-exports; adding them separately would
 # drift in version.

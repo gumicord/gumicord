@@ -18,6 +18,8 @@ pub mod captcha;
 pub mod clipboard;
 pub mod clock;
 pub mod dirs;
+#[cfg(target_os = "ios")]
+pub mod proxy;
 pub mod secret;
 pub mod text_input;
 pub mod touch;
@@ -34,7 +36,7 @@ pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
 #[cfg(target_os = "android")]
 pub use window::run_android;
-pub use window::{Application, FrameCx, PlatformError, RevealRequest, Waker, run};
+pub use window::{Application, FrameCx, ImeProxy, PlatformError, RevealRequest, Waker, run};
 
 /// Writes panics where they can be found: stderr vanishes on the phone,
 /// but the data directory is user-visible, so the message survives the
