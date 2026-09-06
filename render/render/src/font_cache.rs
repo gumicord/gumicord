@@ -231,6 +231,12 @@ fn system_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from("/usr/local/share/fonts"));
         dirs.push(PathBuf::from("/usr/share/fonts"));
     }
+    // Android ships Noto (including CJK) outside the Linux font paths;
+    // readable from the sandbox like everything under /system.
+    #[cfg(target_os = "android")]
+    {
+        dirs.push(PathBuf::from("/system/fonts"));
+    }
     // iOS keeps its own set (Hiragino and friends) outside the macOS
     // paths; the sandbox can still read them.
     #[cfg(target_os = "ios")]

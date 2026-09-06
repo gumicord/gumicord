@@ -51,10 +51,11 @@ fn init_tls_verifier() {
     let ctx = ndk_context::android_context();
     // Safe: the host set both pointers up before this ran.
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
-    let context = unsafe { jni::objects::JObject::from_raw(ctx.context() as jni::sys::jobject) };
-    if let Err(e) = vm
-        .attach_current_thread(|env| rustls_platform_verifier::android::init_with_env(env, context))
-    {
+    if let Err(e) = vm.attach_current_thread(|env| {
+        let context =
+            unsafe { jni::objects::JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
+        rustls_platform_verifier::android::init_with_env(env, context)
+    }) {
         tracing::warn!(?e, "TLS verifier has no JVM; HTTPS will fail");
     }
 }
