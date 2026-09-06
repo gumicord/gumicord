@@ -280,9 +280,11 @@ jobs:
   # Nightly releases in a separate repo. Dated tags keep history;
   # plain releases, no prerelease flag: the repo itself is the
   # nightly channel. GITHUB_TOKEN cannot cross the repo boundary,
-  # so this needs a PAT with Contents write on
-  # gumicord/gumicord-nightly, stored as NIGHTLY_RELEASE_TOKEN.
-  # ────────────────────────────────────────────────────────────
+  # and PATs always expire, so this mints an installation token
+  # from a GitHub App (private key has no expiry): NIGHTLY_APP_ID
+  # and NIGHTLY_APP_PRIVATE_KEY hold the app's id and key, and the
+  # app must be installed on gumicord/gumicord-nightly with
+  # Contents read and write.
   nightly:
     name: Nightly release
     needs: [android, ios]
@@ -310,10 +312,20 @@ jobs:
           mv dist/Gumicord-unsigned.ipa "dist/gumicord-${{ steps.tag.outputs.name }}.ipa"
           ls -l dist
 
+      # Short-lived installation token (expires after the run); the key
+      # itself never expires, so there is nothing to rotate yearly.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.NIGHTLY_APP_ID }}
+          private-key: ${{ secrets.NIGHTLY_APP_PRIVATE_KEY }}
+          owner: gumicord
+          repositories: gumicord-nightly
+
       - uses: softprops/action-gh-release@v2
         with:
           repository: gumicord/gumicord-nightly
-          token: ${{ secrets.NIGHTLY_RELEASE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
           files: dist/*
