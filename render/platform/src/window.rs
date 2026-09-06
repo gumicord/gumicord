@@ -998,11 +998,15 @@ impl ApplicationHandler<LoopEvent> for Host {
         // No OS title bar.
         let attrs = Window::default_attributes()
             .with_title(self.app.title())
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(480.0, 320.0))
             .with_decorations(false)
             // The screen-reader adapter must exist before the first show.
             .with_visible(false);
+        // Phones are fullscreen: a desktop-sized request overflows the real
+        // screen and leaves most of the window off-screen.
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        let attrs = attrs
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(480.0, 320.0));
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
