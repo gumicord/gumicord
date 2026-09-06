@@ -43,16 +43,17 @@ fn make_field() -> Retained<UITextField> {
 
 fn configure(field: &UITextField, kind: super::ImeProxy) {
     match kind {
-        super::ImeProxy::Username => {
+        // Reaching into the statics needs unsafe: nothing checks them.
+        super::ImeProxy::Username => unsafe {
             field.setTextContentType(Some(UITextContentTypeUsername));
             field.setKeyboardType(UIKeyboardType::EmailAddress);
             field.setSecureTextEntry(false);
-        }
-        super::ImeProxy::Password => {
+        },
+        super::ImeProxy::Password => unsafe {
             field.setTextContentType(Some(UITextContentTypePassword));
             field.setKeyboardType(UIKeyboardType::Default);
             field.setSecureTextEntry(true);
-        }
+        },
     }
 }
 
@@ -113,8 +114,8 @@ impl Proxy {
             }
             let field = self.field(kind);
             set_text(field, text);
-            self.last = text.to_owned();
             field.becomeFirstResponder();
+            self.last = text.to_owned();
         }
     }
 

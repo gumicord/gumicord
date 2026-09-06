@@ -735,21 +735,22 @@ impl Host {
             None => false,
         }
     }
-
     /// Tells the IME where the field is, which is what positions the
     /// candidate window; without it, it appears in a corner of the screen.
     fn update_ime_area(&mut self) {
-        let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
-            return;
-        };
         // While a native proxy mirrors a login field it owns the keyboard;
         // winit's key-only view would fight it for first responder.
         #[cfg(target_os = "ios")]
         let proxy_changed = self.sync_ime_proxy();
-        #[cfg(target_os = "ios")]
+        #[cfg(not(target_os = "ios"))]
+        let proxy_changed = false;
         if proxy_changed {
             self.request_redraw();
         }
+
+        let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
+            return;
+        };
         let has_input = self.app.focused_document().is_some() && !self.proxy_active();
 
         // No IME events arrive until this is allowed; winit defaults to off.
@@ -784,7 +785,11 @@ impl Host {
     fn sync_ime_proxy(&mut self) -> bool {
         let want = self.app.ime_proxy();
         let text = self.app.focused_document().map(|d| d.text().to_owned());
-        let Some(parent) = self.window.as_ref().and_then(crate::proxy::parent_view) else {
+        let Some(parent) = self
+            .window
+            .as_ref()
+            .and_then(|w| crate::proxy::parent_view(w))
+        else {
             return false;
         };
         let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
