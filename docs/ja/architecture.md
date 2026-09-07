@@ -10,10 +10,10 @@ Discord REST/Gateway ──▶ Store ─┘                        ▼
                                           (窓・入力・鍵束・通知)
 ```
 
-- 唯一の拡張 ABI はセマンティック UITree ([ADR-0004](../../spec/adr/0004-semantic-uitree-as-extension-abi.md))。テーマもプラグインも UITree にのみ触る。
-- UI レンダラは Rust + wgpu の自前実装 ([ADR-0001](../../spec/adr/0001-native-rust-renderer.md))。
-- プラグイン言語は TypeScript、実行は QuickJS ([ADR-0002](../../spec/adr/0002-quickjs-plugin-runtime.md))。
-- 単一モノレポ ([ADR-0003](../../spec/adr/0003-monorepo.md))。
+- 唯一の拡張 ABI は[セマンティック UITree](../../spec/adr/0004-semantic-uitree-as-extension-abi.md)。テーマもプラグインも UITree にのみ触る。
+- UI レンダラは [Rust + wgpu の自前実装](../../spec/adr/0001-native-rust-renderer.md)。
+- プラグイン言語は TypeScript、実行は [QuickJS](../../spec/adr/0002-quickjs-plugin-runtime.md)。
+- [単一モノレポ](../../spec/adr/0003-monorepo.md)。
 
 ## クレート配置
 

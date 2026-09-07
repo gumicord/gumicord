@@ -56,10 +56,10 @@ export const ui = {
    * Registering against a node that does not exist here (`chrome.*` on
    * mobile) is not an error; it simply never runs. To branch beforehand,
    * use {@link exists}.
-   * Virtualisation means offscreen nodes are never visited (rule V1), so
+   * Virtualisation means offscreen nodes are never visited, so
    * nothing can walk every message. Use Gateway event middleware instead.
    *
-   * `fn` must be pure (rule P7): how many times it runs for one message is
+   * `fn` must be pure: how many times it runs for one message is
    * not defined, since it runs again each time the node leaves the screen
    * and comes back, and a side effect would not add up.
    *

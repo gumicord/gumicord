@@ -60,7 +60,7 @@ self-contained IIFE.
 
 # tools/screenshot (`tools/screenshot`)
 
-> Headless conformance screenshots (`NFR-015`). Renders fixed scenes and
+> Headless conformance screenshots. Renders fixed scenes and
 > compares against blessed images with tolerance.
 
 ## Files

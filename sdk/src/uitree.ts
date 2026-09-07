@@ -81,7 +81,7 @@ export interface PatchContext<Id extends NodeId = NodeId> {
 /**
  * A node transform.
  *
- * It must be pure (rule P7). Virtualisation leaves it undefined how many
+ * It must be pure. Virtualisation leaves it undefined how many
  * times it runs for one message — again each time the node leaves the
  * screen and comes back — so a side effect is unpredictable. To react to
  * something happening, use Gateway event middleware.

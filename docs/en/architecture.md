@@ -10,10 +10,10 @@ Discord REST/gateway ──▶ Store ─┘                    ▼
                                       (window, input, secrets)
 ```
 
-- The only extension ABI is the semantic UITree ([ADR-0004](../../spec/adr/0004-semantic-uitree-as-extension-abi.md)). Themes and plugins only touch the UITree.
-- The UI renderer is hand-rolled Rust + wgpu ([ADR-0001](../../spec/adr/0001-native-rust-renderer.md)).
-- Plugin language is TypeScript, runtime is QuickJS ([ADR-0002](../../spec/adr/0002-quickjs-plugin-runtime.md)).
-- One monorepo ([ADR-0003](../../spec/adr/0003-monorepo.md)).
+- The only extension ABI is the [semantic UITree](../../spec/adr/0004-semantic-uitree-as-extension-abi.md). Themes and plugins only touch the UITree.
+- The UI renderer is [hand-rolled Rust + wgpu](../../spec/adr/0001-native-rust-renderer.md).
+- Plugin language is TypeScript, runtime is [QuickJS](../../spec/adr/0002-quickjs-plugin-runtime.md).
+- [One monorepo](../../spec/adr/0003-monorepo.md).
 
 ## Crate map
 
