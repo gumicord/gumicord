@@ -188,7 +188,6 @@ fn render_typescript() -> String {
          *\n \
          * A core node is tied to a real domain object, so a plugin able to forge\n \
          * one would make the accessibility tree lie.\n \
-         * See spec/03-uitree.md 8.2.\n \
          */\nexport type CoreCreatableNodeId =\n",
     );
     for id in NodeId::ALL.iter().filter(|i| i.is_plugin_creatable()) {

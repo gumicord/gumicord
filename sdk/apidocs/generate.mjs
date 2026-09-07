@@ -1,13 +1,16 @@
-// Generates the API reference signature blocks from the SDK source.
+// Generates the API reference signature blocks from the SDK source, and
+// the stable ID catalogs from the spec table.
 //
 //   node sdk/apidocs/generate.mjs --out <api-docs-dir> [--check]
 //
 // `sdk/src/*.ts` TSDoc is the English source; `sdk/apidocs/ja.json` holds
-// the Japanese descriptions. Only the marked sections of
-// `en/ja/plugins/reference.md` are replaced; the hand-written guide pages
-// around them are left alone:
+// the Japanese API descriptions. The catalog's Japanese roles come from
+// `spec/03-uitree.md` (itself generated); `sdk/apidocs/ids-en.json` holds
+// the English roles. Only the marked sections are replaced; the
+// hand-written guide pages around them are left alone:
 //
 //   <!-- BEGIN GENERATED: api --> ... <!-- END GENERATED: api -->
+//   <!-- BEGIN GENERATED: ids --> ... <!-- END GENERATED: ids -->
 //
 // Run `cargo xtask api-docs` instead of calling this directly.
 
@@ -25,6 +28,12 @@ const ts = require("typescript");
 
 const BEGIN = "<!-- BEGIN GENERATED: api -->";
 const END = "<!-- END GENERATED: api -->";
+
+const IDS_BEGIN = "<!-- BEGIN GENERATED: ids -->";
+const IDS_END = "<!-- END GENERATED: ids -->";
+
+// Gumicord repo root (this script lives at sdk/apidocs/).
+const root = join(here, "..", "..");
 
 const GROUPS = [
   { ns: "ui", file: "index.ts" },
@@ -49,10 +58,10 @@ const INTERFACES = [
 ];
 
 const ALIASES = [
-  { name: "NodeId", file: "ids.ts", catalog: true },
+  { name: "NodeId", file: "ids.ts", catalog: true, abbrev: true },
   { name: "PluginNodeId", file: "uitree.ts" },
   { name: "CreatableNodeId", file: "uitree.ts" },
-  { name: "CoreCreatableNodeId", file: "ids.ts" },
+  { name: "CoreCreatableNodeId", file: "ids.ts", abbrev: true },
   { name: "NodeState", file: "uitree.ts" },
   { name: "DataByNode", file: "ids.ts" },
 ];
@@ -70,15 +79,30 @@ const HEADINGS = {
   },
 };
 
-const WARNING = {
-  en: "> ⚠️ **This section is generated from `sdk/src`.**\n> Do not edit it here; change the SDK TSDoc instead.",
-  ja: "> ⚠️ **この節は `sdk/src` から生成されている。**\n> 直接編集しても上書きされる。直すのは SDK の TSDoc か `sdk/apidocs/ja.json` のほうである。",
-};
-
 const CATALOG_LINE = {
   en: "For the full list see the [stable ID catalog](en/theme/ids.md).",
   ja: "一覧は[安定 ID カタログ](ja/theme/ids.md)を見ること。",
 };
+
+/** Long unions render abbreviated: first two, count, last one. */
+function abbreviateUnion(text) {
+  const members = [...text.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  if (members.length <= 5) return text;
+  const rest = members.length - 3;
+  return (
+    `type ${unionNameOf(text)} =\n` +
+    `  | "${members[0]}"\n` +
+    `  | "${members[1]}"\n` +
+    `  | /* ... ${rest} more */\n` +
+    `  | "${members[members.length - 1]}"\n` +
+    `  ;`
+  );
+}
+
+function unionNameOf(text) {
+  const m = text.match(/type\s+(\w+)/);
+  return m ? m[1] : "T";
+}
 
 function loadSource(file) {
   const path = join(sdk, "src", file);
@@ -223,7 +247,7 @@ function exampleFence(body) {
 
 function render({ lang, ja, sources, missing }) {
   const H = HEADINGS[lang];
-  const out = [WARNING[lang], ""];
+  const out = [];
   const desc = (key, enComment) => {
     if (lang === "ja") {
       if (ja[key]) return ja[key];
@@ -265,16 +289,18 @@ function render({ lang, ja, sources, missing }) {
   }
 
   out.push(H.aliases, "");
-  for (const { name, file, catalog } of ALIASES) {
+  for (const { name, file, catalog, abbrev } of ALIASES) {
     const sf = sources[file].sf;
     const decl = findDecl(sf, "alias", name) ?? findDecl(sf, "interface", name);
     if (!decl) throw new Error(`${name} not found in ${file}`);
     const { comment } = jsdoc(decl);
+    let text = decl.getText(sf).replace(/^export\s+/, "");
+    if (abbrev) text = abbreviateUnion(text);
     out.push(
       `### \`${name}\``,
       "",
       "```ts",
-      decl.getText(sf).replace(/^export\s+/, ""),
+      text,
       "```",
       "",
     );
@@ -286,16 +312,67 @@ function render({ lang, ja, sources, missing }) {
   return out.join("\n").trimEnd() + "\n";
 }
 
-function splice(path, generated) {
+function splice(path, generated, begin = BEGIN, end = END) {
   const raw = readFileSync(path, "utf8").replace(/\r\n/g, "\n");
-  const b = raw.indexOf(BEGIN);
-  const e = raw.indexOf(END);
+  const b = raw.indexOf(begin);
+  const e = raw.indexOf(end);
   if (b === -1 || e === -1 || b >= e) {
-    throw new Error(`${path} has no (or broken) api generation markers`);
+    throw new Error(`${path} has no (or broken) generation markers`);
   }
   return (
-    raw.slice(0, b + BEGIN.length) + "\n\n" + generated + "\n" + raw.slice(e)
+    raw.slice(0, b + begin.length) + "\n\n" + generated + "\n" + raw.slice(e)
   );
+}
+
+/** Reads the generated node table from spec/03-uitree.md. */
+function specIds() {
+  const src = readFileSync(join(root, "spec", "03-uitree.md"), "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
+  const gen = src.slice(
+    src.indexOf("<!-- BEGIN GENERATED: node-ids -->"),
+    src.indexOf("<!-- END GENERATED: node-ids -->"),
+  );
+  const groups = [];
+  let current = null;
+  for (const line of gen.split("\n")) {
+    const h = line.match(/^### `([^`]+)`$/);
+    if (h) {
+      current = { ns: h[1], rows: [] };
+      groups.push(current);
+      continue;
+    }
+    const r = line.match(/^\| `([^`]+)` \| (`[^`]*`|—) \| (.*) \|$/);
+    if (r && current && r[1] !== "ID") {
+      // Requirement codes (FR-001 and friends) stay in the spec; author
+      // pages use plain words.
+      const role = r[3].trim().replace(/ \([A-Z]{2,4}-\d+\)/g, "");
+      current.rows.push({ id: r[1], data: r[2], ja: role });
+    }
+  }
+  return groups;
+}
+
+function renderIds({ lang, enRoles, missingIds }) {
+  const head = lang === "ja" ? "| ID | `data` | 役目 |" : "| ID | `data` | Role |";
+  const out = [];
+  for (const { ns, rows } of specIds()) {
+    out.push(`## \`${ns}\``, "", head, "|---|---|---|");
+    for (const { id, data, ja } of rows) {
+      let role = ja;
+      if (lang === "en") {
+        if (enRoles[id]) role = enRoles[id];
+        else {
+          missingIds.push(id);
+          role = ja;
+        }
+      }
+      out.push(`| \`${id}\` | ${data} | ${role} |`);
+    }
+    out.push("");
+  }
+  return out.join("\n").trimEnd() + "\n";
 }
 
 function main() {
@@ -312,23 +389,37 @@ function main() {
     sources[f] = loadSource(f);
   }
   const ja = JSON.parse(readFileSync(join(here, "ja.json"), "utf8"));
+  const enRoles = JSON.parse(readFileSync(join(here, "ids-en.json"), "utf8"));
   const missing = [];
+  const missingIds = [];
 
-  const targets = [
-    { lang: "en", file: join(out, "en", "plugins", "reference.md") },
-    { lang: "ja", file: join(out, "ja", "plugins", "reference.md") },
-  ];
-  let stale = [];
-  for (const { lang, file } of targets) {
-    const next = splice(file, render({ lang, ja, sources, missing }));
+  const writeOrCheck = (file, next, check, stale) => {
     const current = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
-    if (current === next) continue;
+    if (current === next) return;
     if (check) {
       stale.push(file);
-      continue;
+      return;
     }
-    writeFileSync(file, next.replace(/\n/g, "\n"));
+    writeFileSync(file, next);
     console.log(`  updated: ${file}`);
+  };
+
+  let stale = [];
+  for (const lang of ["en", "ja"]) {
+    const file = join(out, lang, "plugins", "reference.md");
+    writeOrCheck(
+      file,
+      splice(file, render({ lang, ja, sources, missing })),
+      check,
+      stale,
+    );
+    const idsFile = join(out, lang, "theme", "ids.md");
+    writeOrCheck(
+      idsFile,
+      splice(idsFile, renderIds({ lang, enRoles, missingIds }), IDS_BEGIN, IDS_END),
+      check,
+      stale,
+    );
   }
 
   const unseen = [...new Set(missing)].sort();
@@ -337,12 +428,18 @@ function main() {
       `  warning: no Japanese text for ${unseen.join(", ")}; fell back to English.\n       add them to sdk/apidocs/ja.json`,
     );
   }
-  if (check && stale.length > 0) {
-    throw new Error(
-      `stale API reference: ${stale.join(", ")}\n       run \`cargo xtask api-docs\` and push the result`,
+  const unseenIds = [...new Set(missingIds)].sort();
+  if (unseenIds.length > 0) {
+    console.warn(
+      `  warning: no English role for ${unseenIds.join(", ")}; fell back to Japanese.\n       add them to sdk/apidocs/ids-en.json`,
     );
   }
-  console.log("  api reference is current");
+  if (check && stale.length > 0) {
+    throw new Error(
+      `stale generated docs: ${stale.join(", ")}\n       run \`cargo xtask api-docs\` and push the result`,
+    );
+  }
+  console.log("  generated docs are current");
 }
 
 main();

@@ -131,7 +131,7 @@ fn check_light(root: &Path) -> Result<(), String> {
     step("stable ID compatibility");
     uitree::abi(root, false)?;
 
-    step("plugin API reference");
+    step("generated api-docs (reference and ID catalog)");
     // The api-docs checkout lives beside this repo; without it there is
     // nothing to verify against, and CI covers it with an explicit --out.
     if root.join("../api-docs/ja/plugins/reference.md").exists() {
