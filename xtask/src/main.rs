@@ -250,10 +250,10 @@ fn api_docs(root: &Path, args: &[String]) -> Result<(), String> {
 fn out_dir(root: &Path, args: &[String]) -> String {
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--out" {
-            if let Some(dir) = it.next() {
-                return dir.clone();
-            }
+        if a == "--out"
+            && let Some(dir) = it.next()
+        {
+            return dir.clone();
         }
     }
     root.join("../api-docs").to_string_lossy().into_owned()
