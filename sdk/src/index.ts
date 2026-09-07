@@ -65,6 +65,13 @@ export const ui = {
    *
    * `ctx.data` is typed from `id`, so registering against
    * `chat.message.header.author` types `ctx.data.author.bot`.
+   *
+   * @example
+   * ```ts
+   * ui.patch("chat.message.header.author", (node) =>
+   *   ui.after(node, ui.badge({ text: "hi" })),
+   * );
+   * ```
    */
   patch<Id extends NodeId>(id: Id, fn: PatchFn<Id>): void {
     registerPatch(id, fn as PatchFn);
@@ -84,8 +91,8 @@ export const ui = {
    * Wraps a node as the child of another.
    *
    * `wrapper` cannot be a core ID such as `chat.*`: a plugin transforms the
-   * nodes it is given, it does not manufacture core ones.
-   * (`spec/03-uitree.md` 8.2)。
+   * nodes it is given, it does not manufacture core ones. Only its own
+   * namespace and `primitive.*` / `layout.*` may wrap.
    */
   wrap(node: UINode, wrapper: Omit<NewUINode, "children">): UINode {
     return { ...wrapper, children: [node] };
@@ -125,26 +132,43 @@ export const ui = {
     return n;
   },
 
+  /** Creates a `primitive.text` node holding the string. */
   text(value: string): NewUINode {
     return { id: "primitive.text", props: { value } };
   },
 
+  /**
+   * Creates a `primitive.badge` node.
+   *
+   * `tone` is theme-owned and drops; the badge keeps its text.
+   */
   badge(opts: { text: string; tone?: string }): NewUINode {
     return { id: "primitive.badge", props: { ...opts } };
   },
 
+  /**
+   * Creates a `primitive.button` node.
+   *
+   * Functions cannot cross the host boundary, so `onPress` drops silently
+   * and the button is inert on settings screens.
+   */
   button(opts: { label: string; onPress: () => void }): NewUINode {
     return { id: "primitive.button", props: { ...opts } };
   },
 
+  /** Creates a `primitive.icon` node showing the named picture. */
   icon(name: string): NewUINode {
     return { id: "primitive.icon", props: { name } };
   },
 } as const;
 
+/** Logging under the `log` capability. Everything lands in the host log. */
 export const log = {
+  /** Records an informational message. */
   info: (msg: string): void => __gumicord_host.log("info", msg),
+  /** Records a warning. */
   warn: (msg: string): void => __gumicord_host.log("warn", msg),
+  /** Records an error. */
   error: (msg: string): void => __gumicord_host.log("error", msg),
 };
 
@@ -154,10 +178,18 @@ export const log = {
  * It lives in the host, so it survives a plugin reload.
  */
 export const storage = {
+  /** Reads a key. Yields `null` when missing. */
   get: (key: string): string | null => __gumicord_host.storage_get(key),
+  /** Writes a key. Persists immediately; never call from inside a patch. */
   set: (key: string, value: string): void => __gumicord_host.storage_set(key, value),
+  /** Deletes a key. Persists immediately; never call from inside a patch. */
   remove: (key: string): void => __gumicord_host.storage_remove(key),
 
+  /**
+   * Reads JSON. Returns `fallback` for both missing and broken JSON.
+   *
+   * Never call from inside a patch.
+   */
   getJSON<T>(key: string, fallback: T): T {
     const raw = __gumicord_host.storage_get(key);
     if (raw === null) return fallback;
@@ -167,6 +199,7 @@ export const storage = {
       return fallback;
     }
   },
+  /** Writes JSON-encoded. Never call from inside a patch. */
   setJSON(key: string, value: unknown): void {
     __gumicord_host.storage_set(key, JSON.stringify(value));
   },

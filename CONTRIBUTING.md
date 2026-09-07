@@ -63,6 +63,7 @@ cargo xtask schema       # JSON Schema and the sample themes
 cargo xtask sdk           # SDK's type-level guarantees
 cargo xtask abi           # stable ID compatibility
 cargo xtask gen           # generate the spec section and SDK types
+cargo xtask api-docs      # regenerate the plugin API reference
 ```
 
 Several Cargo-backed tasks accept additional arguments. For example:

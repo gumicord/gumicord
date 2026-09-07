@@ -1,0 +1,82 @@
+name: API docs
+
+# The plugin API reference is generated, not written: `sdk/src` TSDoc plus
+# `sdk/apidocs/ja.json` render the signature blocks of
+# `en/ja/plugins/reference.md`, and this pushes the result to
+# gumicord/api-docs on every main push that changes them.
+#
+# Cross-repo pushes need more than GITHUB_TOKEN, and PATs always expire,
+# so this mints an installation token from a GitHub App (private key has
+# no expiry), the same shape as the nightly job in ci.yml:
+# API_DOCS_APP_ID and API_DOCS_APP_PRIVATE_KEY hold the app's id and key,
+# and the app must be installed on gumicord/api-docs with Contents read
+# and write.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-docs:
+    name: Regenerate API reference
+    # Main pushes only: PRs must not publish.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Install SDK dependencies
+        run: npm ci --prefix sdk
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only xtask and its dependencies get built.
+          shared-key: xtask
+
+      # Short-lived installation token (expires after the run); the key
+      # itself never expires, so there is nothing to rotate yearly.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.API_DOCS_APP_ID }}
+          private-key: ${{ secrets.API_DOCS_APP_PRIVATE_KEY }}
+          owner: gumicord
+          repositories: api-docs
+
+      - uses: actions/checkout@v5
+        with:
+          repository: gumicord/api-docs
+          token: ${{ steps.app-token.outputs.token }}
+          path: ../api-docs
+
+      - name: cargo xtask api-docs
+        run: cargo xtask api-docs --out ../api-docs
+
+      - name: Push regenerated reference
+        run: |
+          cd ../api-docs
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "API reference is current; nothing to push."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: regenerate API reference from gumicord@${GITHUB_SHA::7}"
+          git push

@@ -10,6 +10,7 @@
  * Which node carries which type is set by `DataByNode` in `ids.ts`.
  */
 
+/** One Discord user, as a plugin may see them. */
 export interface UserData {
   readonly id: string;
   readonly username: string;
@@ -18,6 +19,7 @@ export interface UserData {
   readonly avatarUrl?: string;
 }
 
+/** One chat message. `content` is plain text; the decorated body lives in nodes. */
 export interface MessageData {
   readonly id: string;
   readonly channelId: string;
@@ -31,6 +33,7 @@ export interface MessageData {
   readonly referencedMessageId?: string;
 }
 
+/** One guild, with its unread state. */
 export interface GuildData {
   readonly id: string;
   readonly name: string;
@@ -39,6 +42,7 @@ export interface GuildData {
   readonly mentionCount: number;
 }
 
+/** One channel, with its unread state. */
 export interface ChannelData {
   readonly id: string;
   readonly name: string;
@@ -49,12 +53,14 @@ export interface ChannelData {
   readonly mentionCount: number;
 }
 
+/** One channel category. */
 export interface CategoryData {
   readonly id: string;
   readonly name: string;
   readonly collapsed: boolean;
 }
 
+/** One direct message thread. */
 export interface DmData {
   readonly id: string;
   readonly recipients: readonly UserData[];
@@ -77,6 +83,7 @@ export interface MemberData {
   readonly roles: readonly string[];
 }
 
+/** One message attachment. */
 export interface AttachmentData {
   readonly id: string;
   readonly filename: string;
@@ -87,6 +94,7 @@ export interface AttachmentData {
   readonly height?: number;
 }
 
+/** One message embed. */
 export interface EmbedData {
   readonly type: string;
   readonly title?: string;

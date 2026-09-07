@@ -13,6 +13,9 @@
 //!     cargo xtask sdk         the SDK's type-level guarantees
 //!     cargo xtask abi         stable ID compatibility (--accept to update)
 //!     cargo xtask gen         generation (--check to verify only)
+//!     cargo xtask api-docs   regenerate the plugin API reference
+//!                             (--check to verify only, --out to point
+//!                             at the api-docs checkout)
 //!
 //! A development machine may have four cores and 8 GB, so building tasks are
 //! held to `jobs = 2` in `.cargo/config.toml`. This can be overridden with
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         "sdk" => sdk(&root),
         "abi" => uitree::abi(&root, flag(&task_args, "--accept")),
         "gen" => uitree::generate(&root, flag(&task_args, "--check")),
+        "api-docs" => api_docs(&root, &task_args),
         "help" | "--help" | "-h" => {
             help();
             Ok(())
@@ -77,6 +81,9 @@ fn help() {
                            --accept updates the snapshot
   cargo xtask gen         generate the spec and SDK types from the IDs
                            --check only verifies they are current
+  cargo xtask api-docs      regenerate the plugin API reference
+                           --check only verifies it is current
+                           --out points at the api-docs checkout
 
 Most tasks accept arguments for the underlying Cargo command. For example:
 
@@ -123,6 +130,15 @@ fn check_light(root: &Path) -> Result<(), String> {
 
     step("stable ID compatibility");
     uitree::abi(root, false)?;
+
+    step("plugin API reference");
+    // The api-docs checkout lives beside this repo; without it there is
+    // nothing to verify against, and CI covers it with an explicit --out.
+    if root.join("../api-docs/ja/plugins/reference.md").exists() {
+        api_docs(root, &["--check".to_owned()])?;
+    } else {
+        println!("  skipped (no api-docs checkout)");
+    }
 
     println!("\n\x1b[32mall passed (light)\x1b[0m");
     Ok(())
@@ -209,6 +225,38 @@ fn sdk(root: &Path) -> Result<(), String> {
     }
 
     run(&dir, "node", &["test/run.mjs"])
+}
+
+/// Regenerates the plugin API reference in the api-docs checkout.
+///
+/// The reference pages keep hand-written guides around generated
+/// signature blocks (`sdk/src` TSDoc plus `sdk/apidocs/ja.json`), so this
+/// only rewrites the marked sections. `--out` points at the api-docs
+/// checkout; the default is `../api-docs`, matching a side-by-side
+/// layout. `--check` verifies without writing.
+fn api_docs(root: &Path, args: &[String]) -> Result<(), String> {
+    let out = out_dir(root, args);
+    let mut node_args = vec![
+        "sdk/apidocs/generate.mjs".to_owned(),
+        "--out".to_owned(),
+        out,
+    ];
+    if flag(args, "--check") {
+        node_args.push("--check".to_owned());
+    }
+    run_owned(root, "node", &node_args)
+}
+
+fn out_dir(root: &Path, args: &[String]) -> String {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--out" {
+            if let Some(dir) = it.next() {
+                return dir.clone();
+            }
+        }
+    }
+    root.join("../api-docs").to_string_lossy().into_owned()
 }
 
 /// Whether a flag was passed.
