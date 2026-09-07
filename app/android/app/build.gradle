@@ -15,7 +15,7 @@ android {
         minSdk 26
         targetSdk 34
         versionCode 1
-        versionName '0.0.0'
+        versionName '0.1.0'
         // Only 64-bit ARM for now: that is every phone shipped in years, and
         // each ABI multiplies native build time. 32-bit ARM and x86 emulators
         // come back when someone needs them.
