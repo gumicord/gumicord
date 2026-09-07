@@ -63,14 +63,14 @@ jobs:
         with:
           repository: gumicord/api-docs
           token: ${{ steps.app-token.outputs.token }}
-          path: ../api-docs
+          path: api-docs
 
       - name: cargo xtask api-docs
-        run: cargo xtask api-docs --out ../api-docs
+        run: cargo xtask api-docs --out api-docs
 
       - name: Push regenerated reference
         run: |
-          cd ../api-docs
+          cd api-docs
           if [ -z "$(git status --porcelain)" ]; then
             echo "API reference is current; nothing to push."
             exit 0
