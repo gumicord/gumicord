@@ -10,9 +10,11 @@ android {
 
     defaultConfig {
         applicationId 'dev.gumicord.app'
-        // GameActivity needs 21+; 26 covers effectively every device that
-        // can still run the Play Store, and skips a decade of legacy paths.
-        minSdk 26
+        // GameActivity needs 21+; 24 matches the official client's floor
+        // (Android 7+) while skipping the oldest legacy paths. Notification
+        // channels and friends are 26+, so the notification work must carry
+        // pre-26 fallbacks.
+        minSdk 24
         targetSdk 34
         versionCode 1
         versionName '0.0.0'
