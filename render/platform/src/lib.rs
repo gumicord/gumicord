@@ -374,7 +374,6 @@ mod tests {
     #[test]
     fn bridge_uses_file_logger_levels() {
         use log::Log as _;
-        use std::io::Write as _;
         let dir = std::env::temp_dir().join("gumicord-log-test-bridge");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
