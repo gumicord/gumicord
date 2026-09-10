@@ -27,11 +27,26 @@ pub fn share_log() -> Result<String, ShareError> {
     imp::share(&path)
 }
 
-/// The file the logger is appending to, if it exists yet.
+/// The file the logger is appending to, if it exists yet: the newest
+/// stamped run, falling back to the legacy fixed name.
 fn log_file() -> Option<PathBuf> {
     let dir = std::env::var_os("GUMICORD_DATA_DIR").filter(|d| !d.is_empty())?;
-    let path = PathBuf::from(dir).join("logs").join("gumicord.log");
-    path.is_file().then_some(path)
+    let dir = PathBuf::from(dir).join("logs");
+    newest_log(&dir, "gumicord-").or_else(|| {
+        let legacy = dir.join("gumicord.log");
+        legacy.is_file().then_some(legacy)
+    })
+}
+
+/// Newest `prefix*.log` by name. Stamps sort chronologically, so no
+/// timestamps are parsed.
+fn newest_log(dir: &std::path::Path, prefix: &str) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with(prefix) && n.ends_with(".log"))
+        .max()
+        .map(|n| dir.join(n))
 }
 
 #[cfg(target_os = "android")]
@@ -196,11 +211,11 @@ fn export_with(
             &[],
         )?
         .l()?;
-    for (src, dst) in [
-        ("gumicord.log", "gumicord-crash.log"),
-        ("panic.log", "panic-crash.log"),
+    for (prefix, dst) in [
+        ("gumicord-", "gumicord-crash.log"),
+        ("panic-", "panic-crash.log"),
     ] {
-        export_one(env, &resolver, &downloads, src, dst)?;
+        export_one(env, &resolver, &downloads, prefix, dst)?;
     }
     Ok(())
 }
@@ -210,7 +225,7 @@ fn export_one(
     env: &mut jni::Env<'_>,
     resolver: &jni::objects::JObject<'_>,
     downloads: &jni::objects::JObject<'_>,
-    src: &str,
+    prefix: &str,
     dst: &str,
 ) -> Result<(), ShareError> {
     use jni::objects::JValue;
@@ -220,7 +235,10 @@ fn export_one(
         return Ok(());
     };
     // A missing file is not an error: an early crash leaves nothing behind.
-    let Ok(bytes) = std::fs::read(std::path::PathBuf::from(dir).join("logs").join(src)) else {
+    let Some(path) = newest_log(&std::path::PathBuf::from(dir).join("logs"), prefix) else {
+        return Ok(());
+    };
+    let Ok(bytes) = std::fs::read(path) else {
         return Ok(());
     };
     // Fixed names, deleted first: no listing, no growth. The names are
@@ -378,5 +396,29 @@ mod tests {
             unsafe { std::env::set_var("GUMICORD_DATA_DIR", v) };
         }
         assert!(matches!(result, Err(ShareError::NoLog)));
+    }
+
+    #[test]
+    fn newest_stamped_run_wins() {
+        let dir = std::env::temp_dir().join("gumicord-share-newest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "gumicord-20200101-000000.log",
+            "gumicord-20200103-000000.log",
+            "gumicord-20200102-000000.log",
+            "panic-20200101-000000.log",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        assert_eq!(
+            newest_log(&dir, "gumicord-"),
+            Some(dir.join("gumicord-20200103-000000.log"))
+        );
+        assert_eq!(
+            newest_log(&dir, "panic-"),
+            Some(dir.join("panic-20200101-000000.log"))
+        );
+        assert_eq!(newest_log(&dir, "trace-"), None);
     }
 }

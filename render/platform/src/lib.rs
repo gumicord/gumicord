@@ -60,7 +60,7 @@ pub fn install_panic_hook() {
             let _ = write!(msg, " at {}:{}", loc.file(), loc.line());
         }
         eprintln!("{msg}");
-        write_diag_file("panic.log", &format!("{msg}\n"));
+        write_diag_file(&format!("panic-{}.log", stamp_now()), &format!("{msg}\n"));
         append_log(&format!("{msg}\n"));
         #[cfg(target_os = "android")]
         {
@@ -77,19 +77,62 @@ pub fn install_panic_hook() {
 
 /// Appends one line to the log file, opening it fresh. The panic hook
 /// cannot reuse the logger: its lock may be the thing that panicked.
+/// Goes to this run's file; without one yet, to the legacy name.
 fn append_log(line: &str) {
     if let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") {
         let dir = std::path::Path::new(&dir).join("logs");
+        let path = current_log_path().unwrap_or_else(|| dir.join("gumicord.log"));
         if std::fs::create_dir_all(&dir).is_ok()
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(dir.join("gumicord.log"))
+                .open(path)
         {
             use std::io::Write as _;
             let _ = write!(file, "{line}");
         }
     }
+}
+
+/// This run's log file, once logging started.
+static CURRENT_LOG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+fn current_log_path() -> Option<std::path::PathBuf> {
+    CURRENT_LOG.get().cloned()
+}
+
+/// Local startup stamp for file names (`20260910-123456`). Colons are
+/// out: Windows forbids them in file names.
+fn stamp_now() -> String {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let local = unix
+        .saturating_add(clock::local_utc_offset_minutes() as i64 * 60)
+        .max(0);
+    let days = local.div_euclid(86_400);
+    let secs = local.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}{m:02}{d:02}-{s1:02}{s2:02}{s3:02}",
+        s1 = secs / 3600,
+        s2 = secs % 3600 / 60,
+        s3 = secs % 60,
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Writes one file into the data directory, creating it first. Everything
@@ -109,7 +152,8 @@ pub fn write_diag_file(name: &str, contents: &str) {
 ///
 /// Same levels as the desktop logger: `info` for our crates, `warn` for
 /// dependencies, raised with `GUMICORD_LOG` / `GUMICORD_LOG_DEPS`.
-/// One backup generation is kept; both live in `logs/` next to the data.
+/// One file per run, named with the startup stamp; only the newest five
+/// are kept. All live in `logs/` next to the data.
 pub fn init_file_logging() {
     let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") else {
         return;
@@ -118,8 +162,9 @@ pub fn init_file_logging() {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let path = dir.join("gumicord.log");
-    rotate_log(&path, 2 * 1024 * 1024);
+    prune_old_logs(&dir, "gumicord-", 5);
+    prune_old_logs(&dir, "panic-", 5);
+    let path = dir.join(format!("gumicord-{}.log", stamp_now()));
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -127,6 +172,7 @@ pub fn init_file_logging() {
     else {
         return;
     };
+    let _ = CURRENT_LOG.set(path);
     let _ = tracing::subscriber::set_global_default(FileLogger {
         file: std::sync::Mutex::new(file),
         ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
@@ -134,11 +180,20 @@ pub fn init_file_logging() {
     });
 }
 
-/// Moves an overgrown log aside, keeping one backup generation.
-fn rotate_log(path: &std::path::Path, limit: u64) {
-    let overgrown = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > limit;
-    if overgrown {
-        let _ = std::fs::rename(path, path.with_extension("log.old"));
+/// Deletes stamped runs past the newest `keep`. Names sort chronologically,
+/// so no timestamps are parsed.
+fn prune_old_logs(dir: &std::path::Path, prefix: &str, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with(prefix) && n.ends_with(".log"))
+        .collect();
+    names.sort();
+    names.reverse();
+    for stale in names.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(dir.join(stale));
     }
 }
 
@@ -206,20 +261,35 @@ impl tracing::field::Visit for Visitor<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::{civil_from_days, prune_old_logs, stamp_now};
+
     #[test]
-    fn an_overgrown_log_moves_aside() {
-        let dir = std::env::temp_dir().join("gumicord-log-test-rotate");
+    fn stamps_render_local_datetime() {
+        assert_eq!(civil_from_days(10_957), (2000, 1, 1));
+        // The stamp itself carries the local clock; shape only.
+        let stamp = stamp_now();
+        assert_eq!(stamp.len(), 15, "{stamp}");
+        assert_eq!(&stamp[8..9], "-");
+        assert!(stamp.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
+    }
+
+    #[test]
+    fn only_the_newest_runs_survive() {
+        let dir = std::env::temp_dir().join("gumicord-log-test-prune");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("gumicord.log");
-
-        std::fs::write(&path, vec![b'x'; 100]).unwrap();
-        super::rotate_log(&path, 10);
-        assert!(!path.exists());
-        assert!(dir.join("gumicord.log.old").exists());
-
-        std::fs::write(&path, vec![b'x'; 5]).unwrap();
-        super::rotate_log(&path, 10);
-        assert!(path.exists());
+        for name in [
+            "gumicord-20200101-000000.log",
+            "gumicord-20200102-000000.log",
+            "gumicord-20200103-000000.log",
+            "unrelated.txt",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        prune_old_logs(&dir, "gumicord-", 2);
+        assert!(!dir.join("gumicord-20200101-000000.log").exists());
+        assert!(dir.join("gumicord-20200102-000000.log").exists());
+        assert!(dir.join("gumicord-20200103-000000.log").exists());
+        assert!(dir.join("unrelated.txt").exists());
     }
 }
