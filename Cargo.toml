@@ -77,6 +77,9 @@ zstd = "0.13"
 # Windows APIs directly; only DPAPI for now.
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory", "Win32_System_Time", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_Graphics_Gdi"] }
 
+# Windows exe icon (.ico -> embedded resource via app/desktop/build.rs).
+winresource = "0.1"
+
 # Linux clipboard (X11 and Wayland); other platforms use their own APIs.
 # Wayland sessions without XWayland need the data-control backend.
 arboard = { version = "3", features = ["wayland-data-control"] }

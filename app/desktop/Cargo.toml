@@ -17,3 +17,6 @@ gumicord-platform.workspace = true
 gumicord-render.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
