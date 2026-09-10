@@ -1991,7 +1991,11 @@ impl Gumicord {
     fn settings_nav_items(&self) -> Vec<crate::menu::Item> {
         use crate::menu::{Action, Item, SettingsCategory};
         let mut items = vec![Item::new(Action::CloseSettings, "閉じる").icon("close")];
-        for category in [SettingsCategory::Plugins, SettingsCategory::Theme] {
+        for category in [
+            SettingsCategory::Plugins,
+            SettingsCategory::Theme,
+            SettingsCategory::Support,
+        ] {
             items.push(
                 Item::new(Action::SettingsCategory(category), category.label())
                     .selected(self.settings.category == category),
@@ -2071,6 +2075,9 @@ impl Gumicord {
                     items
                 }
             },
+            SettingsCategory::Support => {
+                vec![Item::new(Action::ShareLog, "ログを共有")]
+            }
         }
     }
 
@@ -2119,6 +2126,9 @@ impl Gumicord {
                     }
                 },
             },
+            SettingsCategory::Support => {
+                vec!["不具合の報告に使う。記録にトークンは含まれない。".to_owned()]
+            }
         }
     }
 
@@ -2562,6 +2572,14 @@ impl Gumicord {
             }
             crate::menu::Action::UseBundledTheme => {
                 self.use_bundled_theme();
+            }
+            crate::menu::Action::ShareLog => {
+                // The toast is the whole result surface: success names
+                // what opened, failure says so in one line.
+                match gumicord_platform::share_log() {
+                    Ok(note) => self.notify_toast(note),
+                    Err(e) => self.notify_toast(e.to_string()),
+                }
             }
 
             crate::menu::Action::Cut => {
@@ -5441,6 +5459,24 @@ mod tests {
         assert!(!a.settings.open, "閉じない");
     }
 
+    /// Support sits last: 3 opens it without moving 0, 1 and 2.
+    #[test]
+    fn support_category_opens_last_and_carries_share_log() {
+        let mut a = with_settings();
+        press_menu(&mut a, 3);
+        assert_eq!(
+            a.settings.category,
+            crate::menu::SettingsCategory::Support,
+            "増えた分類が開かない"
+        );
+        assert!(
+            a.settings_page_items()
+                .iter()
+                .any(|i| i.action == crate::menu::Action::ShareLog),
+            "共有の行がない"
+        );
+    }
+
     /// A stale index stays put instead of acting on the wrong row.
     #[test]
     fn a_stale_settings_index_keeps_the_screen() {
@@ -5497,7 +5533,7 @@ mod tests {
         assert_eq!(selected_index(&a), [1], "開いている分類行がない");
         press_menu(&mut a, 2);
         // 分類行に加え、標準のテーマ行も付く (demo は標準のはず)。
-        assert_eq!(selected_index(&a), [2, 3], "移っていない");
+        assert_eq!(selected_index(&a), [2, 4], "移っていない");
     }
 
     /// Escape closes it; an outside press does too, with nothing to decide.
@@ -8023,7 +8059,7 @@ mod theme_select_tests {
         a.settings.open = true;
         a.settings.category = crate::menu::SettingsCategory::Theme;
 
-        // Nav takes 0-2; the standard row is 3, the install is 4.
+        // Nav takes 0-3; the standard row is 4, the install is 5.
         let press = |a: &mut Gumicord, index: u32| {
             a.pressed(&[Hit {
                 id: NodeId::OverlayMenuItem,
@@ -8045,9 +8081,9 @@ mod theme_select_tests {
             out
         };
         // Bundled to start: the theme tab and the standard row show active.
-        // Nav takes 0-2; the standard row is 3, the install is 4.
-        assert_eq!(selected(&a), [2, 3]);
-        assert!(press(&mut a, 4));
+        // Nav takes 0-3; the standard row is 4, the install is 5.
+        assert_eq!(selected(&a), [2, 4]);
+        assert!(press(&mut a, 5));
         assert_eq!(
             a.theme_source,
             ThemeSource::Saved("dev.example.wall".to_owned())
@@ -8055,10 +8091,10 @@ mod theme_select_tests {
         // Selecting rescans the folder, which is empty for this app;
         // put the test install back the way production's rescan keeps it.
         a.settings.themes = scan_themes_in(&root);
-        assert_eq!(selected(&a), [2, 4], "active mark did not follow");
-        assert!(press(&mut a, 3));
+        assert_eq!(selected(&a), [2, 5], "active mark did not follow");
+        assert!(press(&mut a, 4));
         assert_eq!(a.theme_source, ThemeSource::Bundled);
-        assert_eq!(selected(&a), [2, 3]);
+        assert_eq!(selected(&a), [2, 4]);
     }
 
     /// Startup falls back to bundled when the saved theme is gone.

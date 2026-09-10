@@ -200,6 +200,9 @@ pub enum Action {
     SelectTheme(String),
     /// Go back to the bundled theme.
     UseBundledTheme,
+    /// Hand the log file to the OS: the share sheet on Android, the logs
+    /// folder on desktop, the Files app location on iOS.
+    ShareLog,
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary
@@ -210,13 +213,14 @@ pub enum Action {
     SelectAll,
 }
 
-/// A settings screen category. Two for now: what is installed, and what
-/// the theme failed to fetch. More arrive with their features.
+/// A settings screen category. Support holds what fits nowhere else
+/// yet; more categories arrive with their features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
     #[default]
     Plugins,
     Theme,
+    Support,
 }
 
 impl SettingsCategory {
@@ -224,6 +228,7 @@ impl SettingsCategory {
         match self {
             SettingsCategory::Plugins => "プラグイン",
             SettingsCategory::Theme => "テーマ",
+            SettingsCategory::Support => "サポート",
         }
     }
 }

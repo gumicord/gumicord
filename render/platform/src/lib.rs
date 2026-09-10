@@ -21,6 +21,7 @@ pub mod dirs;
 #[cfg(target_os = "ios")]
 pub mod proxy;
 pub mod secret;
+pub mod share;
 pub mod text_input;
 pub mod touch;
 pub mod url;
@@ -31,6 +32,7 @@ pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;
 pub use secret::{SecretError, SecretStore};
+pub use share::{ShareError, share_log};
 pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
 pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
@@ -39,9 +41,8 @@ pub use window::run_android;
 pub use window::{Application, FrameCx, ImeProxy, PlatformError, RevealRequest, Waker, run};
 
 /// Writes panics where they can be found: stderr vanishes on the phone,
-/// but the data directory is user-visible, so the message survives the
-/// crash that follows. Best-effort throughout: a failing hook must not
-/// panic again.
+/// so the message survives in the data directory past the crash that
+/// follows. Best-effort throughout: a failing hook must not panic again.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let mut msg = String::from("panic: ");

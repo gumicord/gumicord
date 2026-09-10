@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What FileProvider may hand out. Logs only: the database and the
+     keystore-adjacent files stay inside the app. -->
+<paths>
+    <external-files-path name="logs" path="logs/" />
+</paths>

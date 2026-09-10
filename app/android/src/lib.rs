@@ -6,9 +6,10 @@
 #[cfg(target_os = "android")]
 use gumicord_app::Gumicord;
 
-/// Where files live. External storage is preferred: it is USB-visible,
-/// which is how themes, logs and the database get on and off the phone.
-/// Internal storage is always there and is the fallback.
+/// Where files live. External storage is preferred: internal storage is
+/// always there and is the fallback. Neither is reachable from the Files
+/// app or USB on modern Android, so logs leave through the share sheet
+/// instead (settings screen, support page).
 #[cfg(target_os = "android")]
 fn data_dir(app: &winit::platform::android::activity::AndroidApp) -> std::path::PathBuf {
     if let Some(dir) = app.external_data_path()
