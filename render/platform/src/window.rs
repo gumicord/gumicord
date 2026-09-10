@@ -1026,6 +1026,72 @@ impl Host {
         }
         self.request_redraw();
     }
+
+    /// Builds the renderer once the window can actually draw.
+    ///
+    /// On Android the native window may not exist yet when `resumed` runs:
+    /// configuring a surface without one panics inside wgpu instead of
+    /// failing. Hence the zero-size guard and, on Android only, catching
+    /// that panic: the failure is transient (the window arrives later) and
+    /// retryable, unlike a broken driver on desktop.
+    fn ensure_renderer(&mut self) -> bool {
+        if self.renderer.is_some() {
+            return true;
+        }
+        let Some(window) = self.window.clone() else {
+            return false;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return false;
+        }
+        let scale = window.scale_factor() as f32;
+        // The renderer starts with the bundled font and unfolds system fonts
+        // on a background thread; a wake lets a sleeping loop know they are
+        // ready. The window must exist before the first frame measures text.
+        let wake = {
+            let w = self.waker.clone();
+            Box::new(move || w.wake()) as Box<dyn Fn() + Send + Sync + 'static>
+        };
+        let attempt = || {
+            Renderer::new(
+                window.clone().into(),
+                size.width,
+                size.height,
+                scale,
+                wake,
+                crate::app_data_dir().map(|d| d.join("fonts")),
+                crate::app_data_dir().map(|d| d.join("gpu")),
+            )
+        };
+        #[cfg(target_os = "android")]
+        let created = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(attempt)) {
+            Ok(Ok(r)) => {
+                self.renderer = Some(r);
+                true
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "gpu not ready yet; retrying on the next event");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("gpu not ready yet; retrying on the next event");
+                false
+            }
+        };
+        #[cfg(not(target_os = "android"))]
+        let created = match attempt() {
+            Ok(r) => {
+                self.renderer = Some(r);
+                true
+            }
+            Err(e) => {
+                tracing::error!(%e, "could not initialise the GPU");
+                false
+            }
+        };
+        created
+    }
 }
 
 impl ApplicationHandler<LoopEvent> for Host {
@@ -1141,35 +1207,24 @@ impl ApplicationHandler<LoopEvent> for Host {
             self.waker.proxy(),
         ));
         window.set_visible(true);
-
-        let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
-        // The renderer starts with the bundled font and unfolds system fonts
-        // on a background thread; a wake lets a sleeping loop know they are
-        // ready. The window must exist before the first frame measures text.
-        let wake = {
-            let w = self.waker.clone();
-            Box::new(move || w.wake()) as Box<dyn Fn() + Send + Sync + 'static>
-        };
-        match Renderer::new(
-            window.clone().into(),
-            size.width,
-            size.height,
-            scale,
-            wake,
-            crate::app_data_dir().map(|d| d.join("fonts")),
-            crate::app_data_dir().map(|d| d.join("gpu")),
-        ) {
-            Ok(r) => self.renderer = Some(r),
-            Err(e) => {
-                tracing::error!(%e, "could not initialise the GPU");
-                event_loop.exit();
-                return;
-            }
-        }
-
         window.request_redraw();
         self.window = Some(window);
+
+        if !self.ensure_renderer() {
+            // Desktop keeps the old fail-fast: a window there always has a
+            // valid surface, so a failure is a real bug worth crashing on.
+            #[cfg(not(target_os = "android"))]
+            event_loop.exit();
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        // The native window dies on stop; the surface would outlive it and
+        // the next present would hit the same invalid surface. Drop both so
+        // the next resume rebuilds from scratch.
+        self.renderer = None;
+        self.window = None;
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -1177,6 +1232,11 @@ impl ApplicationHandler<LoopEvent> for Host {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
+                // A missing renderer may just have been early: the window
+                // arriving later resizes into validity.
+                if self.renderer.is_none() {
+                    self.ensure_renderer();
+                }
                 // Log the screen size too, so overflow can be shown by
                 // subtraction rather than guessed at: the expected value is
                 // the screen minus the taskbar.
@@ -1420,7 +1480,14 @@ impl ApplicationHandler<LoopEvent> for Host {
                 self.modifiers = m.state();
             }
 
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => {
+                // Size alone does not prove the native window exists;
+                // without this, an early resume would stay blank forever.
+                if self.renderer.is_none() {
+                    self.ensure_renderer();
+                }
+                self.redraw()
+            }
 
             _ => {}
         }
