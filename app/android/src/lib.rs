@@ -41,10 +41,11 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
 
     if let Err(e) = gumicord_platform::run_android(Gumicord::new(), app) {
         tracing::error!(%e, "could not start");
-        // Startup failures never reach the settings row: leave the logs
-        // where the Files app shows them.
-        let _ = gumicord_platform::export_crash_logs();
     }
+    // Every exit ferries the logs to Downloads: the settings row and the
+    // panic hook cover the middle and the crash, this covers a quiet end.
+    // Without it a run that simply ends leaves nothing behind.
+    let _ = gumicord_platform::export_crash_logs();
     // The activity can come back in the same process (relaunch, recreation),
     // but winit allows one event loop per process. Die here so the next
     // launch starts fresh instead of failing to recreate the loop.

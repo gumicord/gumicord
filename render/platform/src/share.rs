@@ -154,9 +154,10 @@ mod imp {
 
 /// Copies the crash logs where the Files app can see them (Android only).
 ///
-/// If the app never opens, the settings row cannot run: this is the ferry
-/// for that case. Fixed names bound the clutter to two files; an older
-/// pair is deleted first so Downloads never fills with corpses.
+/// Runs at every exit, not only on crashes: if the app never opens, the
+/// settings row cannot run, and a quiet end would otherwise leave nothing
+/// behind. Fixed names bound the clutter to two files; an older pair is
+/// deleted first so Downloads never fills with corpses.
 /// Pre-29 has no Downloads collection and is skipped silently.
 #[cfg(target_os = "android")]
 pub fn export_crash_logs() -> Result<(), ShareError> {
