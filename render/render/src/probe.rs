@@ -1,4 +1,4 @@
-//! GPU backend probing in child processes.
+//! GPU backend probing in child processes (desktop only).
 //!
 //! A broken driver segfaults while the instance is created, taking the whole
 //! process down. Each candidate backend is therefore created in a child that
@@ -9,6 +9,11 @@
 //!
 //! Fresh crashes are remembered on disk, so a known-bad backend is skipped
 //! without spawning. Remembered crashes expire, so a fixed driver is retried.
+//!
+//! Android never spawns: an app cannot re-execute itself from the sandbox
+//! (`current_exe` is the runtime, not us), so every child would die and
+//! every backend would look broken. There the candidate list is trusted
+//! as-is and adapter enumeration speaks.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -98,6 +103,18 @@ pub fn surviving_backends(
 ) -> wgpu::Backends {
     if std::env::var("WGPU_BACKEND").is_ok() || std::env::var(PROBE_ENV).as_deref() == Ok("0") {
         return wgpu::Backends::all();
+    }
+    #[cfg(target_os = "android")]
+    {
+        // No exec() from the app sandbox: current_exe() is the runtime,
+        // not us, so every probe child would die and every backend would
+        // look broken (which is exactly the startup death seen on device).
+        // GLES is the only candidate that matters there; trust the list
+        // and let adapter enumeration speak.
+        return candidates
+            .iter()
+            .copied()
+            .fold(wgpu::Backends::empty(), |a, b| a | b);
     }
     let mut excluded = load_exclusions(cache_dir);
     let mut wanted: Vec<(&str, wgpu::Backends)> = Vec::new();
