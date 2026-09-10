@@ -91,7 +91,9 @@ mod imp {
             .call_static_method(
                 jni_str!("androidx/core/content/FileProvider"),
                 jni_str!("getUriForFile"),
-                jni_sig!("(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;"),
+                jni_sig!(
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;"
+                ),
                 &[
                     JValue::from(context),
                     JValue::from(&authority),
@@ -134,7 +136,9 @@ mod imp {
             .call_static_method(
                 jni_str!("android/content/Intent"),
                 jni_str!("createChooser"),
-                jni_sig!("(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;"),
+                jni_sig!(
+                    "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;"
+                ),
                 &[JValue::from(&intent), JValue::from(&title)],
             )?
             .l()?;
