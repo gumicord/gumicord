@@ -32,9 +32,9 @@ pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;
 pub use secret::{SecretError, SecretStore};
-pub use share::{ShareError, share_log};
 #[cfg(target_os = "android")]
 pub use share::export_crash_logs;
+pub use share::{ShareError, share_log};
 pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
 pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
