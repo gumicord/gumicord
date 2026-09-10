@@ -211,14 +211,15 @@ fn export_with(
             &[],
         )?
         .l()?;
-    for (prefix, dst) in [
-        ("gumicord-", "gumicord-crash.log"),
-        ("panic-", "panic-crash.log"),
-    ] {
-        export_one(env, &resolver, &downloads, prefix, dst)?;
+    for prefix in ["gumicord-", "panic-"] {
+        export_one(env, &resolver, &downloads, prefix)?;
     }
     Ok(())
 }
+
+/// How many files per prefix survive in Downloads.
+#[cfg(target_os = "android")]
+const KEEP_EXPORTS: usize = 5;
 
 #[cfg(target_os = "android")]
 fn export_one(
@@ -226,7 +227,6 @@ fn export_one(
     resolver: &jni::objects::JObject<'_>,
     downloads: &jni::objects::JObject<'_>,
     prefix: &str,
-    dst: &str,
 ) -> Result<(), ShareError> {
     use jni::objects::JValue;
     use jni::{jni_sig, jni_str};
@@ -238,29 +238,22 @@ fn export_one(
     let Some(path) = newest_log(&std::path::PathBuf::from(dir).join("logs"), prefix) else {
         return Ok(());
     };
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(bytes) = std::fs::read(&path) else {
         return Ok(());
     };
-    // Fixed names, deleted first: no listing, no growth. The names are
-    // constants, so embedding them cannot inject anything.
-    let stale = env.new_string(format!("_display_name='{dst}'"))?;
-    env.call_method(
-        resolver,
-        jni_str!("delete"),
-        jni_sig!("(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I"),
-        &[
-            JValue::from(downloads),
-            JValue::from(&stale),
-            JValue::from(&jni::objects::JObject::null()),
-        ],
-    )?;
+    // The copy keeps the source name, stamps included: Downloads reads as
+    // history, and the app side stays the single source of truth.
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("gumicord.log");
     let values = env.new_object(
         jni_str!("android/content/ContentValues"),
         jni_sig!("()V"),
         &[],
     )?;
     for (key, value) in [
-        ("_display_name", dst),
+        ("_display_name", name),
         ("mime_type", "text/plain"),
         ("relative_path", "Download/gumicord/"),
     ] {
@@ -297,7 +290,132 @@ fn export_one(
         &[JValue::from(&bytes)],
     )?;
     env.call_method(&stream, jni_str!("close"), jni_sig!("()V"), &[])?;
+    trim_exports(env, resolver, downloads, prefix);
     Ok(())
+}
+
+/// Deletes same-prefix copies past the newest few, so crash loops cannot
+/// fill Downloads. Best-effort: a failure here must not fail the export.
+#[cfg(target_os = "android")]
+fn trim_exports(
+    env: &mut jni::Env<'_>,
+    resolver: &jni::objects::JObject<'_>,
+    downloads: &jni::objects::JObject<'_>,
+    prefix: &str,
+) {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+
+    let mut trim = || -> Result<(), jni::errors::Error> {
+        let string_class = env.find_class(jni_str!("java/lang/String"))?;
+        let projection = env.new_object_array(3, &string_class, jni::objects::JObject::null())?;
+        for (i, column) in ["_id", "_display_name", "date_added"].iter().enumerate() {
+            let name = env.new_string(*column)?;
+            projection.set_element(env, i, &name)?;
+        }
+        let where_all = env.new_string("relative_path=?")?;
+        let args = env.new_object_array(1, &string_class, jni::objects::JObject::null())?;
+        let one = env.new_string("Download/gumicord/")?;
+        args.set_element(env, 0, &one)?;
+        let no_sort = jni::objects::JObject::null();
+        let cursor = env
+            .call_method(
+                resolver,
+                jni_str!("query"),
+                jni_sig!("(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;"),
+                &[
+                    JValue::from(downloads),
+                    JValue::from(&projection),
+                    JValue::from(&where_all),
+                    JValue::from(&args),
+                    JValue::from(&no_sort),
+                ],
+            )?
+            .l()?;
+        let id_col = column_index(env, &cursor, "_id")?;
+        let name_col = column_index(env, &cursor, "_display_name")?;
+        let date_col = column_index(env, &cursor, "date_added")?;
+        let mut rows: Vec<(i64, String, i64)> = Vec::new();
+        while env
+            .call_method(&cursor, jni_str!("moveToNext"), jni_sig!("()Z"), &[])?
+            .z()?
+        {
+            let id = env
+                .call_method(
+                    &cursor,
+                    jni_str!("getLong"),
+                    jni_sig!("(I)J"),
+                    &[JValue::Int(id_col)],
+                )?
+                .j()?;
+            let name = env
+                .call_method(
+                    &cursor,
+                    jni_str!("getString"),
+                    jni_sig!("(I)Ljava/lang/String;"),
+                    &[JValue::Int(name_col)],
+                )?
+                .l()?;
+            let at = env
+                .call_method(
+                    &cursor,
+                    jni_str!("getLong"),
+                    jni_sig!("(I)J"),
+                    &[JValue::Int(date_col)],
+                )?
+                .j()?;
+            let name: jni::objects::JString = env.cast_local::<jni::objects::JString>(name)?;
+            rows.push((id, name.try_to_string(env)?, at));
+        }
+        let _ = env.call_method(&cursor, jni_str!("close"), jni_sig!("()V"), &[]);
+        rows.sort_by(|a, b| b.2.cmp(&a.2));
+        for (id, name, _) in rows.into_iter().skip(KEEP_EXPORTS) {
+            if !name.starts_with(prefix) {
+                continue;
+            }
+            let target = env
+                .call_static_method(
+                    jni_str!("android/content/ContentUris"),
+                    jni_str!("withAppendedId"),
+                    jni_sig!("(Landroid/net/Uri;J)Landroid/net/Uri;"),
+                    &[JValue::from(downloads), JValue::Long(id)],
+                )?
+                .l()?;
+            let _ = env.call_method(
+                resolver,
+                jni_str!("delete"),
+                jni_sig!("(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I"),
+                &[
+                    JValue::from(&target),
+                    JValue::from(&jni::objects::JObject::null()),
+                    JValue::from(&jni::objects::JObject::null()),
+                ],
+            );
+        }
+        Ok(())
+    };
+    if let Err(e) = trim() {
+        tracing::warn!(?e, "could not trim old crash logs");
+    }
+}
+
+#[cfg(target_os = "android")]
+fn column_index(
+    env: &mut jni::Env<'_>,
+    cursor: &jni::objects::JObject<'_>,
+    column: &str,
+) -> Result<i32, jni::errors::Error> {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+
+    let name = env.new_string(column)?;
+    env.call_method(
+        cursor,
+        jni_str!("getColumnIndex"),
+        jni_sig!("(Ljava/lang/String;)I"),
+        &[JValue::from(&name)],
+    )?
+    .i()
 }
 
 #[cfg(target_os = "ios")]
