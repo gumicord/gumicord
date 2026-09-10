@@ -1045,6 +1045,19 @@ impl Host {
         if size.width == 0 || size.height == 0 {
             return false;
         }
+        // What configure will actually meet: whether the window hands
+        // out a native handle at all. Read-only; safe on any thread.
+        #[cfg(target_os = "android")]
+        {
+            use winit::raw_window_handle::HasWindowHandle;
+            let native = window.window_handle().is_ok();
+            tracing::info!(
+                w = size.width,
+                h = size.height,
+                native_window = native,
+                "gpu attempt"
+            );
+        }
         let scale = window.scale_factor() as f32;
         // The renderer starts with the bundled font and unfolds system fonts
         // on a background thread; a wake lets a sleeping loop know they are

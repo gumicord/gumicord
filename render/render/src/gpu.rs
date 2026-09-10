@@ -107,6 +107,7 @@ impl Gpu {
         let adapter =
             pick_adapter(&instance, Some(&surface), backends).ok_or(GpuError::NoAdapter)?;
         let info = adapter.get_info();
+        tracing::info!(backend = ?info.backend, adapter = info.name, "adapter picked");
 
         let (device, queue) = Self::open_device(&adapter)?;
 
