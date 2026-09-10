@@ -16,6 +16,7 @@ accesskit_winit.workspace = true
 unicode-segmentation.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+log.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
@@ -37,3 +38,4 @@ raw-window-handle.workspace = true
 winit = { workspace = true, features = ["android-game-activity"] }
 jni.workspace = true
 ndk-context.workspace = true
+android_logger.workspace = true

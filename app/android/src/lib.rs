@@ -28,11 +28,8 @@ fn data_dir(app: &winit::platform::android::activity::AndroidApp) -> std::path::
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
-    // Visible in logcat without depending on the desktop logger.
-    android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
-    );
-
+    // Log records reach logcat through the file logger's bridge
+    // (render/platform); nothing else feeds it from here.
     // Safe: set once here, before any thread reads it.
     unsafe { std::env::set_var("GUMICORD_DATA_DIR", data_dir(&app)) };
     gumicord_platform::init_file_logging();

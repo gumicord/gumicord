@@ -172,12 +172,90 @@ pub fn init_file_logging() {
     else {
         return;
     };
-    let _ = CURRENT_LOG.set(path);
+    let _ = CURRENT_LOG.set(path.clone());
     let _ = tracing::subscriber::set_global_default(FileLogger {
         file: std::sync::Mutex::new(file),
         ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
         theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
     });
+    // Dependencies log through the `log` facade, which the tracing
+    // subscriber never sees. Without this their warnings reach logcat at
+    // best and the file never: the EGL failure behind a startup death
+    // stayed invisible for exactly this reason.
+    if let Ok(bridge) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let ours = level_from("GUMICORD_LOG", tracing::Level::INFO);
+        let theirs = level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN);
+        let max = if ours > theirs { ours } else { theirs };
+        let logger: &'static BridgeLogger = Box::leak(Box::new(BridgeLogger {
+            file: std::sync::Mutex::new(bridge),
+            ours,
+            theirs,
+        }));
+        let _ = log::set_logger(logger);
+        log::set_max_level(match max {
+            tracing::Level::TRACE => log::LevelFilter::Trace,
+            tracing::Level::DEBUG => log::LevelFilter::Debug,
+            tracing::Level::INFO => log::LevelFilter::Info,
+            tracing::Level::WARN => log::LevelFilter::Warn,
+            tracing::Level::ERROR => log::LevelFilter::Error,
+        });
+    }
+}
+
+/// Forwards `log` records into the same file the subscriber writes.
+///
+/// Same levels as [`FileLogger`]: `info` for our crates, `warn` for
+/// dependencies. On Android the record additionally goes to logcat, which
+/// keeps `adb` useful now that nothing else feeds it.
+struct BridgeLogger {
+    file: std::sync::Mutex<std::fs::File>,
+    ours: tracing::Level,
+    theirs: tracing::Level,
+}
+
+fn log_as_tracing(level: log::Level) -> tracing::Level {
+    match level {
+        log::Level::Error => tracing::Level::ERROR,
+        log::Level::Warn => tracing::Level::WARN,
+        log::Level::Info => tracing::Level::INFO,
+        log::Level::Debug => tracing::Level::DEBUG,
+        log::Level::Trace => tracing::Level::TRACE,
+    }
+}
+
+impl log::Log for BridgeLogger {
+    fn enabled(&self, meta: &log::Metadata<'_>) -> bool {
+        let max = if meta.target().starts_with("gumicord") {
+            self.ours
+        } else {
+            self.theirs
+        };
+        log_as_tracing(meta.level()) <= max
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        if let Ok(mut file) = self.file.lock() {
+            use std::io::Write as _;
+            let _ = writeln!(
+                file,
+                "[{}] {}: {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+        #[cfg(target_os = "android")]
+        android_logger::log(record);
+    }
+
+    fn flush(&self) {}
 }
 
 /// Deletes stamped runs past the newest `keep`. Names sort chronologically,
@@ -261,7 +339,7 @@ impl tracing::field::Visit for Visitor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, prune_old_logs, stamp_now};
+    use super::{BridgeLogger, civil_from_days, prune_old_logs, stamp_now};
 
     #[test]
     fn stamps_render_local_datetime() {
@@ -291,5 +369,43 @@ mod tests {
         assert!(dir.join("gumicord-20200102-000000.log").exists());
         assert!(dir.join("gumicord-20200103-000000.log").exists());
         assert!(dir.join("unrelated.txt").exists());
+    }
+
+    #[test]
+    fn bridge_uses_file_logger_levels() {
+        use log::Log as _;
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join("gumicord-log-test-bridge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bridge.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let bridge = BridgeLogger {
+            file: std::sync::Mutex::new(file),
+            ours: tracing::Level::INFO,
+            theirs: tracing::Level::WARN,
+        };
+        let meta = |level: log::Level, target: &'static str| {
+            log::Metadata::builder().level(level).target(target).build()
+        };
+        assert!(bridge.enabled(&meta(log::Level::Info, "gumicord_app")));
+        assert!(!bridge.enabled(&meta(log::Level::Debug, "gumicord_app")));
+        assert!(!bridge.enabled(&meta(log::Level::Debug, "wgpu_hal")));
+        assert!(bridge.enabled(&meta(log::Level::Warn, "wgpu_hal")));
+        log::Log::log(
+            &bridge,
+            &log::Record::builder()
+                .level(log::Level::Warn)
+                .target("wgpu_hal")
+                .args(format_args!("egl failed: {}", 6))
+                .build(),
+        );
+        drop(bridge);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[WARN] wgpu_hal: egl failed: 6"), "{text}");
     }
 }

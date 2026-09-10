@@ -1970,11 +1970,9 @@ dependencies = [
 name = "gumicord-android"
 version = "0.0.0"
 dependencies = [
- "android_logger",
  "gumicord-app",
  "gumicord-platform",
  "jni 0.22.4",
- "log",
  "ndk-context",
  "rustls-platform-verifier",
  "tracing",
@@ -2066,11 +2064,13 @@ version = "0.0.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
+ "android_logger",
  "arboard",
  "gumicord-render",
  "gumicord-uitree",
  "jni 0.22.4",
  "keyring",
+ "log",
  "ndk-context",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
