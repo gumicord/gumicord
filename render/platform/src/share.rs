@@ -38,6 +38,7 @@ fn log_file() -> Option<PathBuf> {
 mod imp {
     use super::ShareError;
     use jni::objects::{JObject, JString, JValue};
+    use jni::{jni_sig, jni_str};
     use std::path::Path;
 
     const FLAG_GRANT_READ_URI_PERMISSION: i32 = 0x0000_0001;
@@ -69,7 +70,12 @@ mod imp {
     ) -> Result<String, ShareError> {
         let package: String = {
             let name = env
-                .call_method(context, "getPackageName", "()Ljava/lang/String;", &[])?
+                .call_method(
+                    context,
+                    jni_str!("getPackageName"),
+                    jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
                 .l()?;
             let name: JString = env.cast_local(name)?;
             name.try_to_string(env)?
@@ -77,15 +83,15 @@ mod imp {
         let authority = env.new_string(format!("{package}.fileprovider"))?;
         let file_name = env.new_string(path.to_string_lossy().into_owned())?;
         let file = env.new_object(
-            "java/io/File",
-            "(Ljava/lang/String;)V",
+            jni_str!("java/io/File"),
+            jni_sig!("(Ljava/lang/String;)V"),
             &[JValue::from(&file_name)],
         )?;
         let uri = env
             .call_static_method(
-                "androidx/core/content/FileProvider",
-                "getUriForFile",
-                "(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;",
+                jni_str!("androidx/core/content/FileProvider"),
+                jni_str!("getUriForFile"),
+                jni_sig!("(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;"),
                 &[
                     JValue::from(context),
                     JValue::from(&authority),
@@ -95,28 +101,28 @@ mod imp {
             .l()?;
         let action = env.new_string("android.intent.action.SEND")?;
         let intent = env.new_object(
-            "android/content/Intent",
-            "(Ljava/lang/String;)V",
+            jni_str!("android/content/Intent"),
+            jni_sig!("(Ljava/lang/String;)V"),
             &[JValue::from(&action)],
         )?;
         let mime = env.new_string("text/plain")?;
         env.call_method(
             &intent,
-            "setType",
-            "(Ljava/lang/String;)Landroid/content/Intent;",
+            jni_str!("setType"),
+            jni_sig!("(Ljava/lang/String;)Landroid/content/Intent;"),
             &[JValue::from(&mime)],
         )?;
         let extra = env.new_string("android.intent.extra.STREAM")?;
         env.call_method(
             &intent,
-            "putExtra",
-            "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;",
+            jni_str!("putExtra"),
+            jni_sig!("(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;"),
             &[JValue::from(&extra), JValue::from(&uri)],
         )?;
         env.call_method(
             &intent,
-            "addFlags",
-            "(I)Landroid/content/Intent;",
+            jni_str!("addFlags"),
+            jni_sig!("(I)Landroid/content/Intent;"),
             &[JValue::Int(
                 FLAG_ACTIVITY_NEW_TASK | FLAG_GRANT_READ_URI_PERMISSION,
             )],
@@ -126,16 +132,16 @@ mod imp {
         let title = env.new_string("ログを共有")?;
         let chooser = env
             .call_static_method(
-                "android/content/Intent",
-                "createChooser",
-                "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
+                jni_str!("android/content/Intent"),
+                jni_str!("createChooser"),
+                jni_sig!("(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;"),
                 &[JValue::from(&intent), JValue::from(&title)],
             )?
             .l()?;
         env.call_method(
             context,
-            "startActivity",
-            "(Landroid/content/Intent;)V",
+            jni_str!("startActivity"),
+            jni_sig!("(Landroid/content/Intent;)V"),
             &[JValue::from(&chooser)],
         )?;
         Ok("共有を開いた".to_owned())
