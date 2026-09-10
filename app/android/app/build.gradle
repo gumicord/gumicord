@@ -28,9 +28,27 @@ android {
         }
     }
 
+    signingConfigs {
+        // Committed on purpose: a debug key holds no release trust, and a
+        // checked-in key signs every nightly identically. Passwords are the
+        // conventional debug values, not secrets.
+        nightly {
+            storeFile rootProject.file('nightly.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
         debug {
             debuggable true
+            // One shared debug key for every nightly: CI runners are
+            // throwaway machines, so the default debug keystore would sign
+            // every build differently and updates would refuse to install.
+            // This is NOT the release key; release signing arrives with
+            // the distribution work.
+            signingConfig signingConfigs.nightly
             // The Rust cdylib arrives via jniLibs (see CI); never strip or
             // shrink what Gradle cannot see into.
             minifyEnabled false
