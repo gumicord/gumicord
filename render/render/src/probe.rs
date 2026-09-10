@@ -26,6 +26,9 @@ const PROBE_ENV: &str = "GUMICORD_GPU_PROBE";
 const PROBE_ARG: &str = "--probe-gpu=";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const CACHE_FILE: &str = "probe.json";
+/// Subprocess probing needs re-execution, which the app sandbox forbids
+/// on Android (`current_exe` is the runtime, not us).
+const CAN_SPAWN_PROBES: bool = !cfg!(target_os = "android");
 /// Remembered crashes count for this long before a retry.
 const EXCLUSION_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
 
@@ -104,13 +107,11 @@ pub fn surviving_backends(
     if std::env::var("WGPU_BACKEND").is_ok() || std::env::var(PROBE_ENV).as_deref() == Ok("0") {
         return wgpu::Backends::all();
     }
-    #[cfg(target_os = "android")]
-    {
-        // No exec() from the app sandbox: current_exe() is the runtime,
-        // not us, so every probe child would die and every backend would
-        // look broken (which is exactly the startup death seen on device).
-        // GLES is the only candidate that matters there; trust the list
-        // and let adapter enumeration speak.
+    if !CAN_SPAWN_PROBES {
+        // Every probe child would die and every backend would look broken
+        // (which is exactly the startup death seen on device). GLES is the
+        // only candidate that matters there; trust the list and let adapter
+        // enumeration speak.
         return candidates
             .iter()
             .copied()

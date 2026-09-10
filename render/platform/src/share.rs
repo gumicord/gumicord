@@ -177,7 +177,6 @@ fn export_with(
     env: &mut jni::Env<'_>,
     context: &jni::objects::JObject<'_>,
 ) -> Result<(), ShareError> {
-    use jni::objects::JValue;
     use jni::{jni_sig, jni_str};
 
     // Absent before API 29: that absence is the version gate.
