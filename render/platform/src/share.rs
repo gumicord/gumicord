@@ -77,7 +77,7 @@ mod imp {
                     &[],
                 )?
                 .l()?;
-            let name: JString = env.cast_local(name)?;
+            let name: JString = env.cast_local::<JString>(name)?;
             name.try_to_string(env)?
         };
         let authority = env.new_string(format!("{package}.fileprovider"))?;
