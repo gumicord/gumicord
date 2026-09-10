@@ -33,6 +33,8 @@ pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;
 pub use secret::{SecretError, SecretStore};
 pub use share::{ShareError, share_log};
+#[cfg(target_os = "android")]
+pub use share::export_crash_logs;
 pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
 pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
@@ -60,6 +62,16 @@ pub fn install_panic_hook() {
         eprintln!("{msg}");
         write_diag_file("panic.log", &format!("{msg}\n"));
         append_log(&format!("{msg}\n"));
+        #[cfg(target_os = "android")]
+        {
+            // The app may never open again: ferry what exists to Downloads
+            // while the process still runs. Best-effort like everything
+            // here; a second panic inside the hook would abort outright,
+            // so this must not panic by itself.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = crate::share::export_crash_logs();
+            }));
+        }
     }));
 }
 

@@ -152,6 +152,136 @@ mod imp {
     }
 }
 
+/// Copies the crash logs where the Files app can see them (Android only).
+///
+/// If the app never opens, the settings row cannot run: this is the ferry
+/// for that case. Fixed names bound the clutter to two files; an older
+/// pair is deleted first so Downloads never fills with corpses.
+/// Pre-29 has no Downloads collection and is skipped silently.
+#[cfg(target_os = "android")]
+pub fn export_crash_logs() -> Result<(), ShareError> {
+    let ctx = ndk_context::android_context();
+    // Safe: mirrors init_tls_verifier in app/android; the host set
+    // both pointers up before this ran.
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+    vm.attach_current_thread(|env| {
+        let context =
+            unsafe { jni::objects::JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
+        export_with(env, &context)
+    })
+}
+
+#[cfg(target_os = "android")]
+fn export_with(
+    env: &mut jni::Env<'_>,
+    context: &jni::objects::JObject<'_>,
+) -> Result<(), ShareError> {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+
+    // Absent before API 29: that absence is the version gate.
+    let downloads = match env.get_static_field(
+        jni_str!("android/provider/MediaStore$Downloads"),
+        jni_str!("EXTERNAL_CONTENT_URI"),
+        jni_sig!("Landroid/net/Uri;"),
+    ) {
+        Err(_) => return Ok(()),
+        Ok(found) => found.l()?,
+    };
+    let resolver = env
+        .call_method(
+            context,
+            jni_str!("getContentResolver"),
+            jni_sig!("()Landroid/content/ContentResolver;"),
+            &[],
+        )?
+        .l()?;
+    for (src, dst) in [
+        ("gumicord.log", "gumicord-crash.log"),
+        ("panic.log", "panic-crash.log"),
+    ] {
+        export_one(env, &resolver, &downloads, src, dst)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn export_one(
+    env: &mut jni::Env<'_>,
+    resolver: &jni::objects::JObject<'_>,
+    downloads: &jni::objects::JObject<'_>,
+    src: &str,
+    dst: &str,
+) -> Result<(), ShareError> {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+
+    let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR").filter(|d| !d.is_empty()) else {
+        return Ok(());
+    };
+    // A missing file is not an error: an early crash leaves nothing behind.
+    let Ok(bytes) = std::fs::read(std::path::PathBuf::from(dir).join("logs").join(src)) else {
+        return Ok(());
+    };
+    // Fixed names, deleted first: no listing, no growth. The names are
+    // constants, so embedding them cannot inject anything.
+    let stale = env.new_string(format!("_display_name='{dst}'"))?;
+    env.call_method(
+        resolver,
+        jni_str!("delete"),
+        jni_sig!("(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I"),
+        &[
+            JValue::from(downloads),
+            JValue::from(&stale),
+            JValue::from(&jni::objects::JObject::null()),
+        ],
+    )?;
+    let values = env.new_object(
+        jni_str!("android/content/ContentValues"),
+        jni_sig!("()V"),
+        &[],
+    )?;
+    for (key, value) in [
+        ("_display_name", dst),
+        ("mime_type", "text/plain"),
+        ("relative_path", "Download/gumicord/"),
+    ] {
+        let key = env.new_string(key)?;
+        let value = env.new_string(value)?;
+        env.call_method(
+            &values,
+            jni_str!("put"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
+            &[JValue::from(&key), JValue::from(&value)],
+        )?;
+    }
+    let uri = env
+        .call_method(
+            resolver,
+            jni_str!("insert"),
+            jni_sig!("(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;"),
+            &[JValue::from(downloads), JValue::from(&values)],
+        )?
+        .l()?;
+    let bytes = env.byte_array_from_slice(&bytes)?;
+    let stream = env
+        .call_method(
+            resolver,
+            jni_str!("openOutputStream"),
+            jni_sig!("(Landroid/net/Uri;)Ljava/io/OutputStream;"),
+            &[JValue::from(&uri)],
+        )?
+        .l()?;
+    env.call_method(
+        &stream,
+        jni_str!("write"),
+        jni_sig!("([B)V"),
+        &[JValue::from(&bytes)],
+    )?;
+    env.call_method(&stream, jni_str!("close"), jni_sig!("()V"), &[])?;
+    Ok(())
+}
+
 #[cfg(target_os = "ios")]
 mod imp {
     use super::ShareError;
