@@ -17,7 +17,7 @@ and passing native handles across lives in `app/core`.
 - **arm64-v8a plus x86_64** for now; the emulator is x86_64 and cannot run
   arm64 code without translation. 32-bit ARM comes back when someone needs it.
 - **External storage first** for the data dir (`getExternalFilesDir`), internal as fallback. Set once as `GUMICORD_DATA_DIR` before the loop starts. External is *not* USB-visible anymore: modern Android hides the app's directory from the Files app and USB alike.
-- **Logs are files, shared out.** `logs/gumicord-<stamp>.log` (plus `panic-<stamp>.log`, newest five each) sits next to the data; the settings screen's support page hands the newest to the share sheet through a FileProvider (`logs/` only). Every exit and every panic also ferries copies to Downloads. `logcat` works too, but nothing requires `adb`.
+- **Logs are files, shared out.** `logs/gumicord-<stamp>.log` (plus `panic-<stamp>.log`, newest five each) sits next to the data; the settings screen's support page hands the newest to the share sheet through a FileProvider (`logs/` only). Only a panic ferries copies to Downloads on its own; a quiet end leaves nothing there. `logcat` works too, but nothing requires `adb`.
 - **No Java/Kotlin of our own**: the manifest points at `GameActivity` directly.
 - **Runtime backend fallback**: Android cannot spawn the GPU probe's children, so a GLES setup failure (seen as `eglCreateWindowSurface: BadAlloc` on some drivers) rotates to the next candidate on the next event instead of retrying GLES forever. GLES-first order is kept; devices where GLES works never touch Vulkan.
 
