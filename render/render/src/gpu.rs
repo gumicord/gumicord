@@ -100,8 +100,9 @@ impl Gpu {
         width: u32,
         height: u32,
         probe_cache: Option<&std::path::Path>,
+        backend: Option<wgpu::Backends>,
     ) -> Result<Self, GpuError> {
-        let (instance, backends) = Self::open_instance(probe_cache)?;
+        let (instance, backends) = Self::open_instance(probe_cache, backend)?;
         let surface = instance.create_surface(target)?;
 
         let adapter =
@@ -144,7 +145,7 @@ impl Gpu {
         height: u32,
         probe_cache: Option<&std::path::Path>,
     ) -> Result<Self, GpuError> {
-        let (instance, backends) = Self::open_instance(probe_cache)?;
+        let (instance, backends) = Self::open_instance(probe_cache, None)?;
         let adapter = pick_adapter(&instance, None, backends).ok_or(GpuError::NoAdapter)?;
         let info = adapter.get_info();
 
@@ -178,15 +179,21 @@ impl Gpu {
     /// Shared instance setup: backend narrowing before anything exists.
     /// A broken driver crashes while the instance is being created, not
     /// while adapters are enumerated, so this runs first in both modes.
+    /// An explicit backend skips the probe narrowing: Android cannot spawn
+    /// probe children, so the platform walks the candidates at runtime
+    /// instead (see `candidate_backends`).
     fn open_instance(
         probe_cache: Option<&std::path::Path>,
+        backend: Option<wgpu::Backends>,
     ) -> Result<(wgpu::Instance, wgpu::Backends), GpuError> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        // Narrowed before the instance exists: a broken driver crashes while
-        // one is being created, not while adapters are enumerated. Each
-        // candidate is created in a probe child first, so only survivors
-        // reach this process.
-        if std::env::var("WGPU_BACKEND").is_err() {
+        if let Some(backend) = backend {
+            desc.backends = backend;
+        } else if std::env::var("WGPU_BACKEND").is_err() {
+            // Narrowed before the instance exists: a broken driver crashes while
+            // one is being created, not while adapters are enumerated. Each
+            // candidate is created in a probe child first, so only survivors
+            // reach this process.
             desc.backends = crate::probe::surviving_backends(CANDIDATES, probe_cache);
             if desc.backends.is_empty() {
                 return Err(GpuError::NoAdapter);
@@ -872,6 +879,13 @@ const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::VULK
     target_os = "android"
 )))]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::VULKAN, wgpu::Backends::GL];
+
+/// The backends to try, in order. Android cannot spawn probe children, so
+/// the platform walks this list at runtime when setup fails, passing each
+/// entry back as the explicit backend.
+pub fn candidate_backends() -> &'static [wgpu::Backends] {
+    CANDIDATES
+}
 
 /// Picks an adapter in candidate order.
 ///

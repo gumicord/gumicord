@@ -22,7 +22,7 @@ pub mod probe;
 pub mod text;
 
 pub use geom::{Rect, Size};
-pub use gpu::{GpuError, Presented};
+pub use gpu::{GpuError, Presented, candidate_backends};
 pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
 pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState};
 pub use motion::Motion;
@@ -150,6 +150,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         target: wgpu::SurfaceTarget<'static>,
         width: u32,
@@ -158,8 +159,9 @@ impl Renderer {
         wake: Box<dyn Fn() + Send + Sync + 'static>,
         font_cache_dir: Option<std::path::PathBuf>,
         probe_cache_dir: Option<std::path::PathBuf>,
+        backend: Option<wgpu::Backends>,
     ) -> Result<Self, GpuError> {
-        let gpu = Gpu::new(target, width, height, probe_cache_dir.as_deref())?;
+        let gpu = Gpu::new(target, width, height, probe_cache_dir.as_deref(), backend)?;
         let text = TextEngine::new(&gpu.device, scale, wake, font_cache_dir);
         let atlas_binds = bind_pages(&gpu, &text);
         Ok(Renderer {

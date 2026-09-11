@@ -38,27 +38,17 @@ const RESIZE_BORDER: f32 = 6.0;
 /// Distance per wheel notch, for platforms reporting lines.
 const LINE_SCROLL: f32 = 48.0;
 
-// Android only: the one native call the GLES surface needs.
+// Android only: read-only native-window queries for the GPU setup log.
 //
-// `ANativeWindow_setBuffersGeometry` lives in `libandroid` (already
-// linked), so it is declared here instead of taking the `ndk` crate's
-// `nativewindow` feature: that would link `libnativewindow.so`, whose
-// NDK stub only exists for API 26+, while the app starts at 24.
+// `libandroid` is already linked; declaring the three getters here keeps
+// the platform crate free of a direct NDK dependency.
 #[cfg(target_os = "android")]
 #[link(name = "android")]
 unsafe extern "C" {
-    fn ANativeWindow_setBuffersGeometry(
-        window: *mut std::ffi::c_void,
-        width: i32,
-        height: i32,
-        format: i32,
-    ) -> i32;
+    fn ANativeWindow_getWidth(window: *mut std::ffi::c_void) -> i32;
+    fn ANativeWindow_getHeight(window: *mut std::ffi::c_void) -> i32;
+    fn ANativeWindow_getFormat(window: *mut std::ffi::c_void) -> i32;
 }
-
-/// Android only: legacy window pixel format for 8-bit RGBA. Same value as
-/// `AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM`, and valid since API 1.
-#[cfg(target_os = "android")]
-const WINDOW_FORMAT_RGBA_8888: i32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
@@ -364,6 +354,7 @@ fn run_loop(
         waker,
         window: None,
         renderer: None,
+        backend_rotor: 0,
         adapter: None,
         captcha: WebView2Captcha,
         cursor: (0.0, 0.0),
@@ -406,6 +397,10 @@ struct Host {
     waker: Waker,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    /// Which GPU backend the next setup attempt tries. Android cannot spawn
+    /// probe children, so each failed attempt rotates to the next candidate
+    /// instead of retrying a backend that cannot drive this window.
+    backend_rotor: usize,
     /// Speaks to the OS screen reader. Created before the window first
     /// shows; without it Narrator never connects.
     adapter: Option<accesskit_winit::Adapter>,
@@ -1067,48 +1062,52 @@ impl Host {
         if size.width == 0 || size.height == 0 {
             return false;
         }
-        // What configure will actually meet: whether the window hands
-        // out a native handle at all. Read-only; safe on any thread.
+        // What configure will actually meet: which backend this attempt
+        // uses, and what the native window looks like. The queries are
+        // read-only; safe on any thread.
+        //
+        // Android cannot spawn probe children, so dead candidates are found
+        // here at runtime: each failed attempt rotates to the next backend
+        // (GLES, then Vulkan). A device where GLES setup is impossible still
+        // draws on Vulkan, and devices where GLES works never pay for it.
+        let backend = if cfg!(target_os = "android") {
+            let order = gumicord_render::candidate_backends();
+            Some(order[self.backend_rotor % order.len()])
+        } else {
+            None
+        };
         #[cfg(target_os = "android")]
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let native = window.window_handle().is_ok();
-            tracing::info!(
-                w = size.width,
-                h = size.height,
-                native_window = native,
-                "gpu attempt"
-            );
-            // wgpu's GLES backend picks an EGL config with an 8-bit alpha
-            // channel (the surface is sRGB), but GameActivity hands out an
-            // opaque RGBX window. Lenient drivers convert; strict ones
-            // (Mali) answer eglCreateWindowSurface with BadAlloc, so
-            // configure fails with "Invalid surface" on every attempt.
-            // Asking for RGBA buffers up front matches the window to the
-            // config; zero size keeps the size, only the format changes.
+            // (pointer, width, height, format) of the live window, if any.
+            let mut native_facts: Option<(*mut std::ffi::c_void, i32, i32, i32)> = None;
             if let Ok(handle) = window.window_handle()
                 && let RawWindowHandle::AndroidNdk(h) = handle.as_raw()
             {
                 // Safe: the pointer is the live GameActivity window winit
-                // drew from, borrowed only for this call on the event-loop
-                // thread, before any surface exists on it.
-                let status = unsafe {
-                    ANativeWindow_setBuffersGeometry(
-                        h.a_native_window.as_ptr().cast(),
-                        0,
-                        0,
-                        WINDOW_FORMAT_RGBA_8888,
+                // drew from, borrowed only for these read-only queries on
+                // the event-loop thread.
+                let ptr = h.a_native_window.as_ptr().cast();
+                native_facts = Some(unsafe {
+                    (
+                        ptr,
+                        ANativeWindow_getWidth(ptr),
+                        ANativeWindow_getHeight(ptr),
+                        ANativeWindow_getFormat(ptr),
                     )
-                };
-                if status == 0 {
-                    tracing::info!("native window buffers set to RGBA_8888");
-                } else {
-                    tracing::warn!(
-                        status,
-                        "could not set native window format; surface creation may fail"
-                    );
-                }
+                });
             }
+            tracing::info!(
+                w = size.width,
+                h = size.height,
+                native_window = native_facts.is_some(),
+                native_ptr = ?native_facts.map(|f| f.0),
+                native_w = native_facts.map(|f| f.1),
+                native_h = native_facts.map(|f| f.2),
+                native_format = native_facts.map(|f| f.3),
+                backend = ?backend,
+                "gpu attempt"
+            );
         }
         let scale = window.scale_factor() as f32;
         // The renderer starts with the bundled font and unfolds system fonts
@@ -1127,6 +1126,7 @@ impl Host {
                 wake,
                 crate::app_data_dir().map(|d| d.join("fonts")),
                 crate::app_data_dir().map(|d| d.join("gpu")),
+                backend,
             )
         };
         #[cfg(target_os = "android")]
@@ -1136,11 +1136,15 @@ impl Host {
                 true
             }
             Ok(Err(e)) => {
-                tracing::warn!(%e, "gpu not ready yet; retrying on the next event");
+                // A failed backend must not pin the choice: rotate, so the
+                // next event tries the next candidate.
+                self.backend_rotor += 1;
+                tracing::warn!(%e, backend = ?backend, "gpu not ready yet; retrying on the next event");
                 false
             }
             Err(_) => {
-                tracing::warn!("gpu not ready yet; retrying on the next event");
+                self.backend_rotor += 1;
+                tracing::warn!(backend = ?backend, "gpu not ready yet; retrying on the next event");
                 false
             }
         };
