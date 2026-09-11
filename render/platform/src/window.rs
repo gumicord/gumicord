@@ -1049,7 +1049,7 @@ impl Host {
         // out a native handle at all. Read-only; safe on any thread.
         #[cfg(target_os = "android")]
         {
-            use winit::raw_window_handle::HasWindowHandle;
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let native = window.window_handle().is_ok();
             tracing::info!(
                 w = size.width,
@@ -1057,6 +1057,35 @@ impl Host {
                 native_window = native,
                 "gpu attempt"
             );
+            // wgpu's GLES backend picks an EGL config with an 8-bit alpha
+            // channel (the surface is sRGB), but GameActivity hands out an
+            // opaque RGBX window. Lenient drivers convert; strict ones
+            // (Mali) answer eglCreateWindowSurface with BadAlloc, so
+            // configure fails with "Invalid surface" on every attempt.
+            // Asking for RGBA buffers up front matches the window to the
+            // config; zero size keeps the size, only the format changes.
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AndroidNdk(h) = handle.as_raw()
+            {
+                // Safe: the pointer is the live GameActivity window winit
+                // drew from; clone_from_ptr takes our own reference, which
+                // Drop releases, so the activity's own reference is
+                // untouched. The pointee type is inferred from the call.
+                let native_window = unsafe {
+                    ndk::native_window::NativeWindow::clone_from_ptr(h.a_native_window.cast())
+                };
+                match native_window.set_buffers_geometry(
+                    0,
+                    0,
+                    Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8A8_UNORM),
+                ) {
+                    Ok(()) => tracing::info!("native window buffers set to RGBA_8888"),
+                    Err(e) => tracing::warn!(
+                        %e,
+                        "could not set native window format; surface creation may fail"
+                    ),
+                }
+            }
         }
         let scale = window.scale_factor() as f32;
         // The renderer starts with the bundled font and unfolds system fonts

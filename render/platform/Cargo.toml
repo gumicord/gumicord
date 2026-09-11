@@ -38,4 +38,5 @@ raw-window-handle.workspace = true
 winit = { workspace = true, features = ["android-game-activity"] }
 jni.workspace = true
 ndk-context.workspace = true
+ndk.workspace = true
 android_logger.workspace = true

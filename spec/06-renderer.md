@@ -592,6 +592,8 @@ S1 の実測では p99 が **18.82 ms** で、VSync 周期 16.67 ms をわずか
 | Linux | Vulkan → GL | — |
 | Android | GLES → Vulkan | — |
 
+Android ではサーフェス生成の前にウィンドウの画素形式を RGBA_8888 に寄せる。GameActivity が渡すウィンドウは不透明 (RGBX) だが、GLES バックエンドは sRGB サーフェスのためにアルファ 8 ビット付きの EGLConfig を選ぶ。厳格なドライバ (Mali) は `eglCreateWindowSurface` に `BadAlloc` を返し、`Surface::configure` が `Invalid surface` で毎回失敗するためである (`ANativeWindow_setBuffersGeometry`、大きさ 0 で大きさは維持)。
+
 Windows で GL を優先するのは S1 の実測による。
 
 | バックエンド | WorkingSet | Private | 初フレームまで |

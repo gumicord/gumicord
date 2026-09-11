@@ -19,6 +19,7 @@ and passing native handles across lives in `app/core`.
 - **External storage first** for the data dir (`getExternalFilesDir`), internal as fallback. Set once as `GUMICORD_DATA_DIR` before the loop starts. External is *not* USB-visible anymore: modern Android hides the app's directory from the Files app and USB alike.
 - **Logs are files, shared out.** `logs/gumicord-<stamp>.log` (plus `panic-<stamp>.log`, newest five each) sits next to the data; the settings screen's support page hands the newest to the share sheet through a FileProvider (`logs/` only). Every exit and every panic also ferries copies to Downloads. `logcat` works too, but nothing requires `adb`.
 - **No Java/Kotlin of our own**: the manifest points at `GameActivity` directly.
+- **RGBA window buffers**: GameActivity hands out an opaque RGBX window, but wgpu's GLES backend picks an EGL config with 8-bit alpha (the surface is sRGB). Strict drivers (Mali) answer `eglCreateWindowSurface` with `BadAlloc`, so `ensure_renderer` asks for `R8G8B8A8_UNORM` via `ANativeWindow_setBuffersGeometry` (size 0 keeps the size) before creating the surface.
 
 ## Still open
 
