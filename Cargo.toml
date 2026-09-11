@@ -94,8 +94,11 @@ keyring = { version = "3", features = ["apple-native", "linux-native-sync-persis
 
 # iOS clipboard (UIPasteboard) and friends, via direct ObjC calls.
 objc2 = "0.6"
+objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"
-objc2-ui-kit = "0.3"
+objc2-ui-kit = { version = "0.3", features = ["UIResponder", "UITextInput", "UITextInputTraits", "UIView", "UIWindow"] }
+# Heap blocks for NSNotificationCenter observers (iOS keyboard height).
+block2 = "0.6"
 
 # Native window handle, to attach iOS autofill fields to winit's view.
 raw-window-handle = "0.6"

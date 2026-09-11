@@ -67,9 +67,9 @@
 
 ## v0.0.5 — モバイル入力
 
-- Android は実装済み (`6d88d87`、要実機確認)。iOS の `UITextInput` 橋渡しが残り。方針は [ADR-0011](spec/adr/0011-mobile-input-bridges.md)
-- 残作業: iOS 不可視エディタ (`objc2` で `UITextInput` 実装)、欄外タップの明示 resign、プロキシのスピン解消、キーボード高さ追従 (`PLT-040`)
-- Android 実機確認項目: 日本語変換の確定・候補、メール→パスワードの前進、送信、欄外タップで閉じること
+- Android は実装済み (`6d88d87`、要実機確認)。iOS の `UITextInput` 橋渡しも実装済み (未 push なら push すること)。方針は [ADR-0011](spec/adr/0011-mobile-input-bridges.md)
+- 実機確認項目 (両 OS 共通): 日本語変換の確定・候補、メール→パスワードの前進、送信、欄外タップで閉じること、キーボード表示中のレイアウト追従
+- 残作業: Android のキーボード高さ追従 (`PLT-040`、iOS は通知で対応済み)、セーフエリア (`PLT-041`)
 
 ---
 

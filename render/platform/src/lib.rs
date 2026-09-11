@@ -21,6 +21,8 @@ pub mod clipboard;
 pub mod clock;
 pub mod dirs;
 #[cfg(target_os = "ios")]
+pub mod ios_text;
+#[cfg(target_os = "ios")]
 pub mod proxy;
 pub mod secret;
 pub mod share;

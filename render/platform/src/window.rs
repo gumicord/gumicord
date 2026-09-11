@@ -363,6 +363,8 @@ fn run_loop(
 
     let mut host = Host {
         app: Box::new(app),
+        #[cfg(target_os = "ios")]
+        ios_text: crate::ios_text::IosText::new(waker.clone()),
         waker,
         window: None,
         renderer: None,
@@ -371,7 +373,7 @@ fn run_loop(
         android_app: None,
         #[cfg(target_os = "android")]
         android_text: crate::android_text::AndroidText::new(),
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         next_ime_poll: std::time::Instant::now(),
         adapter: None,
         captcha: WebView2Captcha,
@@ -426,8 +428,8 @@ struct Host {
     /// GameTextInput bridge state (Android only).
     #[cfg(target_os = "android")]
     android_text: crate::android_text::AndroidText,
-    /// Next paced IME poll while a field is focused (Android only).
-    #[cfg(target_os = "android")]
+    /// Next paced IME poll while a field is focused (mobile only).
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     next_ime_poll: std::time::Instant,
     /// Speaks to the OS screen reader. Created before the window first
     /// shows; without it Narrator never connects.
@@ -462,6 +464,9 @@ struct Host {
     /// Native login-field mirrors for iOS password autofill.
     #[cfg(target_os = "ios")]
     proxy: Option<crate::proxy::Proxy>,
+    /// Hidden UITextInput editor state (iOS only).
+    #[cfg(target_os = "ios")]
+    ios_text: crate::ios_text::IosText,
     /// Last frame times in microseconds, for the pacing log.
     frame_us: std::collections::VecDeque<u128>,
     first_frame: bool,
@@ -802,7 +807,10 @@ impl Host {
         let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
             return;
         };
-        let has_input = self.app.focused_document().is_some() && !self.proxy_active();
+        let focused = self.app.focused_document().is_some();
+        // winit's key-only view would fight a native editor for first
+        // responder, so it stays off while either owns the keyboard.
+        let has_input = focused && !self.proxy_active() && !self.editor_active();
 
         // No IME events arrive until this is allowed; winit defaults to off.
         //
@@ -812,13 +820,53 @@ impl Host {
             w.set_ime_allowed(has_input);
             tracing::debug!(allowed = has_input, "toggled IME");
         }
-        if !has_input {
+        if !focused {
             #[cfg(target_os = "android")]
             if self.android_text.is_live() {
                 self.android_text.blur();
             }
+            #[cfg(target_os = "ios")]
+            if self.ios_text.is_live() {
+                self.ios_text.blur();
+            }
             return;
         }
+        if !has_input {
+            return;
+        }
+
+        // iOS edits non-login fields through the hidden UITextInput editor
+        // (see ios_text); login email/password keep the autofill proxies.
+        // It runs while focused even though winit IME stays off above.
+        #[cfg(target_os = "ios")]
+        let acted = {
+            if self.app.ime_proxy().is_some() {
+                false
+            } else {
+                let field = self.app.ime_field().unwrap_or_default();
+                let (x, y) = self.field_origin();
+                let parent = self
+                    .window
+                    .as_ref()
+                    .and_then(|w| crate::proxy::parent_view(w));
+                match (parent, self.app.focused_document()) {
+                    (Some(parent), Some(doc)) => {
+                        if !self.ios_text.ensure(parent, &field, doc, x, y) {
+                            false
+                        } else {
+                            let (changed, newline) = self.ios_text.poll(doc);
+                            if changed {
+                                self.request_redraw();
+                            }
+                            newline && self.app.ime_newline()
+                        }
+                    }
+                    _ => false,
+                }
+            }
+        };
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        let acted = false;
 
         // Android drives text through GameTextInput (see android_text):
         // reconcile the IME state into the document. winit never delivers
@@ -840,8 +888,6 @@ impl Host {
                 false
             }
         };
-        #[cfg(not(target_os = "android"))]
-        let acted = false;
 
         // The field's position comes from the hit record.
         let Some(field) = r
@@ -876,10 +922,9 @@ impl Host {
         };
         let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
-        // Keystrokes raise no events while winit IME is off, so nothing
-        // would wake the loop to poll them. Spin while up; the login
-        // screen is tiny and the spin stops on blur.
-        let spinning = proxy.is_active();
+        // Keystrokes raise no events while winit IME is off. Polling rides
+        // the paced redraws (see `next_ime_poll`) instead of spinning here:
+        // spinning redraws every frame while a field is up.
         let mut changed = false;
         if let Some((kind, event)) = proxy.poll() {
             match event {
@@ -892,9 +937,6 @@ impl Host {
                 }
             }
         }
-        if spinning {
-            self.request_redraw();
-        }
         changed
     }
 
@@ -906,6 +948,33 @@ impl Host {
     #[cfg(not(target_os = "ios"))]
     fn proxy_active(&self) -> bool {
         false
+    }
+
+    /// Whether the hidden editor owns the keyboard (iOS only).
+    #[cfg(target_os = "ios")]
+    fn editor_active(&self) -> bool {
+        self.ios_text.is_live()
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    fn editor_active(&self) -> bool {
+        false
+    }
+
+    /// Where the focused field sits, for anchoring the hidden editor and
+    /// the candidate UI. Falls back through the known field ids.
+    #[cfg(target_os = "ios")]
+    fn field_origin(&self) -> (f64, f64) {
+        let boxes = self.renderer.as_ref().map(|r| r.hit_boxes());
+        let found = boxes.as_ref().and_then(|boxes| {
+            boxes
+                .iter()
+                .find(|h| h.id == NodeId::ChatInputField)
+                .or_else(|| boxes.iter().find(|h| h.id == NodeId::AppScreenLoginField))
+        });
+        found
+            .map(|h| (h.rect.x as f64, h.rect.y as f64))
+            .unwrap_or((0.0, 0.0))
     }
 
     fn redraw(&mut self) {
@@ -988,8 +1057,16 @@ impl Host {
             for image in &backgrounds {
                 r.put_background(image);
             }
+            let mut viewport = r.viewport();
+            // The OS keyboard covers the bottom instead of resizing the
+            // window, so lay out above it. Touches landing on the covered
+            // part hit nothing, which is correct: the keyboard owns them.
+            #[cfg(target_os = "ios")]
+            {
+                viewport.h = (viewport.h - self.ios_text.keyboard_height()).max(0.0);
+            }
             let cx = FrameCx {
-                viewport: r.viewport(),
+                viewport,
                 scale: r.scale(),
             };
             tracing::trace!(w = cx.viewport.w, h = cx.viewport.h, "drawing");
@@ -1265,11 +1342,11 @@ impl ApplicationHandler<LoopEvent> for Host {
             }
         }
 
-        // Android IME polling: keystrokes raise no winit events, so a
+        // Mobile IME polling: keystrokes raise no winit events, so a
         // focused field paces its own polls. The poll itself runs in the
         // redraw; here only the pace is set, so an idle field costs one
         // frame per interval instead of a spin.
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             if self.app.focused_document().is_some() {
                 if now >= self.next_ime_poll {
