@@ -38,23 +38,59 @@ const MAX_RETRIES: u32 = 3;
 ///
 /// The messages are Japanese because they reach the login screen, not just
 /// the log.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum RestError {
-    #[error("通信に失敗した: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(reqwest::Error),
 
-    /// The body is included, having been checked for a token first.
-    #[error("Discord がエラーを返した ({status}): {body}")]
-    Api { status: u16, body: String },
+    /// `body` is the raw response text: parsing (message, nested details)
+    /// happens in [`Display`], so callers needing structure ([`Self::field_errors`])
+    /// read the same source.
+    Api {
+        status: u16,
+        body: String,
+    },
 
-    #[error("レート制限から復帰できなかった ({MAX_RETRIES} 回試行)")]
     RateLimited,
 
-    #[error("応答を解釈できない: {0}")]
-    Decode(#[source] serde_json::Error),
+    Decode(serde_json::Error),
 
-    #[error("captcha が要求された")]
     CaptchaRequired(Box<CaptchaChallenge>),
+}
+
+impl std::fmt::Display for RestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestError::Network(e) => write!(f, "通信に失敗した: {e}"),
+            RestError::Api { status, body } => {
+                write!(
+                    f,
+                    "Discord がエラーを返した ({status}): {}",
+                    message_or_body(body)
+                )
+            }
+            RestError::RateLimited => {
+                write!(f, "レート制限から復帰できなかった ({MAX_RETRIES} 回試行)")
+            }
+            RestError::Decode(e) => write!(f, "応答を解釈できない: {e}"),
+            RestError::CaptchaRequired(_) => write!(f, "captcha が要求された"),
+        }
+    }
+}
+
+impl std::error::Error for RestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RestError::Network(e) => Some(e),
+            RestError::Decode(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<reqwest::Error> for RestError {
+    fn from(e: reqwest::Error) -> Self {
+        RestError::Network(e)
+    }
 }
 
 impl RestError {
@@ -64,6 +100,23 @@ impl RestError {
     /// about whether the token is still good.
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, RestError::Api { status: 401, .. })
+    }
+
+    /// Every nested `_errors` entry as (dotted path, detail), for showing
+    /// each failure under its own field. Empty unless this is an API error
+    /// carrying Discord's envelope.
+    pub fn field_errors(&self) -> Vec<(String, String)> {
+        match self {
+            RestError::Api { body, .. } => {
+                let parsed: Result<ErrorBody, _> = serde_json::from_str(body);
+                parsed
+                    .ok()
+                    .and_then(|e| e.errors)
+                    .map(|e| all_details(&e))
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -315,7 +368,7 @@ impl RestClient {
                 tracing::error!("a response body contained the token; redacting it");
                 "<redacted>".to_owned()
             }
-            _ => message_or_body(&body),
+            _ => body,
         };
         Err(RestError::Api { status, body })
     }
@@ -360,21 +413,18 @@ fn message_or_body(body: &str) -> String {
         .ok()
         .and_then(|e| e.errors)
         .as_ref()
-        .and_then(first_detail)
+        .and_then(|e| all_details(e).into_iter().next())
     {
         Some((path, detail)) => format!("{base}: {path}: {detail}"),
         None => base,
     }
 }
 
-/// First `_errors` entry under the nested `errors` object, with its dotted
-/// path. Discord nests indices as string keys (`embeds.0.description`), so
+/// Every `_errors` entry under the nested `errors` object, in order.
+/// Discord nests indices as string keys (`embeds.0.description`), so
 /// objects suffice, but arrays are walked too.
-fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
-    fn walk(value: &serde_json::Value, path: &mut String, out: &mut Option<(String, String)>) {
-        if out.is_some() {
-            return;
-        }
+fn all_details(errors: &serde_json::Value) -> Vec<(String, String)> {
+    fn walk(value: &serde_json::Value, path: &mut String, out: &mut Vec<(String, String)>) {
         match value {
             serde_json::Value::Object(map) => {
                 if let Some(detail) = map
@@ -391,11 +441,13 @@ fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
                         } else {
                             format!("{message} ({code})")
                         };
-                        *out = Some((path.clone(), detail));
-                        return;
+                        out.push((path.clone(), detail));
                     }
                 }
                 for (key, value) in map {
+                    if key == "_errors" {
+                        continue;
+                    }
                     let saved = path.clone();
                     if !path.is_empty() {
                         path.push('.');
@@ -403,9 +455,6 @@ fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
                     path.push_str(key);
                     walk(value, path, out);
                     *path = saved;
-                    if out.is_some() {
-                        return;
-                    }
                 }
             }
             serde_json::Value::Array(items) => {
@@ -417,16 +466,13 @@ fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
                     path.push_str(&index.to_string());
                     walk(value, path, out);
                     *path = saved;
-                    if out.is_some() {
-                        return;
-                    }
                 }
             }
             _ => {}
         }
     }
 
-    let mut out = None;
+    let mut out = Vec::new();
     walk(errors, &mut String::new(), &mut out);
     out
 }
@@ -595,6 +641,32 @@ mod tests {
         assert_eq!(
             message_or_body(r#"{"message":"Invalid Form Body","code":50035,"errors":{}}"#),
             "Invalid Form Body (50035)"
+        );
+    }
+
+    /// Structured errors come out whole, so each can go under its own
+    /// field; other failures have none.
+    #[test]
+    fn field_errors_list_every_failing_path() {
+        let invalid = RestError::Api {
+            status: 400,
+            body: r#"{"message":"Invalid Form Body","code":50035,"errors":{"login":{"_errors":[{"code":"INVALID_LOGIN","message":"bad"}]},"password":{"_errors":[{"code":"INVALID_LOGIN","message":"bad"}]}}}"#.to_owned(),
+        };
+        assert_eq!(
+            invalid.field_errors(),
+            vec![
+                ("login".to_owned(), "bad (INVALID_LOGIN)".to_owned()),
+                ("password".to_owned(), "bad (INVALID_LOGIN)".to_owned()),
+            ]
+        );
+        assert!(RestError::RateLimited.field_errors().is_empty());
+        assert!(
+            RestError::Api {
+                status: 500,
+                body: "oops".to_owned()
+            }
+            .field_errors()
+            .is_empty()
         );
     }
 

@@ -123,6 +123,10 @@ pub enum LoginEvent {
     Approved,
     Done(Box<LoggedIn>),
     Failed(String),
+    /// Per-field failures from the same attempt, as (dotted path, detail).
+    /// Shown under each named input; the `Failed` message still carries the
+    /// general line.
+    FieldErrors(Vec<(String, String)>),
     /// No session remains: the stored token was refused outright and
     /// discarded, or none was stored. What is on screen came from a cache
     /// nothing can refresh anymore, so the receiver lets it go.
@@ -172,6 +176,8 @@ pub struct Login {
     ///
     /// [`Done`]: LoginEvent::Done
     last_error: Option<String>,
+    /// Per-field failures from the last attempt, drained like the above.
+    field_errors: Vec<(String, String)>,
     /// A [`LoginEvent::Ended`] arrived and nobody has read it yet. Not a
     /// session state: the screen changes on the app side, which drops the
     /// cache.
@@ -210,6 +216,7 @@ impl Login {
             skipped,
             notice: None,
             last_error: None,
+            field_errors: Vec::new(),
             ended: false,
             pending: None,
         }
@@ -352,11 +359,16 @@ impl Login {
                 self.notice = None;
                 self.pending = None;
                 self.last_error = None;
+                self.field_errors.clear();
                 Session::LoggedIn(l)
             }
             LoginEvent::Failed(e) => {
                 self.last_error = Some(e.clone());
                 Session::Failed(e)
+            }
+            LoginEvent::FieldErrors(fields) => {
+                self.field_errors = fields;
+                self.session.clone()
             }
             LoginEvent::TotpNeeded { .. } => Session::PasswordTotp,
             // The form stays put while the challenge is solved elsewhere.
@@ -530,6 +542,15 @@ enum PasswordRun {
     Error(String),
 }
 
+/// Forwards per-field failures (if any) ahead of the general message, so
+/// each lands under its own input.
+fn send_field_errors(tx: &Sender<LoginEvent>, e: &RestError) {
+    let fields = e.field_errors();
+    if !fields.is_empty() {
+        let _ = tx.send(LoginEvent::FieldErrors(fields));
+    }
+}
+
 /// Drives a password login to completion, interrupting the QR.
 ///
 /// Walks the steps: password check, a captcha if Discord challenges it, then
@@ -558,8 +579,10 @@ async fn run_password(
             };
             match rest.mfa_totp(&t, &code).await {
                 Ok(tok) => Some(tok),
-                // A wrong code is just another chance to ask.
+                // A wrong code is just another chance to ask, with the
+                // reason under the field.
                 Err(e) => {
+                    send_field_errors(tx, &e);
                     let _ = tx.send(LoginEvent::TotpNeeded {
                         email: email.clone(),
                     });
@@ -595,7 +618,10 @@ async fn run_password(
                         None => return PasswordRun::Cancelled,
                     }
                 }
-                Err(e) => return PasswordRun::Error(e.to_string()),
+                Err(e) => {
+                    send_field_errors(tx, &e);
+                    return PasswordRun::Error(e.to_string());
+                }
             }
         };
 
@@ -613,7 +639,10 @@ async fn run_password(
                     waker.wake();
                     return PasswordRun::LoggedIn;
                 }
-                Err(e) => return PasswordRun::Error(e.to_string()),
+                Err(e) => {
+                    send_field_errors(tx, &e);
+                    return PasswordRun::Error(e.to_string());
+                }
             }
         }
     }
@@ -875,6 +904,11 @@ impl Login {
     pub(crate) fn take_last_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
+
+    /// Per-field failures from the last attempt, drained like the above.
+    pub(crate) fn take_field_errors(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.field_errors)
+    }
 }
 
 impl Login {
@@ -976,6 +1010,22 @@ mod tests {
         );
         assert!(login.session().hint().contains("ねんねこ"));
         assert!(!login.poll(), "an empty poll asked for a redraw");
+    }
+
+    /// Field failures ride alongside the general message and drain the
+    /// same way.
+    #[test]
+    fn field_errors_apply_and_drain() {
+        let mut login = Login::fresh(false);
+        login.apply(LoginEvent::FieldErrors(vec![(
+            "login".to_owned(),
+            "bad".to_owned(),
+        )]));
+        assert_eq!(
+            login.take_field_errors(),
+            vec![("login".to_owned(), "bad".to_owned())]
+        );
+        assert!(login.take_field_errors().is_empty());
     }
 
     #[test]

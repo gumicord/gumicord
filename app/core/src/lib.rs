@@ -349,6 +349,9 @@ pub struct Gumicord {
     /// The last login failure, shown on the form so the user knows why and can
     /// retry. Cleared by the next attempt or by leaving the form.
     login_error: Option<String>,
+    /// Per-field failures from the last attempt, as (dotted path, detail).
+    /// Shown under each named input; cleared with the general error.
+    login_field_errors: Vec<(String, String)>,
     /// The login form's email contents. Kept across password retries.
     login_email: TextDocument,
     /// The login form's password or TOTP code, whichever step is shown.
@@ -517,6 +520,7 @@ impl Gumicord {
             login_field: None,
             login_form: None,
             login_error: None,
+            login_field_errors: Vec::new(),
             login_email: TextDocument::new(),
             login_input: TextDocument::new(),
             hidden_code: Vec::new(),
@@ -1136,6 +1140,11 @@ impl Application for Gumicord {
         let mut changed = self.login.poll();
         if let Some(msg) = self.login.take_last_error() {
             self.login_error = Some(msg);
+            changed = true;
+        }
+        let fields = self.login.take_field_errors();
+        if !fields.is_empty() {
+            self.login_field_errors = fields;
             changed = true;
         }
         changed |= self.live.poll();
@@ -1903,6 +1912,7 @@ impl Gumicord {
     /// code, or logs in with a bot token; nothing to send stays put.
     fn submit_login(&mut self) -> bool {
         self.login_error = None;
+        self.login_field_errors.clear();
         match self.login_field {
             Some(LoginField::Token) => {
                 let token = self.login_input.text().trim().to_owned();
@@ -1948,6 +1958,7 @@ impl Gumicord {
         self.login_field = None;
         self.login_form = is_mobile().then_some(LoginField::Password);
         self.login_error = None;
+        self.login_field_errors.clear();
         self.login_input.take();
     }
 
@@ -2722,6 +2733,7 @@ impl Gumicord {
         self.login.start_add_account(rt.handle(), waker.clone());
         self.login_form = None;
         self.login_error = None;
+        self.login_field_errors.clear();
         self.floating = None;
         self.composing = Composing::New;
         self.input.take();
@@ -2743,6 +2755,7 @@ impl Gumicord {
         self.login.forget(rt.handle(), waker.clone());
         self.login_form = None;
         self.login_error = None;
+        self.login_field_errors.clear();
         self.forget_account()
     }
 
@@ -2837,8 +2850,14 @@ impl Gumicord {
                             &self.login_email,
                             false,
                         ))
+                        .child_if(self.has_login_field_error(&["login"]), || {
+                            self.login_field_error_node("login_error_email", &["login"])
+                        })
                         .child(self.login_label("パスワード"))
                         .child(self.login_field("password", "パスワード", &self.login_input, true))
+                        .child_if(self.has_login_field_error(&["password"]), || {
+                            self.login_field_error_node("login_error_password", &["password"])
+                        })
                         .child(self.login_forgot_password())
                         .child_if(self.login_error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン"))
@@ -2859,6 +2878,9 @@ impl Gumicord {
                         ))
                         .child(self.login_label("認証コード"))
                         .child(self.login_field("totp", "認証コード", &self.login_input, false))
+                        .child_if(self.has_login_field_error(&["code"]), || {
+                            self.login_field_error_node("login_error_code", &["code"])
+                        })
                         .child_if(self.login_error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン"))
                         .child(self.login_secondary("戻る", "login_back"))
@@ -2933,6 +2955,34 @@ impl Gumicord {
             NodeId::AppScreenLoginError,
             self.login_error.as_deref().unwrap_or_default(),
         )
+    }
+
+    /// Whether any field failure names one of these Discord paths (`login`
+    /// for email, `password`, `code` for TOTP).
+    fn has_login_field_error(&self, segments: &[&str]) -> bool {
+        self.login_field_errors.iter().any(|(path, _)| {
+            segments
+                .iter()
+                .any(|s| path == s || path.starts_with(&format!("{s}.")))
+        })
+    }
+
+    /// An error line below one login field. Shares the general error's node
+    /// so the styling matches; the slot tells same-id siblings apart. Only
+    /// call when [`Self::has_login_field_error`] holds.
+    fn login_field_error_node(&self, slot: &'static str, segments: &[&str]) -> UiNode {
+        let detail = self
+            .login_field_errors
+            .iter()
+            .filter(|(path, _)| {
+                segments
+                    .iter()
+                    .any(|s| path == s || path.starts_with(&format!("{s}.")))
+            })
+            .map(|(_, detail)| detail.clone())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        UiNode::text(NodeId::AppScreenLoginError, detail).with_key(Key::Slot(slot))
     }
 
     /// "または" divider with lines on both sides.
@@ -6308,6 +6358,46 @@ mod login_tests {
             !slots.contains(&Some(Key::Slot("password"))),
             "password form lingers: {slots:?}"
         );
+    }
+
+    /// Field failures show under each named input: INVALID_LOGIN names both
+    /// `login` and `password`, so both lines appear with the general one.
+    #[test]
+    fn login_field_errors_show_under_each_named_input() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::FieldErrors(vec![
+            (
+                "login".to_owned(),
+                "ログインまたはパスワードが無効です。(INVALID_LOGIN)".to_owned(),
+            ),
+            (
+                "password".to_owned(),
+                "ログインまたはパスワードが無効です。(INVALID_LOGIN)".to_owned(),
+            ),
+        ]));
+        a.login.apply_for_test(LoginEvent::Failed(
+            "フォームボディが無効です (50035)".to_owned(),
+        ));
+        assert!(a.wake());
+        let tree = a.build_tree(Panes::Three);
+        let mut lines = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginError {
+                lines.push((n.key.clone(), n.content.as_text().unwrap_or("").to_owned()));
+            }
+        });
+        for slot in ["login_error_email", "login_error_password"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(key, text)| *key == Some(Key::Slot(slot)) && text.contains("無効です")),
+                "missing line for {slot}: {lines:?}"
+            );
+        }
     }
 
     /// A press outside every login field releases focus; otherwise the
