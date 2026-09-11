@@ -39,6 +39,7 @@ pub mod images;
 pub mod live;
 pub mod markdown;
 pub mod menu;
+pub mod pages;
 pub mod session;
 pub mod time;
 
@@ -56,6 +57,7 @@ use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::value::Color;
 use gumicord_uitree::{Anchor, Content, DataKind, Editable, Key, NodeId, State, UiNode};
 use live::Live;
+use pages::login::LoginField;
 use session::{Login, Session};
 
 /// The default theme, embedded rather than loaded: the app has to run even
@@ -272,17 +274,6 @@ impl Composing {
     }
 }
 
-/// Which login-form field, if any, has focus. Only one at a time, and only
-/// while a form is on screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoginField {
-    Email,
-    Password,
-    Totp,
-    /// The bot-token form's single field.
-    Token,
-}
-
 /// The app state, and building the UITree from it.
 pub struct Gumicord {
     theme: Option<Theme>,
@@ -341,24 +332,9 @@ pub struct Gumicord {
     input_focused: bool,
     /// The composer's contents.
     input: TextDocument,
-    /// Which login-form field has focus, if any.
-    login_field: Option<LoginField>,
-    /// The form the user is on: it stays put while login runs or fails, so an
-    /// error lands back on the same form instead of bouncing to the QR.
-    login_form: Option<LoginField>,
-    /// The last login failure, shown on the form so the user knows why and can
-    /// retry. Cleared by the next attempt or by leaving the form.
-    login_error: Option<String>,
-    /// Per-field failures from the last attempt, as (dotted path, detail).
-    /// Shown under each named input; cleared with the general error.
-    login_field_errors: Vec<(String, String)>,
-    /// The login form's email contents. Kept across password retries.
-    login_email: TextDocument,
-    /// The login form's password or TOTP code, whichever step is shown.
-    login_input: TextDocument,
-    /// The hidden code (konami) typed on the QR screen so far. Completed
-    /// sequences open the bot-token form; anything else resets it.
-    hidden_code: Vec<HiddenKey>,
+    /// The login screens: fields, forms, errors. Owned outright by
+    /// [`pages::login`](crate::pages::login).
+    login_view: crate::pages::login::LoginView,
     /// Messages sent in demo mode; unused when live.
     sent: Vec<demo::Message>,
     /// Fetches images.
@@ -418,7 +394,7 @@ impl Gumicord {
         // starts instead of on a code nobody can read.
         if is_mobile() {
             app.login.start_password();
-            app.login_form = Some(LoginField::Password);
+            app.login_view.form = Some(LoginField::Password);
         }
         app
     }
@@ -517,13 +493,7 @@ impl Gumicord {
             selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),
-            login_field: None,
-            login_form: None,
-            login_error: None,
-            login_field_errors: Vec::new(),
-            login_email: TextDocument::new(),
-            login_input: TextDocument::new(),
-            hidden_code: Vec::new(),
+            login_view: crate::pages::login::LoginView::new(),
             sent: Vec::new(),
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
@@ -862,7 +832,7 @@ impl Gumicord {
             Some(("overlay.menu", None))
         } else if self.input_focused {
             Some(("chat.input.field", None))
-        } else if self.login_field.is_some() {
+        } else if self.login_view.field.is_some() {
             Some(("app.screen.login.field", None))
         } else if self.drawer_open {
             Some(("overlay.drawer", None))
@@ -1139,12 +1109,12 @@ impl Application for Gumicord {
     fn wake(&mut self) -> bool {
         let mut changed = self.login.poll();
         if let Some(msg) = self.login.take_last_error() {
-            self.login_error = Some(msg);
+            self.login_view.error = Some(msg);
             changed = true;
         }
         let fields = self.login.take_field_errors();
         if !fields.is_empty() {
-            self.login_field_errors = fields;
+            self.login_view.field_errors = fields;
             changed = true;
         }
         changed |= self.live.poll();
@@ -1348,17 +1318,17 @@ impl Application for Gumicord {
                 _ => LoginField::Totp,
             }),
             _ => None,
-        }) && (self.login_field != Some(field) || self.input_focused)
+        }) && (self.login_view.field != Some(field) || self.input_focused)
         {
-            self.login_field = Some(field);
+            self.login_view.field = Some(field);
             self.input_focused = false;
             changed = true;
         }
 
         // A press outside every field releases focus; otherwise the keyboard
         // stays up on phones with no other way to dismiss it.
-        if self.login_field.is_some() && !hits.iter().any(|h| h.id == NodeId::AppScreenLoginField) {
-            self.login_field = None;
+        if self.login_view.field.is_some() && !hits.iter().any(|h| h.id == NodeId::AppScreenLoginField) {
+            self.login_view.field = None;
             changed = true;
         }
 
@@ -1440,7 +1410,7 @@ impl Application for Gumicord {
             // makes the menu and its items act on the composer.
             (NodeId::ChatInputField, _) => {
                 self.input_focused = true;
-                self.login_field = None;
+                self.login_view.field = None;
                 Some(self.field_menu())
             }
             // A login-form field: focusing it makes the menu and its items
@@ -1449,7 +1419,7 @@ impl Application for Gumicord {
                 NodeId::AppScreenLoginField,
                 Some(Key::Slot(s @ ("email" | "password" | "totp" | "token"))),
             ) => {
-                self.login_field = Some(match *s {
+                self.login_view.field = Some(match *s {
                     "email" => LoginField::Email,
                     "password" => LoginField::Password,
                     "token" => LoginField::Token,
@@ -1474,10 +1444,10 @@ impl Application for Gumicord {
     /// Only a focused field receives input: a login-form field, or the
     /// composer. Never more than one holds focus at once.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
-        match self.login_field {
-            Some(LoginField::Email) => Some(&mut self.login_email),
+        match self.login_view.field {
+            Some(LoginField::Email) => Some(&mut self.login_view.email),
             Some(LoginField::Password | LoginField::Totp | LoginField::Token) => {
-                Some(&mut self.login_input)
+                Some(&mut self.login_view.input)
             }
             None => self.input_focused.then_some(&mut self.input),
         }
@@ -1486,7 +1456,7 @@ impl Application for Gumicord {
     /// What the focused field wants from the soft keyboard (mobile only).
     fn ime_field(&self) -> Option<gumicord_platform::ImeField> {
         use gumicord_platform::{ImeField, ImeKind};
-        match self.login_field {
+        match self.login_view.field {
             Some(LoginField::Email) => Some(ImeField {
                 kind: ImeKind::Email,
                 multiline: false,
@@ -1513,7 +1483,7 @@ impl Application for Gumicord {
     /// The IME committed a newline in a single-line field (mobile only):
     /// advance through the login form, or submit.
     fn ime_newline(&mut self) -> bool {
-        match self.login_field {
+        match self.login_view.field {
             Some(LoginField::Email) => self.focus_neighbor(true),
             _ => self.submit(),
         }
@@ -1526,7 +1496,7 @@ impl Application for Gumicord {
     /// password screen, or the TOTP code. Enter means the same thing in both
     /// places.
     fn submit(&mut self) -> bool {
-        if self.login_field.is_some() {
+        if self.login_view.field.is_some() {
             return self.submit_login();
         }
 
@@ -1586,7 +1556,7 @@ impl Application for Gumicord {
             return true;
         }
         // Escape on a login field abandons the whole password login.
-        if self.login_field.is_some() {
+        if self.login_view.field.is_some() {
             self.leave_login_form();
             return true;
         }
@@ -1612,21 +1582,21 @@ impl Application for Gumicord {
         // Only the QR screen listens; elsewhere the arrows and B/A mean
         // nothing to the app.
         if self.login.session().qr().is_none() {
-            self.hidden_code.clear();
+            self.login_view.hidden_code.clear();
             return true;
         }
 
-        self.hidden_code.push(key);
-        let len = self.hidden_code.len();
-        if self.hidden_code[..] != SEQUENCE[..len] {
-            self.hidden_code.clear();
+        self.login_view.hidden_code.push(key);
+        let len = self.login_view.hidden_code.len();
+        if self.login_view.hidden_code[..] != SEQUENCE[..len] {
+            self.login_view.hidden_code.clear();
             return true;
         }
         if len == SEQUENCE.len() {
-            self.hidden_code.clear();
+            self.login_view.hidden_code.clear();
             self.login.start_token();
-            self.login_form = Some(LoginField::Token);
-            self.login_field = Some(LoginField::Token);
+            self.login_view.form = Some(LoginField::Token);
+            self.login_view.field = Some(LoginField::Token);
         }
         true
     }
@@ -1701,9 +1671,9 @@ impl Application for Gumicord {
     fn captcha_cancelled(&mut self) {
         self.pending = None;
         self.login.cancel_password();
-        self.login_field = None;
+        self.login_view.field = None;
         self.input_focused = false;
-        self.login_input.take();
+        self.login_view.input.take();
     }
 
     /// Pipeline stages [3] through [5]. The plugin pass runs between them.
@@ -1869,14 +1839,14 @@ impl Gumicord {
     /// No neighbor forward (or anywhere without one) acts instead; back from
     /// the first field does nothing.
     fn focus_neighbor(&mut self, next: bool) -> bool {
-        let target = match (self.login_field, next) {
+        let target = match (self.login_view.field, next) {
             (Some(LoginField::Email), true) => Some(LoginField::Password),
             (Some(LoginField::Password), false) => Some(LoginField::Email),
             _ => None,
         };
         match target {
             Some(field) => {
-                self.login_field = Some(field);
+                self.login_view.field = Some(field);
                 true
             }
             None => next && self.submit(),
@@ -1886,22 +1856,22 @@ impl Gumicord {
     /// Submits the active login step. Runs the password flow, hands off a TOTP
     /// code, or logs in with a bot token; nothing to send stays put.
     fn submit_login(&mut self) -> bool {
-        self.login_error = None;
-        self.login_field_errors.clear();
-        match self.login_field {
+        self.login_view.error = None;
+        self.login_view.field_errors.clear();
+        match self.login_view.field {
             Some(LoginField::Token) => {
-                let token = self.login_input.text().trim().to_owned();
+                let token = self.login_view.input.text().trim().to_owned();
                 if token.is_empty() {
                     return false;
                 }
                 self.login.submit_bot_token(token);
-                self.login_input.take();
-                self.login_field = None;
+                self.login_view.input.take();
+                self.login_view.field = None;
                 true
             }
             Some(LoginField::Email) | Some(LoginField::Password) | None => {
-                let email = self.login_email.text().trim().to_owned();
-                let password = self.login_input.text().to_owned();
+                let email = self.login_view.email.text().trim().to_owned();
+                let password = self.login_view.input.text().to_owned();
 
                 if email.is_empty() || password.is_empty() {
                     return false;
@@ -1909,18 +1879,18 @@ impl Gumicord {
                 self.login.submit_password(email, password);
                 // Keep the email for a retry; the password is a secret that
                 // has done its job.
-                self.login_input.take();
-                self.login_field = None;
+                self.login_view.input.take();
+                self.login_view.field = None;
                 true
             }
             Some(LoginField::Totp) => {
-                let code = self.login_input.text().trim().to_owned();
+                let code = self.login_view.input.text().trim().to_owned();
                 if code.is_empty() {
                     return false;
                 }
                 self.login.submit_totp(code);
-                self.login_input.take();
-                self.login_field = None;
+                self.login_view.input.take();
+                self.login_view.field = None;
                 true
             }
         }
@@ -1930,11 +1900,11 @@ impl Gumicord {
     /// show the QR screen, so there it backs out to the password form.
     fn leave_login_form(&mut self) {
         self.login.cancel_password();
-        self.login_field = None;
-        self.login_form = is_mobile().then_some(LoginField::Password);
-        self.login_error = None;
-        self.login_field_errors.clear();
-        self.login_input.take();
+        self.login_view.field = None;
+        self.login_view.form = is_mobile().then_some(LoginField::Password);
+        self.login_view.error = None;
+        self.login_view.field_errors.clear();
+        self.login_view.input.take();
     }
 
     /// The current width class. Read from the last built frame; events
@@ -2706,9 +2676,9 @@ impl Gumicord {
         self.live.disconnect();
         self.images.forget_everything();
         self.login.start_add_account(rt.handle(), waker.clone());
-        self.login_form = None;
-        self.login_error = None;
-        self.login_field_errors.clear();
+        self.login_view.form = None;
+        self.login_view.error = None;
+        self.login_view.field_errors.clear();
         self.floating = None;
         self.composing = Composing::New;
         self.input.take();
@@ -2728,9 +2698,9 @@ impl Gumicord {
             return false;
         };
         self.login.forget(rt.handle(), waker.clone());
-        self.login_form = None;
-        self.login_error = None;
-        self.login_field_errors.clear();
+        self.login_view.form = None;
+        self.login_view.error = None;
+        self.login_view.field_errors.clear();
         self.forget_account()
     }
 
@@ -2760,9 +2730,9 @@ impl Gumicord {
     ///
     /// [`focused_document`]: crate::Application::focused_document
     fn field_doc(&self) -> &TextDocument {
-        match self.login_field {
-            Some(LoginField::Email) => &self.login_email,
-            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => &self.login_input,
+        match self.login_view.field {
+            Some(LoginField::Email) => &self.login_view.email,
+            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => &self.login_view.input,
             None => &self.input,
         }
     }
@@ -2803,7 +2773,7 @@ impl Gumicord {
         let form = match s {
             Session::PasswordTotp => Some(LoginField::Totp),
             Session::Token => Some(LoginField::Token),
-            _ => self.login_form.or(match s {
+            _ => self.login_view.form.or(match s {
                 Session::Password => Some(LoginField::Password),
                 _ => None,
             }),
@@ -2822,19 +2792,19 @@ impl Gumicord {
                         .child(self.login_field(
                             "email",
                             "メールアドレス",
-                            &self.login_email,
+                            &self.login_view.email,
                             false,
                         ))
                         .child_if(self.has_login_field_error(&["login"]), || {
                             self.login_field_error_node("login_error_email", &["login"])
                         })
                         .child(self.login_label("パスワード"))
-                        .child(self.login_field("password", "パスワード", &self.login_input, true))
+                        .child(self.login_field("password", "パスワード", &self.login_view.input, true))
                         .child_if(self.has_login_field_error(&["password"]), || {
                             self.login_field_error_node("login_error_password", &["password"])
                         })
                         .child(self.login_forgot_password())
-                        .child_if(self.login_error.is_some(), || self.login_error_node())
+                        .child_if(self.login_view.error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン"))
                         .child(self.login_divider())
                         // No QR screen on phones, so nowhere to go back to.
@@ -2852,11 +2822,11 @@ impl Gumicord {
                             "認証コードを入力",
                         ))
                         .child(self.login_label("認証コード"))
-                        .child(self.login_field("totp", "認証コード", &self.login_input, false))
+                        .child(self.login_field("totp", "認証コード", &self.login_view.input, false))
                         .child_if(self.has_login_field_error(&["code"]), || {
                             self.login_field_error_node("login_error_code", &["code"])
                         })
-                        .child_if(self.login_error.is_some(), || self.login_error_node())
+                        .child_if(self.login_view.error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン"))
                         .child(self.login_secondary("戻る", "login_back"))
                 }))
@@ -2871,8 +2841,8 @@ impl Gumicord {
                             "ボットトークンでログイン",
                         ))
                         .child(self.login_label("トークン"))
-                        .child(self.login_field("token", "トークン", &self.login_input, false))
-                        .child_if(self.login_error.is_some(), || self.login_error_node())
+                        .child(self.login_field("token", "トークン", &self.login_view.input, false))
+                        .child_if(self.login_view.error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン"))
                         .child(self.login_secondary("戻る", "login_back"))
                 }))
@@ -2928,14 +2898,14 @@ impl Gumicord {
     fn login_error_node(&self) -> UiNode {
         UiNode::text(
             NodeId::AppScreenLoginError,
-            self.login_error.as_deref().unwrap_or_default(),
+            self.login_view.error.as_deref().unwrap_or_default(),
         )
     }
 
     /// Whether any field failure names one of these Discord paths (`login`
     /// for email, `password`, `code` for TOTP).
     fn has_login_field_error(&self, segments: &[&str]) -> bool {
-        self.login_field_errors.iter().any(|(path, _)| {
+        self.login_view.field_errors.iter().any(|(path, _)| {
             segments
                 .iter()
                 .any(|s| path == s || path.starts_with(&format!("{s}.")))
@@ -2947,7 +2917,8 @@ impl Gumicord {
     /// call when [`Self::has_login_field_error`] holds.
     fn login_field_error_node(&self, slot: &'static str, segments: &[&str]) -> UiNode {
         let detail = self
-            .login_field_errors
+            .login_view
+            .field_errors
             .iter()
             .filter(|(path, _)| {
                 segments
@@ -3021,7 +2992,7 @@ impl Gumicord {
     /// Whether the given slot is the currently focused login field.
     fn login_field_slot(&self, slot: &'static str) -> bool {
         matches!(
-            (self.login_field, slot),
+            (self.login_view.field, slot),
             (Some(LoginField::Email), "email")
                 | (Some(LoginField::Password), "password")
                 | (Some(LoginField::Totp), "totp")
@@ -3057,8 +3028,8 @@ impl Gumicord {
             // From the QR screen into the password form.
             "login_password" => {
                 self.login.start_password();
-                self.login_field = None;
-                self.login_form = Some(LoginField::Password);
+                self.login_view.field = None;
+                self.login_view.form = Some(LoginField::Password);
                 true
             }
             "login_submit" => self.submit_login(),
@@ -6388,10 +6359,10 @@ mod login_tests {
             NodeId::AppScreenLoginField,
             Key::Slot("email"),
         )]);
-        assert!(a.login_field.is_some());
+        assert!(a.login_view.field.is_some());
 
         assert!(a.pressed(&[]));
-        assert_eq!(a.login_field, None, "欄外を押してもフォーカスが残る");
+        assert_eq!(a.login_view.field, None, "欄外を押してもフォーカスが残る");
     }
 
     /// Clicking a login field focuses exactly that one, and typing lands in the
@@ -6408,14 +6379,14 @@ mod login_tests {
             NodeId::AppScreenLoginField,
             Key::Slot("email"),
         )]);
-        assert!(matches!(a.login_field, Some(LoginField::Email)));
+        assert!(matches!(a.login_view.field, Some(LoginField::Email)));
         a.focused_document().unwrap().insert("a@b.c");
 
         a.pressed(&[login_hit_of(
             NodeId::AppScreenLoginField,
             Key::Slot("password"),
         )]);
-        assert!(matches!(a.login_field, Some(LoginField::Password)));
+        assert!(matches!(a.login_view.field, Some(LoginField::Password)));
         a.focused_document().unwrap().insert("secret");
 
         assert_eq!(a.login_email.text(), "a@b.c", "email 欄の内容が消えた");
@@ -6447,7 +6418,7 @@ mod login_tests {
         a.focused_document().unwrap().insert("secret");
 
         assert!(a.submit_login(), "パスワードログインが送信されなかった");
-        assert_eq!(a.login_field, None, "送信後もフォーカスが残っている");
+        assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
     }
 
     /// The konami code on the QR screen opens the bot-token form.
@@ -6468,7 +6439,7 @@ mod login_tests {
             "コンバットコードでトークン画面に入っていない"
         );
         assert_eq!(
-            a.login_field,
+            a.login_view.field,
             Some(LoginField::Token),
             "入力欄にフォーカスが無い"
         );
@@ -6489,7 +6460,7 @@ mod login_tests {
         }
 
         assert!(!matches!(a.login.session(), Session::Token));
-        assert_eq!(a.login_field, None);
+        assert_eq!(a.login_view.field, None);
     }
 
     /// Off the QR screen the hidden code does nothing.
@@ -6504,7 +6475,7 @@ mod login_tests {
         }
 
         assert!(!matches!(a.login.session(), Session::Token));
-        assert_eq!(a.login_field, None);
+        assert_eq!(a.login_view.field, None);
     }
 
     /// Submitting the token form hands the bot token to the background and
@@ -6522,7 +6493,7 @@ mod login_tests {
         }
         a.focused_document().unwrap().insert("bot-token");
         assert!(a.submit_login(), "トークンログインが送信されなかった");
-        assert_eq!(a.login_field, None, "送信後もフォーカスが残っている");
+        assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
     }
 
     /// Right-clicking a login field focuses it and shows the input menu for
@@ -6546,7 +6517,7 @@ mod login_tests {
 
         let field = login_hit_of(NodeId::AppScreenLoginField, Key::Slot("email"));
         assert!(a.context_menu(&[field], (0.0, 0.0)));
-        assert!(matches!(a.login_field, Some(LoginField::Email)));
+        assert!(matches!(a.login_view.field, Some(LoginField::Email)));
 
         let has = |want: &Action| {
             a.floating
