@@ -5694,7 +5694,7 @@ mod input_tests {
 
 #[cfg(test)]
 mod login_tests {
-    use super::session::{Login, LoginEvent};
+    use super::session::{Login, LoginEvent, Session};
     use super::*;
 
     /// A signed-out app. `Gumicord::new` reads the environment, and a
@@ -5899,11 +5899,11 @@ mod login_tests {
             NodeId::PrimitiveButton,
             Key::Slot("login_password"),
         )]);
-        assert!(a.login_form.is_some());
+        assert!(a.login_view.form.is_some());
 
         let back = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_qr"));
         assert!(a.pressed(std::slice::from_ref(&back)), "QRボタンが効かない");
-        assert!(a.login_form.is_none(), "QRに戻っていない");
+        assert!(a.login_view.form.is_none(), "QRに戻っていない");
     }
 
     /// MFA must reach the TOTP screen even while the password-form override
@@ -5918,7 +5918,7 @@ mod login_tests {
             NodeId::PrimitiveButton,
             Key::Slot("login_password"),
         )]);
-        assert!(a.login_form.is_some());
+        assert!(a.login_view.form.is_some());
         // Discord asked for a second factor.
         a.login.apply_for_test(LoginEvent::TotpNeeded {
             email: "a@b.c".to_owned(),
@@ -6023,9 +6023,9 @@ mod login_tests {
         assert!(matches!(a.login_view.field, Some(LoginField::Password)));
         a.focused_document().unwrap().insert("secret");
 
-        assert_eq!(a.login_email.text(), "a@b.c", "email 欄の内容が消えた");
+        assert_eq!(a.login_view.email.text(), "a@b.c", "email 欄の内容が消えた");
         assert_eq!(
-            a.login_input.text(),
+            a.login_view.input.text(),
             "secret",
             "password 欄に書かれていない"
         );
@@ -6184,7 +6184,7 @@ mod login_tests {
         a.perform(crate::menu::Action::SelectAll);
 
         assert!(
-            a.login_input.has_selection(),
+            a.login_view.input.has_selection(),
             "ログイン欄が選択されていない"
         );
         assert!(!a.input.has_selection(), "コンポーザーが触られた");
