@@ -38,6 +38,28 @@ const RESIZE_BORDER: f32 = 6.0;
 /// Distance per wheel notch, for platforms reporting lines.
 const LINE_SCROLL: f32 = 48.0;
 
+// Android only: the one native call the GLES surface needs.
+//
+// `ANativeWindow_setBuffersGeometry` lives in `libandroid` (already
+// linked), so it is declared here instead of taking the `ndk` crate's
+// `nativewindow` feature: that would link `libnativewindow.so`, whose
+// NDK stub only exists for API 26+, while the app starts at 24.
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+unsafe extern "C" {
+    fn ANativeWindow_setBuffersGeometry(
+        window: *mut std::ffi::c_void,
+        width: i32,
+        height: i32,
+        format: i32,
+    ) -> i32;
+}
+
+/// Android only: legacy window pixel format for 8-bit RGBA. Same value as
+/// `AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM`, and valid since API 1.
+#[cfg(target_os = "android")]
+const WINDOW_FORMAT_RGBA_8888: i32 = 1;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformError {
     #[error("cannot create the event loop: {0}")]
@@ -1068,22 +1090,23 @@ impl Host {
                 && let RawWindowHandle::AndroidNdk(h) = handle.as_raw()
             {
                 // Safe: the pointer is the live GameActivity window winit
-                // drew from; clone_from_ptr takes our own reference, which
-                // Drop releases, so the activity's own reference is
-                // untouched. The pointee type is inferred from the call.
-                let native_window = unsafe {
-                    ndk::native_window::NativeWindow::clone_from_ptr(h.a_native_window.cast())
+                // drew from, borrowed only for this call on the event-loop
+                // thread, before any surface exists on it.
+                let status = unsafe {
+                    ANativeWindow_setBuffersGeometry(
+                        h.a_native_window.as_ptr().cast(),
+                        0,
+                        0,
+                        WINDOW_FORMAT_RGBA_8888,
+                    )
                 };
-                match native_window.set_buffers_geometry(
-                    0,
-                    0,
-                    Some(ndk::hardware_buffer_format::HardwareBufferFormat::R8G8B8A8_UNORM),
-                ) {
-                    Ok(()) => tracing::info!("native window buffers set to RGBA_8888"),
-                    Err(e) => tracing::warn!(
-                        %e,
+                if status == 0 {
+                    tracing::info!("native window buffers set to RGBA_8888");
+                } else {
+                    tracing::warn!(
+                        status,
                         "could not set native window format; surface creation may fail"
-                    ),
+                    );
                 }
             }
         }

@@ -131,9 +131,6 @@ log = "0.4"
 # the JVM handed over at startup (see app/android).
 jni = "0.22"
 ndk-context = "0.1"
-# Native window format for the GLES surface (see render/platform window.rs):
-# only the buffers geometry is used, so the default features are off.
-ndk = { version = "0.9", default-features = false, features = ["nativewindow"] }
 rustls-platform-verifier = "0.7"
 android_logger = "0.14"
 
