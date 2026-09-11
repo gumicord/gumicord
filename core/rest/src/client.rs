@@ -322,34 +322,116 @@ impl RestClient {
 }
 
 /// Discord's error envelope. Showing its message instead of the raw body
-/// also decodes the \uXXXX escapes JSON carries.
+/// also decodes the \uXXXX escapes JSON carries. The nested `errors` detail
+/// names the failing field, without which a 50035 says nothing about what
+/// was wrong with the body.
 #[derive(serde::Deserialize)]
 struct ErrorBody {
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
     code: Option<i64>,
+    #[serde(default)]
+    errors: Option<serde_json::Value>,
 }
 
 fn message_or_body(body: &str) -> String {
     let parsed: Result<ErrorBody, _> = serde_json::from_str(body);
-    match parsed
+    let base = match parsed
+        .as_ref()
         .ok()
         .filter(|e| e.message.is_some() || e.code.is_some())
     {
         Some(ErrorBody {
             message: Some(message),
             code: Some(code),
+            ..
         }) => format!("{message} ({code})"),
         Some(ErrorBody {
             message: Some(message),
             ..
-        }) => message,
+        }) => message.clone(),
         Some(ErrorBody {
             code: Some(code), ..
         }) => format!("エラーコード {code}"),
-        _ => body.to_owned(),
+        _ => return body.to_owned(),
+    };
+    match parsed.ok().and_then(|e| e.errors).as_ref().and_then(first_detail) {
+        Some((path, detail)) => format!("{base}: {path}: {detail}"),
+        None => base,
     }
+}
+
+/// First `_errors` entry under the nested `errors` object, with its dotted
+/// path. Discord nests indices as string keys (`embeds.0.description`), so
+/// objects suffice, but arrays are walked too.
+fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
+    fn walk(
+        value: &serde_json::Value,
+        path: &mut String,
+        out: &mut Option<(String, String)>,
+    ) {
+        if out.is_some() {
+            return;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(detail) = map
+                    .get("_errors")
+                    .and_then(|e| e.as_array())
+                    .and_then(|a| a.first())
+                {
+                    let message = detail
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+                    // An empty entry tells nothing; siblings might.
+                    if !message.is_empty() {
+                        let code =
+                            detail.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                        let detail = if code.is_empty() {
+                            message.to_owned()
+                        } else {
+                            format!("{message} ({code})")
+                        };
+                        *out = Some((path.clone(), detail));
+                        return;
+                    }
+                }
+                for (key, value) in map {
+                    let saved = path.clone();
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(key);
+                    walk(value, path, out);
+                    *path = saved;
+                    if out.is_some() {
+                        return;
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, value) in items.iter().enumerate() {
+                    let saved = path.clone();
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&index.to_string());
+                    walk(value, path, out);
+                    *path = saved;
+                    if out.is_some() {
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = None;
+    walk(errors, &mut String::new(), &mut out);
+    out
 }
 
 fn build_http(identity: &Identity) -> Result<reqwest::Client, RestError> {
@@ -494,6 +576,29 @@ mod tests {
         assert_eq!(message_or_body(r#"{"code":50035}"#), "エラーコード 50035");
         assert_eq!(message_or_body("not even JSON"), "not even JSON");
         assert_eq!(message_or_body("{}"), "{}");
+    }
+
+    /// The nested `errors` detail names the failing field, so the next
+    /// 50035 identifies itself instead of repeating the mystery.
+    #[test]
+    fn error_bodies_name_the_failing_field() {
+        assert_eq!(
+            message_or_body(
+                r#"{"message":"Invalid Form Body","code":50035,"errors":{"content":{"_errors":[{"code":"BASE_TYPE_MAX_LENGTH","message":"Must be 2000 or fewer in length."}]}}}"#
+            ),
+            "Invalid Form Body (50035): content: Must be 2000 or fewer in length. (BASE_TYPE_MAX_LENGTH)"
+        );
+        assert_eq!(
+            message_or_body(
+                r#"{"message":"Invalid Form Body","code":50035,"errors":{"embeds":{"0":{"description":{"_errors":[{"code":"BASE_TYPE_MAX_LENGTH","message":"Must be 4096 or fewer in length."}]}}}}}"#
+            ),
+            "Invalid Form Body (50035): embeds.0.description: Must be 4096 or fewer in length. (BASE_TYPE_MAX_LENGTH)"
+        );
+        // No usable detail: unchanged behaviour.
+        assert_eq!(
+            message_or_body(r#"{"message":"Invalid Form Body","code":50035,"errors":{}}"#),
+            "Invalid Form Body (50035)"
+        );
     }
 
     /// Ending the session on anything else would throw people offline for a
