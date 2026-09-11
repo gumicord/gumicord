@@ -44,8 +44,8 @@ impl crate::Gumicord {
     /// Opens the settings screen. The drill-in is reset; the category stays,
     /// like Discord remembering the section.
     pub(crate) fn open_settings(&mut self) -> bool {
-        self.drawer_open = false;
-        self.member_sheet_open = false;
+        self.chat.drawer_open = false;
+        self.chat.member_sheet_open = false;
         self.settings.plugin = None;
         self.settings.page = None;
         self.refresh_settings_states();

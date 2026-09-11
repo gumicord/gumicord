@@ -57,6 +57,7 @@ use gumicord_theme::{MatchContext, Theme};
 use gumicord_uitree::value::Color;
 use gumicord_uitree::{Anchor, DataKind, Editable, Key, NodeId, State, UiNode};
 use live::Live;
+use pages::chat::Composing;
 use pages::login::LoginField;
 use session::Login;
 
@@ -228,32 +229,6 @@ impl Panes {
     }
 }
 
-/// What the composer is doing.
-///
-/// One field serves all three: new, reply and edit are all "type and press
-/// enter", and separate fields would mean retyping after realising it was a
-/// reply. Which one is active must be visible — sending a new message while
-/// meaning to edit cannot be undone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Composing {
-    /// Writing something new.
-    #[default]
-    New,
-    /// Replying to a message.
-    Reply(u64),
-    /// Editing a message.
-    Edit(u64),
-}
-
-impl Composing {
-    fn target(self) -> Option<u64> {
-        match self {
-            Composing::New => None,
-            Composing::Reply(id) | Composing::Edit(id) => Some(id),
-        }
-    }
-}
-
 /// The app state, and building the UITree from it.
 pub struct Gumicord {
     theme: Option<Theme>,
@@ -293,25 +268,18 @@ pub struct Gumicord {
     /// The innermost scrollable under the pointer; only that list shows a
     /// scrollbar.
     hovered_scroll: Option<NodeId>,
-    selected_guild: u64,
+/// The main chat screen: lists, messages, composer. Owned outright by
+/// [`pages::chat`](crate::pages::chat).
+    chat: crate::pages::chat::ChatView,
     /// Theme match context, captured before building.
     ///
     /// Inline decoration is spans rather than nodes, so it never reaches the
     /// resolver's walk; the theme has to be consulted while building.
     match_ctx: MatchContext,
-    /// Which spoilers stand open, whole messages or single runs.
-    reveals: crate::markdown::Reveals,
     /// Whatever is floating; at most one.
     floating: Option<crate::menu::Floating>,
     /// Transient notices; several share one node and none blocks input.
     toasts: VecDeque<crate::menu::Toast>,
-    /// What the composer is doing.
-    composing: Composing,
-    selected_channel: u64,
-    /// Whether the composer has focus.
-    input_focused: bool,
-    /// The composer's contents.
-    input: TextDocument,
     /// The login screens: fields, forms, errors. Owned outright by
     /// [`pages::login`](crate::pages::login).
     login_view: crate::pages::login::LoginView,
@@ -343,18 +311,6 @@ pub struct Gumicord {
     dialogs: VecDeque<PendingDialog>,
     /// The plugin dialog currently showing, if any.
     showing: Option<Showing>,
-    /// A jump waiting for the next frame: the renderer knows where the
-    /// message landed last frame, this layer only knows it was pressed.
-    pending_reveal: Option<u64>,
-    /// A jump waiting for its messages: fetched around the target when it
-    /// is not loaded. Dropped when the channel moves on.
-    pending_jump: Option<(ChannelId, u64)>,
-    /// The last pressed message, for the screen reader to follow.
-    a11y_message: Option<u64>,
-    /// The navigation drawer, for widths that hide the lists.
-    drawer_open: bool,
-    /// The member list as a bottom sheet, for widths that hide it.
-    member_sheet_open: bool,
     /// The settings screen. Closed most of the time.
     settings: crate::pages::settings::SettingsView,
 }
@@ -464,15 +420,10 @@ impl Gumicord {
             scale: 1.0,
             hovered: None,
             hovered_scroll: None,
-            selected_guild: guild,
+            chat: crate::pages::chat::ChatView::new(guild, channel),
             match_ctx: MatchContext::new(0.0),
-            reveals: crate::markdown::Reveals::default(),
             floating: None,
             toasts: VecDeque::new(),
-            composing: Composing::New,
-            selected_channel: channel,
-            input_focused: false,
-            input: TextDocument::new(),
             login_view: crate::pages::login::LoginView::new(),
             sent: Vec::new(),
             images: images::Images::new(),
@@ -486,11 +437,6 @@ impl Gumicord {
             approval_queue: VecDeque::new(),
             dialogs: VecDeque::new(),
             showing: None,
-            pending_reveal: None,
-            pending_jump: None,
-            a11y_message: None,
-            drawer_open: false,
-            member_sheet_open: false,
             settings: crate::pages::settings::SettingsView::default(),
         };
         app.refresh_theme_assets();
@@ -800,16 +746,16 @@ impl Gumicord {
             Some(("overlay.modal", None))
         } else if matches!(self.floating, Some(crate::menu::Floating::Menu(_))) {
             Some(("overlay.menu", None))
-        } else if self.input_focused {
+        } else if self.chat.input_focused {
             Some(("chat.input.field", None))
         } else if self.login_view.field.is_some() {
             Some(("app.screen.login.field", None))
-        } else if self.drawer_open {
+        } else if self.chat.drawer_open {
             Some(("overlay.drawer", None))
-        } else if self.member_sheet_open {
+        } else if self.chat.member_sheet_open {
             Some(("overlay.sheet", None))
         } else {
-            self.a11y_message
+            self.chat.a11y_message
                 .map(|id| ("chat.message", Some(Key::Id(id))))
         }
     }
@@ -844,17 +790,17 @@ impl Gumicord {
                     changed = true;
                 }
                 (NodeId::NavGuildListItem, Some(Key::Id(id))) => {
-                    if self.selected_guild == *id {
+                    if self.chat.selected_guild == *id {
                         break;
                     }
-                    self.selected_guild = *id;
+                    self.chat.selected_guild = *id;
                     // Clear the channel, or the list and the body disagree.
-                    self.selected_channel = 0;
+                    self.chat.selected_channel = 0;
                     changed = true;
                 }
                 (NodeId::NavChannelListItem, Some(Key::Id(id))) => {
-                    changed |= self.selected_channel != *id;
-                    self.selected_channel = *id;
+                    changed |= self.chat.selected_channel != *id;
+                    self.chat.selected_channel = *id;
                 }
                 (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
                     changed |= self.stop_composing();
@@ -875,8 +821,8 @@ impl Gumicord {
                 // A press anywhere else on the message still opens all of it:
                 // a single run is a small target.
                 (NodeId::ChatMessage, Some(Key::Id(id))) => {
-                    changed |= self.reveals.messages.insert(*id);
-                    self.a11y_message = Some(*id);
+                    changed |= self.chat.reveals.messages.insert(*id);
+                    self.chat.a11y_message = Some(*id);
                 }
                 // A reply reference jumps to the answered message.
                 (NodeId::ChatMessageReplyRef, Some(Key::Id(target))) => {
@@ -894,7 +840,7 @@ impl Gumicord {
     fn overlay_press(&mut self, hits: &[Hit]) -> bool {
         // Member rows have no profile view yet; tapping one closes the
         // sheet instead of stranding the press.
-        if self.member_sheet_open && hits.iter().any(|h| h.id == NodeId::NavMemberListItem) {
+        if self.chat.member_sheet_open && hits.iter().any(|h| h.id == NodeId::NavMemberListItem) {
             return self.close_member_sheet();
         }
         let content = hits.iter().any(|h| {
@@ -925,14 +871,14 @@ impl Gumicord {
             return drawer || sheet;
         }
         let (guild, channel, settings_was, floating_was) = (
-            self.selected_guild,
-            self.selected_channel,
+            self.chat.selected_guild,
+            self.chat.selected_channel,
             self.settings.open,
             self.floating.is_some(),
         );
         let changed = self.press_loop(hits);
-        if self.selected_guild != guild
-            || self.selected_channel != channel
+        if self.chat.selected_guild != guild
+            || self.chat.selected_channel != channel
             || self.settings.open && !settings_was
             || self.floating.is_some() && !floating_was
         {
@@ -1037,7 +983,7 @@ impl Application for Gumicord {
                 if max <= 0.0 || at > REACH {
                     return;
                 }
-                let channel = ChannelId::from(self.selected_channel);
+                let channel = ChannelId::from(self.chat.selected_channel);
                 self.live.load_older(channel);
             }
             // Members grow downward, at the far end of the scroll.
@@ -1045,7 +991,7 @@ impl Application for Gumicord {
                 if max <= 0.0 || at < max - REACH {
                     return;
                 }
-                let guild = GuildId::from(self.selected_guild);
+                let guild = GuildId::from(self.chat.selected_guild);
                 self.live.extend_members(guild);
             }
             _ => {}
@@ -1068,7 +1014,7 @@ impl Application for Gumicord {
     }
 
     fn take_reveal(&mut self) -> Option<RevealRequest> {
-        self.pending_reveal.take().map(|target| RevealRequest {
+        self.chat.pending_reveal.take().map(|target| RevealRequest {
             region: NodeId::ChatMessageList,
             id: NodeId::ChatMessage,
             key: Some(Key::Id(target)),
@@ -1120,22 +1066,22 @@ impl Application for Gumicord {
                         let _ = idx.save(&store);
                     }
                     if let Some(ch) = self.live.last_channel() {
-                        self.selected_channel = ch.get();
+                        self.chat.selected_channel = ch.get();
                         if let Some(c) = self.live.store().channel(ch)
                             && let Some(g) = c.guild_id
                         {
-                            self.selected_guild = g.get();
+                            self.chat.selected_guild = g.get();
                         }
                     } else {
-                        self.selected_guild = 0;
-                        self.selected_channel = 0;
+                        self.chat.selected_guild = 0;
+                        self.chat.selected_channel = 0;
                     }
                     self.images.forget_everything();
                     self.floating = None;
-                    self.composing = Composing::New;
-                    self.input.take();
-                    self.input_focused = false;
-                    self.reveals = crate::markdown::Reveals::default();
+                    self.chat.composing = Composing::New;
+                    self.chat.input.take();
+                    self.chat.input_focused = false;
+                    self.chat.reveals = crate::markdown::Reveals::default();
                     self.login.set_logged_in(logged_in);
                 }
                 Err((key, err, unauthorized)) => {
@@ -1262,7 +1208,7 @@ impl Application for Gumicord {
 
         // The drawer and the member sheet own their presses while open:
         // letting one through would navigate the chat behind them.
-        if self.drawer_open || self.member_sheet_open {
+        if self.chat.drawer_open || self.chat.member_sheet_open {
             return self.overlay_press(hits);
         }
 
@@ -1270,8 +1216,8 @@ impl Application for Gumicord {
 
         // Pressing outside the composer removes focus.
         let on_input = hits.iter().any(|h| h.id == NodeId::ChatInputField);
-        if on_input != self.input_focused {
-            self.input_focused = on_input;
+        if on_input != self.chat.input_focused {
+            self.chat.input_focused = on_input;
             changed = true;
         }
 
@@ -1288,10 +1234,10 @@ impl Application for Gumicord {
                 _ => LoginField::Totp,
             }),
             _ => None,
-        }) && (self.login_view.field != Some(field) || self.input_focused)
+        }) && (self.login_view.field != Some(field) || self.chat.input_focused)
         {
             self.login_view.field = Some(field);
-            self.input_focused = false;
+            self.chat.input_focused = false;
             changed = true;
         }
 
@@ -1330,10 +1276,10 @@ impl Application for Gumicord {
         if self.floating.is_some() {
             return false;
         }
-        if self.reveals.is_open(owner, run) {
-            self.reveals.shut_run(owner, run);
+        if self.chat.reveals.is_open(owner, run) {
+            self.chat.reveals.shut_run(owner, run);
         } else {
-            self.reveals.open_run(owner, run);
+            self.chat.reveals.open_run(owner, run);
         }
         true
     }
@@ -1351,9 +1297,9 @@ impl Application for Gumicord {
                     (NodeId::ChatMessage, Some(Key::Id(id))) => Some(*id),
                     _ => None,
                 }) {
-                    self.composing = Composing::Reply(id);
-                    self.input_focused = true;
-                    self.a11y_message = Some(id);
+                    self.chat.composing = Composing::Reply(id);
+                    self.chat.input_focused = true;
+                    self.chat.a11y_message = Some(id);
                     return true;
                 }
                 // Anywhere else closes the drawer.
@@ -1361,7 +1307,7 @@ impl Application for Gumicord {
             }
             SwipeDir::Right => {
                 // From the screen edge with the lists hidden: the drawer.
-                if x <= DRAWER_EDGE && !self.drawer_open {
+                if x <= DRAWER_EDGE && !self.chat.drawer_open {
                     return self.open_drawer();
                 }
                 false
@@ -1379,7 +1325,7 @@ impl Application for Gumicord {
             // The composer first: it overlaps the message list. Focusing it
             // makes the menu and its items act on the composer.
             (NodeId::ChatInputField, _) => {
-                self.input_focused = true;
+                self.chat.input_focused = true;
                 self.login_view.field = None;
                 Some(self.field_menu())
             }
@@ -1395,7 +1341,7 @@ impl Application for Gumicord {
                     "token" => LoginField::Token,
                     _ => LoginField::Totp,
                 });
-                self.input_focused = false;
+                self.chat.input_focused = false;
                 Some(self.field_menu())
             }
             (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
@@ -1419,7 +1365,7 @@ impl Application for Gumicord {
             Some(LoginField::Password | LoginField::Totp | LoginField::Token) => {
                 Some(&mut self.login_view.input)
             }
-            None => self.input_focused.then_some(&mut self.input),
+            None => self.chat.input_focused.then_some(&mut self.chat.input),
         }
     }
 
@@ -1443,7 +1389,7 @@ impl Application for Gumicord {
                 kind: ImeKind::Text,
                 multiline: false,
             }),
-            None => self.input_focused.then_some(ImeField {
+            None => self.chat.input_focused.then_some(ImeField {
                 kind: ImeKind::Text,
                 multiline: true,
             }),
@@ -1470,19 +1416,19 @@ impl Application for Gumicord {
             return self.submit_login();
         }
 
-        let body = self.input.text().trim().to_owned();
-        let mode = self.composing;
+        let body = self.chat.input.text().trim().to_owned();
+        let mode = self.chat.composing;
 
         // Emptying an edit is not a delete; Discord rejects it too. Clearing
         // the field and pressing enter must not destroy the message.
         if body.is_empty() {
             return false;
         }
-        self.input.take();
-        self.composing = Composing::New;
+        self.chat.input.take();
+        self.chat.composing = Composing::New;
 
         if self.uses_live() {
-            let channel = ChannelId::from(self.selected_channel);
+            let channel = ChannelId::from(self.chat.selected_channel);
             match mode {
                 Composing::Edit(id) => {
                     self.live.edit_message(channel, MessageId::from(id), body);
@@ -1535,10 +1481,10 @@ impl Application for Gumicord {
         if self.stop_composing() {
             return true;
         }
-        if !self.input_focused {
+        if !self.chat.input_focused {
             return false;
         }
-        self.input_focused = false;
+        self.chat.input_focused = false;
         true
     }
 
@@ -1642,7 +1588,7 @@ impl Application for Gumicord {
         self.pending = None;
         self.login.cancel_password();
         self.login_view.field = None;
-        self.input_focused = false;
+        self.chat.input_focused = false;
         self.login_view.input.take();
     }
 
@@ -1801,31 +1747,31 @@ impl Gumicord {
     /// Opens the navigation drawer. Only where the lists hide and past
     /// login; elsewhere there is nothing to drawer over.
     fn open_drawer(&mut self) -> bool {
-        if self.drawer_open || self.panes().guilds() || !self.shows_main() {
+        if self.chat.drawer_open || self.panes().guilds() || !self.shows_main() {
             return false;
         }
-        self.drawer_open = true;
-        self.member_sheet_open = false;
+        self.chat.drawer_open = true;
+        self.chat.member_sheet_open = false;
         true
     }
 
     fn close_drawer(&mut self) -> bool {
-        std::mem::replace(&mut self.drawer_open, false)
+        std::mem::replace(&mut self.chat.drawer_open, false)
     }
 
     /// Opens the member list as a bottom sheet. Only where the member
     /// pane hides and past login.
     fn open_member_sheet(&mut self) -> bool {
-        if self.member_sheet_open || self.panes().members() || !self.shows_main() {
+        if self.chat.member_sheet_open || self.panes().members() || !self.shows_main() {
             return false;
         }
-        self.member_sheet_open = true;
-        self.drawer_open = false;
+        self.chat.member_sheet_open = true;
+        self.chat.drawer_open = false;
         true
     }
 
     fn close_member_sheet(&mut self) -> bool {
-        std::mem::replace(&mut self.member_sheet_open, false)
+        std::mem::replace(&mut self.chat.member_sheet_open, false)
     }
 
     /// Opens the settings screen. The drill-in is reset; the category stays,
@@ -1860,12 +1806,12 @@ impl Gumicord {
             })
             // The drawer and the member sheet sit above the chat but below
             // dialogs: a decision interrupts navigation, not the reverse.
-            .child_if(self.drawer_open, || {
+            .child_if(self.chat.drawer_open, || {
                 UiNode::new(NodeId::OverlayDrawer)
                     .with_anchor(Anchor::at(0.0, 0.0))
                     .children(self.sidebar(Panes::Four))
             })
-            .child_if(self.member_sheet_open, || {
+            .child_if(self.chat.member_sheet_open, || {
                 let sheet = UiNode::new(NodeId::OverlaySheet)
                     .child(UiNode::new(NodeId::OverlaySheetHandle));
                 // The sheet's own container fills the width; the side
@@ -1969,7 +1915,7 @@ impl Gumicord {
         };
         self.live
             .store()
-            .messages(ChannelId::from(self.selected_channel))
+            .messages(ChannelId::from(self.chat.selected_channel))
             .iter()
             .any(|m| m.id.get() == id && m.author.id == me)
     }
@@ -1984,7 +1930,7 @@ impl Gumicord {
         }
         self.live
             .store()
-            .messages(ChannelId::from(self.selected_channel))
+            .messages(ChannelId::from(self.chat.selected_channel))
             .iter()
             .find(|m| m.id.get() == id)
             .map(|m| m.content.clone())
@@ -2154,8 +2100,8 @@ impl Gumicord {
             crate::menu::Action::Reply(id) => {
                 // Keeps the draft: the expectation is that it gains a
                 // recipient.
-                self.composing = Composing::Reply(*id);
-                self.input_focused = true;
+                self.chat.composing = Composing::Reply(*id);
+                self.chat.input_focused = true;
             }
             crate::menu::Action::Edit(id) => {
                 // The raw body; the parsed one would silently drop the
@@ -2163,20 +2109,20 @@ impl Gumicord {
                 let Some(text) = self.raw_body(*id) else {
                     return true;
                 };
-                self.input.take();
-                self.input.insert(&text);
-                self.composing = Composing::Edit(*id);
-                self.input_focused = true;
+                self.chat.input.take();
+                self.chat.input.insert(&text);
+                self.chat.composing = Composing::Edit(*id);
+                self.chat.input_focused = true;
             }
             crate::menu::Action::Delete(id) => {
                 // Only reached after the dialog confirmed.
                 // ([`Self::needs_confirming`])
                 self.live
-                    .delete_message(ChannelId::from(self.selected_channel), MessageId::from(*id));
+                    .delete_message(ChannelId::from(self.chat.selected_channel), MessageId::from(*id));
                 // Deleting what is being edited also cancels the edit.
-                if self.composing.target() == Some(*id) {
-                    self.composing = Composing::New;
-                    self.input.take();
+                if self.chat.composing.target() == Some(*id) {
+                    self.chat.composing = Composing::New;
+                    self.chat.input.take();
                 }
             }
             crate::menu::Action::SwitchAccount(key) => {
@@ -2337,10 +2283,10 @@ impl Gumicord {
         self.login_view.error = None;
         self.login_view.field_errors.clear();
         self.floating = None;
-        self.composing = Composing::New;
-        self.input.take();
-        self.input_focused = false;
-        self.reveals = crate::markdown::Reveals::default();
+        self.chat.composing = Composing::New;
+        self.chat.input.take();
+        self.chat.input_focused = false;
+        self.chat.reveals = crate::markdown::Reveals::default();
         true
     }
 
@@ -2374,10 +2320,10 @@ impl Gumicord {
 
         // Anything still on screen belongs to the account that just left.
         self.floating = None;
-        self.composing = Composing::New;
-        self.input.take();
-        self.input_focused = false;
-        self.reveals = crate::markdown::Reveals::default();
+        self.chat.composing = Composing::New;
+        self.chat.input.take();
+        self.chat.input_focused = false;
+        self.chat.reveals = crate::markdown::Reveals::default();
         true
     }
 
@@ -2390,7 +2336,7 @@ impl Gumicord {
         match self.login_view.field {
             Some(LoginField::Email) => &self.login_view.email,
             Some(LoginField::Password | LoginField::Totp | LoginField::Token) => &self.login_view.input,
-            None => &self.input,
+            None => &self.chat.input,
         }
     }
 
@@ -2473,7 +2419,7 @@ impl Gumicord {
 
     /// One guild, identical inside and outside a folder.
     fn guild_item(&self, g: &GuildRow) -> UiNode {
-        let selected = g.id == self.selected_guild;
+        let selected = g.id == self.chat.selected_guild;
         let hovered = self.hovered_id(NodeId::NavGuildListItem, g.id);
 
         // The container is wider than the icon, leaving a lane at the left
@@ -2589,7 +2535,7 @@ impl Gumicord {
         let title = self
             .guild_rows()
             .into_iter()
-            .find(|g| g.id == self.selected_guild)
+            .find(|g| g.id == self.chat.selected_guild)
             .map(|g| g.name)
             .unwrap_or_else(|| "Gumicord".to_owned());
 
@@ -2608,7 +2554,7 @@ impl Gumicord {
             let mut item = UiNode::new(NodeId::NavChannelListItem)
                 .with_id_key(c.id)
                 .with_data(c.id)
-                .with_state_if(c.id == self.selected_channel, State::Selected)
+                .with_state_if(c.id == self.chat.selected_channel, State::Selected)
                 .with_state_if(c.unread, State::Unread)
                 .with_state_if(c.mentions > 0, State::Mentioned)
                 .with_state_if(
@@ -2755,7 +2701,7 @@ impl Gumicord {
     fn member_list_rows(&self) -> Option<Vec<UiNode>> {
         use gumicord_gateway::MemberRow;
 
-        let guild = GuildId::from(self.selected_guild);
+        let guild = GuildId::from(self.chat.selected_guild);
         let list = self.live.members(guild)?;
 
         let mut out = Vec::new();
@@ -2851,7 +2797,7 @@ impl Gumicord {
         let channels = self.openable_rows();
         let channel = channels
             .iter()
-            .find(|c| c.id == self.selected_channel)
+            .find(|c| c.id == self.chat.selected_channel)
             .or(channels.first());
 
         let (id, name, icon, topic) = match channel {
@@ -2927,15 +2873,15 @@ impl Gumicord {
                 UiNode::new(NodeId::ChatInput)
                     // What the composer is doing has to be visible: sending a
                     // new message while meaning to edit cannot be undone.
-                    .child_if(self.composing != Composing::New, || self.composing_bar())
+                    .child_if(self.chat.composing != Composing::New, || self.composing_bar())
                     .child(
                         UiNode::editable(
                             NodeId::ChatInputField,
                             Editable {
-                                text: self.input.text().to_owned(),
-                                caret: self.input.caret(),
-                                selection: self.input.selection(),
-                                composing: self.input.composing(),
+                                text: self.chat.input.text().to_owned(),
+                                caret: self.chat.input.caret(),
+                                selection: self.chat.input.selection(),
+                                composing: self.chat.input.composing(),
                                 placeholder: if name.is_empty() {
                                     "メッセージを送信".to_owned()
                                 } else {
@@ -2943,7 +2889,7 @@ impl Gumicord {
                                 },
                             },
                         )
-                        .with_state_if(self.input_focused, State::Focus),
+                        .with_state_if(self.chat.input_focused, State::Focus),
                     ),
             )
     }
@@ -2955,15 +2901,15 @@ impl Gumicord {
     /// edit, where the field holds the original message rather than anything
     /// the user wrote.
     fn stop_composing(&mut self) -> bool {
-        match self.composing {
+        match self.chat.composing {
             Composing::New => false,
             Composing::Reply(_) => {
-                self.composing = Composing::New;
+                self.chat.composing = Composing::New;
                 true
             }
             Composing::Edit(_) => {
-                self.composing = Composing::New;
-                self.input.take();
+                self.chat.composing = Composing::New;
+                self.chat.input.take();
                 true
             }
         }
@@ -2972,18 +2918,19 @@ impl Gumicord {
     /// The line above the composer, naming who is being replied to. "Replying"
     /// alone stops meaning anything once the list has scrolled.
     fn composing_bar(&self) -> UiNode {
-        let (verb, slot) = match self.composing {
+        let (verb, slot) = match self.chat.composing {
             Composing::Reply(_) => ("返信", "reply"),
             Composing::Edit(_) => ("編集", "edit"),
             Composing::New => ("", "none"),
         };
         let who = self
+            .chat
             .composing
             .target()
             .and_then(|id| self.message_rows().into_iter().find(|m| m.id == id))
             .map(|m| m.author);
 
-        let text = match (&self.composing, who) {
+        let text = match (&self.chat.composing, who) {
             (Composing::Reply(_), Some(a)) => format!("{a} に{verb}中"),
             // A scrolled-away target cannot be resolved; still show the state.
             (Composing::Reply(_), None) => format!("{verb}中"),
@@ -3018,7 +2965,7 @@ impl Gumicord {
             return format!("  {hint}");
         }
         if self.uses_live() {
-            let channel = ChannelId::from(self.selected_channel);
+            let channel = ChannelId::from(self.chat.selected_channel);
             if self.live.is_loading(channel) {
                 return "  読み込んでいます…".to_owned();
             }
@@ -3101,8 +3048,8 @@ impl Gumicord {
         use gumicord_gateway::member_list::MemberRow;
         use gumicord_gateway::status::Status;
 
-        let guild = GuildId::from(self.selected_guild);
-        let channel = ChannelId::from(self.selected_channel);
+        let guild = GuildId::from(self.chat.selected_guild);
+        let channel = ChannelId::from(self.chat.selected_channel);
         let store = self.live.store();
         let messages: HashMap<u64, &gumicord_model::Message> = store
             .messages(channel)
@@ -3438,39 +3385,39 @@ impl Gumicord {
     /// that cannot be fetched says so instead of stranding the reader.
     fn jump_to_message(&mut self, target: u64) -> bool {
         if self.message_rows().iter().any(|m| m.id == target) {
-            self.pending_reveal = Some(target);
-            self.a11y_message = Some(target);
-            self.pending_jump = None;
+            self.chat.pending_reveal = Some(target);
+            self.chat.a11y_message = Some(target);
+            self.chat.pending_jump = None;
             return true;
         }
-        let channel = ChannelId::from(self.selected_channel);
+        let channel = ChannelId::from(self.chat.selected_channel);
         if !self.live.fetch_around(channel, target) {
             self.notify_toast("そのメッセージは読み込めませんでした".to_owned());
             return true;
         }
-        self.pending_jump = Some((channel, target));
+        self.chat.pending_jump = Some((channel, target));
         true
     }
 
     /// Settles a waiting jump once its messages arrive. Runs on the frame
     /// after the fetch lands: the rows have to exist before revealing.
     fn settle_jump(&mut self) {
-        let Some((channel, target)) = self.pending_jump else {
+        let Some((channel, target)) = self.chat.pending_jump else {
             return;
         };
-        if ChannelId::from(self.selected_channel) != channel {
-            self.pending_jump = None;
+        if ChannelId::from(self.chat.selected_channel) != channel {
+            self.chat.pending_jump = None;
             return;
         }
         if self.live.take_around_failed(channel, target) {
-            self.pending_jump = None;
+            self.chat.pending_jump = None;
             self.notify_toast("そのメッセージは読み込めませんでした".to_owned());
             return;
         }
         if self.message_rows().iter().any(|m| m.id == target) {
-            self.pending_reveal = Some(target);
-            self.a11y_message = Some(target);
-            self.pending_jump = None;
+            self.chat.pending_reveal = Some(target);
+            self.chat.a11y_message = Some(target);
+            self.chat.pending_jump = None;
         }
     }
 
@@ -3483,7 +3430,7 @@ impl Gumicord {
         let ink = crate::markdown::Ink::new(
             self.theme.as_ref(),
             self.match_ctx,
-            &self.reveals,
+            &self.chat.reveals,
             m.id,
             self.now,
         );
@@ -3497,7 +3444,7 @@ impl Gumicord {
 
         let names = StoreNames {
             store: self.live.store(),
-            guild: GuildId::from(self.selected_guild),
+            guild: GuildId::from(self.chat.selected_guild),
         };
         let node = UiNode::new(NodeId::ChatMessageContent)
             .with_data(m.id)
@@ -3670,29 +3617,29 @@ impl Gumicord {
         let mut changed = false;
 
         let guilds = self.guild_rows();
-        if !guilds.iter().any(|g| g.id == self.selected_guild) {
+        if !guilds.iter().any(|g| g.id == self.chat.selected_guild) {
             let Some(first) = guilds.first() else {
                 // READY has not arrived; select nothing.
                 return false;
             };
-            self.selected_guild = first.id;
-            self.selected_channel = 0;
+            self.chat.selected_guild = first.id;
+            self.chat.selected_channel = 0;
             changed = true;
         }
 
         let channels = self.openable_rows();
-        if !channels.iter().any(|c| c.id == self.selected_channel)
+        if !channels.iter().any(|c| c.id == self.chat.selected_channel)
             && let Some(first) = channels.first()
         {
-            self.selected_channel = first.id;
+            self.chat.selected_channel = first.id;
             changed = true;
         }
 
-        if self.selected_channel != 0 {
+        if self.chat.selected_channel != 0 {
             // A no-op after the first call.
             self.live.open_channel(
-                GuildId::from(self.selected_guild),
-                ChannelId::from(self.selected_channel),
+                GuildId::from(self.chat.selected_guild),
+                ChannelId::from(self.chat.selected_channel),
             );
         }
         changed
@@ -3847,7 +3794,7 @@ impl Gumicord {
         // frame could make the order flicker.
         self.live
             .store()
-            .entries_of(GuildId::from(self.selected_guild))
+            .entries_of(GuildId::from(self.chat.selected_guild))
             .map(|e| match e {
                 ChannelEntry::Category(c) => ChannelRow {
                     id: c.id.get(),
@@ -3898,10 +3845,10 @@ impl Gumicord {
         let me = self.login.session().logged_in().map(|l| l.me.user.id);
         // Which guild is open is known here, not from the message: REST
         // messages carry no `guild_id`.
-        let guild = GuildId::from(self.selected_guild);
+        let guild = GuildId::from(self.chat.selected_guild);
         self.live
             .store()
-            .messages(ChannelId::from(self.selected_channel))
+            .messages(ChannelId::from(self.chat.selected_channel))
             .iter()
             .map(|m| {
                 // REST messages carry no `member`.
