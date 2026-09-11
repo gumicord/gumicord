@@ -41,6 +41,11 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// The remote auth gateway.
 const GATEWAY: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
+/// Bare host, for failure diagnosis (resolving it separately tells DNS
+/// trouble apart from everything past it).
+const GATEWAY_HOST: &str = "remote-auth-gateway.discord.gg";
+/// Control hostname: resolving this too tells whether DNS itself works.
+const CONTROL_HOST: &str = "discord.com";
 
 /// Without an `Origin` the connection is refused.
 const ORIGIN: &str = "https://discord.com";
@@ -123,6 +128,23 @@ impl core::fmt::Debug for RemoteAuth {
     }
 }
 
+/// Resolves both the gateway and a control hostname after a connection
+/// failure, so the log tells DNS trouble apart from TLS and refusals.
+/// Failure-only: the handshake resolves on its own when healthy.
+async fn diagnose_connect() {
+    for host in [GATEWAY_HOST, CONTROL_HOST] {
+        match tokio::net::lookup_host((host, 443)).await {
+            Ok(addrs) => {
+                let addrs: Vec<_> = addrs.collect();
+                tracing::warn!(host, count = addrs.len(), ?addrs, "dns resolves");
+            }
+            Err(e) => {
+                tracing::warn!(host, kind = ?e.kind(), error = %e, "dns does not resolve");
+            }
+        }
+    }
+}
+
 impl RemoteAuth {
     /// Connects and generates the key pair, off the main thread since
     /// generation is slow.
@@ -137,7 +159,13 @@ impl RemoteAuth {
             .headers_mut()
             .insert("Origin", ORIGIN.parse().expect("定数なので必ず通る"));
 
-        let (ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let (ws, _) = match tokio_tungstenite::connect_async(request).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                diagnose_connect().await;
+                return Err(RemoteAuthError::Connect(e));
+            }
+        };
 
         let key = tokio::task::spawn_blocking(|| RsaPrivateKey::new(&mut OsRng, KEY_BITS))
             .await

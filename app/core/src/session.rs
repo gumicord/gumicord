@@ -834,7 +834,12 @@ async fn attempt(
     waker: Waker,
     store: Option<SecretStore>,
 ) -> Result<bool, String> {
-    let mut auth = RemoteAuth::connect().await.map_err(|e| e.to_string())?;
+    let mut auth = RemoteAuth::connect().await.map_err(|e| {
+        // Display alone cannot tell DNS apart from TLS and refusals; the
+        // debug chain carries the OS error underneath.
+        tracing::warn!(error = %e, debug = ?e, "remote auth connect failed");
+        e.to_string()
+    })?;
     let rest = RestClient::anonymous().map_err(|e| e.to_string())?;
 
     loop {
