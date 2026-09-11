@@ -384,17 +384,17 @@ P2 を先に着手した結果、[TSF テキストストアが不要だったこ
 
 **v0.1.0 で初めてプロジェクトの命題が検証される。**
 
-版への割り付けは以下のとおり。XL 2 件 (A2／I2) を v0.0.5 に隔離し、
+版への割り付けは以下のとおり。XL 1 件 (I2) を v0.0.5 に隔離し、
 v0.1.0 は検証のみとする。
 
 | # | 作業 | 規模 | 版 | リスク |
 |---|---|---|---|---|
 | A1 | Android: Gradle + NDK ラッパ、`android-game-activity` | M | v0.0.4 | `accesskit` が GameActivity のみ対応のため選択の余地がない |
-| A2 | **Android: `InputConnection` の JNI 橋渡し** | **XL** | v0.0.5 | **未検証。** まず標準経路で足りないか疑うこと ([ADR-0006](adr/0006-windows-ime-via-winit.md)) |
+| A2 | **Android: GameTextInput の橋渡し** | **M** | v0.0.5 | 生 JNI は書かない。GameActivity 内蔵の GameTextInput を `android-activity` 経由で駆動する ([ADR-0011](adr/0011-mobile-input-bridges.md)) |
 | A3 | Android: GLES バックエンド、セーフエリア、ソフトキーボード追従 | M | v0.0.4 | `PLT-040`, `PLT-041` |
 | A4 | Android: バックジェスチャ、バックグラウンド抑制 | S | v0.0.4 | `PLT-042`, `PLT-043` |
 | I1 | iOS: Xcode ラッパ | M | v0.0.4 | macOS 環境が必要 |
-| I2 | **iOS: `UITextInput` プロトコル** | **XL** | v0.0.5 | **未検証。**同上 |
+| I2 | **iOS: `UITextInput` プロトコル** | **XL** | v0.0.5 | 方針は確定 ([ADR-0011](adr/0011-mobile-input-bridges.md))。`objc2` で不可視エディタに実装する |
 | I3 | iOS: Metal バックエンド、セーフエリア、スワイプバック | M | v0.0.4 | |
 | I4 | iOS: `accesskit_ios` の適用 | M | v0.0.4 | 0.1.2 と若く、成熟度が読めない |
 | X1 | レスポンシブ (1/2/3 ペイン切り替え) | M | v0.0.4 | 🟡 **幅による出し分けは v0.0.1 で先行して済ませた。** 残るのは触って切り替える操作とセーフエリア (`PLT-046`) |
@@ -406,7 +406,7 @@ v0.1.0 は検証のみとする。
 
 ### 6.1 v0.0.5 の最大リスク
 
-**A2 と I2 が両方 XL で、両方とも未検証である。**
+**I2 が XL で未検証である。** A2 の調査は済み、標準経路 (GameTextInput) で足りる ([ADR-0011](adr/0011-mobile-input-bridges.md))。
 
 [ADR-0001 の見直し条件](adr/0001-native-rust-renderer.md)より:
 

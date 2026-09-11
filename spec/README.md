@@ -33,6 +33,8 @@
 | [0007](adr/0007-login-paths-and-captcha.md) | ログイン経路を 2 本持ち、captcha は OS に出させる | 承認 |
 | [0008](adr/0008-snap-layout-via-wndproc-subclass.md) | Windows のスナップレイアウトは親 HWND のサブクラス化で対応する | 承認 |
 | [0009](adr/0009-macos-linux-into-m1.md) | macOS / Linux デスクトップを M1 へ前倒しする | 承認 |
+| [0010](adr/0010-i18n-by-message-ids.md) | 多言語対応は文言 ID の表引きで行う | 承認 |
+| [0011](adr/0011-mobile-input-bridges.md) | モバイルのテキスト入力は自前橋渡しで実装する | 承認 |
 
 ## ルール
 
