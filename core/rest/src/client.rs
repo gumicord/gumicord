@@ -356,7 +356,12 @@ fn message_or_body(body: &str) -> String {
         }) => format!("エラーコード {code}"),
         _ => return body.to_owned(),
     };
-    match parsed.ok().and_then(|e| e.errors).as_ref().and_then(first_detail) {
+    match parsed
+        .ok()
+        .and_then(|e| e.errors)
+        .as_ref()
+        .and_then(first_detail)
+    {
         Some((path, detail)) => format!("{base}: {path}: {detail}"),
         None => base,
     }
@@ -366,11 +371,7 @@ fn message_or_body(body: &str) -> String {
 /// path. Discord nests indices as string keys (`embeds.0.description`), so
 /// objects suffice, but arrays are walked too.
 fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
-    fn walk(
-        value: &serde_json::Value,
-        path: &mut String,
-        out: &mut Option<(String, String)>,
-    ) {
+    fn walk(value: &serde_json::Value, path: &mut String, out: &mut Option<(String, String)>) {
         if out.is_some() {
             return;
         }
@@ -381,14 +382,10 @@ fn first_detail(errors: &serde_json::Value) -> Option<(String, String)> {
                     .and_then(|e| e.as_array())
                     .and_then(|a| a.first())
                 {
-                    let message = detail
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("");
+                    let message = detail.get("message").and_then(|m| m.as_str()).unwrap_or("");
                     // An empty entry tells nothing; siblings might.
                     if !message.is_empty() {
-                        let code =
-                            detail.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                        let code = detail.get("code").and_then(|c| c.as_str()).unwrap_or("");
                         let detail = if code.is_empty() {
                             message.to_owned()
                         } else {
