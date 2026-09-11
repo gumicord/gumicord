@@ -14,6 +14,8 @@
 //!
 //! See `spec/02-architecture.md`.
 
+#[cfg(target_os = "android")]
+pub mod android_text;
 pub mod captcha;
 pub mod clipboard;
 pub mod clock;
@@ -36,6 +38,7 @@ pub use secret::{SecretError, SecretStore};
 pub use share::export_crash_logs;
 pub use share::{ShareError, share_log};
 pub use text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument, TextInputHost};
+pub use text_input::{ImeField, ImeKind};
 pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
 #[cfg(target_os = "android")]

@@ -181,6 +181,18 @@ pub trait Application {
         None
     }
 
+    /// What the focused field wants from the soft keyboard, if anything.
+    /// Mobile only; desktop ignores it.
+    fn ime_field(&self) -> Option<crate::text_input::ImeField> {
+        None
+    }
+
+    /// The IME committed a newline in a single-line field (mobile only).
+    /// Multiline newlines never reach here; they stay in the text.
+    fn ime_newline(&mut self) -> bool {
+        false
+    }
+
     /// Commits and sends, on enter.
     ///
     /// Never called while composing: mistaking the enter that commits an IME
@@ -355,6 +367,12 @@ fn run_loop(
         window: None,
         renderer: None,
         backend_rotor: 0,
+        #[cfg(target_os = "android")]
+        android_app: None,
+        #[cfg(target_os = "android")]
+        android_text: crate::android_text::AndroidText::new(),
+        #[cfg(target_os = "android")]
+        next_ime_poll: std::time::Instant::now(),
         adapter: None,
         captcha: WebView2Captcha,
         cursor: (0.0, 0.0),
@@ -401,6 +419,16 @@ struct Host {
     /// probe children, so each failed attempt rotates to the next candidate
     /// instead of retrying a backend that cannot drive this window.
     backend_rotor: usize,
+    /// The activity for Android-only queries (IME state). Cloned on resume;
+    /// the same activity lives until the process exits.
+    #[cfg(target_os = "android")]
+    android_app: Option<winit::platform::android::activity::AndroidApp>,
+    /// GameTextInput bridge state (Android only).
+    #[cfg(target_os = "android")]
+    android_text: crate::android_text::AndroidText,
+    /// Next paced IME poll while a field is focused (Android only).
+    #[cfg(target_os = "android")]
+    next_ime_poll: std::time::Instant,
     /// Speaks to the OS screen reader. Created before the window first
     /// shows; without it Narrator never connects.
     adapter: Option<accesskit_winit::Adapter>,
@@ -785,8 +813,35 @@ impl Host {
             tracing::debug!(allowed = has_input, "toggled IME");
         }
         if !has_input {
+            #[cfg(target_os = "android")]
+            if self.android_text.is_live() {
+                self.android_text.blur();
+            }
             return;
         }
+
+        // Android drives text through GameTextInput (see android_text):
+        // reconcile the IME state into the document. winit never delivers
+        // either text or actions.
+        #[cfg(target_os = "android")]
+        let acted = {
+            let field = self.app.ime_field().unwrap_or_default();
+            if let (Some(app), Some(doc)) = (self.android_app.clone(), self.app.focused_document())
+            {
+                if !self.android_text.is_live() {
+                    self.android_text.focus(&app, &field, doc);
+                }
+                let (changed, newline) = self.android_text.poll(&app, doc);
+                if changed {
+                    self.request_redraw();
+                }
+                newline && self.app.ime_newline()
+            } else {
+                false
+            }
+        };
+        #[cfg(not(target_os = "android"))]
+        let acted = false;
 
         // The field's position comes from the hit record.
         let Some(field) = r
@@ -800,6 +855,10 @@ impl Host {
             winit::dpi::LogicalPosition::new(field.rect.x, field.rect.y),
             winit::dpi::LogicalSize::new(field.rect.w, field.rect.h),
         );
+        if acted {
+            self.restart_caret();
+            self.request_redraw();
+        }
     }
 
     /// Mirrors the login fields into the native proxies and polls their
@@ -1206,6 +1265,21 @@ impl ApplicationHandler<LoopEvent> for Host {
             }
         }
 
+        // Android IME polling: keystrokes raise no winit events, so a
+        // focused field paces its own polls. The poll itself runs in the
+        // redraw; here only the pace is set, so an idle field costs one
+        // frame per interval instead of a spin.
+        #[cfg(target_os = "android")]
+        {
+            if self.app.focused_document().is_some() {
+                if now >= self.next_ime_poll {
+                    self.next_ime_poll = now + std::time::Duration::from_millis(16);
+                    self.request_redraw();
+                }
+                soonest(self.next_ime_poll);
+            }
+        }
+
         // With no reason, sleep: a stale deadline wakes for no change.
         event_loop.set_control_flow(match until {
             Some(at) => ControlFlow::WaitUntil(at),
@@ -1245,6 +1319,11 @@ impl ApplicationHandler<LoopEvent> for Host {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        {
+            use winit::platform::android::ActiveEventLoopExtAndroid;
+            self.android_app = Some(event_loop.android_app().clone());
+        }
         if self.window.is_some() {
             return;
         }

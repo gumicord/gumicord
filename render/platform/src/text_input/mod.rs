@@ -23,8 +23,35 @@
 //! the IME nowhere to place them.
 
 mod document;
+pub mod offsets;
 
 pub use document::TextDocument;
+
+/// What the focused field wants from the soft keyboard (mobile only).
+/// Desktop ignores it; `winit` IME events carry no field metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImeKind {
+    Text,
+    Email,
+    Password,
+    Number,
+}
+
+/// One focused field's keyboard contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImeField {
+    pub kind: ImeKind,
+    pub multiline: bool,
+}
+
+impl Default for ImeField {
+    fn default() -> Self {
+        ImeField {
+            kind: ImeKind::Text,
+            multiline: false,
+        }
+    }
+}
 
 /// Where text input goes.
 ///

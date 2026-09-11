@@ -1484,6 +1484,42 @@ impl Application for Gumicord {
         }
     }
 
+    /// What the focused field wants from the soft keyboard (mobile only).
+    fn ime_field(&self) -> Option<gumicord_platform::ImeField> {
+        use gumicord_platform::{ImeField, ImeKind};
+        match self.login_field {
+            Some(LoginField::Email) => Some(ImeField {
+                kind: ImeKind::Email,
+                multiline: false,
+            }),
+            Some(LoginField::Password) => Some(ImeField {
+                kind: ImeKind::Password,
+                multiline: false,
+            }),
+            Some(LoginField::Totp) => Some(ImeField {
+                kind: ImeKind::Number,
+                multiline: false,
+            }),
+            Some(LoginField::Token) => Some(ImeField {
+                kind: ImeKind::Text,
+                multiline: false,
+            }),
+            None => self.input_focused.then_some(ImeField {
+                kind: ImeKind::Text,
+                multiline: true,
+            }),
+        }
+    }
+
+    /// The IME committed a newline in a single-line field (mobile only):
+    /// advance through the login form, or submit.
+    fn ime_newline(&mut self) -> bool {
+        match self.login_field {
+            Some(LoginField::Email) => self.focus_neighbor(true),
+            _ => self.submit(),
+        }
+    }
+
     /// Writes polled native text into the named login field, wherever focus
     /// currently sits: a paired fill lands in both fields at once.
     fn proxy_text(&mut self, field: gumicord_platform::ImeProxy, text: String) -> bool {
@@ -1845,6 +1881,24 @@ fn plugin_state_label(state: gumicord_plugin::PluginStateKind) -> &'static str {
 }
 
 impl Gumicord {
+    /// Moves focus between login fields for the keyboard's advance button.
+    /// No neighbor forward (or anywhere without one) acts instead; back from
+    /// the first field does nothing.
+    fn focus_neighbor(&mut self, next: bool) -> bool {
+        let target = match (self.login_field, next) {
+            (Some(LoginField::Email), true) => Some(LoginField::Password),
+            (Some(LoginField::Password), false) => Some(LoginField::Email),
+            _ => None,
+        };
+        match target {
+            Some(field) => {
+                self.login_field = Some(field);
+                true
+            }
+            None => next && self.submit(),
+        }
+    }
+
     /// Submits the active login step. Runs the password flow, hands off a TOTP
     /// code, or logs in with a bot token; nothing to send stays put.
     fn submit_login(&mut self) -> bool {

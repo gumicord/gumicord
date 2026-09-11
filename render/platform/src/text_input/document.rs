@@ -121,6 +121,32 @@ impl TextDocument {
         }
     }
 
+    /// Replaces the whole content, for IME reconciliation: while an IME is
+    /// connected it owns the text, so its state overwrites rather than
+    /// edits. Positions snap back to character boundaries and clamp to the
+    /// text; an empty composing range means none. The selection keeps the
+    /// given direction (`start` is the anchor).
+    pub fn replace_all(
+        &mut self,
+        text: &str,
+        selection: Range<usize>,
+        composing: Option<Range<usize>>,
+    ) {
+        self.text = text.to_owned();
+        let snap = |p: usize| {
+            let mut p = p.min(self.text.len());
+            while !self.text.is_char_boundary(p) {
+                p -= 1;
+            }
+            p
+        };
+        self.anchor = snap(selection.start);
+        self.caret = snap(selection.end);
+        self.composing = composing
+            .map(|r| snap(r.start)..snap(r.end))
+            .filter(|r| !r.is_empty());
+    }
+
     /// Deletes backwards.
     pub fn delete_back(&mut self) {
         if self.delete_selection() {
@@ -356,5 +382,27 @@ mod tests {
         assert_eq!(d.take(), "送信する");
         assert!(d.is_empty());
         assert_eq!(d.caret(), 0);
+    }
+
+    /// The IME owns the text while connected, so its state overwrites.
+    #[test]
+    fn replacing_all_takes_text_selection_and_composition() {
+        let mut d = doc("古い");
+        d.replace_all("新しいにほん", 9..9, Some(9..18));
+        assert_eq!(d.text(), "新しいにほん");
+        assert_eq!(d.caret(), 9);
+        assert!(!d.has_selection());
+        assert_eq!(d.composing(), Some(9..18));
+    }
+
+    /// Out-of-range and mid-character positions snap into place.
+    #[test]
+    fn replacing_all_snaps_positions() {
+        let mut d = TextDocument::new();
+        d.replace_all("あい", 1..9999, Some(2..2));
+        assert_eq!(d.caret(), "あい".len());
+        assert_eq!(d.selection(), 0.."あい".len());
+        // An empty composing range means none.
+        assert!(!d.is_composing());
     }
 }
