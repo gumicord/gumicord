@@ -1483,16 +1483,6 @@ impl Application for Gumicord {
         }
     }
 
-    /// Email and password mirror into native fields on iOS so the password
-    /// manager can fill them. Read on every platform; only iOS acts on it.
-    fn ime_proxy(&self) -> Option<gumicord_platform::ImeProxy> {
-        match self.login_field {
-            Some(LoginField::Email) => Some(gumicord_platform::ImeProxy::Username),
-            Some(LoginField::Password) => Some(gumicord_platform::ImeProxy::Password),
-            _ => None,
-        }
-    }
-
     /// What the focused field wants from the soft keyboard (mobile only).
     fn ime_field(&self) -> Option<gumicord_platform::ImeField> {
         use gumicord_platform::{ImeField, ImeKind};
@@ -1527,21 +1517,6 @@ impl Application for Gumicord {
             Some(LoginField::Email) => self.focus_neighbor(true),
             _ => self.submit(),
         }
-    }
-
-    /// Writes polled native text into the named login field, wherever focus
-    /// currently sits: a paired fill lands in both fields at once.
-    fn proxy_text(&mut self, field: gumicord_platform::ImeProxy, text: String) -> bool {
-        let doc = match field {
-            gumicord_platform::ImeProxy::Username => &mut self.login_email,
-            gumicord_platform::ImeProxy::Password => &mut self.login_input,
-        };
-        if doc.text() == text {
-            return false;
-        }
-        doc.take();
-        doc.insert(&text);
-        true
     }
 
     /// Sends, edits or replies, depending on [`Composing`]. Missing that
@@ -6417,40 +6392,6 @@ mod login_tests {
 
         assert!(a.pressed(&[]));
         assert_eq!(a.login_field, None, "欄外を押してもフォーカスが残る");
-    }
-
-    /// Email and password ask for native mirrors; nothing else does.
-    #[test]
-    fn login_fields_report_their_proxy_kind() {
-        use gumicord_platform::ImeProxy;
-
-        let mut a = pending();
-        assert_eq!(a.ime_proxy(), None);
-        a.login_field = Some(LoginField::Email);
-        assert_eq!(a.ime_proxy(), Some(ImeProxy::Username));
-        a.login_field = Some(LoginField::Password);
-        assert_eq!(a.ime_proxy(), Some(ImeProxy::Password));
-        a.login_field = Some(LoginField::Totp);
-        assert_eq!(a.ime_proxy(), None);
-        a.login_field = None;
-        a.input_focused = true;
-        assert_eq!(a.ime_proxy(), None);
-    }
-
-    /// Polled native text lands in the named field, wherever focus sits: a
-    /// paired fill reaches both fields from one poll.
-    #[test]
-    fn proxy_text_reaches_the_named_field() {
-        use gumicord_platform::ImeProxy;
-
-        let mut a = pending();
-        a.login_field = Some(LoginField::Email);
-        assert!(a.proxy_text(ImeProxy::Password, "secret".to_owned()));
-        assert_eq!(a.login_input.text(), "secret");
-        assert!(a.login_email.text().is_empty());
-        assert!(!a.proxy_text(ImeProxy::Password, "secret".to_owned()));
-        assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
-        assert_eq!(a.login_email.text(), "a@b.c");
     }
 
     /// Clicking a login field focuses exactly that one, and typing lands in the

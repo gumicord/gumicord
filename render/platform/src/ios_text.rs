@@ -785,8 +785,21 @@ impl IosText {
         };
         let (keyboard, secure, autocorrect, autocap, content) = match field.kind {
             ImeKind::Text => (UIKeyboardType::Default, false, true, true, None),
-            ImeKind::Email => (UIKeyboardType::EmailAddress, false, false, false, None),
-            ImeKind::Password => (UIKeyboardType::Default, true, false, false, None),
+            ImeKind::Email => (
+                UIKeyboardType::EmailAddress,
+                false,
+                false,
+                false,
+                // External linkage: reading the static needs unsafe.
+                Some(unsafe { objc2_ui_kit::UITextContentTypeUsername.retain() }),
+            ),
+            ImeKind::Password => (
+                UIKeyboardType::Default,
+                true,
+                false,
+                false,
+                Some(unsafe { objc2_ui_kit::UITextContentTypePassword.retain() }),
+            ),
             ImeKind::Number => (
                 UIKeyboardType::NumberPad,
                 false,
@@ -936,6 +949,18 @@ fn place_editor(editor: &ImeEditor, x: f64, y: f64) {
     use objc2_foundation::{NSPoint, NSSize};
     editor.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(1.0, 1.0)));
     editor.setAlpha(0.0);
+}
+
+/// winit's view, the only legal parent. `None` when the handle is missing.
+pub fn parent_view(window: &winit::window::Window) -> Option<&UIView> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::UiKit(handle) => {
+            Some(unsafe { &*handle.ui_view.as_ptr().cast::<UIView>() })
+        }
+        _ => None,
+    }
 }
 
 /// Keyboard end-frame height in points, if the notice carries one.

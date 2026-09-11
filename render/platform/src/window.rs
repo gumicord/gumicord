@@ -76,14 +76,6 @@ pub struct RevealRequest {
     pub key: Option<Key>,
 }
 
-/// Which login field an iOS proxy mirrors, if any. Only these two pair
-/// for password autofill; everything else keeps winit's keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImeProxy {
-    Username,
-    Password,
-}
-
 /// The application, as the platform layer sees it. No OS types appear here,
 /// so winit never leaks into the app crate.
 pub trait Application {
@@ -166,18 +158,6 @@ pub trait Application {
     /// The document receiving input, if any. This layer has no notion of
     /// focus; the app decides.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
-        None
-    }
-
-    /// Writes polled native text into the named login field. Only iOS
-    /// proxies call this; elsewhere it is never invoked.
-    fn proxy_text(&mut self, _field: ImeProxy, _text: String) -> bool {
-        false
-    }
-
-    /// The login field an iOS proxy should mirror, if any. Only iOS reads
-    /// this; elsewhere the value is ignored.
-    fn ime_proxy(&self) -> Option<ImeProxy> {
         None
     }
 
@@ -386,8 +366,6 @@ fn run_loop(
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
-        #[cfg(target_os = "ios")]
-        proxy: None,
         frame_us: std::collections::VecDeque::new(),
         first_frame: true,
         started: std::time::Instant::now(),
@@ -461,9 +439,6 @@ struct Host {
     modifiers: ModifiersState,
     /// Whether IME is allowed; only changes are told to the OS.
     ime_allowed: bool,
-    /// Native login-field mirrors for iOS password autofill.
-    #[cfg(target_os = "ios")]
-    proxy: Option<crate::proxy::Proxy>,
     /// Hidden UITextInput editor state (iOS only).
     #[cfg(target_os = "ios")]
     ios_text: crate::ios_text::IosText,
@@ -794,23 +769,13 @@ impl Host {
     /// Tells the IME where the field is, which is what positions the
     /// candidate window; without it, it appears in a corner of the screen.
     fn update_ime_area(&mut self) {
-        // While a native proxy mirrors a login field it owns the keyboard;
-        // winit's key-only view would fight it for first responder.
-        #[cfg(target_os = "ios")]
-        let proxy_changed = self.sync_ime_proxy();
-        #[cfg(not(target_os = "ios"))]
-        let proxy_changed = false;
-        if proxy_changed {
-            self.request_redraw();
-        }
-
         let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
             return;
         };
         let focused = self.app.focused_document().is_some();
         // winit's key-only view would fight a native editor for first
-        // responder, so it stays off while either owns the keyboard.
-        let has_input = focused && !self.proxy_active() && !self.editor_active();
+        // responder, so it stays off while one owns the keyboard.
+        let has_input = focused && !self.editor_active();
 
         // No IME events arrive until this is allowed; winit defaults to off.
         //
@@ -835,34 +800,30 @@ impl Host {
             return;
         }
 
-        // iOS edits non-login fields through the hidden UITextInput editor
-        // (see ios_text); login email/password keep the autofill proxies.
-        // It runs while focused even though winit IME stays off above.
+        // iOS edits every field through the hidden UITextInput editor
+        // (see ios_text). It runs while focused even though winit IME
+        // stays off above.
         #[cfg(target_os = "ios")]
         let acted = {
-            if self.app.ime_proxy().is_some() {
-                false
-            } else {
-                let field = self.app.ime_field().unwrap_or_default();
-                let (x, y) = self.field_origin();
-                let parent = self
-                    .window
-                    .as_ref()
-                    .and_then(|w| crate::proxy::parent_view(w));
-                match (parent, self.app.focused_document()) {
-                    (Some(parent), Some(doc)) => {
-                        if !self.ios_text.ensure(parent, &field, doc, x, y) {
-                            false
-                        } else {
-                            let (changed, newline) = self.ios_text.poll(doc);
-                            if changed {
-                                self.request_redraw();
-                            }
-                            newline && self.app.ime_newline()
+            let field = self.app.ime_field().unwrap_or_default();
+            let (x, y) = self.field_origin();
+            let parent = self
+                .window
+                .as_ref()
+                .and_then(|w| crate::ios_text::parent_view(w));
+            match (parent, self.app.focused_document()) {
+                (Some(parent), Some(doc)) => {
+                    if !self.ios_text.ensure(parent, &field, doc, x, y) {
+                        false
+                    } else {
+                        let (changed, newline) = self.ios_text.poll(doc);
+                        if changed {
+                            self.request_redraw();
                         }
+                        newline && self.app.ime_newline()
                     }
-                    _ => false,
                 }
+                _ => false,
             }
         };
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -905,49 +866,6 @@ impl Host {
             self.restart_caret();
             self.request_redraw();
         }
-    }
-
-    /// Mirrors the login fields into the native proxies and polls their
-    /// text back. True when the tree needs another look.
-    #[cfg(target_os = "ios")]
-    fn sync_ime_proxy(&mut self) -> bool {
-        let want = self.app.ime_proxy();
-        let text = self.app.focused_document().map(|d| d.text().to_owned());
-        let Some(parent) = self
-            .window
-            .as_ref()
-            .and_then(|w| crate::proxy::parent_view(w))
-        else {
-            return false;
-        };
-        let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
-        proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
-        // Keystrokes raise no events while winit IME is off. Polling rides
-        // the paced redraws (see `next_ime_poll`) instead of spinning here:
-        // spinning redraws every frame while a field is up.
-        let mut changed = false;
-        if let Some((kind, event)) = proxy.poll() {
-            match event {
-                crate::proxy::ProxyEvent::Text(text) => {
-                    changed |= self.app.proxy_text(kind, text);
-                }
-                crate::proxy::ProxyEvent::Submitted(text) => {
-                    changed |= self.app.proxy_text(kind, text);
-                    changed |= self.app.submit();
-                }
-            }
-        }
-        changed
-    }
-
-    #[cfg(target_os = "ios")]
-    fn proxy_active(&self) -> bool {
-        self.proxy.as_ref().is_some_and(|p| p.is_active())
-    }
-
-    #[cfg(not(target_os = "ios"))]
-    fn proxy_active(&self) -> bool {
-        false
     }
 
     /// Whether the hidden editor owns the keyboard (iOS only).

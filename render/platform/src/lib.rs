@@ -22,8 +22,6 @@ pub mod clock;
 pub mod dirs;
 #[cfg(target_os = "ios")]
 pub mod ios_text;
-#[cfg(target_os = "ios")]
-pub mod proxy;
 pub mod secret;
 pub mod share;
 pub mod text_input;
@@ -45,7 +43,7 @@ pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
 #[cfg(target_os = "android")]
 pub use window::run_android;
-pub use window::{Application, FrameCx, ImeProxy, PlatformError, RevealRequest, Waker, run};
+pub use window::{Application, FrameCx, PlatformError, RevealRequest, Waker, run};
 
 /// Writes panics where they can be found: stderr vanishes on the phone,
 /// so the message survives in the data directory past the crash that
