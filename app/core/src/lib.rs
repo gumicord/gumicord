@@ -2807,12 +2807,19 @@ impl Gumicord {
 
         // A form the user chose stays up while the login runs or even fails, so
         // its error is shown on the form, not bounced to the QR.
-        let form = self.login_form.or(match s {
-            Session::Password => Some(LoginField::Password),
+        //
+        // The override pins only the password form: TOTP and token steps
+        // always follow the session, or the override strands the flow on
+        // the password screen (mobile never shows QR, so it is always set
+        // there).
+        let form = match s {
             Session::PasswordTotp => Some(LoginField::Totp),
             Session::Token => Some(LoginField::Token),
-            _ => None,
-        });
+            _ => self.login_form.or(match s {
+                Session::Password => Some(LoginField::Password),
+                _ => None,
+            }),
+        };
 
         match form {
             Some(LoginField::Email | LoginField::Password) => {
@@ -6267,6 +6274,40 @@ mod login_tests {
         let back = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_qr"));
         assert!(a.pressed(std::slice::from_ref(&back)), "QRボタンが効かない");
         assert!(a.login_form.is_none(), "QRに戻っていない");
+    }
+
+    /// MFA must reach the TOTP screen even while the password-form override
+    /// is set: the override used to strand the flow on the password screen
+    /// with no visible progress (mobile pins it from the start, having no
+    /// QR screen).
+    #[test]
+    fn the_totp_screen_shows_despite_the_password_override() {
+        let mut a = pending();
+        // In through the password form, like a phone.
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        assert!(a.login_form.is_some());
+        // Discord asked for a second factor.
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+        });
+        let tree = a.build_tree(Panes::Three);
+        let mut slots = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginField {
+                slots.push(n.key.clone());
+            }
+        });
+        assert!(
+            slots.contains(&Some(Key::Slot("totp"))),
+            "TOTP screen missing: {slots:?}"
+        );
+        assert!(
+            !slots.contains(&Some(Key::Slot("password"))),
+            "password form lingers: {slots:?}"
+        );
     }
 
     /// A press outside every login field releases focus; otherwise the
