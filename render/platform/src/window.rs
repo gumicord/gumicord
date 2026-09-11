@@ -1057,14 +1057,16 @@ impl Host {
             for image in &backgrounds {
                 r.put_background(image);
             }
-            let mut viewport = r.viewport();
+            let viewport = r.viewport();
             // The OS keyboard covers the bottom instead of resizing the
             // window, so lay out above it. Touches landing on the covered
             // part hit nothing, which is correct: the keyboard owns them.
             #[cfg(target_os = "ios")]
-            {
+            let viewport = {
+                let mut viewport = viewport;
                 viewport.h = (viewport.h - self.ios_text.keyboard_height()).max(0.0);
-            }
+                viewport
+            };
             let cx = FrameCx {
                 viewport,
                 scale: r.scale(),
