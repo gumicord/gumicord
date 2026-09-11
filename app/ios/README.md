@@ -21,7 +21,8 @@ passing the Documents directory across lives in `app/core`.
 - **Text input through a hidden `UITextInput` editor** (`render/platform`
   `ios_text`, ADR-0011). winit's view only speaks `UIKeyInput`; the 1px
   editor beside it gives conversion, candidates and autocorrect while pixels
-  stay ours. Login email/password keep the autofill proxies. Keyboard height
+  stay ours. Every field edits through it, with content types set per
+  field. Keyboard height
   comes from `UIKeyboardWillShow/Hide` notices and shrinks the layout
   viewport (`PLT-040`).
 - **No signing.** `CODE_SIGNING_ALLOWED=NO`; CI zips the unsigned `.app` as `Payload/` into an `.ipa` for sideloading. Passing App Store review is unlikely anyway.

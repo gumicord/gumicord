@@ -921,6 +921,15 @@ impl Host {
             // Once, when the fold lands: files seen, faces parsed, CJK among
             // them. Phones have no debugger; this file says why glyphs miss.
             if let Some(stats) = self.renderer.as_ref().and_then(Renderer::font_stats) {
+                // The shared log carries the same line: fonts.log is not
+                // exported, but the run log is.
+                tracing::info!(
+                    files = stats.files,
+                    faces = stats.faces,
+                    cjk = stats.cjk,
+                    cached = stats.from_cache,
+                    "system fonts folded in",
+                );
                 crate::write_diag_file(
                     "fonts.log",
                     &format!(

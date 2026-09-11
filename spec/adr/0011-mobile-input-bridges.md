@@ -50,7 +50,7 @@ GameActivity は GameTextInput を内蔵している (`onCreateInputConnection` 
 
 ### I2: `UITextInput` を `objc2` で実装する
 
-`winit` の iOS ビューは `UIKeyInput` しか話さないため、プロトコル実装は自前になる。`winit` のビューの兄弟として不可視のエディタビューを置き、そこに `UITextInput` (+ `UIKeyInput` + `UITextInputTraits`) を実装する。ログインプロキシ (`proxy.rs`) と違い、**本物の `UITextInput`** なので変換・候補・自動修正は OS の標準動作になり、候補ウィンドウの位置指定 (`PLT-001`) も正しく効く。
+`winit` の iOS ビューは `UIKeyInput` しか話さないため、プロトコル実装は自前になる。`winit` のビューの兄弟として不可視のエディタビューを置き、そこに `UITextInput` (+ `UIKeyInput` + `UITextInputTraits`) を実装する。**本物の `UITextInput`** なので変換・候補・自動修正は OS の標準動作になり、候補ウィンドウの位置指定 (`PLT-001`) も正しく効く。ログインフィールドの不可視プロキシは性能問題のため廃止し、全欄をエディタに一本化した。
 
 あわせて殻を直す。欄外タップで blur＋resign (キーボードを閉じる)、プロキシの毎フレームスピンをやめてイベント＋タイマー駆動にする。キーボードの高さ追従 (`PLT-040`) は iOS のキーボード通知で取る。
 

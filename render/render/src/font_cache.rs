@@ -34,7 +34,7 @@ pub struct Stats {
 /// Fills the database, from cache where the files did not move.
 pub fn populate(db: &mut Database, dir: Option<&Path>) -> Stats {
     let Some(dir) = dir else {
-        db.load_system_fonts();
+        load_platform_fonts(db);
         return stats_of(db, 0, false);
     };
     let walked = walk_fonts();
@@ -46,12 +46,22 @@ pub fn populate(db: &mut Database, dir: Option<&Path>) -> Stats {
             true
         }
         _ => {
-            db.load_system_fonts();
+            load_platform_fonts(db);
             store(db, dir, &walked);
             false
         }
     };
     stats_of(db, walked.total_files, from_cache)
+}
+
+/// `Database::load_system_fonts` with the platform gap closed: fontdb
+/// enumerates nothing on Android (no fontconfig, no Android branch), so a
+/// cache miss left the database empty and Japanese as tofu. `/system/fonts`
+/// holds Noto (including CJK) and reads from the sandbox.
+fn load_platform_fonts(db: &mut Database) {
+    #[cfg(target_os = "android")]
+    db.load_fonts_dir("/system/fonts");
+    db.load_system_fonts();
 }
 
 fn stats_of(db: &Database, files: usize, from_cache: bool) -> Stats {
