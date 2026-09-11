@@ -58,6 +58,7 @@ use gumicord_uitree::value::Color;
 use gumicord_uitree::{Anchor, DataKind, Editable, Key, NodeId, State, UiNode};
 use live::Live;
 use pages::chat::Composing;
+use pages::chat::{ChannelRow, GuildRow, MessageRow, ReplyRef};
 use pages::login::LoginField;
 use session::Login;
 
@@ -2190,39 +2191,6 @@ impl Gumicord {
         true
     }
 
-    /// The document a field menu and its items act on: the focused login field
-    /// if any, else the composer. Read-only; [`focused_document`] is the
-    /// mutable twin used to actually edit it.
-    ///
-    /// [`focused_document`]: crate::Application::focused_document
-    fn field_doc(&self) -> &TextDocument {
-        match self.login_view.field {
-            Some(LoginField::Email) => &self.login_view.email,
-            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => &self.login_view.input,
-            None => &self.chat.input,
-        }
-    }
-
-    /// A field's menu, desktop only. Lists only what would do something.
-    fn field_menu(&self) -> Vec<crate::menu::Item> {
-        use crate::menu::{Action, Item};
-        let doc = self.field_doc();
-        let mut items = Vec::new();
-
-        if !doc.selection().is_empty() {
-            items.push(Item::new(Action::Cut, "切り取り").icon("cut"));
-            items.push(Item::new(Action::CopySelection, "コピー").icon("copy"));
-        }
-        // Not read: opening the clipboard takes it from other programs, which
-        // is not something to do every time a menu opens.
-        items.push(Item::new(Action::Paste, "貼り付け").icon("paste"));
-
-        if !doc.is_empty() {
-            items.push(Item::new(Action::SelectAll, "すべて選択").icon("select_all"));
-        }
-        items
-    }
-
     /// The custom title bar. Buttons are told apart by their slot, which is
     /// all the platform layer reads.
     fn titlebar(&self) -> UiNode {
@@ -2252,146 +2220,6 @@ impl Gumicord {
                     .child(button("maximize", "window.maximize"))
                     .child(button("close", "window.close")),
             )
-    }
-
-    /// The guild list.
-    fn guild_list(&self) -> UiNode {
-        let mut list = UiNode::new(NodeId::NavGuildList).child(
-            UiNode::text(NodeId::NavGuildListHome, "DM").with_state_if(
-                self.is_hovered(NodeId::NavGuildListHome, None),
-                State::Hover,
-            ),
-        );
-
-        for g in self.guild_rows() {
-            // The folder header; pressing it folds.
-            if g.folder_of_own.is_some() {
-                list = list.child(self.folder_face(&g));
-                continue;
-            }
-            // Contents belong to the folder; emitting them as siblings too
-            // would duplicate them.
-            if g.in_folder {
-                continue;
-            }
-
-            list = list.child(self.guild_item(&g));
-        }
-        list.children(self.scrollbar(NodeId::NavGuildList))
-    }
-
-    /// One guild, identical inside and outside a folder.
-    fn guild_item(&self, g: &GuildRow) -> UiNode {
-        let selected = g.id == self.chat.selected_guild;
-        let hovered = self.hovered_id(NodeId::NavGuildListItem, g.id);
-
-        // The container is wider than the icon, leaving a lane at the left
-        // for the pill.
-        let icon = face(NodeId::NavGuildListItemIcon, g.icon.as_deref(), &g.name)
-            .with_data(g.id)
-            .with_state_if(selected, State::Selected)
-            .with_state_if(hovered, State::Hover)
-            .with_state_if(g.in_folder, State::Grouped);
-
-        UiNode::new(NodeId::NavGuildListItem)
-            .with_id_key(g.id)
-            .with_data(g.id)
-            .with_state_if(selected, State::Selected)
-            .with_state_if(g.unread, State::Unread)
-            .with_state_if(g.mentions > 0, State::Mentioned)
-            // Carried as state, not a spacer node: a spacer bakes in the
-            // indent and takes it away from the theme.
-            .with_state_if(g.in_folder, State::Grouped)
-            .with_state_if(hovered, State::Hover)
-            .children(self.guild_pill(g, selected, hovered))
-            .child(icon)
-            // Counts only; the pill already says there is something unread.
-            .children((g.mentions > 0).then(|| {
-                UiNode::text(NodeId::NavGuildListItemBadge, g.mentions.to_string()).with_data(g.id)
-            }))
-    }
-
-    /// The pill at a guild's left edge.
-    ///
-    /// ```text
-    ///   ▍◯   selected   tall
-    ///   ▪◯   unread     a dot
-    ///   ▎◯   hovered    in between
-    ///    ◯   otherwise  absent
-    /// ```
-    ///
-    /// Absent rather than zero-height when it would say nothing, so a visible
-    /// pill always means something. The size is the theme's; this only says
-    /// why it is there.
-    fn guild_pill(&self, g: &GuildRow, selected: bool, hovered: bool) -> Option<UiNode> {
-        if !selected && !hovered && !g.unread {
-            return None;
-        }
-        Some(
-            UiNode::new(NodeId::NavGuildListItemPill)
-                .with_data(g.id)
-                .with_state_if(selected, State::Selected)
-                .with_state_if(g.unread, State::Unread)
-                .with_state_if(hovered, State::Hover),
-        )
-    }
-
-    /// One folder. Open, it wraps its contents.
-    ///
-    /// ```text
-    ///   folded          open
-    ///   ┌───────┐      ┌───────┐   one background
-    ///   │ ▢ ▢ │      │   ▱   │   behind both
-    ///   │ ▢ ▢ │      │  ▢   │
-    ///   └───────┘      │  ▢   │
-    ///                     └───────┘
-    /// ```
-    ///
-    /// Folded, it tiles the icons inside, so what was folded away is visible
-    /// without unfolding.
-    ///
-    /// No tiles while open, or the same icons appear twice. Contents stay
-    /// children, or the background stops covering them and the folder's extent
-    /// becomes invisible.
-    fn folder_face(&self, row: &GuildRow) -> UiNode {
-        let id = row.folder_of_own.unwrap_or(row.id);
-        // Only carried; where it lands is the theme's call.
-        let tint = row.tint.map(Color::from_rgb);
-        let node = UiNode::new(NodeId::NavGuildListFolder)
-            .with_id_key(id)
-            .with_tint_opt(tint)
-            .with_state_if(row.collapsed, State::Collapsed)
-            .with_state_if(
-                self.hovered_id(NodeId::NavGuildListFolder, id),
-                State::Hover,
-            );
-
-        if !row.collapsed {
-            return node
-                .child(UiNode::icon(NodeId::NavGuildListFolderIcon, "folder").with_tint_opt(tint))
-                .children(row.members.iter().map(|m| self.guild_item(m)));
-        }
-
-        // Rows and columns; there is no grid primitive.
-        let mut grid = UiNode::new(NodeId::LayoutColumn);
-        for pair in row.members.chunks(2).take(FOLDER_TILES / 2) {
-            let mut line = UiNode::new(NodeId::LayoutRow);
-            for m in pair {
-                line = line.child(
-                    face(NodeId::NavGuildListItemIcon, m.icon.as_deref(), &m.name)
-                        .with_id_key(m.id)
-                        // `collapsed`, not `grouped`.
-                        //
-                        // `grouped` means a guild inside an open folder,
-                        // drawn at normal size; this is a tile on a folded
-                        // one. Sharing a state would break one while fixing
-                        // the other. The size is the theme's.
-                        .with_state(State::Collapsed),
-                );
-            }
-            grid = grid.child(line);
-        }
-        node.child(grid)
     }
 
     fn channel_list(&self) -> UiNode {
@@ -3361,77 +3189,6 @@ impl crate::markdown::Names for StoreNames<'_> {
             .role_name(self.guild, RoleId::from(id))
             .map(str::to_owned)
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Display rows
-//
-//  Demo and live data meet here, so the tree builder never has to ask which
-//  one it is holding.
-// ═══════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Clone)]
-struct GuildRow {
-    id: u64,
-    name: String,
-    /// Icon URL; the initials stand in when absent.
-    icon: Option<String>,
-    unread: bool,
-    mentions: u32,
-    /// The folder id, when this row is a folder header.
-    folder_of_own: Option<u64>,
-    /// Whether it sits inside a folder; the indent is the theme's.
-    in_folder: bool,
-    /// Whether the folder is folded.
-    collapsed: bool,
-    /// The folder's colour; where it lands is the theme's call.
-    tint: Option<u32>,
-    /// What the folder holds: children when open, tiles when folded.
-    members: Vec<GuildRow>,
-}
-
-#[derive(Debug, Clone)]
-struct ChannelRow {
-    id: u64,
-    name: String,
-    icon: &'static str,
-    topic: Option<String>,
-    unread: bool,
-    mentions: u32,
-    /// A category heading; nothing opens.
-    category: bool,
-}
-
-struct MessageRow {
-    id: u64,
-    author: String,
-    /// Avatar URL; the initials stand in when absent.
-    avatar: Option<String>,
-    /// The role colour; where it lands is the theme's call.
-    tint: Option<u32>,
-    time: String,
-    /// Local day label, also the grouping key: equal strings share a day.
-    day: String,
-    /// Whole seconds, to tell a live run from yesterday's tail.
-    unix: i64,
-    /// The parsed body. The raw string is deliberately absent: holding both
-    /// invites drawing from the wrong one, and only the reader would notice.
-    blocks: Vec<gumicord_markdown::Block>,
-    mentioned: bool,
-    /// The answered message, if this replies to one (FR-028). Display only:
-    /// pressing it to jump there is a later piece.
-    reply: Option<ReplyRef>,
-}
-
-/// Who and what a reply answers: one line, like Discord.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReplyRef {
-    author: String,
-    snippet: String,
-    /// Small avatar URL; everyone has one, default included.
-    avatar: Option<String>,
-    /// The answered message, to jump to on press.
-    target: u64,
 }
 
 /// How many characters of a referenced message show.
