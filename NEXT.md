@@ -67,8 +67,9 @@
 
 ## v0.0.5 — モバイル入力
 
-- Android／iOS のテキスト入力層のみ。まず標準経路で足りるかを疑うこと
-  (Windows の教訓)。不可なら ADR-0001 の再検討へ
+- Android は実装済み (`6d88d87`、要実機確認)。iOS の `UITextInput` 橋渡しが残り。方針は [ADR-0011](spec/adr/0011-mobile-input-bridges.md)
+- 残作業: iOS 不可視エディタ (`objc2` で `UITextInput` 実装)、欄外タップの明示 resign、プロキシのスピン解消、キーボード高さ追従 (`PLT-040`)
+- Android 実機確認項目: 日本語変換の確定・候補、メール→パスワードの前進、送信、欄外タップで閉じること
 
 ---
 
