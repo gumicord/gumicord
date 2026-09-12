@@ -914,7 +914,10 @@ impl Page {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            // sRGB bytes in, linear out: theme colours convert on the
+            // CPU, so images must decode on sample or they render
+            // washed out next to them. Glyph alpha is unaffected.
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
