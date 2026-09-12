@@ -905,24 +905,10 @@ fn pick_adapter(
     surface: Option<&wgpu::Surface<'_>>,
     backends: wgpu::Backends,
 ) -> Option<wgpu::Adapter> {
-    // Headless screenshots prefer software rendering everywhere, so one
-    // blessed image holds across machines. The instance backends above
-    // still apply, so probed-out drivers stay out.
-    if surface.is_none() {
-        let fallback = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: true,
-            ..Default::default()
-        }));
-        if let Ok(a) = fallback {
-            return Some(a);
-        }
-    }
     let adapters = pollster::block_on(instance.enumerate_adapters(backends));
-    // An explicit backend wins over the candidate order; a broken or
-    // unknown one falls through to the order below instead of failing
-    // startup. This is how one backend is tried in isolation.
+    // An explicit backend wins everywhere, headless runs included; a
+    // broken or unknown one falls through to the order below instead of
+    // failing startup. This is how one backend is tried in isolation.
     if let Ok(name) = std::env::var("WGPU_BACKEND") {
         let wanted = crate::probe::backend_of(&name.to_ascii_lowercase());
         match wanted.filter(|w| backends.contains(*w)) {
@@ -946,6 +932,20 @@ fn pick_adapter(
             }
         }
     }
+    // Headless screenshots prefer software rendering everywhere, so one
+    // blessed image holds across machines. The instance backends above
+    // still apply, so probed-out drivers stay out.
+    if surface.is_none() {
+        let fallback = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: true,
+            ..Default::default()
+        }));
+        if let Ok(a) = fallback {
+            return Some(a);
+        }
+    }
     for wanted in CANDIDATES {
         if !backends.contains(*wanted) {
             continue;
@@ -958,7 +958,7 @@ fn pick_adapter(
             return Some(a.clone());
         }
     }
-    // Failing that, anything will do. An explicit `WGPU_BACKEND` lands here.
+    // Failing that, anything will do.
     // (The headless fallback above already tried software first.)
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
