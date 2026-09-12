@@ -263,6 +263,16 @@ impl Floating {
     }
 }
 
+/// The sheet grabber, centred. The layout engine has no main-axis
+/// centring, so spacers eat the slack on both sides; the pill keeps a
+/// slot so the theme can tell it from any other row.
+pub(crate) fn sheet_handle() -> UiNode {
+    UiNode::new(NodeId::OverlaySheetHandle)
+        .child(UiNode::new(NodeId::LayoutSpacer))
+        .child(UiNode::new(NodeId::LayoutRow).with_key(Key::Slot("sheet_handle_pill")))
+        .child(UiNode::new(NodeId::LayoutSpacer))
+}
+
 /// Wraps content in the layer and scrim.
 ///
 /// The scrim comes first: drawing follows tree order, so putting it last
@@ -289,7 +299,7 @@ impl Menu {
                 .with_anchor(Anchor::at(self.at.0, self.at.1))
                 .child(menu),
             Present::Sheet => UiNode::new(NodeId::OverlaySheet)
-                .child(UiNode::new(NodeId::OverlaySheetHandle))
+                .child(sheet_handle())
                 .child(menu),
         };
 

@@ -820,7 +820,8 @@
       }
     },
     {
-      "select": "overlay.sheet.handle",
+      "select": "layout.row",
+      "when": { "slot": "sheet_handle_pill" },
       "style": {
         "width": 36,
         "height": 4,

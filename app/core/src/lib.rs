@@ -1774,8 +1774,7 @@ impl Gumicord {
                     .children(self.sidebar(Panes::Four))
             })
             .child_if(self.chat.member_sheet_open, || {
-                let sheet = UiNode::new(NodeId::OverlaySheet)
-                    .child(UiNode::new(NodeId::OverlaySheetHandle));
+                let sheet = UiNode::new(NodeId::OverlaySheet).child(crate::menu::sheet_handle());
                 // The sheet's own container fills the width; the side
                 // pane's fixed-width one would leave a narrow rail.
                 let mut list = UiNode::new(NodeId::NavMemberListSheet);

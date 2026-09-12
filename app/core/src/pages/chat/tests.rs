@@ -443,6 +443,40 @@ fn member_sheet_spans_and_caps() {
     );
 }
 
+/// The sheet grabber sits centred at the top, not stuck to the left edge.
+#[test]
+fn the_sheet_handle_sits_centred() {
+    let (w, h) = (400.0, 800.0);
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let cx = gumicord_platform::FrameCx {
+        viewport: gumicord_render::Size::new(w, h),
+        scale: 1.0,
+    };
+    let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+    let sheet = placed
+        .iter()
+        .find(|(id, _)| *id == NodeId::OverlaySheet)
+        .map(|(_, r)| *r)
+        .expect("面が置かれていない");
+    let pill = placed
+        .iter()
+        .filter(|(id, r)| {
+            *id == NodeId::LayoutRow
+                && (r.w - 36.0).abs() < 1.0
+                && r.y >= sheet.y
+                && r.y < sheet.y + 40.0
+        })
+        .map(|(_, r)| *r)
+        .next()
+        .expect("掴みしろがない");
+    let centred = sheet.x + (sheet.w - pill.w) / 2.0;
+    assert!(
+        (pill.x - centred).abs() < 1.0,
+        "中央にいない {pill:?} {sheet:?}"
+    );
+}
+
 /// The back button opens the drawer from a press too.
 #[test]
 fn back_button_opens_the_drawer() {
