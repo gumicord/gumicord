@@ -88,4 +88,5 @@
   (`cd72d6f` の ✕ がこれで見つかった)
 - Windows Vulkan は機種依存で死ぬことがある (HD 520 + igvk64.dll
   31.0.101.2115 で確認)。1機種の証拠で切らず、プローブ除外に任せる。
-  後の版で別機種・新ドライバでの再検証あり。`WGPU_BACKEND=vulkan` で試せる
+  別機種 (NVIDIA GTX 1660 Ti) では正常動作を確認済み。
+  `WGPU_BACKEND=vulkan` で試せる
