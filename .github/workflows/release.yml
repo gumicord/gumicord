@@ -1,0 +1,251 @@
+name: Release
+
+# Stable releases, cut by hand. Nightly automation lives in ci.yml; this
+# workflow only runs when someone asks for it, and it never overwrites:
+# the tag, the release and every asset are created exactly once. A step
+# fails if its output already exists, so a broken release is fixed by
+# cutting a new version, never by editing files in place.
+#
+# Desktop only for now: the mobile legs ship debug/unsigned builds, which
+# is fine for a nightly channel but not for a versioned release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, matching the workspace version (e.g. v0.0.0)'
+        required: true
+        default: 'v0.0.0'
+      ref:
+        description: 'Commit to release'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write
+
+concurrency:
+  # Never cancel a release mid-flight; concurrent runs for one tag fail
+  # at the guard instead.
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 4
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # Resolve the commit and refuse anything that would overwrite.
+  # ────────────────────────────────────────────────────────────
+  guard:
+    name: Guard (version match, no overwrite)
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Resolve the commit
+        id: resolve
+        run: echo "sha=$(git rev-parse "${{ inputs.ref }}^{commit}")" >> "$GITHUB_OUTPUT"
+
+      - name: Tag matches the workspace version
+        run: |
+          case "${{ inputs.tag }}" in
+            v*) ;;
+            *) echo "tag must start with v" >&2; exit 1 ;;
+          esac
+          test "${{ inputs.tag }}" = "v$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+
+      # Tags cannot be moved afterwards either: the push below is
+      # non-force, so re-running against an existing tag fails here first
+      # with a readable error instead.
+      - name: Refuse to overwrite an existing tag or release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ! git ls-remote --tags origin "refs/tags/${{ inputs.tag }}" | grep -q .
+          ! gh release view "${{ inputs.tag }}" >/dev/null 2>&1
+
+  # ────────────────────────────────────────────────────────────
+  # Desktop builds. Same recipe as the dist job in ci.yml, minus the
+  # mobile legs and the per-commit uploads.
+  # ────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.label }})
+    needs: [guard]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows
+            os: windows-latest
+            bin: gumicord.exe
+          - label: linux
+            os: ubuntu-latest
+            bin: gumicord
+          - label: macos
+            os: macos-latest
+            bin: gumicord
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Desktop Linux links the system D-Bus library like the checks do.
+      - name: Install D-Bus headers
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same fat LTO profile as main pushes, which is what the
+          # recorded binary size and startup figures were measured with.
+          shared-key: dist
+
+      - name: Build
+        shell: bash
+        run: cargo build -p gumicord-desktop --profile dist
+
+      # Ship the themes so they can be swapped with GUMICORD_THEME.
+      - name: Assemble
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/dist/${{ matrix.bin }}" dist/
+          cp -r examples/themes dist/themes
+          cp LICENSE dist/
+          # The first thing anyone reads; lead with what does not work yet.
+          cat > dist/README.txt <<'TXT'
+          Gumicord ${{ inputs.tag }} (desktop build)
+
+            ${{ matrix.bin }}    run it directly
+            themes/             themes; to swap one in:
+                                  set GUMICORD_THEME=themes/midnight/theme.json
+                                  ${{ matrix.bin }}
+
+          Signing in needs the Discord app on your phone to scan a QR code:
+          there is no password login yet, and no voice, no reactions, no
+          search, and no plugins. The UI is Japanese only for now.
+
+          WARNING: connecting to Discord with a third-party client breaks
+          their terms of service and can cost you your account.
+
+          Progress: https://github.com/gumicord/gumicord/blob/main/spec/07-roadmap.md
+          TXT
+          ls -l "dist/${{ matrix.bin }}"
+
+      # One file to run, built from the binary above with stock tooling.
+      - name: Build AppImage
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          curl -L -o linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          ./linuxdeploy --appdir AppDir -e "target/dist/gumicord" \
+            -d packaging/linux/gumicord.desktop -i packaging/icons/gumicord.png \
+            --output appimage
+          ls -l Gumicord-*.AppImage
+
+      - name: Build app bundle and dmg
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p Gumicord.app/Contents/MacOS Gumicord.app/Contents/Resources dmg-staging
+          cp "target/dist/gumicord" Gumicord.app/Contents/MacOS/
+          cp packaging/macos/Info.plist Gumicord.app/Contents/
+          rm -rf "$RUNNER_TEMP/icon.iconset"
+          mkdir "$RUNNER_TEMP/icon.iconset"
+          for s in 16 32 128 256 512; do
+            sips -s format png -z $s $s packaging/icons/app-icon.png \
+              --out "$RUNNER_TEMP/icon.iconset/icon_${s}x${s}.png" >/dev/null
+            sips -s format png -z $((s*2)) $((s*2)) packaging/icons/app-icon.png \
+              --out "$RUNNER_TEMP/icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$RUNNER_TEMP/icon.iconset" \
+            -o Gumicord.app/Contents/Resources/Gumicord.icns
+          mv Gumicord.app dmg-staging/
+          cp -r dist/themes dist/LICENSE dist/README.txt dmg-staging/
+          hdiutil create -volname Gumicord -srcfolder dmg-staging -ov Gumicord.dmg
+          ls -l Gumicord.dmg
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.tag }}-${{ matrix.label }}
+          path: |
+            dist/
+            Gumicord-*.AppImage
+            Gumicord.dmg
+          retention-days: 14
+
+  # ────────────────────────────────────────────────────────────
+  # Tag the built commit, then publish. Runs only if every leg built;
+  # anything already published fails instead of overwriting.
+  # ────────────────────────────────────────────────────────────
+  publish:
+    name: Publish release
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-${{ inputs.tag }}-*
+          path: dist
+
+      # The build filenames carry no version, so rename with the tag to
+      # keep downloads distinguishable across releases.
+      - name: Rename assets
+        run: |
+          TAG="${{ inputs.tag }}"
+          mv dist/release-$TAG-linux/Gumicord-*.AppImage dist/gumicord-$TAG-linux.AppImage
+          mv dist/release-$TAG-macos/Gumicord.dmg dist/gumicord-$TAG-macos.dmg
+          for entry in windows linux macos; do
+            case "$entry" in
+              windows) bin=gumicord.exe ;;
+              *) bin=gumicord ;;
+            esac
+            # Artifacts lose the executable bit on the way; restore it, or
+            # the unzipped binary refuses to start.
+            chmod +x "dist/release-$TAG-$entry/dist/$bin"
+            (cd "dist/release-$TAG-$entry/dist" && zip -qr "../../gumicord-$TAG-$entry.zip" .)
+            rm -rf "dist/release-$TAG-$entry"
+          done
+          ls -l dist
+
+      - name: Create and push the tag
+        run: |
+          git tag "${{ inputs.tag }}" "${{ needs.guard.outputs.sha }}"
+          git push origin "${{ inputs.tag }}"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ needs.guard.outputs.sha }}
+          name: ${{ inputs.tag }}
+          files: |
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.dmg
+          fail_on_unmatched_files: true
+          body: |
+            Gumicord ${{ inputs.tag }} (desktop): Windows / Linux / macOS.
+            Built from https://github.com/${{ github.repository }}/commit/${{ needs.guard.outputs.sha }}.
+            Unsigned, like the mobile builds: signing and notarization are separate work.
+
+            WARNING: connecting to Discord with a third-party client breaks
+            their terms of service and can cost you your account.
