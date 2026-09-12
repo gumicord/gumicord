@@ -22,9 +22,6 @@ use gumicord_rest::{CaptchaChallenge, LoginOutcome, RestClient, RestError, Solve
 
 use crate::account::{AccountKey, AccountsIndex, LEGACY_BOT_TOKEN_KEY, LEGACY_USER_TOKEN_KEY};
 
-/// Skips login to look at the UI. Shows fixed demo data, never real data.
-const SKIP_ENV: &str = "GUMICORD_SKIP_LOGIN";
-
 const TOKEN_KEY: &str = LEGACY_USER_TOKEN_KEY;
 const BOT_TOKEN_KEY: &str = LEGACY_BOT_TOKEN_KEY;
 
@@ -189,18 +186,11 @@ pub struct Login {
 }
 
 impl Login {
-    /// Reads the environment once: per frame, the screen shown could change
-    /// mid-run.
     pub fn new() -> Self {
-        if std::env::var(SKIP_ENV).is_ok_and(|v| v != "0") {
-            tracing::warn!("{SKIP_ENV} is set; skipping login and showing demo data");
-            return Self::skipped();
-        }
         Self::fresh(false)
     }
 
-    /// Skips login and shows demo data. For renderer and theme work, and for
-    /// tests.
+    /// Skips the login screens with an empty store. For tests.
     pub fn skipped() -> Self {
         Self::fresh(true)
     }

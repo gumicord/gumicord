@@ -428,3 +428,537 @@ impl crate::Gumicord {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::*;
+
+    use crate::session::{Login, LoginEvent, Session};
+
+    /// A signed-out app. `Gumicord::new` reads the environment, and a
+    /// developer's variables must not change test results.
+    fn pending() -> Gumicord {
+        Gumicord::with_themes(
+            Login::fresh_for_test(),
+            Live::without_cache(),
+            PluginManager::disabled(),
+            None,
+        )
+    }
+
+    fn ids(tree: &UiNode) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        tree.walk(&mut |n, _| out.push(n.id));
+        out
+    }
+
+    /// The main screen is not even built while signed out; visible but
+    /// untouchable is the worst state.
+    #[test]
+    fn the_main_screen_is_not_built_before_login() {
+        let a = pending();
+        let seen = ids(&a.build_tree(Panes::Three));
+
+        assert!(seen.contains(&NodeId::AppScreenLogin));
+        assert!(!seen.contains(&NodeId::AppScreenMain));
+        assert!(!seen.contains(&NodeId::ChatMessageList), "本文が漏れている");
+    }
+
+    /// No QR node before there is a QR: an unscannable one is worse than
+    /// none.
+    #[test]
+    fn the_qr_node_appears_only_once_there_is_a_qr() {
+        let mut a = pending();
+        assert!(!ids(&a.build_tree(Panes::Three)).contains(&NodeId::PrimitiveQr));
+
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        let tree = a.build_tree(Panes::Three);
+        assert!(ids(&tree).contains(&NodeId::PrimitiveQr));
+
+        let mut data = None;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveQr {
+                data = n.content.as_qr().map(str::to_owned);
+            }
+        });
+        assert_eq!(data.as_deref(), Some("https://example/1"));
+    }
+
+    /// Progress is always stated, so nothing looks silently stuck.
+    #[test]
+    fn every_state_says_something() {
+        let mut a = pending();
+        for event in [
+            None,
+            Some(LoginEvent::Qr("x".to_owned())),
+            Some(LoginEvent::Approved),
+            Some(LoginEvent::Failed("接続できない".to_owned())),
+        ] {
+            if let Some(e) = event {
+                a.login.apply_for_test(e);
+            }
+            let tree = a.build_tree(Panes::Three);
+
+            let mut hint = None;
+            tree.walk(&mut |n, _| {
+                if n.id == NodeId::AppScreenLoginHint {
+                    hint = n.content.as_text().map(str::to_owned);
+                }
+            });
+            let hint = hint.expect("説明文が無い");
+            assert!(!hint.trim().is_empty(), "説明文が空である");
+        }
+    }
+
+    /// The theme reaches the login screen; the QR's ground stays light.
+    #[test]
+    fn the_theme_reaches_the_login_screen() {
+        let mut a = pending();
+        a.login.apply_for_test(LoginEvent::Qr("x".to_owned()));
+
+        let tree = a.build(&FrameCx {
+            viewport: gumicord_render::Size::new(1280.0, 800.0),
+            scale: 1.0,
+        });
+
+        let mut qr_style = None;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveQr {
+                qr_style = Some(n.style.clone());
+            }
+        });
+        let s = qr_style.expect("QR が無い");
+        assert!(s.background.is_some(), "QR の地が解決されていない");
+        assert!(s.padding.is_some(), "静音領域ぶんの余白が無い");
+    }
+
+    /// Skipping login shows the main screen.
+    #[test]
+    fn skipping_shows_the_main_screen() {
+        let a = Gumicord::demo();
+        assert!(a.login.shows_main());
+        assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::AppScreenMain));
+    }
+
+    /// A signed-out app with a cache left by an earlier run.
+    fn cached() -> Gumicord {
+        let mut a = pending();
+        a.live.store_mut().upsert_guild(gumicord_model::Guild {
+            id: 1u64.into(),
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: Vec::new(),
+            roles: Vec::new(),
+        });
+        a
+    }
+
+    /// A session already dead at startup must not strand the app behind its
+    /// own cache: nothing could ever refresh what is on screen.
+    #[test]
+    fn a_session_dead_at_startup_clears_the_cache() {
+        let mut a = cached();
+        assert!(!a.live.is_empty(), "the cache did not load");
+        assert!(a.shows_main(), "cache-first shows the main screen");
+
+        a.login.apply_for_test(LoginEvent::Ended);
+        assert!(a.wake(), "the end asked for a redraw");
+
+        assert!(a.live.is_empty(), "the cache survived");
+        assert!(!a.shows_main(), "the login screen never took over");
+        assert!(
+            a.login.hint().contains("セッションが無効"),
+            "no reason given: {}",
+            a.login.hint()
+        );
+    }
+
+    /// A first start has neither cache nor session; leading the QR with a
+    /// logout reason nobody earned would be a lie.
+    #[test]
+    fn a_session_dead_before_any_cache_blames_nothing() {
+        let mut a = pending();
+        assert!(a.live.is_empty());
+
+        a.login.apply_for_test(LoginEvent::Ended);
+        a.wake();
+
+        assert_eq!(a.login.hint(), a.login.session().hint());
+    }
+
+    /// Tests never reach the network.
+    #[test]
+    fn nothing_starts_until_start_is_called() {
+        let login = Login::fresh_for_test();
+        assert!(!login.shows_main());
+        assert!(login.session().qr().is_none());
+    }
+
+    /// A hit for the login form, where the node already carries its slot.
+    fn login_hit_of(id: NodeId, key: Key) -> Hit {
+        Hit {
+            id,
+            key: Some(key),
+            rect: gumicord_render::Rect::ZERO,
+            clip: None,
+        }
+    }
+
+    /// The QR screen has a way into the password form, and reaching it swaps
+    /// the screen over: the QR must not linger behind the form.
+    #[test]
+    fn the_password_form_is_reached_from_the_qr() {
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        assert!(ids(&a.build_tree(Panes::Three)).contains(&NodeId::PrimitiveQr));
+
+        let entry = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_password"));
+        assert!(
+            a.pressed(std::slice::from_ref(&entry)),
+            "フォームへの入口が効かない"
+        );
+
+        assert!(matches!(a.login.session(), Session::Password));
+        let mut seen = ids(&a.build_tree(Panes::Three));
+        assert!(seen.contains(&NodeId::AppScreenLoginField), "入力欄が無い");
+        seen.retain(|id| *id == NodeId::PrimitiveQr);
+        assert!(seen.is_empty(), "パスワード画面なのに QR が残る");
+    }
+
+    /// The QR button on the password form leaves it; its press used to fall
+    /// through the dispatch and do nothing.
+    #[test]
+    fn the_qr_button_leaves_the_password_form() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        assert!(a.login_view.form.is_some());
+
+        let back = login_hit_of(NodeId::PrimitiveButton, Key::Slot("login_qr"));
+        assert!(a.pressed(std::slice::from_ref(&back)), "QRボタンが効かない");
+        assert!(a.login_view.form.is_none(), "QRに戻っていない");
+    }
+
+    /// MFA must reach the TOTP screen even while the password-form override
+    /// is set: the override used to strand the flow on the password screen
+    /// with no visible progress (mobile pins it from the start, having no
+    /// QR screen).
+    #[test]
+    fn the_totp_screen_shows_despite_the_password_override() {
+        let mut a = pending();
+        // In through the password form, like a phone.
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        assert!(a.login_view.form.is_some());
+        // Discord asked for a second factor.
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+        });
+        let tree = a.build_tree(Panes::Three);
+        let mut slots = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginField {
+                slots.push(n.key.clone());
+            }
+        });
+        assert!(
+            slots.contains(&Some(Key::Slot("totp"))),
+            "TOTP screen missing: {slots:?}"
+        );
+        assert!(
+            !slots.contains(&Some(Key::Slot("password"))),
+            "password form lingers: {slots:?}"
+        );
+    }
+
+    /// Field failures show under each named input: INVALID_LOGIN names both
+    /// `login` and `password`, so both lines appear with the general one.
+    #[test]
+    fn login_field_errors_show_under_each_named_input() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::FieldErrors(vec![
+            (
+                "login".to_owned(),
+                "ログインまたはパスワードが無効です。(INVALID_LOGIN)".to_owned(),
+            ),
+            (
+                "password".to_owned(),
+                "ログインまたはパスワードが無効です。(INVALID_LOGIN)".to_owned(),
+            ),
+        ]));
+        a.login.apply_for_test(LoginEvent::Failed(
+            "フォームボディが無効です (50035)".to_owned(),
+        ));
+        assert!(a.wake());
+        let tree = a.build_tree(Panes::Three);
+        let mut lines = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginError {
+                lines.push((n.key.clone(), n.content.as_text().unwrap_or("").to_owned()));
+            }
+        });
+        for slot in ["login_error_email", "login_error_password"] {
+            assert!(
+                lines
+                    .iter()
+                    .any(|(key, text)| *key == Some(Key::Slot(slot)) && text.contains("無効です")),
+                "missing line for {slot}: {lines:?}"
+            );
+        }
+    }
+
+    /// A press outside every login field releases focus; otherwise the
+    /// keyboard stays up with no way to dismiss it.
+    #[test]
+    fn pressing_outside_a_login_field_releases_focus() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        assert!(a.login_view.field.is_some());
+
+        assert!(a.pressed(&[]));
+        assert_eq!(a.login_view.field, None, "欄外を押してもフォーカスが残る");
+    }
+
+    /// Clicking a login field focuses exactly that one, and typing lands in the
+    /// right box; switching to another keeps the first's contents.
+    #[test]
+    fn clicking_a_login_field_focuses_it_for_typing() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        assert!(matches!(a.login_view.field, Some(LoginField::Email)));
+        a.focused_document().unwrap().insert("a@b.c");
+
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        assert!(matches!(a.login_view.field, Some(LoginField::Password)));
+        a.focused_document().unwrap().insert("secret");
+
+        assert_eq!(a.login_view.email.text(), "a@b.c", "email 欄の内容が消えた");
+        assert_eq!(
+            a.login_view.input.text(),
+            "secret",
+            "password 欄に書かれていない"
+        );
+    }
+
+    /// Submitting the password form hands the credentials to the background
+    /// login and drops the form's focus.
+    #[test]
+    fn submitting_the_password_form_hands_off_credentials() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        a.focused_document().unwrap().insert("a@b.c");
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+
+        assert!(a.submit_login(), "パスワードログインが送信されなかった");
+        assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
+    }
+
+    /// The konami code on the QR screen opens the bot-token form.
+    #[test]
+    fn the_konami_code_opens_the_bot_token_form() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            assert!(a.hidden_key(key), "QR 画面上のキーは消費されるはず");
+        }
+
+        assert!(
+            matches!(a.login.session(), Session::Token),
+            "コンバットコードでトークン画面に入っていない"
+        );
+        assert_eq!(
+            a.login_view.field,
+            Some(LoginField::Token),
+            "入力欄にフォーカスが無い"
+        );
+    }
+
+    /// A stray key breaks the sequence; nothing opens and the buffer resets.
+    #[test]
+    fn a_stray_key_breaks_the_konami_code() {
+        use gumicord_platform::HiddenKey::{Down, Left, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+
+        // Up Up Down Down Left, then a Left where a Right belongs.
+        for key in [Up, Up, Down, Down, Left, Left] {
+            a.hidden_key(key);
+        }
+
+        assert!(!matches!(a.login.session(), Session::Token));
+        assert_eq!(a.login_view.field, None);
+    }
+
+    /// Off the QR screen the hidden code does nothing.
+    #[test]
+    fn the_konami_code_does_nothing_off_the_qr_screen() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        // `pending` starts at Connecting, not the QR screen.
+        let mut a = pending();
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            a.hidden_key(key);
+        }
+
+        assert!(!matches!(a.login.session(), Session::Token));
+        assert_eq!(a.login_view.field, None);
+    }
+
+    /// Submitting the token form hands the bot token to the background and
+    /// drops the form's focus.
+    #[test]
+    fn submitting_the_token_form_hands_off_the_bot_token() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            a.hidden_key(key);
+        }
+        a.focused_document().unwrap().insert("bot-token");
+        assert!(a.submit_login(), "トークンログインが送信されなかった");
+        assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
+    }
+
+    /// Right-clicking a login field focuses it and shows the input menu for
+    /// that field's contents, not the composer's.
+    #[test]
+    fn right_clicking_a_login_field_opens_its_menu() {
+        use crate::menu::Action;
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+
+        // Focus the email field and select its content.
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        a.focused_document().unwrap().insert("a@b.c");
+        a.focused_document().unwrap().select_all();
+
+        let field = login_hit_of(NodeId::AppScreenLoginField, Key::Slot("email"));
+        assert!(a.context_menu(&[field], (0.0, 0.0)));
+        assert!(matches!(a.login_view.field, Some(LoginField::Email)));
+
+        let has = |want: &Action| {
+            a.floating
+                .as_ref()
+                .expect("開いていない")
+                .items()
+                .iter()
+                .any(|i| &i.action == want)
+        };
+        assert!(has(&Action::Cut), "選んだ欄に切り取りが出ていない");
+        assert!(has(&Action::CopySelection), "選んだ欄にコピーが出ていない");
+        assert!(has(&Action::Paste), "貼り付けが出ていない");
+    }
+
+    /// The "select all" menu item targets the focused login field, leaving
+    /// the composer untouched.
+    #[test]
+    fn select_all_targets_the_focused_login_field() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+
+        a.perform(crate::menu::Action::SelectAll);
+
+        assert!(
+            a.login_view.input.has_selection(),
+            "ログイン欄が選択されていない"
+        );
+        assert!(!a.chat.input.has_selection(), "コンポーザーが触られた");
+    }
+
+    /// A captcha challenge is handed to the platform, and its solution comes
+    /// back as a submit.
+    #[test]
+    fn a_pending_captcha_is_forwarded_and_solved() {
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::CaptchaNeeded(gumicord_rest::CaptchaChallenge {
+                sitekey: Some("site123".to_owned()),
+                service: Some("hcaptcha".to_owned()),
+                rqdata: Some("rqdata".to_owned()),
+                rqtoken: Some("rqtoken".to_owned()),
+                session_id: Some("sess".to_owned()),
+            }));
+
+        let challenge = a
+            .pending_captcha()
+            .expect("pending_captcha がプラットフォームへ渡さない");
+        assert_eq!(challenge.site_key, "site123");
+        assert_eq!(challenge.rqdata.as_deref(), Some("rqdata"));
+
+        // Nothing left to forward: it moved to the app side for the retry.
+        assert!(
+            a.pending_captcha().is_none(),
+            "同一の captcha が二度渡される"
+        );
+
+        a.captcha_solved(gumicord_platform::SolvedCaptcha {
+            solution: "tok".to_owned(),
+        });
+        assert!(a.pending.is_none(), "解けた captcha が残っている");
+    }
+}
+
