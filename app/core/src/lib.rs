@@ -959,6 +959,16 @@ impl Application for Gumicord {
                 .iter()
                 .filter(|(_, n)| n.label().is_some())
                 .count(),
+            items = update
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == accesskit::Role::ListItem)
+                .count(),
+            named_items = update
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == accesskit::Role::ListItem && n.label().is_some())
+                .count(),
             focus = update.focus.0,
         );
         Some(update)
