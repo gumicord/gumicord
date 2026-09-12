@@ -263,14 +263,12 @@ impl Floating {
     }
 }
 
-/// The sheet grabber, centred. The layout engine has no main-axis
-/// centring, so spacers eat the slack on both sides; the pill keeps a
-/// slot so the theme can tell it from any other row.
+/// The sheet grabber, centred by its row's `center_main`: a fixed-size
+/// child would otherwise stick to the row start. The pill keeps a slot
+/// so the theme can tell it from any other row.
 pub(crate) fn sheet_handle() -> UiNode {
     UiNode::new(NodeId::OverlaySheetHandle)
-        .child(UiNode::new(NodeId::LayoutSpacer))
         .child(UiNode::new(NodeId::LayoutRow).with_key(Key::Slot("sheet_handle_pill")))
-        .child(UiNode::new(NodeId::LayoutSpacer))
 }
 
 /// Wraps content in the layer and scrim.

@@ -425,6 +425,7 @@ layout(node, constraints) -> Size
 | `axis` | 子の並べ方 (`Row` / `Column` / `Stack`) |
 | `grow` | 親の主軸の余りをどれだけ取るか |
 | `cross` | 交差軸での子の扱い (`Stretch` / `Start` / `Center`) |
+| `center_main` | 主軸方向の余りを両側に等分するか (中央寄せ)。余りがなければ何もしない |
 | `width` / `height` | 既定の寸法。テーマの `width` / `height` が優先される |
 | `scroll` | はみ出しを切り、スクロールできるか |
 | `hugs_content` | 重ねの中で、**親いっぱいに広がらない**か (印だけ) |
@@ -448,6 +449,8 @@ layout(node, constraints) -> Size
 ```
 
 この順序でなければならない。`chat.message` は「アイコン (40px) + 本文 (残り全部)」であり、**本文の折り返し幅はアイコンの幅を引いたあとでなければ決まらない**。全員に同じ制約を配ると本文が横にはみ出す。
+
+`center_main` の中央寄せは配分のあとに置く。`grow` が余りを食い尽くしたら余りは残らず、何も起きない。
 
 ### 8.1 仮想化 (`NFR-007`)
 

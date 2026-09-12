@@ -501,6 +501,20 @@ impl<'a> Cx<'a, '_, '_> {
         let horizontal = it.axis == Axis::Row;
         let mut cursor = if horizontal { inner.x } else { inner.y } - offset;
 
+        // Centred content starts mid-leftover. Grow children eat the
+        // leftover first (see size_children), so this no-ops when
+        // anything claims the slack, and never shifts overflowing content.
+        if it.center_main {
+            let spare = if horizontal {
+                inner.w - content.w
+            } else {
+                inner.h - content.h
+            };
+            if spare > 0.0 {
+                cursor += spare / 2.0;
+            }
+        }
+
         for (i, child) in node.children.iter().enumerate() {
             // Overlaid children stay out of the flow.
             if is_overlay(child.id) {

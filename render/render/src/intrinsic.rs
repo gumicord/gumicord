@@ -67,6 +67,13 @@ pub struct Intrinsic {
     /// A message list opens on the newest row, which follows from what a
     /// message list is.
     pub anchor_end: bool,
+    /// Whether leftover main-axis space splits evenly on both sides.
+    ///
+    /// Rows start children at the main start and have no other option;
+    /// without this a fixed-size child (a sheet grabber) sticks to the
+    /// edge. Grow children eat the leftover first, so this no-ops when
+    /// anything claims the slack.
+    pub center_main: bool,
 }
 
 impl Intrinsic {
@@ -82,6 +89,7 @@ impl Intrinsic {
             follows_cross: false,
             single_line: false,
             anchor_end: false,
+            center_main: false,
         }
     }
 
@@ -146,6 +154,12 @@ impl Intrinsic {
     const fn scrollable_to_end(mut self) -> Self {
         self.scroll = true;
         self.anchor_end = true;
+        self
+    }
+
+    /// Centred on the main axis when narrower than the parent.
+    const fn center_main(mut self) -> Self {
+        self.center_main = true;
         self
     }
 }
@@ -327,7 +341,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         OverlayPopover | OverlayMenu => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
         // Full width, content height, rising from the bottom.
         OverlaySheet => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
-        OverlaySheetHandle => Intrinsic::row().cross(Cross::Center),
+        OverlaySheetHandle => Intrinsic::row().center_main(),
         // Content-sized and corner-anchored by the app: like a popover
         // stood on its side.
         OverlayDrawer => Intrinsic::column().cross(Cross::Stretch).hugs_content(),
