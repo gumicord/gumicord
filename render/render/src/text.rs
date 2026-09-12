@@ -103,6 +103,14 @@ impl Fallback for GumicordFallback {
         if han_unified && !locale.starts_with("zh") && !locale.starts_with("ko") {
             return JAPANESE_FALLBACK;
         }
+        // Fullwidth letters, digits and marks shape in Latin/Common runs,
+        // where the platform list holds no CJK font: they fall through to
+        // an arbitrary face (bold on some machines) or to nothing at all.
+        // ASCII itself stays in the primary family and never reaches this
+        // list, so routing Japanese readers here only adds coverage.
+        if locale == "ja" && matches!(script, Script::Latin | Script::Common | Script::Inherited) {
+            return JAPANESE_FALLBACK;
+        }
         PlatformFallback.script_fallback(script, locale)
     }
 }
@@ -1545,6 +1553,29 @@ mod tests {
 
         // Outside CJK nothing is taken over.
         assert_ne!(f.script_fallback(Script::Arabic, "ja"), JAPANESE_FALLBACK);
+    }
+
+    /// Fullwidth forms shape in Latin/Common runs, where the platform
+    /// list holds no CJK font. Japanese readers get the Japanese list
+    /// there too, so the run falls back to a regular CJK face instead
+    /// of an arbitrary one (bold on some machines) or nothing.
+    #[test]
+    fn fullwidth_runs_fall_back_to_japanese() {
+        use unicode_script::Script;
+        let f = GumicordFallback;
+        // U+FF21, U+FF10 and U+30FC shape outside Han/Hiragana/Katakana.
+        assert_eq!(Script::from('Ａ'), Script::Latin);
+        assert_eq!(Script::from('０'), Script::Common);
+        assert_eq!(Script::from('ー'), Script::Common);
+        for script in [Script::Latin, Script::Common, Script::Inherited] {
+            assert_eq!(f.script_fallback(script, "ja"), JAPANESE_FALLBACK);
+        }
+        // Other locales keep the platform default.
+        assert_ne!(f.script_fallback(Script::Latin, "en"), JAPANESE_FALLBACK);
+        assert_ne!(
+            f.script_fallback(Script::Common, "zh-CN"),
+            JAPANESE_FALLBACK
+        );
     }
 
     #[test]
