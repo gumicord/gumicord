@@ -104,22 +104,15 @@ impl<'a> Builder<'a> {
             return None;
         }
         // Readers announce the item being moved through, not its parts:
-        // an unnamed item is only ever a position. Borrow the kept
-        // children's labels, so a message reads as its row and a member
-        // as their name. Lists themselves stay unnamed, or one list
-        // would read as its whole contents at once.
+        // an unnamed item is only ever a position. Borrow the labels
+        // below, so a message reads as its row and a member as their
+        // name. Lists themselves stay unnamed, or one list would read
+        // as its whole contents at once.
         let label = match (label, role) {
             (None, Role::ListItem) => {
                 let mut text = String::new();
                 for cid in &children {
-                    if let Some((_, n)) = self.nodes.iter().find(|(id, _)| id == cid)
-                        && let Some(l) = n.label()
-                    {
-                        if !text.is_empty() {
-                            text.push(' ');
-                        }
-                        text.push_str(l);
-                    }
+                    Self::borrowed_labels(&self.nodes, *cid, &mut text);
                 }
                 nonempty(&text)
             }
@@ -142,6 +135,34 @@ impl<'a> Builder<'a> {
         }
         self.nodes.push((id, n));
         Some(NodeId(id.0))
+    }
+
+    /// Labels below a node, for an item to borrow. Nested items name
+    /// themselves: take their name without descending, or it reads
+    /// twice. Nodes the walk skipped (a QR payload's children) are not
+    /// in the list and stay silent.
+    fn borrowed_labels(nodes: &[(NodeId, Node)], id: NodeId, text: &mut String) {
+        let Some((_, node)) = nodes.iter().find(|(nid, _)| *nid == id) else {
+            return;
+        };
+        if node.role() == Role::ListItem {
+            if let Some(l) = node.label() {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(l);
+            }
+            return;
+        }
+        if let Some(l) = node.label() {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(l);
+        }
+        for cid in node.children() {
+            Self::borrowed_labels(nodes, *cid, text);
+        }
     }
 
     /// A root that always exists, even for an empty tree.
@@ -363,5 +384,28 @@ mod tests {
             .collect();
         // Once on the paragraph itself, once on the item naming it.
         assert_eq!(his.len(), 2, "the item stays unnamed");
+    }
+
+    /// Message rows wrap their parts in an unlabelled column: the item
+    /// must borrow through it, not only from direct children.
+    #[test]
+    fn items_borrow_through_unlabelled_wrappers() {
+        use gumicord_uitree::Key;
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        tree.children.push(
+            UiNode::new(StableId::ChatMessage)
+                .with_key(Key::Id(2))
+                .child(
+                    UiNode::new(StableId::LayoutColumn)
+                        .child(text(StableId::ChatMessageContent, "wrapped")),
+                ),
+        );
+        let update = tree_update(&tree, None, "Gumicord");
+        let wrapped: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.label() == Some("wrapped"))
+            .collect();
+        assert_eq!(wrapped.len(), 2, "the item stays unnamed");
     }
 }
