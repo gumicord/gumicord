@@ -267,8 +267,8 @@ pub struct Gumicord {
     /// The innermost scrollable under the pointer; only that list shows a
     /// scrollbar.
     hovered_scroll: Option<NodeId>,
-/// The main chat screen: lists, messages, composer. Owned outright by
-/// [`pages::chat`](crate::pages::chat).
+    /// The main chat screen: lists, messages, composer. Owned outright by
+    /// [`pages::chat`](crate::pages::chat).
     chat: crate::pages::chat::ChatView,
     /// Theme match context, captured before building.
     ///
@@ -752,7 +752,8 @@ impl Gumicord {
         } else if self.chat.member_sheet_open {
             Some(("overlay.sheet", None))
         } else {
-            self.chat.a11y_message
+            self.chat
+                .a11y_message
                 .map(|id| ("chat.message", Some(Key::Id(id))))
         }
     }
@@ -1240,7 +1241,9 @@ impl Application for Gumicord {
 
         // A press outside every field releases focus; otherwise the keyboard
         // stays up on phones with no other way to dismiss it.
-        if self.login_view.field.is_some() && !hits.iter().any(|h| h.id == NodeId::AppScreenLoginField) {
+        if self.login_view.field.is_some()
+            && !hits.iter().any(|h| h.id == NodeId::AppScreenLoginField)
+        {
             self.login_view.field = None;
             changed = true;
         }
@@ -1970,8 +1973,10 @@ impl Gumicord {
             crate::menu::Action::Delete(id) => {
                 // Only reached after the dialog confirmed.
                 // ([`Self::needs_confirming`])
-                self.live
-                    .delete_message(ChannelId::from(self.chat.selected_channel), MessageId::from(*id));
+                self.live.delete_message(
+                    ChannelId::from(self.chat.selected_channel),
+                    MessageId::from(*id),
+                );
                 // Deleting what is being edited also cancels the edit.
                 if self.chat.composing.target() == Some(*id) {
                     self.chat.composing = Composing::New;
@@ -2797,7 +2802,6 @@ fn scrollbar_node() -> UiNode {
     UiNode::new(NodeId::LayoutScrollbar).child(UiNode::new(NodeId::LayoutScrollbarThumb))
 }
 
-
 #[cfg(test)]
 mod responsive_tests {
     use super::*;
@@ -2862,14 +2866,6 @@ mod responsive_tests {
         assert_eq!(panes_in(&a.build_tree(Panes::One)), vec![NodeId::ChatView]);
     }
 }
-
-
-
-
-
-
-
-
 
 /// Builds an icon or avatar, falling back to initials.
 ///
@@ -3094,25 +3090,27 @@ mod plugin_tests {
         let mut a = app_with_plugins(&root);
         // Demo rows are gone; seed one live message so the patched
         // content nodes exist.
-        a.live.store_mut().replace_guilds(vec![gumicord_model::Guild {
-            id: 1u64.into(),
-            name: "テスト".to_owned(),
-            icon_hash: None,
-            unavailable: false,
-            channels: vec![gumicord_model::Channel {
-                id: 10u64.into(),
-                kind: gumicord_model::ChannelKind::GuildText,
-                name: Some("いっぱん".to_owned()),
-                guild_id: Some(1u64.into()),
-                parent_id: None,
-                position: 0,
-                topic: None,
-                nsfw: false,
-                recipients: Vec::new(),
-                last_message_id: None,
-            }],
-            roles: Vec::new(),
-        }]);
+        a.live
+            .store_mut()
+            .replace_guilds(vec![gumicord_model::Guild {
+                id: 1u64.into(),
+                name: "テスト".to_owned(),
+                icon_hash: None,
+                unavailable: false,
+                channels: vec![gumicord_model::Channel {
+                    id: 10u64.into(),
+                    kind: gumicord_model::ChannelKind::GuildText,
+                    name: Some("いっぱん".to_owned()),
+                    guild_id: Some(1u64.into()),
+                    parent_id: None,
+                    position: 0,
+                    topic: None,
+                    nsfw: false,
+                    recipients: Vec::new(),
+                    last_message_id: None,
+                }],
+                roles: Vec::new(),
+            }]);
         a.live.store_mut().set_backlog(
             ChannelId::from(10u64),
             vec![gumicord_model::Message {
@@ -3223,8 +3221,6 @@ mod theme_hot_reload_tests {
         assert!(!a.maybe_reload_theme());
     }
 }
-
-
 
 #[cfg(test)]
 mod plugin_data_tests {

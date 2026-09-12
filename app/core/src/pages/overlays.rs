@@ -3,8 +3,10 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::pages::chat::tests::{
+        app, hit_of, is_confirm, press_button, press_menu, swipe, with_menu,
+    };
     use crate::*;
-    use crate::pages::chat::tests::{app, hit_of, is_confirm, press_button, press_menu, swipe, with_menu};
 
     use gumicord_model::{Message, MessageId, User, UserId};
 
@@ -177,7 +179,6 @@ mod tests {
         assert_eq!(a.chat.composing, Composing::New);
     }
 
-
     /// A press hits both layers, so without a rule it passes through and
     /// navigates to whatever the user meant to dismiss the menu over.
     #[test]
@@ -192,7 +193,6 @@ mod tests {
         assert_eq!(a.chat.selected_channel, before, "下のチャンネルへ移動した");
     }
 
-
     /// A link under an open menu is dismissed with the menu, not opened:
     /// declining hands the press back to the dismissal path.
     #[test]
@@ -203,7 +203,6 @@ mod tests {
         let mut b = app();
         assert!(b.link_pressed("https://example.com/"));
     }
-
 
     /// Pressing an item runs it and closes the menu.
     ///
@@ -224,7 +223,6 @@ mod tests {
         assert!(a.floating.is_none());
     }
 
-
     /// The menu floats above the composer, so escape stops there.
     #[test]
     fn esc_はメニューを先に閉じる() {
@@ -242,7 +240,6 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════
     //  Signing out
 
-
     /// A menu holding only "delete".
     ///
     /// Built directly rather than through `message_menu`, which checks whether
@@ -259,7 +256,6 @@ mod tests {
         a
     }
 
-
     /// One row among others in a menu, one line from its neighbours, and a
     /// deleted message cannot be recovered.
     #[test]
@@ -267,9 +263,12 @@ mod tests {
         let mut a = with_delete_menu();
         assert!(press_menu(&mut a, 0));
         assert!(is_confirm(&a), "確認の窓が出ていない");
-        assert_eq!(a.chat.composing, Composing::Edit(1), "確かめる前に消えている");
+        assert_eq!(
+            a.chat.composing,
+            Composing::Edit(1),
+            "確かめる前に消えている"
+        );
     }
-
 
     /// Cancelling does nothing and closes the dialog.
     #[test]
@@ -282,7 +281,6 @@ mod tests {
         assert_eq!(a.chat.composing, Composing::Edit(1), "やめたのに消えている");
     }
 
-
     /// Confirming is what actually deletes.
     #[test]
     fn confirming_the_dialog_deletes() {
@@ -294,7 +292,6 @@ mod tests {
         // Deleting what is being edited also cancels the edit.
         assert_eq!(a.chat.composing, Composing::New, "消えていない");
     }
-
 
     /// A dialog represents an unmade decision; dismissing it on an outside
     /// press leaves the outcome ambiguous.
@@ -310,7 +307,6 @@ mod tests {
         assert!(is_confirm(&a), "外を押しただけで窓が消えた");
     }
 
-
     /// Escape closes it; no way out at all would be a dead end.
     #[test]
     fn escape_closes_the_dialog() {
@@ -322,7 +318,6 @@ mod tests {
         assert_eq!(a.chat.composing, Composing::Edit(1), "Esc で消えている");
     }
 
-
     /// Confirming again would reopen the dialog forever.
     #[test]
     fn the_dialog_does_not_reappear() {
@@ -331,7 +326,6 @@ mod tests {
         press_button(&mut a, crate::menu::button::CONFIRM);
         assert!(a.floating.is_none(), "窓がもう一度出ている");
     }
-
 
     /// Nothing underneath is reachable while it is open.
     #[test]
@@ -343,7 +337,6 @@ mod tests {
         a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]);
         assert_eq!(a.chat.selected_channel, before, "下のチャンネルへ移動した");
     }
-
 
     /// Confirming everything would stop the dialog being read at all.
     #[test]
@@ -362,7 +355,6 @@ mod tests {
 
     // ═══════════════════════════════════════════════════════════════
     //  Settings screen
-
 
     /// The dialog's laid-out rectangles. Reading the theme's numbers does not
     /// show where things land.
@@ -387,7 +379,6 @@ mod tests {
         gumicord_render::layout_for_test(&tree, cx.viewport)
     }
 
-
     fn all_of(
         placed: &[(NodeId, gumicord_render::Rect)],
         id: NodeId,
@@ -399,13 +390,11 @@ mod tests {
             .collect()
     }
 
-
     fn one_of(placed: &[(NodeId, gumicord_render::Rect)], id: NodeId) -> gumicord_render::Rect {
         let all = all_of(placed, id);
         assert_eq!(all.len(), 1, "{id:?} が {} 個ある", all.len());
         all[0]
     }
-
 
     fn contains(outer: gumicord_render::Rect, inner: gumicord_render::Rect) -> bool {
         inner.x >= outer.x
@@ -413,7 +402,6 @@ mod tests {
             && inner.x + inner.w <= outer.x + outer.w
             && inner.y + inner.h <= outer.y + outer.h
     }
-
 
     /// A button outside the dialog is visible but unpressable.
     #[test]
@@ -451,7 +439,6 @@ mod tests {
         }
     }
 
-
     /// Overlapping leaves one visible but unreachable.
     #[test]
     fn the_two_buttons_do_not_overlap() {
@@ -465,7 +452,6 @@ mod tests {
         );
     }
 
-
     /// Centred, not placed at the press.
     #[test]
     fn the_dialog_is_centred_on_screen() {
@@ -476,7 +462,6 @@ mod tests {
         assert!((cx - w / 2.0).abs() < 1.0, "横にずれている {modal:?}");
         assert!((cy - h / 2.0).abs() < 1.0, "縦にずれている {modal:?}");
     }
-
 
     /// Overflowing at phone widths puts cancel out of reach.
     #[test]
@@ -497,7 +482,6 @@ mod tests {
         }
     }
 
-
     /// A permanent full-window layer would absorb every press.
     #[test]
     fn no_overlay_layer_is_built_while_nothing_is_open() {
@@ -512,7 +496,6 @@ mod tests {
         assert!(has_layer(&with_menu()));
     }
 
-
     /// A press on nothing just closes what is open.
     #[test]
     fn right_clicking_empty_space_closes_the_menu() {
@@ -520,7 +503,6 @@ mod tests {
         assert!(a.context_menu(&[], (0.0, 0.0)));
         assert!(a.floating.is_none());
     }
-
 
     /// By width, not device: a narrowed desktop window reads better with a
     /// sheet.
@@ -531,5 +513,4 @@ mod tests {
         assert_eq!(Panes::Two.present(), Present::Popover);
         assert_eq!(Panes::Four.present(), Present::Popover);
     }
-
 }

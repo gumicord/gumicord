@@ -2,8 +2,8 @@
 use super::GuildRow;
 use crate::Panes;
 use gumicord_model::{GuildId, RoleId};
-use gumicord_uitree::{Key, NodeId, State, UiNode};
 use gumicord_uitree::value::Color;
+use gumicord_uitree::{Key, NodeId, State, UiNode};
 use std::borrow::Cow;
 
 impl crate::Gumicord {

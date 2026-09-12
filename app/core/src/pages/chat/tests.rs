@@ -2,698 +2,660 @@
 use super::*;
 use crate::*;
 
-    pub(crate) fn app() -> Gumicord {
-        Gumicord::demo()
+pub(crate) fn app() -> Gumicord {
+    Gumicord::demo()
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Replying and editing
+
+pub(crate) fn swipe(dir: SwipeDir, x: f32) -> Swipe {
+    Swipe::Point { dir, x, y: 400.0 }
+}
+
+pub(crate) fn narrow() -> Gumicord {
+    let mut a = app();
+    a.match_ctx = MatchContext::new(400.0);
+    a
+}
+
+pub(crate) fn hit_of(id: NodeId, key: Option<Key>) -> Hit {
+    Hit {
+        id,
+        key,
+        rect: gumicord_render::Rect::ZERO,
+        clip: None,
     }
+}
 
-    // ═══════════════════════════════════════════════════════════════
-    //  Replying and editing
+pub(crate) fn with_menu() -> Gumicord {
+    let mut a = app();
+    let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+    assert!(
+        a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)),
+        "メニューが開かなかった"
+    );
+    a
+}
 
+pub(crate) fn press_menu(a: &mut Gumicord, index: u32) -> bool {
+    a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(index)))])
+}
 
-    pub(crate) fn swipe(dir: SwipeDir, x: f32) -> Swipe {
-        Swipe::Point { dir, x, y: 400.0 }
-    }
+pub(crate) fn press_button(a: &mut Gumicord, index: usize) -> bool {
+    a.pressed(&[hit_of(
+        NodeId::OverlayModalAction,
+        Some(Key::Index(index as u32)),
+    )])
+}
 
+pub(crate) fn is_confirm(a: &Gumicord) -> bool {
+    matches!(a.floating, Some(crate::menu::Floating::Confirm(_)))
+}
 
-    pub(crate) fn narrow() -> Gumicord {
+fn built(a: &mut Gumicord) {
+    let cx = gumicord_platform::FrameCx {
+        viewport: gumicord_render::Size::new(1280.0, 800.0),
+        scale: 1.0,
+    };
+    a.build(&cx);
+}
+
+/// Sending a new message while meaning to edit cannot be undone, so the
+/// mode has to be visible.
+#[test]
+fn replying_and_editing_are_visible_on_screen() {
+    let bar = |c: Composing| {
         let mut a = app();
-        a.match_ctx = MatchContext::new(400.0);
-        a
-    }
+        a.chat.composing = c;
+        let mut out = None;
+        a.build_tree(Panes::Four).walk(&mut |n, _| {
+            if n.id == NodeId::ChatInputToolbar {
+                out = n.key.clone();
+            }
+        });
+        out
+    };
+    assert_eq!(bar(Composing::New), None, "何もしていないのに出ている");
+    assert_eq!(bar(Composing::Reply(1)), Some(Key::Slot("reply")));
+    assert_eq!(bar(Composing::Edit(1)), Some(Key::Slot("edit")));
+}
 
+/// This happened: a later `primitive.button` rule added horizontal
+/// padding, which pushed the icon outside its 20-square box and left an
+/// empty dark box beside it. Reading the theme's numbers does not catch
+/// it; the laid-out rectangles do.
+#[test]
+fn the_cancel_icon_stays_inside_its_box() {
+    let mut a = app();
+    a.chat.composing = Composing::Reply(1);
+    let cx = gumicord_platform::FrameCx {
+        viewport: gumicord_render::Size::new(1280.0, 800.0),
+        scale: 1.0,
+    };
+    let tree = a.build(&cx);
+    let placed = gumicord_render::layout_for_test(&tree, cx.viewport);
 
-    pub(crate) fn hit_of(id: NodeId, key: Option<Key>) -> Hit {
-        Hit {
-            id,
-            key,
-            rect: gumicord_render::Rect::ZERO,
-            clip: None,
-        }
-    }
+    let find = |id| {
+        placed
+            .iter()
+            .rev()
+            .find(|(i, _)| *i == id)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("{id:?} が置かれていない"))
+    };
+    let button = find(NodeId::PrimitiveButton);
+    let icon = find(NodeId::PrimitiveIcon);
 
+    assert!(
+        button.w > 0.0 && button.h > 0.0,
+        "箱が潰れている {button:?}"
+    );
+    assert!(
+        icon.x >= button.x
+            && icon.y >= button.y
+            && icon.x + icon.w <= button.x + button.w
+            && icon.y + icon.h <= button.y + button.h,
+        "絵 {icon:?} が箱 {button:?} からはみ出している"
+    );
+}
 
-    pub(crate) fn with_menu() -> Gumicord {
+/// Escape works too, but without a visible way out this looks like a
+/// state with no exit.
+#[test]
+fn a_cancel_button_appears_while_replying() {
+    let cancel = |c: Composing| {
         let mut a = app();
-        let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
-        assert!(
-            a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)),
-            "メニューが開かなかった"
-        );
-        a
-    }
-
-
-    pub(crate) fn press_menu(a: &mut Gumicord, index: u32) -> bool {
-        a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(index)))])
-    }
-
-
-    pub(crate) fn press_button(a: &mut Gumicord, index: usize) -> bool {
-        a.pressed(&[hit_of(
-            NodeId::OverlayModalAction,
-            Some(Key::Index(index as u32)),
-        )])
-    }
-
-
-    pub(crate) fn is_confirm(a: &Gumicord) -> bool {
-        matches!(a.floating, Some(crate::menu::Floating::Confirm(_)))
-    }
-
-
-    fn built(a: &mut Gumicord) {
-        let cx = gumicord_platform::FrameCx {
-            viewport: gumicord_render::Size::new(1280.0, 800.0),
-            scale: 1.0,
-        };
-        a.build(&cx);
-    }
-
-
-    /// Sending a new message while meaning to edit cannot be undone, so the
-    /// mode has to be visible.
-    #[test]
-    fn replying_and_editing_are_visible_on_screen() {
-        let bar = |c: Composing| {
-            let mut a = app();
-            a.chat.composing = c;
-            let mut out = None;
-            a.build_tree(Panes::Four).walk(&mut |n, _| {
-                if n.id == NodeId::ChatInputToolbar {
-                    out = n.key.clone();
-                }
-            });
-            out
-        };
-        assert_eq!(bar(Composing::New), None, "何もしていないのに出ている");
-        assert_eq!(bar(Composing::Reply(1)), Some(Key::Slot("reply")));
-        assert_eq!(bar(Composing::Edit(1)), Some(Key::Slot("edit")));
-    }
-
-
-    /// This happened: a later `primitive.button` rule added horizontal
-    /// padding, which pushed the icon outside its 20-square box and left an
-    /// empty dark box beside it. Reading the theme's numbers does not catch
-    /// it; the laid-out rectangles do.
-    #[test]
-    fn the_cancel_icon_stays_inside_its_box() {
-        let mut a = app();
-        a.chat.composing = Composing::Reply(1);
-        let cx = gumicord_platform::FrameCx {
-            viewport: gumicord_render::Size::new(1280.0, 800.0),
-            scale: 1.0,
-        };
-        let tree = a.build(&cx);
-        let placed = gumicord_render::layout_for_test(&tree, cx.viewport);
-
-        let find = |id| {
-            placed
-                .iter()
-                .rev()
-                .find(|(i, _)| *i == id)
-                .map(|(_, r)| *r)
-                .unwrap_or_else(|| panic!("{id:?} が置かれていない"))
-        };
-        let button = find(NodeId::PrimitiveButton);
-        let icon = find(NodeId::PrimitiveIcon);
-
-        assert!(
-            button.w > 0.0 && button.h > 0.0,
-            "箱が潰れている {button:?}"
-        );
-        assert!(
-            icon.x >= button.x
-                && icon.y >= button.y
-                && icon.x + icon.w <= button.x + button.w
-                && icon.y + icon.h <= button.y + button.h,
-            "絵 {icon:?} が箱 {button:?} からはみ出している"
-        );
-    }
-
-
-    /// Escape works too, but without a visible way out this looks like a
-    /// state with no exit.
-    #[test]
-    fn a_cancel_button_appears_while_replying() {
-        let cancel = |c: Composing| {
-            let mut a = app();
-            a.chat.composing = c;
-            let mut found = false;
-            a.build_tree(Panes::Four).walk(&mut |n, _| {
-                found |=
-                    n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(CANCEL_COMPOSING));
-            });
-            found
-        };
-        assert!(!cancel(Composing::New), "何もしていないのに出ている");
-        assert!(cancel(Composing::Reply(1)));
-        assert!(cancel(Composing::Edit(1)));
-    }
-
-
-    /// Cancelling a reply keeps the draft; cancelling an edit does not, since
-    /// the field held the original message rather than anything typed.
-    #[test]
-    fn cancelling_a_reply_keeps_the_draft_but_cancelling_an_edit_clears_it() {
-        let press = |c: Composing| {
-            let mut a = app();
-            a.chat.composing = c;
-            a.chat.input.insert("書いた文");
-            let hits = [hit_of(
-                NodeId::PrimitiveButton,
-                Some(Key::Slot(CANCEL_COMPOSING)),
-            )];
-            assert!(a.pressed(&hits), "何も起きなかった");
-            assert_eq!(a.chat.composing, Composing::New, "やめていない");
-            a.chat.input.text().to_owned()
-        };
-        assert_eq!(press(Composing::Reply(1)), "書いた文", "返信で消えた");
-        assert_eq!(press(Composing::Edit(1)), "", "編集で残った");
-    }
-
-
-    /// If the slot constant is read as a binding rather than a pattern, every
-    /// button falls through here. It looks identical until one is pressed.
-    #[test]
-    fn another_button_does_not_cancel() {
-        let mut a = app();
-        a.chat.composing = Composing::Reply(1);
-        let hits = [hit_of(NodeId::PrimitiveButton, Some(Key::Slot("その他")))];
-
-        a.pressed(&hits);
-        assert_eq!(
-            a.chat.composing,
-            Composing::Reply(1),
-            "別のボタンで取り消された"
-        );
-    }
-
-
-    /// Escape cancels the reply or edit before discarding the draft; both at
-    /// once leaves it unclear which was lost.
-    #[test]
-    fn esc_は返信をやめてから閉じる() {
-        let mut a = app();
-        a.chat.input_focused = true;
-        a.chat.composing = Composing::Reply(1);
-        a.chat.input.insert("書きかけ");
-
-        assert!(a.cancel_input());
-        assert_eq!(a.chat.composing, Composing::New, "返信のままである");
-        assert!(a.chat.input_focused, "フォーカスまで外れた");
-    }
-
-
-    /// Clearing the field and pressing enter must not destroy the message.
-    #[test]
-    fn submitting_an_empty_field_does_nothing() {
-        let mut a = app();
-        a.chat.composing = Composing::Edit(1);
-        assert!(!a.submit());
-        assert_eq!(a.chat.composing, Composing::Edit(1), "編集をやめてしまった");
-    }
-
-
-    /// Sending returns to composing a new message, or the next one is a reply
-    /// too.
-    #[test]
-    fn submitting_returns_to_composing_a_new_message() {
-        let mut a = app();
-        a.chat.composing = Composing::Reply(1);
-        a.chat.input.insert("やあ");
-        assert!(a.submit());
-        assert_eq!(a.chat.composing, Composing::New);
-    }
-
-
-    /// The server would return 403 anyway, but not offering it comes first.
-    #[test]
-    fn someone_elses_message_offers_neither_edit_nor_delete() {
-        use crate::menu::Action;
-        // Demo mode is signed out, so nothing is ours.
-        let a = app();
-        let items = a.message_menu(1);
-        assert!(
-            !items
-                .iter()
-                .any(|i| matches!(i.action, Action::Edit(_) | Action::Delete(_))),
-            "他人の発言に編集か削除が出ている"
-        );
-        // Reply is offered on anyone's message.
-        assert!(items.iter().any(|i| matches!(i.action, Action::Reply(_))));
-    }
-
-
-    /// The composer overlaps the message list, so it is checked first.
-    #[test]
-    fn the_input_field_gets_the_input_menu() {
-        use crate::menu::Action;
-        let mut a = app();
-        let hits = [
-            hit_of(NodeId::ChatInputField, None),
-            hit_of(NodeId::ChatMessage, Some(Key::Id(1))),
-        ];
-        assert!(a.context_menu(&hits, (0.0, 0.0)));
-
-        let items = a.floating.as_ref().expect("開いていない").items();
-        assert!(
-            items.iter().any(|i| i.action == Action::Paste),
-            "発言のメニューが出ている"
-        );
-    }
-
-
-    /// Only what would do something.
-    #[test]
-    fn cut_and_copy_are_absent_without_a_selection() {
-        use crate::menu::Action;
-        let mut a = app();
-        let has = |a: &Gumicord, want: Action| a.field_menu().iter().any(|i| i.action == want);
-
-        assert!(!has(&a, Action::CopySelection));
-        assert!(!has(&a, Action::SelectAll), "空なのに全選択が出ている");
-        assert!(has(&a, Action::Paste), "貼り付けはいつでも出る");
-
-        a.chat.input.insert("あいう");
-        assert!(has(&a, Action::SelectAll));
-        assert!(!has(&a, Action::CopySelection), "まだ選んでいない");
-
-        a.chat.input.select_all();
-        assert!(has(&a, Action::CopySelection));
-        assert!(has(&a, Action::Cut));
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Touch: swipes, drawer, member sheet
-
-
-    /// A message swiped left starts a reply, like the menu does.
-    #[test]
-    fn swipe_left_on_a_message_starts_a_reply() {
-        let mut a = app();
-        let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
-        assert!(a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
-        assert_eq!(a.chat.composing, Composing::Reply(7));
-        assert!(a.chat.input_focused, "入力欄に焦点がない");
-        assert_eq!(a.chat.a11y_message, Some(7));
-    }
-
-
-    /// An edge swipe opens the drawer only where the lists hide.
-    #[test]
-    fn edge_swipe_opens_the_drawer_when_narrow() {
-        let mut a = narrow();
-        assert!(a.swiped(&[], swipe(SwipeDir::Right, 10.0)));
-        assert!(a.chat.drawer_open, "棚が開かない");
-
-        let mut wide = app();
-        wide.match_ctx = MatchContext::new(1400.0);
-        assert!(!wide.swiped(&[], swipe(SwipeDir::Right, 10.0)));
-        assert!(!wide.chat.drawer_open, "広いのに開いた");
-
-        let mut mid = narrow();
-        assert!(!mid.swiped(&[], swipe(SwipeDir::Right, 300.0)));
-        assert!(!mid.chat.drawer_open, "端でないのに開いた");
-    }
-
-
-    /// The drawer holds both lists and navigates, then closes.
-    #[test]
-    fn drawer_selects_a_channel_then_closes() {
-        let mut a = narrow();
-        assert!(a.open_drawer());
+        a.chat.composing = c;
         let mut found = false;
-        a.build_tree(Panes::One).walk(&mut |n, _| {
+        a.build_tree(Panes::Four).walk(&mut |n, _| {
+            found |= n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(CANCEL_COMPOSING));
+        });
+        found
+    };
+    assert!(!cancel(Composing::New), "何もしていないのに出ている");
+    assert!(cancel(Composing::Reply(1)));
+    assert!(cancel(Composing::Edit(1)));
+}
+
+/// Cancelling a reply keeps the draft; cancelling an edit does not, since
+/// the field held the original message rather than anything typed.
+#[test]
+fn cancelling_a_reply_keeps_the_draft_but_cancelling_an_edit_clears_it() {
+    let press = |c: Composing| {
+        let mut a = app();
+        a.chat.composing = c;
+        a.chat.input.insert("書いた文");
+        let hits = [hit_of(
+            NodeId::PrimitiveButton,
+            Some(Key::Slot(CANCEL_COMPOSING)),
+        )];
+        assert!(a.pressed(&hits), "何も起きなかった");
+        assert_eq!(a.chat.composing, Composing::New, "やめていない");
+        a.chat.input.text().to_owned()
+    };
+    assert_eq!(press(Composing::Reply(1)), "書いた文", "返信で消えた");
+    assert_eq!(press(Composing::Edit(1)), "", "編集で残った");
+}
+
+/// If the slot constant is read as a binding rather than a pattern, every
+/// button falls through here. It looks identical until one is pressed.
+#[test]
+fn another_button_does_not_cancel() {
+    let mut a = app();
+    a.chat.composing = Composing::Reply(1);
+    let hits = [hit_of(NodeId::PrimitiveButton, Some(Key::Slot("その他")))];
+
+    a.pressed(&hits);
+    assert_eq!(
+        a.chat.composing,
+        Composing::Reply(1),
+        "別のボタンで取り消された"
+    );
+}
+
+/// Escape cancels the reply or edit before discarding the draft; both at
+/// once leaves it unclear which was lost.
+#[test]
+fn esc_は返信をやめてから閉じる() {
+    let mut a = app();
+    a.chat.input_focused = true;
+    a.chat.composing = Composing::Reply(1);
+    a.chat.input.insert("書きかけ");
+
+    assert!(a.cancel_input());
+    assert_eq!(a.chat.composing, Composing::New, "返信のままである");
+    assert!(a.chat.input_focused, "フォーカスまで外れた");
+}
+
+/// Clearing the field and pressing enter must not destroy the message.
+#[test]
+fn submitting_an_empty_field_does_nothing() {
+    let mut a = app();
+    a.chat.composing = Composing::Edit(1);
+    assert!(!a.submit());
+    assert_eq!(a.chat.composing, Composing::Edit(1), "編集をやめてしまった");
+}
+
+/// Sending returns to composing a new message, or the next one is a reply
+/// too.
+#[test]
+fn submitting_returns_to_composing_a_new_message() {
+    let mut a = app();
+    a.chat.composing = Composing::Reply(1);
+    a.chat.input.insert("やあ");
+    assert!(a.submit());
+    assert_eq!(a.chat.composing, Composing::New);
+}
+
+/// The server would return 403 anyway, but not offering it comes first.
+#[test]
+fn someone_elses_message_offers_neither_edit_nor_delete() {
+    use crate::menu::Action;
+    // Demo mode is signed out, so nothing is ours.
+    let a = app();
+    let items = a.message_menu(1);
+    assert!(
+        !items
+            .iter()
+            .any(|i| matches!(i.action, Action::Edit(_) | Action::Delete(_))),
+        "他人の発言に編集か削除が出ている"
+    );
+    // Reply is offered on anyone's message.
+    assert!(items.iter().any(|i| matches!(i.action, Action::Reply(_))));
+}
+
+/// The composer overlaps the message list, so it is checked first.
+#[test]
+fn the_input_field_gets_the_input_menu() {
+    use crate::menu::Action;
+    let mut a = app();
+    let hits = [
+        hit_of(NodeId::ChatInputField, None),
+        hit_of(NodeId::ChatMessage, Some(Key::Id(1))),
+    ];
+    assert!(a.context_menu(&hits, (0.0, 0.0)));
+
+    let items = a.floating.as_ref().expect("開いていない").items();
+    assert!(
+        items.iter().any(|i| i.action == Action::Paste),
+        "発言のメニューが出ている"
+    );
+}
+
+/// Only what would do something.
+#[test]
+fn cut_and_copy_are_absent_without_a_selection() {
+    use crate::menu::Action;
+    let mut a = app();
+    let has = |a: &Gumicord, want: Action| a.field_menu().iter().any(|i| i.action == want);
+
+    assert!(!has(&a, Action::CopySelection));
+    assert!(!has(&a, Action::SelectAll), "空なのに全選択が出ている");
+    assert!(has(&a, Action::Paste), "貼り付けはいつでも出る");
+
+    a.chat.input.insert("あいう");
+    assert!(has(&a, Action::SelectAll));
+    assert!(!has(&a, Action::CopySelection), "まだ選んでいない");
+
+    a.chat.input.select_all();
+    assert!(has(&a, Action::CopySelection));
+    assert!(has(&a, Action::Cut));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Touch: swipes, drawer, member sheet
+
+/// A message swiped left starts a reply, like the menu does.
+#[test]
+fn swipe_left_on_a_message_starts_a_reply() {
+    let mut a = app();
+    let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
+    assert!(a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
+    assert_eq!(a.chat.composing, Composing::Reply(7));
+    assert!(a.chat.input_focused, "入力欄に焦点がない");
+    assert_eq!(a.chat.a11y_message, Some(7));
+}
+
+/// An edge swipe opens the drawer only where the lists hide.
+#[test]
+fn edge_swipe_opens_the_drawer_when_narrow() {
+    let mut a = narrow();
+    assert!(a.swiped(&[], swipe(SwipeDir::Right, 10.0)));
+    assert!(a.chat.drawer_open, "棚が開かない");
+
+    let mut wide = app();
+    wide.match_ctx = MatchContext::new(1400.0);
+    assert!(!wide.swiped(&[], swipe(SwipeDir::Right, 10.0)));
+    assert!(!wide.chat.drawer_open, "広いのに開いた");
+
+    let mut mid = narrow();
+    assert!(!mid.swiped(&[], swipe(SwipeDir::Right, 300.0)));
+    assert!(!mid.chat.drawer_open, "端でないのに開いた");
+}
+
+/// The drawer holds both lists and navigates, then closes.
+#[test]
+fn drawer_selects_a_channel_then_closes() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let mut found = false;
+    a.build_tree(Panes::One).walk(&mut |n, _| {
+        found = found
+            || n.id == NodeId::OverlayDrawer
+            || n.id == NodeId::NavGuildList
+            || n.id == NodeId::NavChannelList;
+    });
+    assert!(found, "棚の中身がない");
+
+    assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(10)))]));
+    assert_eq!(a.chat.selected_channel, 10);
+    assert!(!a.chat.drawer_open, "選んだのに閉じない");
+}
+
+/// Tapping outside the drawer dismisses it without navigating.
+#[test]
+fn tapping_outside_the_drawer_dismisses_it() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let channel = a.chat.selected_channel;
+    assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+    assert!(!a.chat.drawer_open, "閉じていない");
+    assert_eq!(a.chat.selected_channel, channel, "下のチャンネルへ移動した");
+}
+
+/// Escape closes the drawer and the sheet, after menus and settings.
+#[test]
+fn escape_closes_drawer_and_sheet() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    assert!(a.cancel_input());
+    assert!(!a.chat.drawer_open, "Esc で閉じない");
+
+    assert!(a.open_member_sheet());
+    assert!(a.cancel_input());
+    assert!(!a.chat.member_sheet_open, "Esc で閉じない");
+}
+
+/// The member button opens the sheet only where the pane hides.
+#[test]
+fn members_button_opens_the_sheet_when_narrow() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let mut sheet = false;
+    let mut list = false;
+    a.build_tree(Panes::One).walk(&mut |n, _| {
+        sheet = sheet || n.id == NodeId::OverlaySheet;
+        list = list || n.id == NodeId::NavMemberListSheet;
+    });
+    assert!(sheet && list, "面か一覧が出ていない");
+
+    // Tapping a row closes the sheet; there is no profile view yet.
+    assert!(a.pressed(&[hit_of(NodeId::NavMemberListItem, Some(Key::Id(5)))]));
+    assert!(!a.chat.member_sheet_open, "閉じていない");
+
+    let mut wide = app();
+    wide.match_ctx = MatchContext::new(1400.0);
+    assert!(!wide.open_member_sheet(), "広いのに開いた");
+}
+
+/// The header carries the member button only while the pane hides.
+#[test]
+fn header_button_appears_only_when_narrow() {
+    fn has_button(a: &Gumicord, panes: Panes) -> bool {
+        let mut found = false;
+        a.build_tree(panes).walk(&mut |n, _| {
             found = found
-                || n.id == NodeId::OverlayDrawer
-                || n.id == NodeId::NavGuildList
-                || n.id == NodeId::NavChannelList;
+                || (n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(MEMBERS_OPEN)));
         });
-        assert!(found, "棚の中身がない");
-
-        assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(10)))]));
-        assert_eq!(a.chat.selected_channel, 10);
-        assert!(!a.chat.drawer_open, "選んだのに閉じない");
+        found
     }
+    assert!(has_button(&narrow(), Panes::One));
+    let mut wide = app();
+    wide.match_ctx = MatchContext::new(1400.0);
+    assert!(!has_button(&wide, Panes::Four));
+}
 
+/// The members mark names a real icon; unknown names draw nothing.
+#[test]
+fn members_icon_exists() {
+    assert!(
+        gumicord_render::icon::lookup(MEMBERS_ICON).is_some(),
+        "人形札の絵がない"
+    );
+    assert!(
+        gumicord_render::icon::lookup(BACK_ICON).is_some(),
+        "戻る札の絵がない"
+    );
+}
 
-    /// Tapping outside the drawer dismisses it without navigating.
-    #[test]
-    fn tapping_outside_the_drawer_dismisses_it() {
-        let mut a = narrow();
-        assert!(a.open_drawer());
-        let channel = a.chat.selected_channel;
-        assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
-        assert!(!a.chat.drawer_open, "閉じていない");
-        assert_eq!(a.chat.selected_channel, channel, "下のチャンネルへ移動した");
-    }
+/// The drawer stands at the left edge, narrower than the window.
+#[test]
+fn drawer_stands_at_the_left_edge() {
+    let (w, h) = (400.0, 800.0);
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let cx = gumicord_platform::FrameCx {
+        viewport: gumicord_render::Size::new(w, h),
+        scale: 1.0,
+    };
+    let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+    let drawer = placed
+        .iter()
+        .find(|(id, _)| *id == NodeId::OverlayDrawer)
+        .map(|(_, r)| *r)
+        .expect("棚が置かれていない");
+    assert!(drawer.x.abs() < 1.0, "左端にいない {drawer:?}");
+    assert!(drawer.w < w, "全画面を覆っている {drawer:?}");
+}
 
+/// The sheet spans the width, rises to ~70% at most, and sits at
+/// the bottom.
+#[test]
+fn member_sheet_spans_and_caps() {
+    let (w, h) = (400.0, 800.0);
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let cx = gumicord_platform::FrameCx {
+        viewport: gumicord_render::Size::new(w, h),
+        scale: 1.0,
+    };
+    let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+    let sheet = placed
+        .iter()
+        .find(|(id, _)| *id == NodeId::OverlaySheet)
+        .map(|(_, r)| *r)
+        .expect("面が置かれていない");
+    assert!((sheet.w - w).abs() < 1.0, "横いっぱいでない {sheet:?}");
+    assert!(sheet.h <= h * 0.7 + 1.0, "高すぎる {sheet:?}");
+    assert!(
+        (sheet.y + sheet.h - h).abs() < 1.0,
+        "下に付いていない {sheet:?}"
+    );
+    let list = placed
+        .iter()
+        .find(|(id, _)| *id == NodeId::NavMemberListSheet)
+        .map(|(_, r)| *r)
+        .expect("一覧が出ていない");
+    assert!(
+        (list.w - sheet.w).abs() < 1.0,
+        "一覧が面を埋めていない {list:?} {sheet:?}"
+    );
+}
 
-    /// Escape closes the drawer and the sheet, after menus and settings.
-    #[test]
-    fn escape_closes_drawer_and_sheet() {
-        let mut a = narrow();
-        assert!(a.open_drawer());
-        assert!(a.cancel_input());
-        assert!(!a.chat.drawer_open, "Esc で閉じない");
+/// The back button opens the drawer from a press too.
+#[test]
+fn back_button_opens_the_drawer() {
+    let mut a = narrow();
+    let mut found = false;
+    a.build_tree(Panes::One).walk(&mut |n, _| {
+        found = found || (n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(BACK_OPEN)));
+    });
+    assert!(found, "戻る札が出ていない");
+    assert!(a.pressed(&[hit_of(NodeId::PrimitiveButton, Some(Key::Slot(BACK_OPEN)))]));
+    assert!(a.chat.drawer_open, "戻る札で開かない");
+}
 
-        assert!(a.open_member_sheet());
-        assert!(a.cancel_input());
-        assert!(!a.chat.member_sheet_open, "Esc で閉じない");
-    }
+// ═══════════════════════════════════════════════════════════════
+//  Context menus
 
+#[test]
+fn right_clicking_a_message_opens_the_menu() {
+    let a = with_menu();
+    assert!(a.floating.is_some());
+    assert_eq!(
+        a.floating.as_ref().and_then(|f| match f {
+            crate::menu::Floating::Menu(m) => Some(m.at),
+            _ => None,
+        }),
+        Some((10.0, 20.0))
+    );
+}
 
-    /// The member button opens the sheet only where the pane hides.
-    #[test]
-    fn members_button_opens_the_sheet_when_narrow() {
-        let mut a = narrow();
-        assert!(a.open_member_sheet());
-        let mut sheet = false;
-        let mut list = false;
-        a.build_tree(Panes::One).walk(&mut |n, _| {
-            sheet = sheet || n.id == NodeId::OverlaySheet;
-            list = list || n.id == NodeId::NavMemberListSheet;
-        });
-        assert!(sheet && list, "面か一覧が出ていない");
+/// A covered run opens alone and closes again on the second press; under
+/// an open menu it declines exactly like a link does.
+#[test]
+fn a_spoiler_press_toggles_and_declines_while_something_floats() {
+    let mut a = with_menu();
+    assert!(!a.spoiler_pressed(1, 0));
+    assert!(!a.chat.reveals.is_open(1, 0), "断ったのに開いている");
 
-        // Tapping a row closes the sheet; there is no profile view yet.
-        assert!(a.pressed(&[hit_of(NodeId::NavMemberListItem, Some(Key::Id(5)))]));
-        assert!(!a.chat.member_sheet_open, "閉じていない");
+    // Toggle: open once, then cover again.
+    let mut b = app();
+    assert!(b.spoiler_pressed(5, 2));
+    assert!(b.chat.reveals.is_open(5, 2));
+    assert!(b.spoiler_pressed(5, 2));
+    assert!(!b.chat.reveals.is_open(5, 2), "もう一度押しても閉じない");
 
-        let mut wide = app();
-        wide.match_ctx = MatchContext::new(1400.0);
-        assert!(!wide.open_member_sheet(), "広いのに開いた");
-    }
+    // The message-level reveal still counts as open for every run.
+    b.chat.reveals.messages.insert(5);
+    assert!(b.spoiler_pressed(5, 2));
+    assert!(
+        b.chat.reveals.is_open(5, 2),
+        "メッセージ全体が開いているのに閉じた"
+    );
+}
 
+/// Signing out is destructive and hard to reverse without a phone, so it
+/// goes through the same dialog as deleting.
+#[test]
+fn logging_out_asks_first() {
+    let mut a = app();
+    a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
+        at: (0.0, 0.0),
+        items: vec![crate::menu::Item::new(
+            crate::menu::Action::LogOut,
+            "ログアウト",
+        )],
+    }));
+    press_menu(&mut a, 0);
+    assert!(is_confirm(&a), "no confirmation appeared");
+}
 
-    /// The header carries the member button only while the pane hides.
-    #[test]
-    fn header_button_appears_only_when_narrow() {
-        fn has_button(a: &Gumicord, panes: Panes) -> bool {
-            let mut found = false;
-            a.build_tree(panes).walk(&mut |n, _| {
-                found = found
-                    || (n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(MEMBERS_OPEN)));
-            });
-            found
-        }
-        assert!(has_button(&narrow(), Panes::One));
-        let mut wide = app();
-        wide.match_ctx = MatchContext::new(1400.0);
-        assert!(!has_button(&wide, Panes::Four));
-    }
-
-
-    /// The members mark names a real icon; unknown names draw nothing.
-    #[test]
-    fn members_icon_exists() {
-        assert!(
-            gumicord_render::icon::lookup(MEMBERS_ICON).is_some(),
-            "人形札の絵がない"
-        );
-        assert!(
-            gumicord_render::icon::lookup(BACK_ICON).is_some(),
-            "戻る札の絵がない"
-        );
-    }
-
-
-    /// The drawer stands at the left edge, narrower than the window.
-    #[test]
-    fn drawer_stands_at_the_left_edge() {
-        let (w, h) = (400.0, 800.0);
-        let mut a = narrow();
-        assert!(a.open_drawer());
-        let cx = gumicord_platform::FrameCx {
-            viewport: gumicord_render::Size::new(w, h),
-            scale: 1.0,
-        };
-        let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
-        let drawer = placed
-            .iter()
-            .find(|(id, _)| *id == NodeId::OverlayDrawer)
-            .map(|(_, r)| *r)
-            .expect("棚が置かれていない");
-        assert!(drawer.x.abs() < 1.0, "左端にいない {drawer:?}");
-        assert!(drawer.w < w, "全画面を覆っている {drawer:?}");
-    }
-
-
-    /// The sheet spans the width, rises to ~70% at most, and sits at
-    /// the bottom.
-    #[test]
-    fn member_sheet_spans_and_caps() {
-        let (w, h) = (400.0, 800.0);
-        let mut a = narrow();
-        assert!(a.open_member_sheet());
-        let cx = gumicord_platform::FrameCx {
-            viewport: gumicord_render::Size::new(w, h),
-            scale: 1.0,
-        };
-        let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
-        let sheet = placed
-            .iter()
-            .find(|(id, _)| *id == NodeId::OverlaySheet)
-            .map(|(_, r)| *r)
-            .expect("面が置かれていない");
-        assert!((sheet.w - w).abs() < 1.0, "横いっぱいでない {sheet:?}");
-        assert!(sheet.h <= h * 0.7 + 1.0, "高すぎる {sheet:?}");
-        assert!(
-            (sheet.y + sheet.h - h).abs() < 1.0,
-            "下に付いていない {sheet:?}"
-        );
-        let list = placed
-            .iter()
-            .find(|(id, _)| *id == NodeId::NavMemberListSheet)
-            .map(|(_, r)| *r)
-            .expect("一覧が出ていない");
-        assert!(
-            (list.w - sheet.w).abs() < 1.0,
-            "一覧が面を埋めていない {list:?} {sheet:?}"
-        );
-    }
-
-
-    /// The back button opens the drawer from a press too.
-    #[test]
-    fn back_button_opens_the_drawer() {
-        let mut a = narrow();
-        let mut found = false;
-        a.build_tree(Panes::One).walk(&mut |n, _| {
-            found =
-                found || (n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(BACK_OPEN)));
-        });
-        assert!(found, "戻る札が出ていない");
-        assert!(a.pressed(&[hit_of(NodeId::PrimitiveButton, Some(Key::Slot(BACK_OPEN)))]));
-        assert!(a.chat.drawer_open, "戻る札で開かない");
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Context menus
-
-
-    #[test]
-    fn right_clicking_a_message_opens_the_menu() {
-        let a = with_menu();
-        assert!(a.floating.is_some());
-        assert_eq!(
-            a.floating.as_ref().and_then(|f| match f {
-                crate::menu::Floating::Menu(m) => Some(m.at),
-                _ => None,
+/// The dialog has to say the phone is needed, since password login does
+/// not exist yet.
+#[test]
+fn the_logout_dialog_says_a_phone_is_needed() {
+    let a = app();
+    let c = a
+        .needs_confirming(
+            &crate::menu::Floating::Menu(crate::menu::Menu {
+                at: (0.0, 0.0),
+                items: Vec::new(),
             }),
-            Some((10.0, 20.0))
-        );
-    }
+            &crate::menu::Action::LogOut,
+        )
+        .expect("log out should be confirmed");
+    assert!(c.danger);
+    assert!(c.body.contains("QR"), "does not mention the QR: {}", c.body);
+}
 
+/// Only offered while signed in; there is nothing to sign out of otherwise.
+#[test]
+fn the_user_menu_is_empty_when_signed_out() {
+    assert!(app().user_menu().is_empty());
+}
 
-    /// A covered run opens alone and closes again on the second press; under
-    /// an open menu it declines exactly like a link does.
-    #[test]
-    fn a_spoiler_press_toggles_and_declines_while_something_floats() {
-        let mut a = with_menu();
-        assert!(!a.spoiler_pressed(1, 0));
-        assert!(!a.chat.reveals.is_open(1, 0), "断ったのに開いている");
+/// Demo mode has no runtime and nothing to sign out of.
+#[test]
+fn signing_out_without_a_runtime_does_nothing() {
+    let mut a = app();
+    assert!(!a.sign_out());
+}
 
-        // Toggle: open once, then cover again.
-        let mut b = app();
-        assert!(b.spoiler_pressed(5, 2));
-        assert!(b.chat.reveals.is_open(5, 2));
-        assert!(b.spoiler_pressed(5, 2));
-        assert!(!b.chat.reveals.is_open(5, 2), "もう一度押しても閉じない");
+// ═══════════════════════════════════════════════════════════════
+//  Time-dependent display
 
-        // The message-level reveal still counts as open for every run.
-        b.chat.reveals.messages.insert(5);
-        assert!(b.spoiler_pressed(5, 2));
-        assert!(
-            b.chat.reveals.is_open(5, 2),
-            "メッセージ全体が開いているのに閉じた"
-        );
-    }
+/// With no relative timestamp there is nothing to wake for, and a
+/// deadline would spin for no change.
+#[test]
+fn nothing_relative_means_no_wake_up() {
+    let mut a = app();
+    built(&mut a);
+    assert_eq!(a.next_frame_in(), None);
+}
 
+/// Otherwise "just now" stays on an open screen for hours.
+#[test]
+fn a_relative_timestamp_asks_for_a_later_frame() {
+    let mut a = app();
+    // Relative to the real clock; a fixed timestamp would drift into
+    // "years ago".
+    let at = gumicord_platform::now_unix() - 90;
+    let channel = ChannelId::from(a.chat.selected_channel);
+    a.live.store_mut().set_backlog(
+        channel,
+        vec![gumicord_model::Message {
+            id: MessageId::from(9_999u64),
+            channel_id: channel,
+            guild_id: None,
+            author: gumicord_model::User {
+                id: UserId::from(7u64),
+                username: "nenneko".to_owned(),
+                global_name: Some("ねんねこ".to_owned()),
+                discriminator: "0".to_owned(),
+                avatar_hash: None,
+                bot: false,
+            },
+            content: format!("<t:{at}:R>"),
+            timestamp: "2026-08-22T12:34:56+00:00".to_owned(),
+            edited_timestamp: None,
+            pinned: false,
+            attachments: Vec::new(),
+            member: None,
+            referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
+        }],
+    );
+    built(&mut a);
 
-    /// Signing out is destructive and hard to reverse without a phone, so it
-    /// goes through the same dialog as deleting.
-    #[test]
-    fn logging_out_asks_first() {
-        let mut a = app();
-        a.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
-            at: (0.0, 0.0),
-            items: vec![crate::menu::Item::new(
-                crate::menu::Action::LogOut,
-                "ログアウト",
-            )],
-        }));
-        press_menu(&mut a, 0);
-        assert!(is_confirm(&a), "no confirmation appeared");
-    }
+    let d = a.next_frame_in().expect("起き直しを頼んでいない");
+    assert!(
+        d.as_secs() >= 1 && d.as_secs() <= 60,
+        "分の切れ目のはずが {d:?}"
+    );
+}
 
+// ═══════════════════════════════════════════════════════════════
+//  Confirming before deleting
 
-    /// The dialog has to say the phone is needed, since password login does
-    /// not exist yet.
-    #[test]
-    fn the_logout_dialog_says_a_phone_is_needed() {
-        let a = app();
-        let c = a
-            .needs_confirming(
-                &crate::menu::Floating::Menu(crate::menu::Menu {
-                    at: (0.0, 0.0),
-                    items: Vec::new(),
-                }),
-                &crate::menu::Action::LogOut,
-            )
-            .expect("log out should be confirmed");
-        assert!(c.danger);
-        assert!(c.body.contains("QR"), "does not mention the QR: {}", c.body);
-    }
+/// Matching on the raw string would notify someone for writing about a
+/// mention inside code.
+#[test]
+fn a_mention_inside_code_is_not_a_mention() {
+    let me = Some(UserId::from(1));
+    let call =
+        |src: &str| crate::pages::chat::rows::calls_me(&gumicord_markdown::parse(src), me, None);
 
-
-    /// Only offered while signed in; there is nothing to sign out of otherwise.
-    #[test]
-    fn the_user_menu_is_empty_when_signed_out() {
-        assert!(app().user_menu().is_empty());
-    }
-
-
-    /// Demo mode has no runtime and nothing to sign out of.
-    #[test]
-    fn signing_out_without_a_runtime_does_nothing() {
-        let mut a = app();
-        assert!(!a.sign_out());
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Time-dependent display
-
-
-    /// With no relative timestamp there is nothing to wake for, and a
-    /// deadline would spin for no change.
-    #[test]
-    fn nothing_relative_means_no_wake_up() {
-        let mut a = app();
-        built(&mut a);
-        assert_eq!(a.next_frame_in(), None);
-    }
-
-
-    /// Otherwise "just now" stays on an open screen for hours.
-    #[test]
-    fn a_relative_timestamp_asks_for_a_later_frame() {
-        let mut a = app();
-        // Relative to the real clock; a fixed timestamp would drift into
-        // "years ago".
-        let at = gumicord_platform::now_unix() - 90;
-        let channel = ChannelId::from(a.chat.selected_channel);
-        a.live.store_mut().set_backlog(
-            channel,
-            vec![gumicord_model::Message {
-                id: MessageId::from(9_999u64),
-                channel_id: channel,
-                guild_id: None,
-                author: gumicord_model::User {
-                    id: UserId::from(7u64),
-                    username: "nenneko".to_owned(),
-                    global_name: Some("ねんねこ".to_owned()),
-                    discriminator: "0".to_owned(),
-                    avatar_hash: None,
-                    bot: false,
-                },
-                content: format!("<t:{at}:R>"),
-                timestamp: "2026-08-22T12:34:56+00:00".to_owned(),
-                edited_timestamp: None,
-                pinned: false,
-                attachments: Vec::new(),
-                member: None,
-                referenced_message: None,
-                mentions: Vec::new(),
-                mention_everyone: false,
-            }],
-        );
-        built(&mut a);
-
-        let d = a.next_frame_in().expect("起き直しを頼んでいない");
-        assert!(
-            d.as_secs() >= 1 && d.as_secs() <= 60,
-            "分の切れ目のはずが {d:?}"
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Confirming before deleting
-
-
-    /// Matching on the raw string would notify someone for writing about a
-    /// mention inside code.
-    #[test]
-    fn a_mention_inside_code_is_not_a_mention() {
-        let me = Some(UserId::from(1));
-        let call = |src: &str| crate::pages::chat::rows::calls_me(&gumicord_markdown::parse(src), me, None);
-
-        assert!(call("やあ <@1>"));
-        assert!(!call("`<@1>` と書くと呼べる"));
-        assert!(!call(
-            "```
+    assert!(call("やあ <@1>"));
+    assert!(!call("`<@1>` と書くと呼べる"));
+    assert!(!call(
+        "```
 <@1>
 ```"
-        ));
-        // A different person is not us.
-        assert!(!call("やあ <@2>"));
-    }
+    ));
+    // A different person is not us.
+    assert!(!call("やあ <@2>"));
+}
 
+/// Watching only `@everyone` misses being called by role.
+#[test]
+fn a_mention_of_our_own_role_counts() {
+    let me = Some(UserId::from(1));
+    let roles = [RoleId::from(9)];
+    let call = |src: &str, r: Option<&[RoleId]>| {
+        crate::pages::chat::rows::calls_me(&gumicord_markdown::parse(src), me, r)
+    };
 
-    /// Watching only `@everyone` misses being called by role.
-    #[test]
-    fn a_mention_of_our_own_role_counts() {
-        let me = Some(UserId::from(1));
-        let roles = [RoleId::from(9)];
-        let call =
-            |src: &str, r: Option<&[RoleId]>| crate::pages::chat::rows::calls_me(&gumicord_markdown::parse(src), me, r);
+    assert!(call("<@&9> 集合", Some(&roles)));
+    assert!(!call("<@&8> 集合", Some(&roles)));
+    assert!(!call("<@&9> 集合", None));
+    assert!(call("@everyone", None));
+    assert!(call("@here", None));
+    // A channel reference is not a mention.
+    assert!(!call("<#9> を見て", Some(&roles)));
+}
 
-        assert!(call("<@&9> 集合", Some(&roles)));
-        assert!(!call("<@&8> 集合", Some(&roles)));
-        assert!(!call("<@&9> 集合", None));
-        assert!(call("@everyone", None));
-        assert!(call("@here", None));
-        // A channel reference is not a mention.
-        assert!(!call("<#9> を見て", Some(&roles)));
-    }
+/// Mentions inside quotes and lists count.
+#[test]
+fn a_nested_mention_is_found() {
+    let me = Some(UserId::from(1));
+    let call =
+        |src: &str| crate::pages::chat::rows::calls_me(&gumicord_markdown::parse(src), me, None);
+    assert!(call("> やあ <@1>"));
+    assert!(call("- やあ <@1>"));
+    assert!(call("# やあ <@1>"));
+}
 
-
-    /// Mentions inside quotes and lists count.
-    #[test]
-    fn a_nested_mention_is_found() {
-        let me = Some(UserId::from(1));
-        let call = |src: &str| crate::pages::chat::rows::calls_me(&gumicord_markdown::parse(src), me, None);
-        assert!(call("> やあ <@1>"));
-        assert!(call("- やあ <@1>"));
-        assert!(call("# やあ <@1>"));
-    }
-
-    /// The tree builds and reflects the selection.
-    #[test]
-    fn the_tree_reflects_the_selection() {
-        let mut a = app();
-        // Demo rows are gone; the selection shows through live data.
-        a.live.store_mut().replace_guilds(vec![gumicord_model::Guild {
+/// The tree builds and reflects the selection.
+#[test]
+fn the_tree_reflects_the_selection() {
+    let mut a = app();
+    // Demo rows are gone; the selection shows through live data.
+    a.live
+        .store_mut()
+        .replace_guilds(vec![gumicord_model::Guild {
             id: 1u64.into(),
             name: "テスト".to_owned(),
             icon_hash: None,
@@ -726,32 +688,31 @@ use crate::*;
             ],
             roles: Vec::new(),
         }]);
-        a.chat.selected_guild = 1;
-        a.chat.selected_channel = 12;
-        let tree = a.build_tree(Panes::Three);
+    a.chat.selected_guild = 1;
+    a.chat.selected_channel = 12;
+    let tree = a.build_tree(Panes::Three);
 
-        let mut selected = Vec::new();
-        tree.walk(&mut |n, _| {
-            if n.id == NodeId::NavChannelListItem && n.states.contains(State::Selected) {
-                selected.push(n.key.clone());
-            }
-        });
-        assert_eq!(selected, vec![Some(Key::Id(12))]);
-    }
+    let mut selected = Vec::new();
+    tree.walk(&mut |n, _| {
+        if n.id == NodeId::NavChannelListItem && n.states.contains(State::Selected) {
+            selected.push(n.key.clone());
+        }
+    });
+    assert_eq!(selected, vec![Some(Key::Id(12))]);
+}
 
-
-    /// A press that changes nothing asks for no redraw.
-    #[test]
-    fn pressing_the_current_channel_changes_nothing() {
-        let mut a = app();
-        let hit = Hit {
-            id: NodeId::NavChannelListItem,
-            key: Some(Key::Id(a.chat.selected_channel)),
-            rect: gumicord_render::Rect::ZERO,
-            clip: None,
-        };
-        assert!(!a.pressed(std::slice::from_ref(&hit)));
-    }
+/// A press that changes nothing asks for no redraw.
+#[test]
+fn pressing_the_current_channel_changes_nothing() {
+    let mut a = app();
+    let hit = Hit {
+        id: NodeId::NavChannelListItem,
+        key: Some(Key::Id(a.chat.selected_channel)),
+        rect: gumicord_render::Rect::ZERO,
+        clip: None,
+    };
+    assert!(!a.pressed(std::slice::from_ref(&hit)));
+}
 
 #[cfg(test)]
 mod input_tests {
@@ -827,7 +788,10 @@ mod input_tests {
         a.focused_document().unwrap().insert("こんにちは");
 
         assert!(a.submit());
-        assert!(field(&a.build(&cx())).text.is_empty(), "入力欄が空になっていない");
+        assert!(
+            field(&a.build(&cx())).text.is_empty(),
+            "入力欄が空になっていない"
+        );
     }
 
     /// Whitespace alone is not sent.
@@ -1218,7 +1182,10 @@ mod member_tests {
         let a = app(m);
         let rows = a.message_rows();
         let snippet = &rows[0].reply.as_ref().expect("返信元がない").snippet;
-        assert_eq!(snippet.chars().count(), crate::pages::chat::rows::REPLY_SNIPPET_LEN + 1);
+        assert_eq!(
+            snippet.chars().count(),
+            crate::pages::chat::rows::REPLY_SNIPPET_LEN + 1
+        );
         assert!(snippet.ends_with('…'), "{snippet}");
         assert!(!snippet.contains('\n'), "{snippet}");
     }
@@ -2007,4 +1974,3 @@ mod folder_tests {
         assert!(folder.members[2].icon.is_none());
     }
 }
-

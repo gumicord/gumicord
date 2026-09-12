@@ -38,7 +38,10 @@ impl crate::Gumicord {
                 UiNode::new(NodeId::PrimitiveButton)
                     .with_key(Key::Slot(crate::MEMBERS_OPEN))
                     .with_state_if(
-                        self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot(crate::MEMBERS_OPEN))),
+                        self.is_hovered(
+                            NodeId::PrimitiveButton,
+                            Some(&Key::Slot(crate::MEMBERS_OPEN)),
+                        ),
                         State::Hover,
                     )
                     .child(UiNode::icon(NodeId::PrimitiveIcon, crate::MEMBERS_ICON))
@@ -84,7 +87,9 @@ impl crate::Gumicord {
                 UiNode::new(NodeId::ChatInput)
                     // What the composer is doing has to be visible: sending a
                     // new message while meaning to edit cannot be undone.
-                    .child_if(self.chat.composing != Composing::New, || self.composing_bar())
+                    .child_if(self.chat.composing != Composing::New, || {
+                        self.composing_bar()
+                    })
                     .child(
                         UiNode::editable(
                             NodeId::ChatInputField,

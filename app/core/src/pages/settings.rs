@@ -285,8 +285,8 @@ impl crate::Gumicord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
     use crate::pages::chat::tests::{app, hit_of, press_menu};
+    use crate::*;
 
     fn themes_root(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("gumicord-theme-select-{tag}"));
@@ -465,13 +465,11 @@ mod tests {
         a
     }
 
-
     fn settings_ids(a: &Gumicord) -> Vec<NodeId> {
         let mut out = Vec::new();
         a.build_tree(Panes::Four).walk(&mut |n, _| out.push(n.id));
         out
     }
-
 
     fn settings_texts(a: &Gumicord) -> Vec<String> {
         let mut out = Vec::new();
@@ -482,7 +480,6 @@ mod tests {
         });
         out
     }
-
 
     /// The screen carries the nav and the page, in that order, under the
     /// title bar that never leaves.
@@ -512,7 +509,6 @@ mod tests {
         );
     }
 
-
     /// Demo loads no plugins, and nothing failed to fetch.
     #[test]
     fn empty_lists_say_so() {
@@ -524,7 +520,6 @@ mod tests {
         let texts = settings_texts(&theme).join("\n");
         assert!(texts.contains("問題は起きていません"), "{texts}");
     }
-
 
     /// The rows share the menu's index space: 0 closes, 1 and 2 switch.
     #[test]
@@ -546,7 +541,6 @@ mod tests {
         assert!(!a.settings.open, "閉じない");
     }
 
-
     /// Support sits last: 3 opens it without moving 0, 1 and 2.
     #[test]
     fn support_category_opens_last_and_carries_share_log() {
@@ -565,7 +559,6 @@ mod tests {
         );
     }
 
-
     /// A stale index stays put instead of acting on the wrong row.
     #[test]
     fn a_stale_settings_index_keeps_the_screen() {
@@ -573,7 +566,6 @@ mod tests {
         press_menu(&mut a, 99);
         assert!(a.settings.open, "画面が消えた");
     }
-
 
     /// Nothing underneath is reachable while it is open. Like a menu, an
     /// outside press closes the screen instead of navigating behind it.
@@ -585,7 +577,6 @@ mod tests {
         assert_eq!(a.chat.selected_channel, before, "下のチャンネルへ移動した");
         assert!(!a.settings.open, "外側の押下で閉じない");
     }
-
 
     /// The gear and its press handler address the same slot, and the icon
     /// name exists in the registry: either link breaking leaves a dead,
@@ -603,7 +594,6 @@ mod tests {
         )]));
         assert!(a.settings.open, "歯車で開かない");
     }
-
 
     /// The open tab's row carries Selected, so the theme can highlight it.
     #[test]
@@ -628,7 +618,6 @@ mod tests {
         assert_eq!(selected_index(&a), [2, 4], "移っていない");
     }
 
-
     /// Escape closes it; an outside press does too, with nothing to decide.
     #[test]
     fn escape_and_outside_press_close_settings() {
@@ -641,7 +630,6 @@ mod tests {
         assert!(!b.settings.open, "外側の押下で閉じない");
     }
 
-
     /// The bundled theme always parses; a broken one starts up black.
     #[test]
     fn the_bundled_theme_parses() {
@@ -650,7 +638,6 @@ mod tests {
         assert!(errors.is_empty(), "同梱テーマに誤りがある: {errors:?}");
         assert!(result.is_applied());
     }
-
 
     /// Resolving the theme gives `app.window` a background.
     #[test]
@@ -672,5 +659,4 @@ mod tests {
         assert_eq!(title.id, NodeId::ChromeTitlebarTitle);
         assert!(title.style.color.is_some(), "文字色が継承されていない");
     }
-
 }

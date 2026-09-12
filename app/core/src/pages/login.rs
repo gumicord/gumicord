@@ -3,8 +3,8 @@
 //! Owns its fields outright; the shell only routes presses here and reads
 //! the built subtree.
 
-use gumicord_platform::{HiddenKey, TextDocument};
 use gumicord_platform::Application;
+use gumicord_platform::{HiddenKey, TextDocument};
 use gumicord_uitree::{Content, Editable, Key, NodeId, State, UiNode};
 
 use super::super::session::Session;
@@ -174,7 +174,12 @@ impl crate::Gumicord {
                             self.login_field_error_node("login_error_email", &["login"])
                         })
                         .child(self.login_label("パスワード"))
-                        .child(self.login_field("password", "パスワード", &self.login_view.input, true))
+                        .child(self.login_field(
+                            "password",
+                            "パスワード",
+                            &self.login_view.input,
+                            true,
+                        ))
                         .child_if(self.has_login_field_error(&["password"]), || {
                             self.login_field_error_node("login_error_password", &["password"])
                         })
@@ -197,7 +202,12 @@ impl crate::Gumicord {
                             "認証コードを入力",
                         ))
                         .child(self.login_label("認証コード"))
-                        .child(self.login_field("totp", "認証コード", &self.login_view.input, false))
+                        .child(self.login_field(
+                            "totp",
+                            "認証コード",
+                            &self.login_view.input,
+                            false,
+                        ))
                         .child_if(self.has_login_field_error(&["code"]), || {
                             self.login_field_error_node("login_error_code", &["code"])
                         })
@@ -961,4 +971,3 @@ mod tests {
         assert!(a.pending.is_none(), "解けた captcha が残っている");
     }
 }
-
