@@ -28,8 +28,8 @@ fn to_ndc(p: vec2<f32>) -> vec4<f32> {
 struct RectInst {
     @location(0) rect: vec4<f32>,
     @location(1) color: vec4<f32>,
-    // x = 角の半径, y = 枠線の太さ (0 なら塗り潰し)
-    @location(2) params: vec2<f32>,
+    // x = 角の半径, y = 枠線の太さ (0 なら塗り潰し), z = 1.0 なら輪郭を硬くする
+    @location(2) params: vec3<f32>,
 };
 
 struct RectOut {
@@ -39,6 +39,7 @@ struct RectOut {
     @location(2) color: vec4<f32>,
     @location(3) radius: f32,
     @location(4) border: f32,
+    @location(5) crisp: f32,
 };
 
 @vertex
@@ -54,6 +55,7 @@ fn vs_rect(@builtin(vertex_index) vi: u32, inst: RectInst) -> RectOut {
     // 半径も太さも短辺の半分を超えられない
     out.radius = min(inst.params.x, half_min);
     out.border = min(inst.params.y, half_min);
+    out.crisp = inst.params.z;
     return out;
 }
 
@@ -78,6 +80,12 @@ fn fs_rect(in: RectOut) -> @location(0) vec4<f32> {
         // 内側の縁は d == -border の等高線
         let inner = 1.0 - smoothstep(-aa, aa, d + in.border);
         alpha = max(alpha - inner, 0.0);
+    }
+
+    if (in.crisp > 0.5) {
+        // QR モジュール用: 端をぼかさず二値化する。読み取り機は
+        // 灰色の縁をノイズとして読む。
+        alpha = select(0.0, 1.0, alpha >= 0.5);
     }
 
     return vec4<f32>(in.color.rgb, in.color.a * alpha);

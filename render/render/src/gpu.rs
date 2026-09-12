@@ -325,9 +325,9 @@ impl Gpu {
                         offset: 16,
                         shader_location: 1,
                     },
-                    // Corner radius and border width.
+                    // Corner radius, border width, and the crisp flag.
                     wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
+                        format: wgpu::VertexFormat::Float32x3,
                         offset: 32,
                         shader_location: 2,
                     },

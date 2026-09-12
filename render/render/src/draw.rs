@@ -113,12 +113,37 @@ impl DrawList {
         border: f32,
         scissor: Option<[u32; 4]>,
     ) {
+        self.push_rect_crisp(r, color, radius, border, false, scissor);
+    }
+
+    /// Like [`Self::push_rect`], but with hard rather than feathered edges
+    /// when `crisp` is set. QR modules need solid pixels: feathered edges
+    /// read as grey and scanners reject them.
+    fn push_rect_crisp(
+        &mut self,
+        r: [f32; 4],
+        color: [f32; 4],
+        radius: f32,
+        border: f32,
+        crisp: bool,
+        scissor: Option<[u32; 4]>,
+    ) {
         if r[2] <= 0.0 || r[3] <= 0.0 || color[3] <= 0.0 {
             return;
         }
         let first = self.rect_count();
         self.rects.extend_from_slice(&[
-            r[0], r[1], r[2], r[3], color[0], color[1], color[2], color[3], radius, border, 0.0,
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            radius,
+            border,
+            if crisp { 1.0 } else { 0.0 },
             0.0,
         ]);
         self.extend_run(RunKind::Rect, first, scissor, 0);
@@ -746,7 +771,7 @@ fn draw_qr(
     let ox = box_px[0] + ((box_px[2] - side) * 0.5).round();
     let oy = box_px[1] + ((box_px[3] - side) * 0.5).round();
 
-    let (light, dark) = qr_colors(&placed.node.style);
+    let (light, _) = qr_colors(&placed.node.style);
 
     dl.push_rect(
         [ox, oy, side, side],
@@ -757,18 +782,21 @@ fn draw_qr(
     );
 
     let colors = code.to_colors();
-    let fg = linear(dark, opacity);
+    // Modules are always solid black: a theme colour here scans worse,
+    // and grey edges do not scan at all (see push_rect_crisp).
+    let fg = linear(QR_DARK, opacity);
     for (i, c) in colors.iter().enumerate() {
         if *c != qrcode::Color::Dark {
             continue;
         }
         let x = (i as u32 % modules) + QUIET;
         let y = (i as u32 / modules) + QUIET;
-        dl.push_rect(
+        dl.push_rect_crisp(
             [ox + x as f32 * cell, oy + y as f32 * cell, cell, cell],
             fg,
             0.0,
             0.0,
+            true,
             scissor,
         );
     }
@@ -1271,6 +1299,17 @@ mod tests {
     fn contrast_matches_the_wcag_definition() {
         assert!((contrast(QR_DARK, QR_LIGHT) - 21.0).abs() < 0.01);
         assert!((contrast(QR_LIGHT, QR_LIGHT) - 1.0).abs() < 0.001);
+    }
+
+    /// Crisp rects carry the flag; ordinary ones do not.
+    #[test]
+    fn crisp_flag_rides_along() {
+        let mut dl = DrawList::default();
+        let white = [1.0; 4];
+        dl.push_rect([0.0, 0.0, 2.0, 2.0], white, 0.0, 0.0, None);
+        dl.push_rect_crisp([2.0, 0.0, 2.0, 2.0], white, 0.0, 0.0, true, None);
+        assert_eq!(dl.rects[10], 0.0);
+        assert_eq!(dl.rects[22], 1.0);
     }
 
     #[test]
