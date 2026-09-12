@@ -949,11 +949,19 @@ impl Application for Gumicord {
         &mut self,
         tree: &gumicord_uitree::UiNode,
     ) -> Option<accesskit::TreeUpdate> {
-        Some(crate::a11y::tree_update(
-            tree,
-            self.a11y_focus(),
-            &self.title(),
-        ))
+        let update = crate::a11y::tree_update(tree, self.a11y_focus(), &self.title());
+        // Screen-reader diagnosis: positions without names means labels
+        // are missing here, not in the reader.
+        tracing::debug!(
+            nodes = update.nodes.len(),
+            labeled = update
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.label().is_some())
+                .count(),
+            focus = update.focus.0,
+        );
+        Some(update)
     }
 
     fn request_backgrounds(&mut self, keys: &[String]) {
