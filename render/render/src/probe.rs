@@ -4,6 +4,11 @@
 //! process down. Each candidate backend is therefore created in a child that
 //! may die; the parent only trusts backends whose child reported back.
 //!
+//! Enumeration alone is not enough: some drivers enumerate fine and die
+//! creating the device, which is exactly what the client does next. The
+//! child requests a device per adapter too, so that death also happens in
+//! the child and only excludes the backend.
+//!
 //! The child is this same binary, run with `--probe-gpu=<backend>`. It prints
 //! one JSON line and exits; anything else means that backend is unusable.
 //!
@@ -92,8 +97,22 @@ fn probe_backend(backend: wgpu::Backends) -> Vec<String> {
     let instance = wgpu::Instance::new(desc);
     pollster::block_on(instance.enumerate_adapters(backend))
         .iter()
+        .filter(|a| device_opens(a))
         .map(|a| a.get_info().name.clone())
         .collect()
+}
+
+/// Whether the driver survives device creation. Downlevel limits are the
+/// common denominator, so passing here means the client's own (laxer)
+/// request passes too. Dying here only excludes the backend.
+fn device_opens(adapter: &wgpu::Adapter) -> bool {
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("gumicord-probe"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        ..Default::default()
+    }))
+    .is_ok()
 }
 
 /// Backends whose probe child reported back.
