@@ -494,6 +494,14 @@ async fn run(
                     }
                 }
                 // A stray captcha or totp command with no password in flight.
+                // Cancelling with nothing in flight still leaves the form:
+                // without an answer the session keeps pinning it, and the
+                // way back looks dead.
+                Some(LoginCommand::CancelPassword) => {
+                    let _ = tx.send(LoginEvent::Restarted);
+                    waker.wake();
+                    continue;
+                }
                 Some(_) | None => continue,
             }
         };
