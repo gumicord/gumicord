@@ -84,11 +84,27 @@ const JAPANESE_FALLBACK: &[&str] = &[
 ///
 /// Normalising the locale alone fixes it, but leaves exactly one usable font,
 /// so the whole list is replaced here.
+///
+/// Fullwidth letters, digits and marks need the same treatment one layer
+/// down: they shape in Latin/Common runs, which cosmic-text never collects
+/// into the script lists, so `script_fallback` cannot see them whatever it
+/// returns. They resolve through the common list instead, where the
+/// platform default holds no CJK font: without the Japanese faces there
+/// they fall through to an arbitrary face (bold on some machines) or to
+/// nothing at all.
 #[derive(Debug)]
-struct GumicordFallback;
+struct GumicordFallback {
+    /// Whether CJK faces join the common fallback. Mirrors the Han
+    /// unification gate below: Chinese and Korean readers keep the
+    /// platform order to protect Han shapes.
+    japanese_common: bool,
+}
 
 impl Fallback for GumicordFallback {
     fn common_fallback(&self) -> &[&'static str] {
+        if self.japanese_common {
+            return JAPANESE_FALLBACK;
+        }
         PlatformFallback.common_fallback()
     }
 
@@ -101,14 +117,6 @@ impl Fallback for GumicordFallback {
         // Chinese and Korean readers should not get Japanese shapes, so
         // those stay with the platform's choice.
         if han_unified && !locale.starts_with("zh") && !locale.starts_with("ko") {
-            return JAPANESE_FALLBACK;
-        }
-        // Fullwidth letters, digits and marks shape in Latin/Common runs,
-        // where the platform list holds no CJK font: they fall through to
-        // an arbitrary face (bold on some machines) or to nothing at all.
-        // ASCII itself stays in the primary family and never reaches this
-        // list, so routing Japanese readers here only adds coverage.
-        if locale == "ja" && matches!(script, Script::Latin | Script::Common | Script::Inherited) {
             return JAPANESE_FALLBACK;
         }
         PlatformFallback.script_fallback(script, locale)
@@ -392,7 +400,10 @@ impl Shaper {
         // A theme that writes no family gets sans-serif, so pointing that at
         // the bundled font means themes need say nothing.
         db.set_sans_serif_family(BUNDLED_SANS_FAMILY);
-        FontSystem::new_with_locale_and_db_and_fallback(locale.to_owned(), db, GumicordFallback)
+        let fallback = GumicordFallback {
+            japanese_common: !locale.starts_with("zh") && !locale.starts_with("ko"),
+        };
+        FontSystem::new_with_locale_and_db_and_fallback(locale.to_owned(), db, fallback)
     }
 
     /// System fonts and the bundled font, both ready now.
@@ -1542,7 +1553,9 @@ mod tests {
     /// readers keep theirs.
     #[test]
     fn han_scripts_fall_back_by_locale() {
-        let f = GumicordFallback;
+        let f = GumicordFallback {
+            japanese_common: true,
+        };
         assert_eq!(f.script_fallback(Script::Han, "ja"), JAPANESE_FALLBACK);
         assert_eq!(f.script_fallback(Script::Hiragana, "ja"), JAPANESE_FALLBACK);
         assert_eq!(f.script_fallback(Script::Katakana, "en"), JAPANESE_FALLBACK);
@@ -1555,27 +1568,25 @@ mod tests {
         assert_ne!(f.script_fallback(Script::Arabic, "ja"), JAPANESE_FALLBACK);
     }
 
-    /// Fullwidth forms shape in Latin/Common runs, where the platform
-    /// list holds no CJK font. Japanese readers get the Japanese list
-    /// there too, so the run falls back to a regular CJK face instead
-    /// of an arbitrary one (bold on some machines) or nothing.
+    /// Fullwidth forms shape in Latin/Common runs, which never reach
+    /// script_fallback: cosmic-text only collects other scripts. They
+    /// resolve through the common list instead, so that is where the
+    /// Japanese faces join.
     #[test]
     fn fullwidth_runs_fall_back_to_japanese() {
         use unicode_script::Script;
-        let f = GumicordFallback;
         // U+FF21, U+FF10 and U+30FC shape outside Han/Hiragana/Katakana.
         assert_eq!(Script::from('Ａ'), Script::Latin);
         assert_eq!(Script::from('０'), Script::Common);
         assert_eq!(Script::from('ー'), Script::Common);
-        for script in [Script::Latin, Script::Common, Script::Inherited] {
-            assert_eq!(f.script_fallback(script, "ja"), JAPANESE_FALLBACK);
-        }
-        // Other locales keep the platform default.
-        assert_ne!(f.script_fallback(Script::Latin, "en"), JAPANESE_FALLBACK);
-        assert_ne!(
-            f.script_fallback(Script::Common, "zh-CN"),
-            JAPANESE_FALLBACK
-        );
+        let ja = GumicordFallback {
+            japanese_common: true,
+        };
+        assert_eq!(ja.common_fallback(), JAPANESE_FALLBACK);
+        let zh = GumicordFallback {
+            japanese_common: false,
+        };
+        assert_ne!(zh.common_fallback(), JAPANESE_FALLBACK);
     }
 
     #[test]
