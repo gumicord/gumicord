@@ -984,8 +984,9 @@ impl Application for Gumicord {
                 let channel = ChannelId::from(self.chat.selected_channel);
                 self.live.load_older(channel);
             }
-            // Members grow downward, at the far end of the scroll.
-            NodeId::NavMemberList => {
+            // Members grow downward, at the far end of the scroll. The
+            // narrow sheet shows the same list under another id.
+            NodeId::NavMemberList | NodeId::NavMemberListSheet => {
                 if max <= 0.0 || at < max - REACH {
                     return;
                 }
