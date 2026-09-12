@@ -85,9 +85,6 @@ impl<'a> Builder<'a> {
             .focus_stable
             .as_ref()
             .is_some_and(|(s, k)| *s == stable && k.as_ref() == node.key.as_ref());
-        if focused && self.focus_id.is_none() {
-            self.focus_id = Some(NodeId(id.0));
-        }
         let mut children = Vec::new();
         if !matches!(node.content, Content::Qr(_)) {
             for child in &node.children {
@@ -105,6 +102,11 @@ impl<'a> Builder<'a> {
         let (role, label, value) = describe(stable, &node.content, is_root, title);
         if !is_root && label.is_none() && value.is_none() && children.is_empty() {
             return None;
+        }
+        // Only surviving nodes can hold focus: a match that prunes away
+        // must not leave the focus pointing outside the tree.
+        if focused && self.focus_id.is_none() {
+            self.focus_id = Some(NodeId(id.0));
         }
         let mut n = Node::new(role);
         if let Some(label) = label {
@@ -301,5 +303,22 @@ mod tests {
             |id| tree_update(&tree, Some(("chat.message", Some(Key::Id(id)))), "Gumicord").focus;
         assert_ne!(focus(1), focus(2), "focus ignores the key");
         assert_eq!(focus(2), focus(2), "focus moves between frames");
+    }
+
+    /// A focus match that prunes away must not leave the focus pointing
+    /// outside the tree: the reader kills the update for a missing id.
+    #[test]
+    fn focus_falls_back_when_its_node_is_pruned() {
+        use gumicord_uitree::Key;
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        // Matches the focus but carries nothing, so it is pruned.
+        tree.children
+            .push(UiNode::new(StableId::ChatMessage).with_key(Key::Id(7)));
+        let update = tree_update(&tree, Some(("chat.message", Some(Key::Id(7)))), "Gumicord");
+        let ids: Vec<u64> = update.nodes.iter().map(|(id, _)| id.0).collect();
+        assert!(
+            ids.contains(&update.focus.0),
+            "focus points outside the tree"
+        );
     }
 }
