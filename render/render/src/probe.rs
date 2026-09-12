@@ -95,9 +95,18 @@ fn probe_backend(backend: wgpu::Backends) -> Vec<String> {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
     desc.backends = backend;
     let instance = wgpu::Instance::new(desc);
-    pollster::block_on(instance.enumerate_adapters(backend))
+    // Progress on stderr: stdout carries only the final JSON report,
+    // so a dying child still says how far it got.
+    eprintln!("probe: instance created");
+    let adapters = pollster::block_on(instance.enumerate_adapters(backend));
+    eprintln!("probe: enumerated {} adapters", adapters.len());
+    adapters
         .iter()
-        .filter(|a| device_opens(a))
+        .filter(|a| {
+            let ok = device_opens(a);
+            eprintln!("probe: device {}", if ok { "opened" } else { "failed" });
+            ok
+        })
         .map(|a| a.get_info().name.clone())
         .collect()
 }
@@ -193,6 +202,17 @@ pub fn surviving_backends(
                             exclude(&mut excluded, &name);
                         }
                     },
+                    Ok(out) => {
+                        // The child's stderr says how far it got (the stage
+                        // markers); keep the tail so one glance locates it.
+                        let text = String::from_utf8_lossy(&out.stderr);
+                        let mut start = text.len().saturating_sub(300);
+                        while !text.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        tracing::warn!(backend = name, status = ?status, stderr = %&text[start..], "gpu probe failed; excluding it");
+                        exclude(&mut excluded, &name);
+                    }
                     _ => {
                         tracing::warn!(backend = name, status = ?status, "gpu probe failed; excluding it");
                         exclude(&mut excluded, &name);
