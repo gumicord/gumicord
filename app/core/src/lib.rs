@@ -887,6 +887,40 @@ impl Gumicord {
     }
 }
 
+/// The first list item in the tree, one level deep, for diagnosis.
+/// Texts are cut short: this lands in a log file the tester shares.
+fn diag_item(tree: &gumicord_uitree::UiNode) -> String {
+    fn find(node: &gumicord_uitree::UiNode) -> Option<&gumicord_uitree::UiNode> {
+        let stable = node.id.as_str();
+        if stable == "chat.message" || stable.ends_with(".item") {
+            return Some(node);
+        }
+        node.children.iter().find_map(find)
+    }
+    fn short(node: &gumicord_uitree::UiNode) -> String {
+        let mut s = format!("{:?}/{:?}/{:?}", node.id, node.key, node.content);
+        // Byte truncation can split a character; back off to a boundary.
+        while s.len() > 160 && !s.is_char_boundary(160) {
+            s.pop();
+        }
+        s.truncate(160);
+        s
+    }
+    let Some(item) = find(tree) else {
+        return "none".to_owned();
+    };
+    let mut out = short(item);
+    for c in &item.children {
+        out.push_str(" | ");
+        out.push_str(&short(c));
+    }
+    while out.len() > 600 && !out.is_char_boundary(600) {
+        out.pop();
+    }
+    out.truncate(600);
+    out
+}
+
 impl Application for Gumicord {
     fn title(&self) -> String {
         "Gumicord".to_owned()
@@ -971,6 +1005,7 @@ impl Application for Gumicord {
                 .count(),
             focus = update.focus.0,
         );
+        tracing::debug!(first_item = %diag_item(tree));
         Some(update)
     }
 
