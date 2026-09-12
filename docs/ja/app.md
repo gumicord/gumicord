@@ -38,7 +38,7 @@
 
 ## Files
 
-### `src/main.rs` — 起動処理。プローブ子は即終了し、`gumicord_platform::run(Gumicord::new())` で共有ループに入る。`GUMICORD_LOG` は自クレートのみ既定 `info`、依存側は `GUMICORD_LOG_DEPS` で既定 `warn`。
+### `src/main.rs` — 起動処理。プローブ子は即終了し、`gumicord_platform::run(Gumicord::new())` で共有ループに入る。`GUMICORD_LOG` は自クレートのみ既定 `info`、依存側は `GUMICORD_LOG_DEPS` で既定 `warn`。Windows ではコンソールを出さず、全行を `logs/` の実行ログと stderr の両方へ書く。CRT は静的リンクで再頒布不要。
 
 ### `Cargo.toml` — バイナリ `gumicord` の定義。
 

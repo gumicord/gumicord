@@ -20,6 +20,7 @@ pub mod captcha;
 pub mod clipboard;
 pub mod clock;
 pub mod dirs;
+pub mod file_dialog;
 #[cfg(target_os = "ios")]
 pub mod ios_text;
 pub mod secret;
@@ -33,6 +34,7 @@ pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, We
 pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;
+pub use file_dialog::FileDialogError;
 pub use secret::{SecretError, SecretStore};
 #[cfg(target_os = "android")]
 pub use share::export_crash_logs;
@@ -150,6 +152,22 @@ pub fn write_diag_file(name: &str, contents: &str) {
     }
 }
 
+/// Makes room for this run's log and names it. The caller opens and
+/// writes: the mobile file logger and the desktop tee hold their own
+/// handles. Also marks it current, so panic-hook appends land in it.
+pub fn prepare_run_log() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("GUMICORD_DATA_DIR").filter(|d| !d.is_empty())?;
+    let dir = std::path::Path::new(&dir).join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    prune_old_logs(&dir, "gumicord-", 5);
+    prune_old_logs(&dir, "panic-", 5);
+    let path = dir.join(format!("gumicord-{}.log", stamp_now()));
+    let _ = CURRENT_LOG.set(path.clone());
+    Some(path)
+}
+
 /// Logs to a file beside the data directory. Phones have no console to
 /// read: without this, a crash leaves nothing behind but the panic line.
 ///
@@ -158,16 +176,9 @@ pub fn write_diag_file(name: &str, contents: &str) {
 /// One file per run, named with the startup stamp; only the newest five
 /// are kept. All live in `logs/` next to the data.
 pub fn init_file_logging() {
-    let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR") else {
+    let Some(path) = prepare_run_log() else {
         return;
     };
-    let dir = std::path::Path::new(&dir).join("logs");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    prune_old_logs(&dir, "gumicord-", 5);
-    prune_old_logs(&dir, "panic-", 5);
-    let path = dir.join(format!("gumicord-{}.log", stamp_now()));
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -175,7 +186,6 @@ pub fn init_file_logging() {
     else {
         return;
     };
-    let _ = CURRENT_LOG.set(path.clone());
     let _ = tracing::subscriber::set_global_default(FileLogger {
         file: std::sync::Mutex::new(file),
         ours: level_from("GUMICORD_LOG", tracing::Level::INFO),

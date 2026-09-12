@@ -163,7 +163,7 @@ jobs:
       # Desktop Linux links the system D-Bus library like the checks do.
       - name: Install D-Bus headers
         if: matrix.os == 'ubuntu-latest' && matrix.kind == 'desktop'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config desktop-file-utils
 
       - name: Add mobile target
         if: matrix.kind != 'desktop'
@@ -299,6 +299,18 @@ jobs:
           name: gumicord-appimage-${{ github.sha }}
           path: Gumicord-*.AppImage
           retention-days: 14
+
+      # The entry rides inside the AppImage; a typo here ships a
+      # launcher that never appears. Extracting also proves the
+      # AppImage is not truncated.
+      - name: Validate desktop entry and AppImage
+        if: matrix.kind == 'desktop' && matrix.os == 'ubuntu-latest'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          desktop-file-validate packaging/linux/gumicord.desktop
+          ./Gumicord-*.AppImage --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
 
       - name: Build app bundle and dmg
         if: matrix.kind == 'desktop' && matrix.os == 'macos-latest'

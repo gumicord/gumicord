@@ -26,6 +26,9 @@ wry.workspace = true
 arboard.workspace = true
 keyring.workspace = true
 
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+rfd.workspace = true
+
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2.workspace = true
 objc2-core-foundation.workspace = true

@@ -14,7 +14,7 @@ use gumicord_uitree::{Content, Key, UiNode};
 pub fn tree_update(tree: &UiNode, focus: Option<(&str, Option<Key>)>, title: &str) -> TreeUpdate {
     let mut builder = Builder::new(focus);
     let root = builder
-        .node(tree, true, title, 0)
+        .node(tree, true, title, 0, 0)
         .unwrap_or_else(|| builder.fallback_root(title));
     TreeUpdate {
         nodes: builder.nodes,
@@ -49,7 +49,17 @@ impl<'a> Builder<'a> {
     /// apart by key; keyless ones by order of appearance. The parent's id
     /// joins in: the same key under two parents is two nodes, and the
     /// reader rejects a child id seen twice anywhere in one update.
-    fn id_of(&mut self, parent: u64, stable: &'a str, key: &Option<Key>) -> NodeId {
+    /// `occurrence` tells apart same-key siblings under one parent: a list
+    /// with two items maps both, the second carrying a count suffix. Theme
+    /// slots double as node keys, so builders cannot make those unique;
+    /// this layer absorbs the repeats instead of dropping them.
+    fn id_of(
+        &mut self,
+        parent: u64,
+        stable: &'a str,
+        key: &Option<Key>,
+        occurrence: u64,
+    ) -> NodeId {
         let instance = match key {
             Some(Key::Id(id)) => format!("id{id}"),
             Some(Key::Slot(slot)) => format!("slot{slot}"),
@@ -60,7 +70,11 @@ impl<'a> Builder<'a> {
                 format!("nth{n}")
             }
         };
-        let discriminator = format!("{parent}:{stable}\0{instance}");
+        let discriminator = if occurrence == 0 {
+            format!("{parent}:{stable}\0{instance}")
+        } else {
+            format!("{parent}:{stable}\0{instance}#{occurrence}")
+        };
         if let Some(&id) = self.ids.get(&discriminator) {
             return id;
         }
@@ -78,24 +92,31 @@ impl<'a> Builder<'a> {
         is_root: bool,
         title: &'a str,
         parent: u64,
+        occurrence: u64,
     ) -> Option<NodeId> {
         let stable = node.id.as_str();
-        let id = self.id_of(parent, stable, &node.key);
+        let id = self.id_of(parent, stable, &node.key, occurrence);
         let focused = self
             .focus_stable
             .as_ref()
             .is_some_and(|(s, k)| *s == stable && k.as_ref() == node.key.as_ref());
         let mut children = Vec::new();
+        // Same-key siblings share one id shape; count them so each maps
+        // apart. Keyless ones already tell apart by order of appearance.
+        let mut repeats: HashMap<(&'static str, &Key), u64> = HashMap::new();
         if !matches!(node.content, Content::Qr(_)) {
             for child in &node.children {
-                if let Some(cid) = self.node(child, false, title, id.0) {
-                    // A repeated key would list one child twice, which the
-                    // reader rejects the whole tree for. Plugins can build
-                    // such siblings, so keep the first and drop the rest
-                    // rather than crashing on them.
-                    if !children.contains(&cid) {
-                        children.push(cid);
+                let occurrence = match &child.key {
+                    Some(key) => {
+                        let counter = repeats.entry((child.id.as_str(), key)).or_insert(0);
+                        let occurrence = *counter;
+                        *counter += 1;
+                        occurrence
                     }
+                    None => 0,
+                };
+                if let Some(cid) = self.node(child, false, title, id.0, occurrence) {
+                    children.push(cid);
                 }
             }
         }
@@ -407,5 +428,64 @@ mod tests {
             .filter(|(_, n)| n.label() == Some("wrapped"))
             .collect();
         assert_eq!(wrapped.len(), 2, "the item stays unnamed");
+    }
+
+    /// The reader rejects the whole update when one child id is listed
+    /// twice anywhere in it. Same check as the consumer: every listed
+    /// child id must be new.
+    fn assert_children_unique(update: &TreeUpdate) {
+        let mut seen = std::collections::HashSet::new();
+        for (_, node) in &update.nodes {
+            for child in node.children() {
+                assert!(seen.insert(child), "duplicate child {child:?}");
+            }
+        }
+    }
+
+    /// Two lists in one message repeat the list key under one parent,
+    /// and their rows repeat the depth key under the shared id. Both
+    /// levels mapped to one id each, so the same row id was listed twice
+    /// and the reader killed the client for it. Every visible message
+    /// with two lists crashed startup.
+    #[test]
+    fn repeated_list_keys_map_apart() {
+        use gumicord_uitree::Key;
+        fn list(body: &str) -> UiNode {
+            UiNode::new(StableId::LayoutColumn)
+                .with_key(Key::Slot("list"))
+                .child(
+                    UiNode::new(StableId::LayoutRow)
+                        .with_key(Key::Slot("li0"))
+                        .child(UiNode::text(StableId::PrimitiveText, body.to_owned())),
+                )
+        }
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        tree.children.push(list("first"));
+        tree.children.push(list("second"));
+        let update = tree_update(&tree, None, "Gumicord");
+        assert_children_unique(&update);
+        let dump = format!("{:?}", update.nodes);
+        assert!(dump.contains("first"), "first list dropped: {dump}");
+        assert!(dump.contains("second"), "second list dropped: {dump}");
+        // Same tree, same ids: the suffix must not reshuffle frames.
+        let second = tree_update(&tree, None, "Gumicord");
+        let ids = |u: &TreeUpdate| u.nodes.iter().map(|(id, _)| id.0).collect::<Vec<_>>();
+        assert_eq!(ids(&update), ids(&second));
+    }
+
+    /// Two code blocks in one language repeat their key the same way.
+    #[test]
+    fn repeated_code_keys_map_apart() {
+        use gumicord_uitree::Key;
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        for body in ["one()", "two()"] {
+            tree.children.push(
+                UiNode::new(StableId::PrimitiveCodeBlock)
+                    .with_key(Key::Slot("rust"))
+                    .with_content(gumicord_uitree::Content::Text(body.to_owned())),
+            );
+        }
+        let update = tree_update(&tree, None, "Gumicord");
+        assert_children_unique(&update);
     }
 }

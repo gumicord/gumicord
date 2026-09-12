@@ -41,7 +41,9 @@
 
 ## Files
 
-### `src/lib.rs` — 入口と再エクスポート、パニックフックとファイルロガー。Key items: `install_panic_hook()`、`init_file_logging()`、`write_diag_file()`、`Application`、`Waker`。IME 候補位置は入力欄全体を渡す。
+### `src/lib.rs` — 入口と再エクスポート、パニックフックとファイルロガー。Key items: `install_panic_hook()`、`init_file_logging()`、`prepare_run_log()`、`write_diag_file()`、`Application`、`Waker`。IME 候補位置は入力欄全体を渡す。
+
+### `src/file_dialog.rs` — デスクトップの OS ネイティブなファイル選択。Key items: `PickOptions`、`FileFilter`、`FileDialogError`、`pick_file()`。取り消しは空で返る。携帯側は未対応。
 
 ### `src/window.rs` — 装飾なしウィンドウとオンデマンド再描画のイベントループ。タイトルバー領域のドラッグ移動、縁のリサイズ、制御ボタンの press/release 分離、スクロールバー掴み、リンク／スポイラー優先の press 解決、IME・キー入力配送、点滅・次フレーム期限による待機制御を持つ。Key items: `Application`、`Waker`、`FrameCx`、`PlatformError`、`run()`、`RevealRequest`、`ImeProxy`。最大化状態は保持せず都度問い合わせ、描画直前に実サイズへリサイズし直す。モバイルでは窓寸法を OS 任せにし、タイトルバーは出さない。
 

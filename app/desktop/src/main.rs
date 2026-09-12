@@ -2,6 +2,7 @@
 //!
 //! A thin wrapper: lifecycle and native handles only, with everything else in
 //! [`gumicord_app`].
+#![windows_subsystem = "windows"]
 
 use gumicord_app::Gumicord;
 
@@ -12,6 +13,16 @@ fn main() {
     if gumicord_render::probe::run_probe(&args) {
         return;
     }
+    // No console on Windows: every line must reach the run log, so the
+    // data dir and the panic hook come before anything that can fail.
+    if std::env::var_os("GUMICORD_DATA_DIR")
+        .filter(|d| !d.is_empty())
+        .is_none()
+        && let Some(dir) = gumicord_platform::app_data_dir()
+    {
+        unsafe { std::env::set_var("GUMICORD_DATA_DIR", dir) };
+    }
+    gumicord_platform::install_panic_hook();
     init_tracing();
 
     if let Err(e) = gumicord_platform::run(Gumicord::new()) {
@@ -28,12 +39,23 @@ fn main() {
 /// dependencies have their own `GUMICORD_LOG_DEPS`, defaulting to `warn`, so
 /// they are quiet but not silenced.
 ///
-/// `tracing-subscriber` is not worth ten crates for one line per event on
-/// stderr. Structured filtering or another destination would change that.
+/// Every line goes to this run's file under `logs/` next to the data
+/// directory, and to stderr too: launching from a terminal still shows
+/// output, while a GUI launch leaves the file behind instead of a console.
+/// `tracing-subscriber` is not worth ten crates for one line per event.
+/// Structured filtering or another destination would change that.
 fn init_tracing() {
+    let file = gumicord_platform::prepare_run_log().and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
     let _ = tracing::subscriber::set_global_default(Logger {
         ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
         theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
+        file: file.map(std::sync::Mutex::new),
     });
 }
 
@@ -48,12 +70,14 @@ fn level_from(var: &str, default: tracing::Level) -> tracing::Level {
     }
 }
 
-/// A subscriber that writes one line per event to stderr.
+/// A subscriber that writes one line per event to stderr and the run log.
 struct Logger {
     /// The limit for `gumicord*`.
     ours: tracing::Level,
     /// The limit for everything else.
     theirs: tracing::Level,
+    /// This run's log file. `None` when no data directory is known.
+    file: Option<std::sync::Mutex<std::fs::File>>,
 }
 
 impl tracing::Subscriber for Logger {
@@ -81,6 +105,12 @@ impl tracing::Subscriber for Logger {
         let mut msg = String::new();
         event.record(&mut Visitor(&mut msg));
         eprintln!("[{}] {}{}", meta.level(), meta.target(), msg);
+        if let Some(file) = &self.file
+            && let Ok(mut file) = file.lock()
+        {
+            use std::io::Write as _;
+            let _ = writeln!(file, "[{}] {}{}", meta.level(), meta.target(), msg);
+        }
     }
 
     fn enter(&self, _: &tracing::Id) {}

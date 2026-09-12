@@ -103,7 +103,7 @@ jobs:
       # Desktop Linux links the system D-Bus library like the checks do.
       - name: Install D-Bus headers
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config desktop-file-utils
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -156,8 +156,11 @@ jobs:
             -d packaging/linux/gumicord.desktop -i packaging/icons/gumicord.png \
             --output appimage
           ls -l Gumicord-*.AppImage
+          desktop-file-validate packaging/linux/gumicord.desktop
+          ./Gumicord-*.AppImage --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
 
-      - name: Build app bundle and dmg
+      - name: Build app bundle
         if: matrix.os == 'macos-latest'
         run: |
           mkdir -p Gumicord.app/Contents/MacOS Gumicord.app/Contents/Resources dmg-staging
@@ -173,10 +176,58 @@ jobs:
           done
           iconutil -c icns "$RUNNER_TEMP/icon.iconset" \
             -o Gumicord.app/Contents/Resources/Gumicord.icns
+
+      # Opt-in: signs only when the certificate secrets exist, so forks
+      # and unconfigured repos keep building unsigned dmg files.
+      - name: Sign app bundle
+        if: matrix.os == 'macos-latest' && secrets.MACOS_CERT_P12 != ''
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/gumicord-sign.keychain-db"
+          security create-keychain -p actions "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p actions "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k actions "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          # Hardened runtime and a trusted timestamp are what
+          # notarization asks for; without them the ticket is refused.
+          /usr/bin/codesign --deep --force --verify --verbose \
+            --sign "$MACOS_SIGN_IDENTITY" --options runtime --timestamp \
+            Gumicord.app
+          /usr/bin/codesign --verify --deep --strict Gumicord.app
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Build dmg
+        if: matrix.os == 'macos-latest'
+        run: |
           mv Gumicord.app dmg-staging/
           cp -r dist/themes dist/LICENSE dist/README.txt dmg-staging/
           hdiutil create -volname Gumicord -srcfolder dmg-staging -ov Gumicord.dmg
           ls -l Gumicord.dmg
+
+      # Opt-in like signing above. Stapling lets a downloaded dmg pass
+      # Gatekeeper offline; without secrets this step stays skipped.
+      - name: Notarize dmg
+        if: matrix.os == 'macos-latest' && secrets.MACOS_NOTARY_APPLE_ID != ''
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          xcrun notarytool submit Gumicord.dmg \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple Gumicord.dmg
 
       - name: Upload build
         uses: actions/upload-artifact@v4
@@ -245,7 +296,8 @@ jobs:
           body: |
             Gumicord ${{ inputs.tag }} (desktop): Windows / Linux / macOS.
             Built from https://github.com/${{ github.repository }}/commit/${{ needs.guard.outputs.sha }}.
-            Unsigned, like the mobile builds: signing and notarization are separate work.
+            Unsigned unless the signing secrets are configured: see
+            packaging/README.md for what turns signatures on.
 
             WARNING: connecting to Discord with a third-party client breaks
             their terms of service and can cost you your account.

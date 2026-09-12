@@ -22,7 +22,7 @@ members = [
 exclude = ["spike"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -83,6 +83,12 @@ winresource = "0.1"
 # Linux clipboard (X11 and Wayland); other platforms use their own APIs.
 # Wayland sessions without XWayland need the data-control backend.
 arboard = { version = "3", features = ["wayland-data-control"] }
+
+# Desktop file picker. The default portal backend shows the desktop
+# environment's own dialog through D-Bus and links nothing GTK-specific,
+# so Linux CI needs no new system packages. Phones have no shared dialog
+# and stay on their own pickers.
+rfd = "0.17"
 
 # Linux secret storage (Secret Service) and macOS Keychain. No default
 # features in keyring do anything: without these every entry is a mock

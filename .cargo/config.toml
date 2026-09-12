@@ -26,3 +26,15 @@ jobs = 2
 # Android 15+ on 16 KB page devices refuses libraries without 16 KB
 # segments; without this the app dies at load with no code running.
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-pc-windows-msvc]
+# Link the CRT statically, so the binary runs without the VC++
+# redistributable. The C sources (SQLite, TLS) follow through their
+# build scripts; `dumpbin /dependents` must show no VCRUNTIME140 or
+# MSVCP140 after this.
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+# Same as x86_64 above. No such machine is on hand, so this line is
+# symmetry until someone checks the dependents there too.
+rustflags = ["-C", "target-feature=+crt-static"]

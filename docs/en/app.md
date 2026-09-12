@@ -74,7 +74,8 @@ routines only. Key items: `parse_unix()`, `continues()`.
 ### `src/main.rs` — Startup. Probe children exit at once, then the shared
 loop runs `gumicord_platform::run(Gumicord::new())`. `GUMICORD_LOG` is
 `info` for our crates only; dependencies default to `warn` via
-`GUMICORD_LOG_DEPS`.
+`GUMICORD_LOG_DEPS`. No console window on Windows: every line goes to
+both the run log under `logs/` and stderr. Static CRT, no redistributable.
 
 ### `Cargo.toml` — The `gumicord` binary.
 

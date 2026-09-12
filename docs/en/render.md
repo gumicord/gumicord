@@ -85,9 +85,13 @@ survive. Key items: `surviving_backends()`, `run_probe()`.
 ## Files
 
 ### `src/lib.rs` — Entry, re-exports, panic hook, file logger. Key items:
-`install_panic_hook()`, `init_file_logging()`, `write_diag_file()`,
-`Application`, `Waker`. The IME candidate area takes the whole input
+`install_panic_hook()`, `init_file_logging()`, `prepare_run_log()`,
+`write_diag_file()`, `Application`, `Waker`. The IME candidate area takes the whole input
 field.
+
+### `src/file_dialog.rs` — Desktop native file picker. Key items:
+`PickOptions`, `FileFilter`, `FileDialogError`, `pick_file()`.
+Cancellation comes back empty. Phones stay unsupported.
 
 ### `src/window.rs` — Decoration-less window and on-demand-redraw event
 loop. Titlebar-area drag moves, 6px edge resize, press/release-split

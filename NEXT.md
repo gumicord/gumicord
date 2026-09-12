@@ -1,6 +1,6 @@
 # 次にやること
 
-最終更新: 2026-09-12。**終わったものはこの一覧から消すこと。**
+最終更新: 2026-09-13。**終わったものはこの一覧から消すこと。**
 
 これは仕様ではなく引き継ぎのメモである。版計画は
 [`spec/07-roadmap.md`](spec/07-roadmap.md) にある。
@@ -13,13 +13,24 @@
 
 ---
 
-## v0.0.3 — デスクトップ展開
+## v0.0.3 残作業 (機械以外待ち)
 
-- macOS／Linux で同一テーマ・同一プラグイン・日本語入力の確認
-- スクリーンショット比較の CI 化
-- macOS の配布 (dmg／署名／公証)、Linux のパッケージ化
-- デスクトップ分のクリップボード・ファイル選択
-- 実行時健全性はテスター任せ
+版上げは済み。コード側の到達は以下で、残りは人手・機械・参加登録待ち。
+手順書は [`VERIFY-v0.0.3.md`](spec/verify/VERIFY-v0.0.3.md)。
+
+- 済: 起動時 `duplicate child` 落ちの修正 (同キー姉妹の連番化＋回帰試験)。
+  テスター機の再現形 (2 並びの箇条書き) で旧コードが落ち・新コードが通るのを確認
+- 済: Windows のコンソール撤去 (`windows_subsystem`) と実行ログのファイル化
+  (`%APPDATA%\gumicord\logs`、macOS／Linux は設定先の `logs/`)
+- 済: CRT 静的リンク。再頒布 `VCRUNTIME140`／`MSVCP140` 参照なしを確認
+- 済: デスクトップのファイル選択基盤 (`rfd`＋試験＋手動 smoke)。呼ぶ画面はまだ無い
+- 済: 署名・公証の secrets 対応 (未設定なら未署名のまま)。`packaging/README.md` に手順
+- 済: Windows blessed 画像の登録 (`render/tests/screenshots/windows/`)。CI 照合が実ゲート化
+- 済: Linux の `desktop-file-validate` と AppImage 展開検査の CI 化
+- 待ち: macOS／Linux 実機確認 (`VERIFY-v0.0.3.md` の 1〜4・6〜7)
+- 待ち: Linux blessed 画像の登録 (CI の `screenshot-ubuntu-*` 実像を目視してから)。
+  macOS は GPU 付きランナが要るため CI 対象外のまま
+- 待ち: 署名・公証の実実行 (Apple Developer Program の参加と secrets 登録が要る)
 
 ---
 
