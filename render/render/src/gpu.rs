@@ -869,12 +869,17 @@ pub(crate) fn percentile(samples: &[u64], q: f64) -> u64 {
     sorted[rank]
 }
 
-/// The backends to try, in order. No Vulkan on Windows: its initialisation
-/// dies inside igvk64.dll 31.0.101.2115 (access violation, Intel HD 520),
-/// while the same calls pass often enough to look flaky. Force it with
-/// `WGPU_BACKEND=vulkan` to try it anyway.
+/// The backends to try, in order. Vulkan is probed like the rest: a
+/// crashing driver dies in the child and is excluded per machine, which
+/// is the only correct granularity (igvk64.dll 31.0.101.2115 kills one
+/// machine's devices while others are fine). Force it anywhere with
+/// `WGPU_BACKEND=vulkan`.
 #[cfg(target_os = "windows")]
-const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::DX12];
+const CANDIDATES: &[wgpu::Backends] = &[
+    wgpu::Backends::GL,
+    wgpu::Backends::DX12,
+    wgpu::Backends::VULKAN,
+];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::METAL];
 #[cfg(target_os = "android")]
