@@ -1374,6 +1374,61 @@ mod member_tests {
         assert_eq!(grouped, vec![false, false]);
     }
 
+    /// Two dividers must reach the reader as distinct children. Identical
+    /// divider keys used to list one child twice, which the reader kills
+    /// the whole tree for.
+    #[test]
+    fn two_dividers_reach_the_reader_as_distinct_children() {
+        let mut a = app(message(None, None));
+        backlog(
+            &mut a,
+            vec![
+                stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00"),
+                stamped(2, 7, "nenneko", "2026-09-04T14:00:00+00:00"),
+            ],
+        );
+        let update = crate::a11y::tree_update(&a.chat_view(), None, "Gumicord");
+        for (id, node) in &update.nodes {
+            let mut seen = std::collections::HashSet::new();
+            for c in node.children() {
+                assert!(seen.insert(c), "duplicate child {c:?} under {id:?}");
+            }
+        }
+    }
+
+    /// Each day's divider carries its own key. Same-keyed siblings are
+    /// what listed one child twice; this pins the fix below the reader.
+    #[test]
+    fn each_days_divider_carries_its_own_key() {
+        fn keys(tree: &UiNode, out: &mut Vec<Option<Key>>) {
+            if tree.id == NodeId::LayoutRow
+                && tree
+                    .children
+                    .iter()
+                    .any(|c| c.id == NodeId::ChatMessageListDayDivider)
+            {
+                out.push(tree.key.clone());
+            }
+            for c in &tree.children {
+                keys(c, out);
+            }
+        }
+        let mut a = app(message(None, None));
+        backlog(
+            &mut a,
+            vec![
+                stamped(1, 7, "nenneko", "2026-09-03T12:00:00+00:00"),
+                stamped(2, 7, "nenneko", "2026-09-04T14:00:00+00:00"),
+            ],
+        );
+        let tree = a.chat_view();
+        let mut found = Vec::new();
+        keys(&tree, &mut found);
+        assert_eq!(found.len(), 2, "one divider per day");
+        assert!(found[0].is_some(), "dividers carry no key");
+        assert_ne!(found[0], found[1], "dividers share a key");
+    }
+
     /// The date sits centred with a line reaching each side: the spacers
     /// either side of the label hold equal widths on the same height.
     #[test]

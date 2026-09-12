@@ -92,7 +92,13 @@ impl<'a> Builder<'a> {
         if !matches!(node.content, Content::Qr(_)) {
             for child in &node.children {
                 if let Some(cid) = self.node(child, false, title, id.0) {
-                    children.push(cid);
+                    // A repeated key would list one child twice, which the
+                    // reader rejects the whole tree for. Plugins can build
+                    // such siblings, so keep the first and drop the rest
+                    // rather than crashing on them.
+                    if !children.contains(&cid) {
+                        children.push(cid);
+                    }
                 }
             }
         }

@@ -190,12 +190,24 @@ impl crate::Gumicord {
         "  みどり が入力中…".to_owned()
     }
 
+    /// One id per day label: sibling dividers must not share a key, or
+    /// the reader rejects the tree for listing one child twice.
+    fn day_id(day: &str) -> u64 {
+        // FNV-1a: deterministic across frames, unlike the default hasher.
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in day.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
     /// A day divider: the date centred with a line reaching both sides.
     /// The lines are spacers the theme paints; soaking the row's remainder
     /// keeps the label centred whatever the width.
     pub(crate) fn day_divider(day: &str) -> UiNode {
         UiNode::new(NodeId::LayoutRow)
-            .with_key(Key::Slot("day_divider"))
+            .with_key(Key::Id(Self::day_id(day)))
             .child(UiNode::new(NodeId::LayoutSpacer).with_key(Key::Slot("day_divider_line")))
             .child(UiNode::text(NodeId::ChatMessageListDayDivider, day))
             .child(UiNode::new(NodeId::LayoutSpacer).with_key(Key::Slot("day_divider_line")))
