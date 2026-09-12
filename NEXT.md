@@ -20,7 +20,7 @@
 - 起動の release 計測 (debug 883ms に対して 500ms)。計測器・検証層が
   載っているため release で測り直すこと。
   2026-09-12 追記: 同機 debug で 2445ms (947 nodes・safe mode)。
-  release (v0.0.1 zip・同場面) で 1013ms、再測で 916ms。
+  release (v0.0.1 zip・同場面) で 1013ms、再測で 916ms、さらに 801ms。
   目標 500ms には届かず
 - p99 の実操作記録 (計測器は入り済み)。`frame submit times` の行を貼ること
 - ナレーターの読み上げ確認: 2026-09-12 動作確認済み
