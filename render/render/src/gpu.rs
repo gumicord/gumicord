@@ -111,6 +111,7 @@ impl Gpu {
         tracing::info!(backend = ?info.backend, adapter = info.name, "adapter picked");
 
         let (device, queue) = Self::open_device(&adapter)?;
+        tracing::debug!("device opened");
 
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
@@ -128,6 +129,7 @@ impl Gpu {
         config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&device, &config);
         let format = config.format;
+        tracing::debug!(format = ?format, "surface configured");
 
         Self::assemble(
             device,
@@ -229,6 +231,7 @@ impl Gpu {
             label: Some("gumicord"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
+        tracing::debug!("shader compiled");
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
@@ -376,6 +379,7 @@ impl Gpu {
 
         let rect_buf = make_instance_buffer(&device, "rects", INITIAL_RECTS * FLOATS_PER_RECT);
         let glyph_buf = make_instance_buffer(&device, "glyphs", INITIAL_GLYPHS * FLOATS_PER_GLYPH);
+        tracing::debug!("pipelines created");
 
         tracing::info!(
             backend = ?info.backend,
@@ -865,12 +869,14 @@ pub(crate) fn percentile(samples: &[u64], q: f64) -> u64 {
     sorted[rank]
 }
 
-/// The backends to try, in order. Vulkan stays opt-in on Windows: its
-/// initialisation segfaults intermittently on Intel drivers here, which
-/// no probe can catch, so the default never picks it. Force it with
-/// `WGPU_BACKEND=vulkan` to try it anyway.
+/// The backends to try, in order. Vulkan rejoined Windows guarded by the
+/// probe: a crashing driver dies in the child, never in the client.
 #[cfg(target_os = "windows")]
-const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::DX12];
+const CANDIDATES: &[wgpu::Backends] = &[
+    wgpu::Backends::GL,
+    wgpu::Backends::DX12,
+    wgpu::Backends::VULKAN,
+];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::METAL];
 #[cfg(target_os = "android")]
