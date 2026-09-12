@@ -103,6 +103,28 @@ impl<'a> Builder<'a> {
         if !is_root && label.is_none() && value.is_none() && children.is_empty() {
             return None;
         }
+        // Readers announce the item being moved through, not its parts:
+        // an unnamed item is only ever a position. Borrow the kept
+        // children's labels, so a message reads as its row and a member
+        // as their name. Lists themselves stay unnamed, or one list
+        // would read as its whole contents at once.
+        let label = match (label, role) {
+            (None, Role::ListItem) => {
+                let mut text = String::new();
+                for cid in &children {
+                    if let Some((_, n)) = self.nodes.iter().find(|(id, _)| id == cid)
+                        && let Some(l) = n.label()
+                    {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(l);
+                    }
+                }
+                nonempty(&text)
+            }
+            (label, _) => label,
+        };
         // Only surviving nodes can hold focus: a match that prunes away
         // must not leave the focus pointing outside the tree.
         if focused && self.focus_id.is_none() {
@@ -320,5 +342,26 @@ mod tests {
             ids.contains(&update.focus.0),
             "focus points outside the tree"
         );
+    }
+
+    /// Items are what the reader moves through: an unnamed one is only
+    /// ever announced as a position, so it borrows its children's labels.
+    #[test]
+    fn items_borrow_their_children_s_labels() {
+        use gumicord_uitree::Key;
+        let mut tree = UiNode::new(StableId::AppScreenMain);
+        tree.children.push(
+            UiNode::new(StableId::ChatMessage)
+                .with_key(Key::Id(1))
+                .child(text(StableId::ChatMessageContent, "hi")),
+        );
+        let update = tree_update(&tree, None, "Gumicord");
+        let his: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.label() == Some("hi"))
+            .collect();
+        // Once on the paragraph itself, once on the item naming it.
+        assert_eq!(his.len(), 2, "the item stays unnamed");
     }
 }
