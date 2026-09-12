@@ -27,8 +27,13 @@ use crate::route::{Method, Route};
 const API_BASE: &str = "https://discord.com/api/v9";
 /// Bot requests must identify as a bot client. Sending the desktop Discord
 /// client UA used by user sessions can be rejected by Discord's edge layer
-/// with error 40333 before the API checks the token.
-const BOT_USER_AGENT: &str = "Gumicord (https://github.com/gumicord/gumicord, 0.0.0)";
+/// with error 40333 before the API checks the token. The version rides the
+/// workspace version so the two cannot drift apart.
+const BOT_USER_AGENT: &str = concat!(
+    "Gumicord (https://github.com/gumicord/gumicord, ",
+    env!("CARGO_PKG_VERSION"),
+    ")"
+);
 
 /// Retries after a 429. Bounded, so a fault on our side cannot hammer Discord
 /// forever.

@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-android"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-app",
  "gumicord-platform",
@@ -1981,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-app"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "accesskit",
  "base64",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-desktop"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-app",
  "gumicord-platform",
@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-gateway"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "futures-util",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-ios"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-app",
  "gumicord-platform",
@@ -2046,11 +2046,11 @@ dependencies = [
 
 [[package]]
 name = "gumicord-markdown"
-version = "0.0.0"
+version = "0.0.1"
 
 [[package]]
 name = "gumicord-model"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "base64",
  "serde",
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-platform"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-plugin"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-uitree",
  "rquickjs",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-render"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-rest"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-model",
  "reqwest",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-screenshot"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-render",
  "gumicord-theme",
@@ -2143,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-store"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-model",
  "rusqlite",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-theme"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-uitree",
  "serde",
@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "gumicord-uitree"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
 ]
@@ -6869,7 +6869,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gumicord-uitree",
 ]
