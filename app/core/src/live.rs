@@ -434,6 +434,12 @@ impl Live {
         self.store.is_empty()
     }
 
+    /// Whether an older page is on its way. The top row shows loading
+    /// while this holds, so the list does not end in silence mid-scroll.
+    pub fn paging_older(&self, channel: ChannelId) -> bool {
+        self.paging.contains(&channel)
+    }
+
     /// Empty because it was fetched, or empty because it was not.
     ///
     /// Without the distinction, "loading" and "no messages" look the same.
@@ -743,6 +749,25 @@ impl Live {
         for part in want.chunks(CHUNK) {
             subs.request_members(guild, part.to_vec());
         }
+    }
+
+    /// Whether member rows were asked for that have not arrived yet.
+    ///
+    /// Asked past held means on its way; a final partial page holds
+    /// everything asked for, so the row does not stick around. The total
+    /// guards the other end: headings count as held rows, so without it a
+    /// small guild would load forever.
+    pub fn members_pending(&self, guild: GuildId) -> bool {
+        let held = self.members.get(&guild).map_or(0, |m| m.rows().len());
+        let Ok(held) = u32::try_from(held) else {
+            return false;
+        };
+        held < self.members.get(&guild).map_or(0, |m| m.total())
+            && self
+                .member_rows
+                .get(&guild)
+                .and_then(|asked| asked.last())
+                .is_some_and(|last| last[1] >= held)
     }
 
     /// Asks for the next page of the member list, once scrolled near its end.
@@ -2447,6 +2472,47 @@ mod tests {
 
         live.extend_members(GuildId::from(9u64));
         assert!(live.member_rows.is_empty(), "asked for someone else");
+    }
+
+    /// Asked past held with members still out there means a page is on
+    /// its way; a final partial page holds everything asked for, so the
+    /// bottom row does not stick around.
+    #[test]
+    fn pending_tracks_unanswered_member_rows() {
+        fn list(held: usize, total: u32) -> gumicord_gateway::MemberList {
+            let items: Vec<serde_json::Value> = (0..held)
+                .map(|i| {
+                    serde_json::json!({
+                        "member": {
+                            "user": { "id": i.to_string(), "username": format!("う{i}") },
+                            "roles": [],
+                        }
+                    })
+                })
+                .collect();
+            let raw = serde_json::json!({
+                "guild_id": "7",
+                "member_count": total,
+                "online_count": 1,
+                "ops": [{ "op": "SYNC", "range": [0, 99], "items": items }],
+            });
+            let mut list = gumicord_gateway::MemberList::default();
+            assert!(list.apply(gumicord_gateway::member_list::parse(&raw).expect("読める")));
+            list
+        }
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        assert!(!live.members_pending(guild), "nothing asked yet");
+
+        live.members.insert(guild, list(100, 500));
+        live.member_rows.insert(guild, vec![[0u32, 99]]);
+        assert!(!live.members_pending(guild), "first page landed");
+
+        live.member_rows.insert(guild, vec![[0u32, 99], [100, 199]]);
+        assert!(live.members_pending(guild), "second page on its way");
+
+        live.members.insert(guild, list(150, 150));
+        assert!(!live.members_pending(guild), "final page holds all");
     }
 
     /// A bot roster groups by hoisted role with honest counts, and chunks

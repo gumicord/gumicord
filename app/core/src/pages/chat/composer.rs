@@ -54,6 +54,12 @@ impl crate::Gumicord {
         // redraw the date.
         let rows = self.message_rows();
         let mut messages = UiNode::new(NodeId::ChatMessageList);
+        // Older pages arrive above: while one is on its way, a row at
+        // the top says so instead of ending the list in silence.
+        let channel = ChannelId::from(self.chat.selected_channel);
+        if self.live.paging_older(channel) || self.live.is_loading(channel) {
+            messages = messages.child(super::rows::loading_row("message_list_loading"));
+        }
         let mut prev: Option<(&str, &str, i64)> = None;
         let mut divided_day = "";
         for m in &rows {

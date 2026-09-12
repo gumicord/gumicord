@@ -2,6 +2,18 @@
 use super::{ChannelRow, GuildRow, MessageRow, ReplyRef};
 use gumicord_model::{ChannelId, GuildId, RoleId, UserId};
 use gumicord_store::{ChannelEntry, FolderRow, GuildEntry};
+use gumicord_uitree::{Key, NodeId, State, UiNode};
+
+/// A loading row for a list end: the top of messages, the bottom of
+/// members. Generic primitives only, so no new stable ID is needed;
+/// the slot tells the lists apart and `Loading` lets the theme style it.
+pub(crate) fn loading_row(slot: &'static str) -> UiNode {
+    UiNode::new(NodeId::LayoutRow)
+        .with_key(Key::Slot(slot))
+        .with_state(State::Loading)
+        .child(UiNode::text(NodeId::PrimitiveText, "読み込んでいます…"))
+}
+
 impl crate::Gumicord {
     pub(crate) fn guild_rows(&self) -> Vec<GuildRow> {
         // The store has already handled unavailable guilds and folder

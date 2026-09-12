@@ -250,6 +250,11 @@ impl crate::Gumicord {
         if out.is_empty() {
             return None;
         }
+        // More rows were asked for than have arrived: a row at the bottom
+        // says the list continues instead of ending in silence.
+        if self.live.members_pending(guild) {
+            out.push(super::rows::loading_row("member_list_loading"));
+        }
         Some(out)
     }
 

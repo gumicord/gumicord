@@ -1429,6 +1429,16 @@ mod member_tests {
         assert_ne!(found[0], found[1], "dividers share a key");
     }
 
+    /// The loading row carries its slot and the Loading state, so the
+    /// theme can tell it from a message.
+    #[test]
+    fn the_loading_row_names_its_list() {
+        let row = super::rows::loading_row("member_list_loading");
+        assert!(row.states.contains(State::Loading));
+        assert_eq!(row.key, Some(Key::Slot("member_list_loading")));
+        assert!(row.children.iter().any(|c| c.id == NodeId::PrimitiveText));
+    }
+
     /// The date sits centred with a line reaching each side: the spacers
     /// either side of the label hold equal widths on the same height.
     #[test]
