@@ -865,9 +865,14 @@ pub(crate) fn percentile(samples: &[u64], q: f64) -> u64 {
     sorted[rank]
 }
 
-/// The backends to try, in order. Windows omits Vulkan after the S1 crash.
+/// The backends to try, in order. Vulkan rejoined Windows guarded by the
+/// probe: a crashing driver dies in the child, never in the client.
 #[cfg(target_os = "windows")]
-const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::DX12];
+const CANDIDATES: &[wgpu::Backends] = &[
+    wgpu::Backends::GL,
+    wgpu::Backends::DX12,
+    wgpu::Backends::VULKAN,
+];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::METAL];
 #[cfg(target_os = "android")]
@@ -911,6 +916,32 @@ fn pick_adapter(
         }
     }
     let adapters = pollster::block_on(instance.enumerate_adapters(backends));
+    // An explicit backend wins over the candidate order; a broken or
+    // unknown one falls through to the order below instead of failing
+    // startup. This is how one backend is tried in isolation.
+    if let Ok(name) = std::env::var("WGPU_BACKEND") {
+        let wanted = crate::probe::backend_of(&name.to_ascii_lowercase());
+        match wanted.filter(|w| backends.contains(*w)) {
+            Some(wanted) => {
+                if let Some(a) = adapters.iter().find(|a| {
+                    wanted.contains(wgpu::Backends::from(a.get_info().backend))
+                        && surface.is_none_or(|s| a.is_surface_supported(s))
+                }) {
+                    return Some(a.clone());
+                }
+                tracing::warn!(
+                    backend = name,
+                    "explicit backend unavailable; trying candidates"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    backend = name,
+                    "unknown explicit backend; trying candidates"
+                );
+            }
+        }
+    }
     for wanted in CANDIDATES {
         if !backends.contains(*wanted) {
             continue;

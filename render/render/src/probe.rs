@@ -52,7 +52,7 @@ fn backend_name(backend: wgpu::Backends) -> Option<&'static str> {
     }
 }
 
-fn backend_of(name: &str) -> Option<wgpu::Backends> {
+pub(crate) fn backend_of(name: &str) -> Option<wgpu::Backends> {
     match name {
         "gl" => Some(wgpu::Backends::GL),
         "vulkan" => Some(wgpu::Backends::VULKAN),
