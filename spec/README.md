@@ -35,6 +35,7 @@
 | [0009](adr/0009-macos-linux-into-m1.md) | macOS / Linux デスクトップを M1 へ前倒しする | 承認 |
 | [0010](adr/0010-i18n-by-message-ids.md) | 多言語対応は文言 ID の表引きで行う | 承認 |
 | [0011](adr/0011-mobile-input-bridges.md) | モバイルのテキスト入力は自前橋渡しで実装する | 承認 |
+| [0012](adr/0012-bundle-noto-sans-jp.md) | CJK は Noto Sans JP のサブセット可変フォントを同梱する | 承認 |
 
 ## ルール
 

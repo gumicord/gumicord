@@ -54,15 +54,25 @@ const BUNDLED_SANS: &[u8] = include_bytes!("../../../assets/fonts/Inter.ttf");
 /// The bundled font's family name, which sans-serif resolves to.
 const BUNDLED_SANS_FAMILY: &str = "Inter";
 
+/// The bundled Japanese font.
+///
+/// Same deal as [`BUNDLED_SANS`], one variable file for every weight:
+/// fullwidth forms and kana must not depend on which system fonts a
+/// machine happens to have. Non-Japanese scripts still fall back to
+/// system fonts.
+const BUNDLED_JAPANESE: &[u8] = include_bytes!("../../../assets/fonts/NotoSansJP-VF.ttf");
+
+/// The bundled Japanese font's family name, heading the CJK fallback.
+const BUNDLED_JAPANESE_FAMILY: &str = "Noto Sans JP";
+
 /// Japanese fallbacks, in order.
 ///
-/// The library's Windows table holds one entry; the UI-tuned variant goes
-/// first and an older one follows. Names for the other platforms come after,
-/// so the same order produces the same result everywhere.
-///
-/// This only picks from what the system has. Identical rendering everywhere
-/// needs a bundled Japanese font.
+/// The bundled font goes first so CJK renders the same everywhere;
+/// system fonts follow for what it does not cover. The library's
+/// Windows table holds one entry; the UI-tuned variant goes first and
+/// an older one follows. Names for the other platforms come after.
 const JAPANESE_FALLBACK: &[&str] = &[
+    BUNDLED_JAPANESE_FAMILY,
     // Windows
     "Yu Gothic UI",
     "Yu Gothic",
@@ -397,6 +407,7 @@ impl Shaper {
     /// and the default family pointing at it.
     fn font_system(locale: &str, mut db: fontdb::Database) -> FontSystem {
         db.load_font_data(BUNDLED_SANS.to_vec());
+        db.load_font_data(BUNDLED_JAPANESE.to_vec());
         // A theme that writes no family gets sans-serif, so pointing that at
         // the bundled font means themes need say nothing.
         db.set_sans_serif_family(BUNDLED_SANS_FAMILY);

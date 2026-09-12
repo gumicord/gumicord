@@ -9,6 +9,7 @@ record where the file came from.
 | File | Use | Licence | Source |
 |---|---|---|---|
 | `Inter.ttf` | Body and UI (Latin) | SIL Open Font License 1.1 ([`Inter-OFL.txt`](Inter-OFL.txt)) | [google/fonts `ofl/inter`](https://github.com/google/fonts/tree/main/ofl/inter), upstream [rsms/inter](https://github.com/rsms/inter) |
+| `NotoSansJP-VF.ttf` | Body and UI (Japanese) | SIL Open Font License 1.1 ([`NotoSansJP-OFL.txt`](NotoSansJP-OFL.txt)) | [Noto Sans JP subset variable](https://github.com/googlefonts/noto-cjk/raw/main/Sans/Variable/TTF/Subset/NotoSansJP-VF.ttf) ([notofonts/noto-cjk](https://github.com/googlefonts/noto-cjk)) |
 
 ## Why bundle at all
 
@@ -28,14 +29,13 @@ in a single file, and cosmic-text sets the `wght` axis at rasterisation time.
 Static instances would mean two files for the 400 and 600 the sample theme
 uses, and another every time a theme reaches for a different weight.
 
-## No CJK yet
+## CJK: Noto Sans JP variable
 
-Japanese still falls back to a system font.
-
-The variable Noto Sans JP is around 5.7 MB, which would more than double the
-current 4.66 MB binary. Bundling it is right for identical rendering, but it
-is a trade against binary size and needs a decision of its own. Record it in
-an ADR once made.
+Japanese renders from the bundled subset variable font (9.1 MB), first in
+the CJK fallback order; system fonts cover the rest. Fullwidth forms no
+longer depend on which system fonts a machine happens to have (bold on
+some machines, missing on others). Non-Japanese scripts still fall back
+to system fonts. Decided in [ADR-0012](../../spec/adr/0012-bundle-noto-sans-jp.md).
 
 ## Adding a font
 
