@@ -865,14 +865,12 @@ pub(crate) fn percentile(samples: &[u64], q: f64) -> u64 {
     sorted[rank]
 }
 
-/// The backends to try, in order. Vulkan rejoined Windows guarded by the
-/// probe: a crashing driver dies in the child, never in the client.
+/// The backends to try, in order. Vulkan stays opt-in on Windows: its
+/// initialisation segfaults intermittently on Intel drivers here, which
+/// no probe can catch, so the default never picks it. Force it with
+/// `WGPU_BACKEND=vulkan` to try it anyway.
 #[cfg(target_os = "windows")]
-const CANDIDATES: &[wgpu::Backends] = &[
-    wgpu::Backends::GL,
-    wgpu::Backends::DX12,
-    wgpu::Backends::VULKAN,
-];
+const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::GL, wgpu::Backends::DX12];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const CANDIDATES: &[wgpu::Backends] = &[wgpu::Backends::METAL];
 #[cfg(target_os = "android")]
