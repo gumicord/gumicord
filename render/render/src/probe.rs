@@ -102,14 +102,15 @@ fn probe_backend(backend: wgpu::Backends) -> Vec<String> {
         .collect()
 }
 
-/// Whether the driver survives device creation. Downlevel limits are the
-/// common denominator, so passing here means the client's own (laxer)
-/// request passes too. Dying here only excludes the backend.
+/// Whether the driver survives device creation. Same shape as the
+/// client's own request, so passing here means the same call below;
+/// only timing and load can still differ. Dying here only excludes
+/// the backend.
 fn device_opens(adapter: &wgpu::Adapter) -> bool {
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("gumicord-probe"),
         required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::downlevel_defaults(),
+        required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
         ..Default::default()
     }))
     .is_ok()
