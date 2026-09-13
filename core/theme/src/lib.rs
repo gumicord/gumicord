@@ -830,6 +830,76 @@ mod tests {
         );
     }
 
+    /// Wallpaper is midnight's layout in different paint: resolved
+    /// spacing must match selector for selector. A missing base rule
+    /// collapsed message rows, and reply rows lost their padding.
+    #[test]
+    fn wallpaper_matches_midnight_layout() {
+        use gumicord_uitree::{Style, value::Edges};
+        let midnight = Theme::parse(include_str!("../../../examples/themes/midnight/theme.json"))
+            .theme
+            .expect("midnight parses");
+        let wallpaper = Theme::parse(include_str!(
+            "../../../examples/themes/wallpaper/theme.json"
+        ))
+        .theme
+        .expect("wallpaper parses");
+        #[allow(clippy::type_complexity)]
+        fn spacing(
+            style: &Style,
+        ) -> (
+            Option<Edges>,
+            Option<Edges>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+        ) {
+            (
+                style.padding,
+                style.margin,
+                style.gap,
+                style.width,
+                style.height,
+                style.min_width,
+                style.max_width,
+                style.min_height,
+                style.max_height,
+            )
+        }
+        let cases: &[(NodeId, Option<&'static str>)] = &[
+            (NodeId::ChatMessage, None),
+            (NodeId::ChatMessageReplyRef, None),
+            (NodeId::ChatMessageReplyRefAvatar, None),
+            (NodeId::ChatMessageAvatar, None),
+            (NodeId::ChatMessageContent, None),
+            (NodeId::ChatMessageHeaderAuthor, None),
+            (NodeId::ChatMessageListDayDivider, None),
+            (NodeId::PrimitiveCodeBlock, None),
+            (NodeId::LayoutColumn, Some("list")),
+            (NodeId::LayoutRow, Some("li0")),
+            (NodeId::LayoutRow, Some("li2")),
+            (NodeId::ChatInputField, None),
+            (NodeId::ChatHeader, None),
+            (NodeId::NavChannelListItem, None),
+            (NodeId::NavGuildListItem, None),
+            (NodeId::AppScreenLoginField, None),
+            (NodeId::OverlayModalAction, None),
+        ];
+        for (id, slot) in cases {
+            let ctx = MatchContext {
+                slot: *slot,
+                ..ctx()
+            };
+            let a = spacing(&midnight.style_for(*id, &ctx));
+            let b = spacing(&wallpaper.style_for(*id, &ctx));
+            assert_eq!(a, b, "{id:?} with slot {slot:?} places differently");
+        }
+    }
+
     /// The fetcher sees every background image once, with fit and blur.
     #[test]
     fn background_images_are_collected_once_each() {

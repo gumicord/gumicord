@@ -554,6 +554,10 @@
 
     {
       "select": "chat.message",
+      "style": { "padding": [4, 16, 4, 16], "gap": 8 }
+    },
+    {
+      "select": "chat.message",
       "when": { "state": "grouped" },
       "style": { "padding": [0, 16, 0, 64] }
     },
@@ -755,7 +759,7 @@
         "borderColor": "$color.border",
         "borderWidth": 1,
         "radius": "$radius.sm",
-        "padding": [8, 10, 8, 10],
+        "padding": 8,
         "margin": [4, 0, 4, 0]
       }
     },
