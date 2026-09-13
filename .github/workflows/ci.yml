@@ -492,7 +492,7 @@ jobs:
           echo "$names"
           missing=0
           for suffix in .apk .ipa -windows.zip -linux.zip -macos.zip -linux.AppImage -macos.dmg; do
-            if ! echo "$names" | grep -q "${suffix}$"; then
+            if ! echo "$names" | grep -qF -- "$suffix"; then
               echo "missing asset ending in $suffix"
               missing=1
             fi
