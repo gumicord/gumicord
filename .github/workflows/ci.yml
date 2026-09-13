@@ -479,6 +479,26 @@ jobs:
             - WARNING: connecting to Discord with a third-party client breaks
               their terms of service and can cost you your account.
 
+      # The release API can drop an asset mid-upload while reporting
+      # success (seen 2026-09-13: windows.zip built fine but its metadata
+      # update 404'd). Fail here rather than ship a release missing a
+      # platform; re-running the job re-uploads everything.
+      - name: Verify all assets uploaded
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          names=$(gh release view "$TAG" --repo gumicord/gumicord-nightly --json assets --jq '.assets[].name')
+          echo "$names"
+          missing=0
+          for suffix in .apk .ipa -windows.zip -linux.zip -macos.zip -linux.AppImage -macos.dmg; do
+            if ! echo "$names" | grep -q "${suffix}$"; then
+              echo "missing asset ending in $suffix"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+
   # ────────────────────────────────────────────────────────────
   # Confirms rust-version in Cargo.toml is true. A declared value nobody
   # checks always drifts eventually.
