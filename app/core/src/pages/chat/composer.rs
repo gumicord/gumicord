@@ -164,6 +164,24 @@ impl crate::Gumicord {
             // A spacer rather than a written margin, which would stop
             // matching once the theme changes the bar's padding.
             .child(UiNode::new(NodeId::LayoutSpacer))
+            // While replying, whether the target gets notified.
+            .child_if(matches!(self.chat.composing, Composing::Reply(_)), || {
+                let label = if self.chat.reply_mention {
+                    "@ON"
+                } else {
+                    "@OFF"
+                };
+                UiNode::new(NodeId::PrimitiveButton)
+                    .with_key(Key::Slot(crate::REPLY_MENTION))
+                    .with_state_if(
+                        self.is_hovered(
+                            NodeId::PrimitiveButton,
+                            Some(&Key::Slot(crate::REPLY_MENTION)),
+                        ),
+                        State::Hover,
+                    )
+                    .child(UiNode::text(NodeId::PrimitiveText, label))
+            })
             // Escape works too, but without a visible way out this looks like
             // a state with no exit.
             .child(

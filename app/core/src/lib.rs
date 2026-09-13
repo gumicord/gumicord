@@ -121,6 +121,8 @@ const FOLDER_TILES: usize = 4;
 /// Slot for the cancel button; the same string is used to build it and to
 /// match the press.
 const CANCEL_COMPOSING: &str = "cancel_composing";
+/// Slot for the reply-mention toggle; same use. Only built while replying.
+const REPLY_MENTION: &str = "reply_mention";
 /// Slot for the settings gear in the user panel; same use.
 const SETTINGS_OPEN: &str = "settings_open";
 /// Slot for the member-list button in the chat header; same use. Only
@@ -803,6 +805,12 @@ impl Gumicord {
                 (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
                     changed |= self.stop_composing();
                 }
+                (NodeId::PrimitiveButton, Some(Key::Slot(REPLY_MENTION))) => {
+                    if matches!(self.chat.composing, Composing::Reply(_)) {
+                        self.chat.reply_mention = !self.chat.reply_mention;
+                        changed = true;
+                    }
+                }
                 // The gear sits on the user panel; its hit comes first, so
                 // this arm wins over the panel's own menu.
                 (NodeId::PrimitiveButton, Some(Key::Slot(SETTINGS_OPEN))) => {
@@ -1419,6 +1427,7 @@ impl Application for Gumicord {
 
         let body = self.chat.input.text().trim().to_owned();
         let mode = self.chat.composing;
+        let reply_mention = self.chat.reply_mention;
 
         // Emptying an edit is not a delete; Discord rejects it too. Clearing
         // the field and pressing enter must not destroy the message.
@@ -1437,9 +1446,9 @@ impl Application for Gumicord {
                 // The gateway echoes it back; adding it here shows it twice.
                 Composing::Reply(id) => {
                     self.live
-                        .send_message(channel, body, Some(MessageId::from(id)));
+                        .send_message(channel, body, Some(MessageId::from(id)), reply_mention);
                 }
-                Composing::New => self.live.send_message(channel, body, None),
+                Composing::New => self.live.send_message(channel, body, None, reply_mention),
             }
             return true;
         }

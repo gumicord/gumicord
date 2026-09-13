@@ -4,6 +4,45 @@ use gumicord_model::{Channel, ChannelId, Message, MessageId};
 
 use crate::{RestClient, RestError, Route};
 
+#[derive(serde::Serialize)]
+struct MessageReference {
+    message_id: String,
+    fail_if_not_exists: bool,
+}
+
+#[derive(serde::Serialize)]
+struct MessageAllowedMentions {
+    parse: [&'static str; 3],
+    replied_user: bool,
+}
+
+#[derive(serde::Serialize)]
+struct CreateMessageBody<'a> {
+    content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_reference: Option<MessageReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_mentions: Option<MessageAllowedMentions>,
+}
+
+fn create_message_body(
+    content: &str,
+    reply_to: Option<MessageId>,
+    reply_mention: bool,
+) -> CreateMessageBody<'_> {
+    CreateMessageBody {
+        content,
+        message_reference: reply_to.map(|id| MessageReference {
+            message_id: id.to_string(),
+            fail_if_not_exists: false,
+        }),
+        allowed_mentions: reply_to.map(|_| MessageAllowedMentions {
+            parse: ["users", "roles", "everyone"],
+            replied_user: reply_mention,
+        }),
+    }
+}
+
 impl RestClient {
     /// Fetches recent messages.
     ///
@@ -50,10 +89,10 @@ impl RestClient {
     /// The created message is returned, but the Gateway delivers the same one
     /// as `MESSAGE_CREATE`; adding both to the view shows it twice.
     ///
-    /// Without `allowed_mentions`, a reply notifies its target. That is
-    /// Discord's default and what the official client does, so silently
-    /// changing it would mean replies the recipient never notices. A
-    /// no-notify reply needs somewhere in the UI to choose it first.
+    /// `reply_mention` decides whether a reply notifies its target. It is
+    /// only read when `reply_to` is set. Sending `allowed_mentions` with just
+    /// `replied_user` would also silence other mentions, so the default parse
+    /// set travels along to keep them working.
     ///
     /// `fail_if_not_exists` is false: otherwise deleting the original while a
     /// reply is being typed rejects the reply along with it.
@@ -62,27 +101,9 @@ impl RestClient {
         channel: ChannelId,
         content: &str,
         reply_to: Option<MessageId>,
+        reply_mention: bool,
     ) -> Result<Message, RestError> {
-        #[derive(serde::Serialize)]
-        struct Reference {
-            message_id: String,
-            fail_if_not_exists: bool,
-        }
-
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            content: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            message_reference: Option<Reference>,
-        }
-
-        let body = Body {
-            content,
-            message_reference: reply_to.map(|id| Reference {
-                message_id: id.to_string(),
-                fail_if_not_exists: false,
-            }),
-        };
+        let body = create_message_body(content, reply_to, reply_mention);
         self.send(Route::create_message(channel), Some(&body)).await
     }
 
@@ -218,5 +239,36 @@ mod tests {
 
         assert!(jump.path.contains("around=9"));
         assert_eq!(first.bucket_key, jump.bucket_key);
+    }
+
+    #[test]
+    fn a_plain_message_carries_no_reference_or_mentions() {
+        let body = create_message_body("hello", None, true);
+        let json = serde_json::to_value(&body).expect("serializable");
+
+        assert_eq!(json["content"], "hello");
+        assert!(json.get("message_reference").is_none());
+        assert!(json.get("allowed_mentions").is_none());
+    }
+
+    #[test]
+    fn a_reply_carries_its_target_and_the_mention_switch() {
+        let target = gumicord_model::MessageId::from(7u64);
+        for mention in [true, false] {
+            let body = create_message_body("hi", Some(target), mention);
+            let json = serde_json::to_value(&body).expect("serializable");
+
+            assert_eq!(json["message_reference"]["message_id"], "7");
+            assert_eq!(json["message_reference"]["fail_if_not_exists"], false);
+            assert_eq!(json["allowed_mentions"]["replied_user"], mention);
+            // Omitting the parse set would also silence other mentions.
+            let parse = json["allowed_mentions"]["parse"]
+                .as_array()
+                .expect("parse set");
+            let parse: Vec<&str> = parse.iter().map(|v| v.as_str().unwrap_or("")).collect();
+            assert!(parse.contains(&"users"));
+            assert!(parse.contains(&"roles"));
+            assert!(parse.contains(&"everyone"));
+        }
     }
 }

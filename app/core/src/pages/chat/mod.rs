@@ -118,6 +118,8 @@ pub(crate) struct ChatView {
     pub(crate) reveals: crate::markdown::Reveals,
     /// What the composer is doing.
     pub(crate) composing: Composing,
+    /// Whether a reply mentions its target. Discord's default is on.
+    pub(crate) reply_mention: bool,
     pub(crate) selected_channel: u64,
     /// Whether the composer has focus.
     pub(crate) input_focused: bool,
@@ -143,6 +145,7 @@ impl ChatView {
             selected_guild: guild,
             reveals: crate::markdown::Reveals::default(),
             composing: Composing::New,
+            reply_mention: true,
             selected_channel: channel,
             input_focused: false,
             input: TextDocument::new(),

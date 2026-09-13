@@ -138,6 +138,69 @@ fn a_cancel_button_appears_while_replying() {
     assert!(cancel(Composing::Edit(1)));
 }
 
+/// The reply-mention switch shows only while replying, naming its state.
+#[test]
+fn the_mention_switch_appears_only_while_replying() {
+    fn label(a: &mut Gumicord) -> Option<String> {
+        let mut out = None;
+        a.build_tree(Panes::Four).walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot(REPLY_MENTION)) {
+                for c in &n.children {
+                    if let gumicord_uitree::Content::Text(t) = &c.content {
+                        out = Some(t.clone());
+                    }
+                }
+            }
+        });
+        out
+    }
+    let mut replying = app();
+    replying.chat.composing = Composing::Reply(1);
+    replying.chat.reply_mention = true;
+    assert_eq!(label(&mut replying).as_deref(), Some("@ON"));
+    replying.chat.reply_mention = false;
+    assert_eq!(label(&mut replying).as_deref(), Some("@OFF"));
+
+    let mut editing = app();
+    editing.chat.composing = Composing::Edit(1);
+    assert_eq!(label(&mut editing), None);
+
+    let mut fresh = app();
+    fresh.chat.composing = Composing::New;
+    assert_eq!(label(&mut fresh), None);
+}
+
+/// Pressing the switch flips whether the reply notifies its target.
+#[test]
+fn pressing_the_mention_switch_flips_the_flag() {
+    let mut a = app();
+    a.chat.composing = Composing::Reply(1);
+    assert!(a.chat.reply_mention);
+    let hits = [hit_of(
+        NodeId::PrimitiveButton,
+        Some(Key::Slot(REPLY_MENTION)),
+    )];
+    assert!(a.pressed(&hits));
+    assert!(!a.chat.reply_mention);
+    assert!(a.pressed(&hits));
+    assert!(a.chat.reply_mention);
+}
+
+/// The switch does nothing outside a reply; the button is not even built.
+#[test]
+fn pressing_the_mention_switch_outside_a_reply_changes_nothing() {
+    let mut a = app();
+    a.chat.composing = Composing::Edit(1);
+    let before = a.chat.reply_mention;
+    let hits = [hit_of(
+        NodeId::PrimitiveButton,
+        Some(Key::Slot(REPLY_MENTION)),
+    )];
+    a.pressed(&hits);
+    assert_eq!(a.chat.reply_mention, before);
+    assert_eq!(a.chat.composing, Composing::Edit(1));
+}
+
 /// Cancelling a reply keeps the draft; cancelling an edit does not, since
 /// the field held the original message rather than anything typed.
 #[test]

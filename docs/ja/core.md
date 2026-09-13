@@ -37,7 +37,7 @@ Discord との通信 (`model` / `rest` / `gateway`) と正規化された状態
 
 ### `src/auth.rs` — ログイン系 REST 呼び出し。パスワード/MFA/QR チケット交換とトークン検証を集める。Key items: `LoginOutcome`、`fn login()`、`fn mfa_totp()`、`fn remote_auth_login()`、`fn current_user()`。captcha 解決はヘッダで送る。
 
-### `src/channel.rs` — チャンネル・メッセージ系 REST 呼び出し。履歴は最新順のまま返し、並べ替えは呼び出し側に残す。Key items: `fn create_message()`、`fn messages()`、`fn messages_before()`、`fn edit_message()`、`fn delete_message()`、`fn fetch_cdn()`。返信は通知抑制を付けず `fail_if_not_exists=false`、CDN 取得は無認証・4MB 上限で別扱いする。
+### `src/channel.rs` — チャンネル・メッセージ系 REST 呼び出し。履歴は最新順のまま返し、並べ替えは呼び出し側に残す。Key items: `fn create_message()`、`fn messages()`、`fn messages_before()`、`fn edit_message()`、`fn delete_message()`、`fn fetch_cdn()`。返信は `allowed_mentions.replied_user` で通知の有無を切り替え (`fail_if_not_exists=false`)、CDN 取得は無認証・4MB 上限で別扱いする。
 
 ### `src/build_number.rs` — 起動時にログインページ HTML から `BUILD_NUMBER` を測定し identity に記録する。失敗は起動を止めず組込値に退避する。Key items: `fn measure()`、`fn extract()`。
 

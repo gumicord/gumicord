@@ -899,13 +899,22 @@ impl Live {
     ///
     /// Not added to the view: the gateway echoes it back, and adding it here
     /// too would show it twice.
-    pub fn send_message(&self, channel: ChannelId, content: String, reply_to: Option<MessageId>) {
+    pub fn send_message(
+        &self,
+        channel: ChannelId,
+        content: String,
+        reply_to: Option<MessageId>,
+        reply_mention: bool,
+    ) {
         let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
             return;
         };
         let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         rt.spawn(async move {
-            if let Err(e) = rest.create_message(channel, &content, reply_to).await {
+            if let Err(e) = rest
+                .create_message(channel, &content, reply_to, reply_mention)
+                .await
+            {
                 if report_dead_token(&tx, Some(&waker), &e) {
                     return;
                 }
