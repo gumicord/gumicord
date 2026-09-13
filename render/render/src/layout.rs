@@ -132,6 +132,7 @@ pub fn layout<'a>(
         text,
         scroll,
         cache: HashMap::new(),
+        in_vscroll: false,
         out: Vec::new(),
         overflow: HashMap::new(),
         scrollbars: Vec::new(),
@@ -147,8 +148,12 @@ pub fn layout<'a>(
 struct Cx<'a, 't, 's> {
     text: &'t mut Shaper,
     scroll: &'s ScrollState,
-    /// (node address, constraint) -> size
-    cache: HashMap<(usize, u32, u32), Size>,
+    /// (node address, constraint, scroll context) -> size
+    cache: HashMap<(usize, u32, u32, bool), Size>,
+    /// Inside a vertical scroll region's content. Stacked children hug
+    /// there: the region absorbs the overflow, so there is no share to
+    /// divide. Restored when leaving the region.
+    in_vscroll: bool,
     out: Vec<Placed<'a>>,
     /// Overflow per scroll region.
     overflow: HashMap<NodeId, f32>,
@@ -208,7 +213,12 @@ impl<'a> Cx<'a, '_, '_> {
     // ───────────────────────────────────────────────── Measuring
 
     fn measure(&mut self, node: &UiNode, avail: Size) -> Size {
-        let key = (std::ptr::from_ref(node) as usize, q(avail.w), q(avail.h));
+        let key = (
+            std::ptr::from_ref(node) as usize,
+            q(avail.w),
+            q(avail.h),
+            self.in_vscroll,
+        );
         if let Some(s) = self.cache.get(&key) {
             return *s;
         }
@@ -229,7 +239,14 @@ impl<'a> Cx<'a, '_, '_> {
             (ex_h.unwrap_or(avail.h) - pad.vertical()).max(0.0),
         );
 
+        // Entering a vertical scroll region: its content hugs, whether
+        // measured or placed.
+        let vscroll = self.in_vscroll;
+        if it.scroll && it.axis == Axis::Column {
+            self.in_vscroll = true;
+        }
         let content = self.measure_content(node, &it, inner);
+        self.in_vscroll = vscroll;
 
         clamp_size(
             node,
@@ -362,9 +379,14 @@ impl<'a> Cx<'a, '_, '_> {
         // Measure the children that take no slack. Wrapping text that
         // spilled past one line joins the second pass instead: hugging its
         // longest line would rewrap it narrower at draw time.
+        //
+        // Inside a vertical scroll region, stacked children all hug: the
+        // region absorbs the overflow, so there is no share to divide.
+        // Splitting it equally is what sliced list rows to one height.
+        let hug_vertical = self.in_vscroll && !horizontal;
         let mut fills = vec![false; n];
         for (i, c) in node.children.iter().enumerate() {
-            if overlay[i] || (grows[i] > 0.0 && remaining.is_finite()) {
+            if overlay[i] || (grows[i] > 0.0 && remaining.is_finite() && !hug_vertical) {
                 continue;
             }
             let m = margins[i];
@@ -383,11 +405,12 @@ impl<'a> Cx<'a, '_, '_> {
         }
 
         // Divide the remainder by grow. An infinite constraint, as on a
-        // scroll region's main axis, leaves nothing to divide.
+        // scroll region's main axis, leaves nothing to divide — as does a
+        // vertical share inside one, where children hug instead.
         let fill: f32 = fills.iter().filter(|f| **f).count() as f32;
         let total_grow: f32 = grows.iter().sum();
         let total = total_grow + fill;
-        if total > 0.0 && remaining.is_finite() {
+        if total > 0.0 && remaining.is_finite() && !hug_vertical {
             let pool = remaining.max(0.0);
             for (i, c) in node.children.iter().enumerate() {
                 let share = grows[i] + if fills[i] { 1.0 } else { 0.0 };
@@ -464,6 +487,13 @@ impl<'a> Cx<'a, '_, '_> {
         let riders = matches!(node.content, Content::Image(_)) && !node.children.is_empty();
         if node.content.is_leaf() && !riders {
             return;
+        }
+
+        // Entering a vertical scroll region: its content hugs, whether
+        // measured or placed. Restored below.
+        let vscroll = self.in_vscroll;
+        if it.scroll && it.axis == Axis::Column {
+            self.in_vscroll = true;
         }
 
         // A scroll region drops the main-axis constraint to get the real
@@ -600,6 +630,7 @@ impl<'a> Cx<'a, '_, '_> {
 
             self.place(child, child_rect, clip);
         }
+        self.in_vscroll = vscroll;
     }
 
     /// Places a scrollbar at the list's edge.

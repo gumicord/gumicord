@@ -613,6 +613,11 @@
     },
     {
       "select": "primitive.text",
+      "when": { "slot": "p" },
+      "style": { "margin": [4, 0, 4, 0] }
+    },
+    {
+      "select": "primitive.text",
       "when": { "slot": "bullet" },
       "style": { "color": "$color.text.secondary" }
     },

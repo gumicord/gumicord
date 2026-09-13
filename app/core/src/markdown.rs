@@ -22,6 +22,8 @@
 //! | `link` | links and bare URLs |
 //! | `mention` | `<@1>` `<#1>` `<@&1>` `@everyone` |
 //! | `h1` `h2` `h3` `subtext` | headings and `-# ` |
+//! | `p` | paragraphs: the theme separates them, so a blank line reads
+//! | | as more than a line break |
 //! | `quote_bar` | the rule beside a quote |
 //! | `bullet` | list markers |
 //!
@@ -183,7 +185,10 @@ impl<'a> Ink<'a> {
 
     fn block(&self, b: &Block, names: &dyn Names) -> UiNode {
         match b {
-            Block::Paragraph(c) => self.rich(self.spans(c, names), None),
+            // A blank line ends the paragraph above, so paragraphs carry a
+            // slot: without themed spacing two of them read as one line
+            // break.
+            Block::Paragraph(c) => self.rich(self.spans(c, names), Some("p")),
             Block::Heading { level, content } => {
                 let slot = match level {
                     1 => "h1",
@@ -557,6 +562,21 @@ mod tests {
         match blocks.first() {
             Some(gumicord_markdown::Block::Paragraph(c)) => ink.spans(c, names),
             other => panic!("段落ではない {other:?}"),
+        }
+    }
+
+    /// A blank line ends the paragraph, and each paragraph carries the
+    /// slot the theme spaces them with. Without it two paragraphs read
+    /// as a single line break.
+    #[test]
+    fn paragraphs_carry_the_spacing_slot() {
+        let reveals = Reveals::default();
+        let ink = Ink::new(None, MatchContext::new(1000.0), &reveals, 7, NOW);
+        let nodes = ink.blocks(&gumicord_markdown::parse("one\n\ntwo"), &NoNames);
+        assert_eq!(nodes.len(), 2);
+        for n in &nodes {
+            assert_eq!(n.id, NodeId::PrimitiveText);
+            assert_eq!(n.key, Some(Key::Slot("p")));
         }
     }
 

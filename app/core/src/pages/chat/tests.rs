@@ -1665,17 +1665,20 @@ mod member_tests {
     /// wraps (regression: multi-line bullets piled onto each other).
     #[test]
     fn long_list_items_do_not_overlap() {
-        use gumicord_render::layout::ScrollState;
-
         let mut m = message(None, None);
         m.content = [
-            "テストのお願い",
+            "# テストのお願い",
             "現在gumicordは以下の環境で十分にテストされておらず、テストが必要です",
             "- Android(実機・エミュ問わず全環境でクラッシュ)",
-            "- Linux(ディストリビューションは不明だがボットログインまで正常に動作する、クリップボードやセキュアブートは未確認)",
+            "- Linux(ディストリビューションは不明だがボットログインまで正常に動作する、クリップボードやセキュアストレージの動作は未確認)",
             "- macOS(動作未確認)",
+            "",
             "また以下の環境ではテストが行われていますが動作が不十分です",
-            "- iOS(フォームボディが無効ですエラーでログインできない)",
+            "- iOS(\"フォームボディーが無効です\"エラーでログインできない)",
+            "",
+            "テストにご協力いただける方は今日の夕方以降に作成される予定のテスターロールをつけていただけると助かります。",
+            "というかログをください(Androidの場合はダウンロードフォルダー、それ以外はgumicordのデータフォルダーにあります)",
+            "@everyone ",
         ]
         .join("\n");
         let mut a = app(m);
@@ -1689,7 +1692,7 @@ mod member_tests {
             &tree,
             cx.viewport,
             &mut shaper,
-            &ScrollState::new(),
+            &gumicord_render::layout::ScrollState::new(),
         );
 
         let mut rows: Vec<gumicord_render::Rect> = r
@@ -1706,16 +1709,51 @@ mod member_tests {
         // At least one item wraps, or the test proves nothing.
         let tallest = rows.iter().map(|r| r.h).fold(0.0f32, f32::max);
         let shortest = rows.iter().map(|r| r.h).fold(f32::MAX, f32::min);
-        assert!(
-            tallest > shortest + 1.0,
-            "どの項目も折り返していない"
-        );
+        assert!(tallest > shortest + 1.0, "どの項目も折り返していない");
         for w in rows.windows(2) {
             assert!(
                 w[1].y >= w[0].y + w[0].h - 0.5,
                 "箇条書きが重なっている ({w:?})"
             );
         }
+    }
+
+    /// A blank line separates paragraphs wider than a line break does.
+    /// Without themed spacing the two read as one break.
+    #[test]
+    fn blank_lines_separate_paragraphs() {
+        let mut m = message(None, None);
+        m.content = "first\n\nsecond".to_owned();
+        let mut a = app(m);
+        // The machine may hold a saved theme; spacing comes from the
+        // bundled one under test.
+        a.theme = parse_theme_file(DEFAULT_THEME);
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(900.0, 800.0),
+            scale: 1.0,
+        };
+        let tree = a.build(&cx);
+        let mut shaper = gumicord_render::text::Shaper::new(1.0);
+        let r = gumicord_render::layout::layout(
+            &tree,
+            cx.viewport,
+            &mut shaper,
+            &gumicord_render::layout::ScrollState::new(),
+        );
+
+        let mut paras: Vec<gumicord_render::Rect> = r
+            .placed
+            .iter()
+            .filter(|p| p.node.id == NodeId::PrimitiveText && p.node.key == Some(Key::Slot("p")))
+            .map(|p| p.rect)
+            .collect();
+        assert_eq!(paras.len(), 2, "段落がない");
+        paras.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+        // Margins need no font, so this holds wherever the theme applies.
+        assert!(
+            paras[1].y - paras[0].bottom() >= 7.5,
+            "段落の区切りが改行と変わらない ({paras:?})"
+        );
     }
 }
 

@@ -224,6 +224,7 @@ Markdown の**行の中の飾りはノードではない**。太字を別のノ�
 | `link` `mention` | リンク・裸の URL / `<@1>` `<#1>` `<@&1>` `@everyone` |
 | `h1` `h2` `h3` `subtext` | 見出しと `-# ` |
 | `bullet` | 箇条書きの印 |
+| `p` | 段落。本文と本文の空行は段落の区切りであり、行の中の改行より広く空ける |
 
 縦に積まれるものはノードなので、通常どおり安定 ID で狙える — 引用の線は `primitive.divider` の `slot: "quote_bar"`、コードブロックは `primitive.code_block`、箇条書きの字下げは `layout.row` の `slot: "li0"`〜`"li4"`。
 
