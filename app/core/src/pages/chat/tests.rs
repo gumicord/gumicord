@@ -910,6 +910,66 @@ mod input_tests {
         assert!(!a.chat.input_focused);
         assert!(!a.cancel_input(), "既に外れていれば何も起きない");
     }
+
+    /// Shift+Enter is a newline, not a send.
+    #[test]
+    fn shift_enter_inserts_a_newline_instead_of_sending() {
+        let mut a = Gumicord::demo();
+        a.chat.input_focused = true;
+        a.focused_document().unwrap().insert("one");
+        assert!(a.shift_enter());
+        assert_eq!(a.chat.input.text(), "one\n");
+        assert_eq!(a.chat.composing, Composing::New);
+    }
+
+    /// Login fields stay single-line: Shift+Enter is unhandled there, so
+    /// the caller falls through to submitting.
+    #[test]
+    fn shift_enter_on_a_login_field_is_unhandled() {
+        let mut a = Gumicord::demo();
+        a.login_view.field = Some(LoginField::Email);
+        a.chat.input_focused = true;
+        assert!(!a.shift_enter());
+        assert!(a.chat.input.text().is_empty());
+    }
+
+    /// A multiline draft sends whole.
+    #[test]
+    fn a_multiline_draft_sends_whole() {
+        let mut a = Gumicord::demo();
+        a.chat.input_focused = true;
+        a.focused_document().unwrap().insert("one\ntwo");
+        assert!(a.submit());
+        assert!(
+            field(&a.build(&cx())).text.is_empty(),
+            "入力欄が空になっていない"
+        );
+    }
+
+    /// The field grows with its lines.
+    ///
+    /// ASCII only: the CI runner may have no Japanese font.
+    #[test]
+    fn the_field_grows_with_its_lines() {
+        fn height(text: &str) -> f32 {
+            let mut a = Gumicord::demo();
+            a.chat.input_focused = true;
+            a.focused_document().unwrap().insert(text);
+            let cx = cx();
+            let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
+            placed
+                .iter()
+                .find(|(id, _)| *id == NodeId::ChatInputField)
+                .map(|(_, r)| r.h)
+                .expect("入力欄が置かれていない")
+        }
+        let one = height("one");
+        let three = height("one\ntwo\nthree");
+        assert!(
+            three > one + 1.0,
+            "3 行が 1 行と変わらない ({three} <= {one})"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1753,6 +1813,45 @@ mod member_tests {
         assert!(
             paras[1].y - paras[0].bottom() >= 7.5,
             "段落の区切りが改行と変わらない ({paras:?})"
+        );
+    }
+
+    /// Consecutive blank lines keep their height instead of collapsing
+    /// into the paragraph gap.
+    #[test]
+    fn blank_lines_keep_their_height() {
+        let mut m = message(None, None);
+        m.content = "a\n\n\n\nb".to_owned();
+        let mut a = app(m);
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(900.0, 800.0),
+            scale: 1.0,
+        };
+        let tree = a.build(&cx);
+        let mut shaper = gumicord_render::text::Shaper::new(1.0);
+        let r = gumicord_render::layout::layout(
+            &tree,
+            cx.viewport,
+            &mut shaper,
+            &gumicord_render::layout::ScrollState::new(),
+        );
+
+        let mut paras: Vec<gumicord_render::Rect> = r
+            .placed
+            .iter()
+            .filter(|p| p.node.id == NodeId::PrimitiveText && p.node.key == Some(Key::Slot("p")))
+            .map(|p| p.rect)
+            .collect();
+        assert_eq!(paras.len(), 2, "段落がない");
+        paras.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+        if paras[1].h == 0.0 {
+            eprintln!("フォントが見つからないため、この試験は飛ばす");
+            return;
+        }
+        // "a" plus three empty lines against a single line.
+        assert!(
+            paras[0].h > paras[1].h * 2.5,
+            "空行が潰れている ({paras:?})"
         );
     }
 }

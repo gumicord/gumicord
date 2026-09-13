@@ -7,6 +7,11 @@
 use gumicord_app::Gumicord;
 
 fn main() {
+    // From a terminal, join its console first: a `windows_subsystem`
+    // binary otherwise starts without one and stderr goes nowhere
+    // visible. Has to precede the probe, which reports on stdout.
+    #[cfg(windows)]
+    attach_parent_console();
     // A probe child reports its backend and exits; it must not reach the
     // window, the logger, or anything else that talks.
     let args: Vec<String> = std::env::args().collect();
@@ -28,6 +33,37 @@ fn main() {
     if let Err(e) = gumicord_platform::run(Gumicord::new()) {
         tracing::error!(%e, "起動できなかった");
         std::process::exit(1);
+    }
+}
+
+/// Joins the launching console, if there is one and nothing else took
+/// stderr already.
+///
+/// A `windows_subsystem` binary starts without a console even from cmd,
+/// so terminal output vanishes. Joining the parent's console shows it,
+/// while a GUI launch has no console to join and stays file-only: no
+/// console window appears either way.
+///
+/// Only when stderr leads nowhere: piped or redirected output (the probe
+/// parent's pipes, `> file`) already flows, and joining a console then
+/// would steal it.
+#[cfg(windows)]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+        fn GetStdHandle(which: i32) -> *mut u8;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    // Everything the client prints — logs, probe progress, panics —
+    // goes to stderr; the probe's JSON report alone uses stdout, and
+    // only a pipe ever reads that.
+    const STD_ERROR_HANDLE: i32 = -12;
+    if unsafe { GetStdHandle(STD_ERROR_HANDLE) }.is_null() {
+        // Fails with no console to join; nothing else to do then.
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
     }
 }
 

@@ -45,7 +45,7 @@
 
 ## 4. クリップボード
 
-- [ ] 本文の複写・貼り付けが他のアプリと往復できる
+- [x] 本文の複写・貼り付けが他のアプリと往復できる
 - [ ] 画像の複写・貼り付けができる (対応範囲は機種依存)
 
 結果:
@@ -59,8 +59,8 @@ v0.0.3 では基盤のみ。呼び出す画面はまだ無い (添付送信は M
 cargo run -p gumicord-platform --example pick_file
 ```
 
-- [ ] OS ネイティブの選択画面が開く (Windows／macOS／Linux)
-- [ ] 選んだ画像のパスが表示される。取り消しは `no choice` になる
+- [x] OS ネイティブの選択画面が開く (Windows／macOS／Linux)
+- [x] 選んだ画像のパスが表示される。取り消しは `no choice` になる
 
 結果 (開発者が実施し、OS ごとに記録):
 
@@ -68,10 +68,10 @@ cargo run -p gumicord-platform --example pick_file
 
 - [ ] Linux: AppImage がそのまま起動する
 - [ ] macOS: dmg を開いて起動する (未署名の警告が出る。署名は別作業)
-- [ ] Windows: ダブルクリックでコンソール窓が出ない
-- [ ] ログが残る (Windows: `%APPDATA%\gumicord\logs`、
+- [x] Windows: ダブルクリックでコンソール窓が出ない
+- [x] ログが残る (Windows: `%APPDATA%\gumicord\logs`、
   macOS／Linux: 設定先の `logs/`)。起動失敗時はここを見る
-- [ ] Windows: VC++ 再頒布パッケージの無い機械でも起動する
+- [x] Windows: VC++ 再頒布パッケージの無い機械でも起動する
 
 結果:
 
@@ -81,16 +81,16 @@ v0.0.2 世代は、箇条書きを 2 つ以上含む発言が見えると起動�
 `duplicate child` で落ちていた (accesskit への子 id 重複)。
 復帰したセッションで確認する:
 
-- [ ] 箇条書き・引用・コードブロックを含むチャンネルを開いても落ちない
-- [ ] ナレーター／VoiceOver を付けたまま起動しても落ちない
+- [x] 箇条書き・引用・コードブロックを含むチャンネルを開いても落ちない
+- [x] ナレーター／VoiceOver を付けたまま起動しても落ちない
 
 結果:
 
 ## 8. スクリーンショット比較 (X2)
 
-- [ ] CI の `screenshot` ジョブが緑である
-- [ ] Windows は祝福画像と照合されている (素通りでない)
-- [ ] Linux の実像 (CI 成果物 `screenshot-ubuntu-*`) を目視し、
+- [x] CI の `screenshot` ジョブが緑である
+- [x] Windows は祝福画像と照合されている (素通りでない)
+- [x] Linux の実像 (CI 成果物 `screenshot-ubuntu-*`) を目視し、
   差が意図どおりなら祝福画像として登録する
 
 結果:

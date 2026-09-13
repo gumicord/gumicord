@@ -9,7 +9,7 @@
 //! enough to accept for now.
 
 use crate::inline;
-use crate::model::{Block, Item, Marker};
+use crate::model::{Block, Deco, Inline, InlineKind, Item, Marker};
 
 /// Spaces per indent level.
 const INDENT: usize = 2;
@@ -99,6 +99,9 @@ fn trim_code(s: &str) -> String {
 fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
     let all: Vec<&str> = text.split('\n').collect();
     let mut para: Vec<&str> = Vec::new();
+    // Blank lines in a row. Kept as breaks on the neighbour paragraph so
+    // consecutive blanks stay visible instead of collapsing to one gap.
+    let mut blanks = 0usize;
     let mut i = 0;
 
     // Flush the pending paragraph.
@@ -106,8 +109,9 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
         () => {
             if !para.is_empty() {
                 let joined = std::mem::take(&mut para).join("\n");
-                let content = inline::parse(&joined);
+                let mut content = inline::parse(&joined);
                 if !content.is_empty() {
+                    drain_blanks(&mut blanks, &mut *out, Some(&mut content));
                     out.push(Block::Paragraph(content));
                 }
             }
@@ -119,6 +123,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
 
         if line.trim().is_empty() {
             flush!();
+            blanks += 1;
             i += 1;
             continue;
         }
@@ -132,6 +137,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
             body.extend_from_slice(&all[i + 1..]);
             let mut inner = Vec::new();
             lines(&body.join("\n"), depth + 1, &mut inner);
+            drain_blanks(&mut blanks, &mut *out, None);
             out.push(Block::Quote(inner));
             return;
         }
@@ -148,12 +154,14 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
             }
             let mut inner = Vec::new();
             lines(&body.join("\n"), depth + 1, &mut inner);
+            drain_blanks(&mut blanks, &mut *out, None);
             out.push(Block::Quote(inner));
             continue;
         }
 
         if let Some((level, rest)) = heading(line) {
             flush!();
+            drain_blanks(&mut blanks, &mut *out, None);
             out.push(Block::Heading {
                 level,
                 content: inline::parse(rest),
@@ -164,6 +172,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
 
         if let Some(rest) = line.strip_prefix("-# ") {
             flush!();
+            drain_blanks(&mut blanks, &mut *out, None);
             out.push(Block::Subtext(inline::parse(rest)));
             i += 1;
             continue;
@@ -179,6 +188,7 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
                 items.push(it);
                 i += 1;
             }
+            drain_blanks(&mut blanks, &mut *out, None);
             out.push(Block::List(items));
             continue;
         }
@@ -187,6 +197,33 @@ fn lines(text: &str, depth: u32, out: &mut Vec<Block>) {
         i += 1;
     }
     flush!();
+    // Trailing blanks ride the last paragraph, if any.
+    drain_blanks(&mut blanks, &mut *out, None);
+}
+
+/// Hands pending blank lines to a paragraph: trailing onto the previous
+/// one, else leading onto the caller's paragraph when given one. Blanks
+/// with no paragraph around are dropped: other blocks keep their own
+/// spacing.
+fn drain_blanks(blanks: &mut usize, out: &mut [Block], next: Option<&mut Vec<Inline>>) {
+    let n = std::mem::take(blanks);
+    if n == 0 {
+        return;
+    }
+    if let Some(Block::Paragraph(prev)) = out.last_mut() {
+        prev.extend((0..n).map(|_| Inline {
+            deco: Deco::NONE,
+            kind: InlineKind::Break,
+        }));
+    } else if let Some(inlines) = next {
+        inlines.splice(
+            0..0,
+            (0..n).map(|_| Inline {
+                deco: Deco::NONE,
+                kind: InlineKind::Break,
+            }),
+        );
+    }
 }
 
 /// The content of a `> ` line. A bare `>` quotes a blank line.

@@ -721,7 +721,7 @@ fn draw_editable(
     // blink.
     if caret_visible && placed.node.states.contains(State::Focus) {
         mark(
-            shaped.caret(e.caret, (CARET_WIDTH * scale).max(1.0)),
+            shaped.caret(&e.text, e.caret, (CARET_WIDTH * scale).max(1.0)),
             linear(fg, opacity),
             dl,
         );

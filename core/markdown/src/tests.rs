@@ -278,7 +278,7 @@ fn quotes() {
 
 #[test]
 fn a_bare_angle_quotes_a_blank_line() {
-    assert_eq!(flat("> a\n>\n> b"), "[quote{a\nb\n}]\n");
+    assert_eq!(flat("> a\n>\n> b"), "[quote{a⏎\nb\n}]\n");
 }
 
 #[test]
@@ -332,7 +332,15 @@ fn a_newline_inside_a_paragraph_survives() {
 
 #[test]
 fn a_blank_line_ends_a_paragraph() {
-    assert_eq!(flat("a\n\nb"), "a\nb\n");
+    assert_eq!(flat("a\n\nb"), "a⏎\nb\n");
+}
+
+/// Consecutive blank lines all survive, trailing on the paragraph above.
+#[test]
+fn consecutive_blank_lines_all_survive() {
+    assert_eq!(flat("a\n\n\n\nb"), "a⏎⏎⏎\nb\n");
+    assert_eq!(flat("\n\na"), "⏎⏎a\n");
+    assert_eq!(flat("a\n\n"), "a⏎⏎\n");
 }
 
 #[test]

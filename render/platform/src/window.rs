@@ -181,6 +181,13 @@ pub trait Application {
         false
     }
 
+    /// Shift+Enter on a field that takes newlines. The app inserts one and
+    /// reports consumed; anything else reports unhandled and the caller
+    /// falls through to [`Application::submit`].
+    fn shift_enter(&mut self) -> bool {
+        false
+    }
+
     /// Leaves text input, on escape.
     fn cancel_input(&mut self) -> bool {
         false
@@ -714,7 +721,14 @@ impl Host {
         };
 
         match edit {
-            Some(EditKey::Enter) => return self.app.submit(),
+            Some(EditKey::Enter) => {
+                // Shift+Enter is a newline where the app takes one; anywhere
+                // else it still sends.
+                if shift && self.app.shift_enter() {
+                    return true;
+                }
+                return self.app.submit();
+            }
             Some(EditKey::Escape) => {
                 if let Some(doc) = self.app.focused_document()
                     && doc.is_composing()

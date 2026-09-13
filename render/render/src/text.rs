@@ -296,7 +296,18 @@ pub struct RunRect {
 impl Shaped {
     /// The caret rect at a byte offset: the left edge of the glyph starting
     /// there, or the right edge of the previous one at end of line.
-    pub fn caret(&self, at: usize, width: f32) -> TextRect {
+    ///
+    /// The text comes along because newlines are line starts and ends, not
+    /// glyphs: from glyphs alone an empty line is invisible, and the caret
+    /// would stick to the line above instead of dropping to it.
+    pub fn caret(&self, text: &str, at: usize, width: f32) -> TextRect {
+        let mut at = at.min(text.len());
+        while at > 0 && !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        if text.contains('\n') {
+            return self.multiline_caret(text, at, width);
+        }
         // The glyph starting there.
         if let Some(g) = self.glyphs.iter().find(|g| g.start >= at) {
             return TextRect {
@@ -321,6 +332,89 @@ impl Shaped {
                 w: width,
                 h: self.line_height,
             },
+        }
+    }
+
+    /// Caret placement with explicit line breaks. Every newline steps
+    /// exactly one visual line, which is what makes empty lines landable;
+    /// soft wraps keep taking the next glyph's edge.
+    fn multiline_caret(&self, text: &str, at: usize, width: f32) -> TextRect {
+        // End of the last non-newline char before the caret, if any.
+        let back = text[..at]
+            .rfind(|c| c != '\n')
+            .map(|i| i + text[i..].chars().next().map_or(0, |c| c.len_utf8()));
+        // Top of that content's visual line: the latest line started
+        // before it.
+        let mut base = None;
+        if let Some(end) = back {
+            for g in &self.glyphs {
+                if g.start >= end {
+                    continue;
+                }
+                let higher = match base {
+                    Some((t, _)) => g.line_top > t + f32::EPSILON,
+                    None => true,
+                };
+                if higher {
+                    base = Some((g.line_top, g.line_height));
+                }
+            }
+        }
+        // Nothing laid out before the caret: the first line, if any.
+        if base.is_none() {
+            base = self
+                .glyphs
+                .iter()
+                .min_by(|a, b| a.line_top.total_cmp(&b.line_top))
+                .map(|g| (g.line_top, g.line_height));
+        }
+        let (base_top, base_lh) = base.unwrap_or((0.0, self.line_height));
+        // Newlines crossed since that content: each starts a fresh line,
+        // so the caret sits at a line start.
+        let from = back.unwrap_or(0);
+        let steps = text[from..at].bytes().filter(|&b| b == b'\n').count();
+        if steps > 0 {
+            return TextRect {
+                x: 0.0,
+                y: base_top + steps as f32 * base_lh,
+                w: width,
+                h: base_lh,
+            };
+        }
+        // Soft-wrapped onto the next line: the next glyph's edge, wherever
+        // it laid out. A hard break instead keeps the line end below.
+        if !text[at..].starts_with('\n')
+            && let Some(g) = self.glyphs.iter().find(|g| g.start >= at)
+            && g.line_top > base_top + f32::EPSILON
+        {
+            return TextRect {
+                x: g.left,
+                y: g.line_top,
+                w: width,
+                h: g.line_height,
+            };
+        }
+        // Rest of this visual line: the next glyph's edge, else the line end.
+        let mut x = 0.0;
+        let mut found = false;
+        for g in &self.glyphs {
+            if (g.line_top - base_top).abs() >= f32::EPSILON {
+                continue;
+            }
+            if g.start >= at && !found {
+                x = g.left;
+                found = true;
+            }
+            if g.end <= at {
+                x = g.left + g.advance;
+                found = true;
+            }
+        }
+        TextRect {
+            x,
+            y: base_top,
+            w: width,
+            h: base_lh,
         }
     }
 
@@ -629,18 +723,29 @@ impl Shaper {
         let mut h = 0.0f32;
         let mut glyphs = Vec::new();
         let mut rects: Vec<RunRect> = Vec::new();
+        // Glyph ranges arrive relative to their logical line; rebase them
+        // to the whole text (see `logical_line_starts`).
+        let starts = logical_line_starts(runs);
+        let full_len: usize = runs.iter().map(|(t, _)| t.len()).sum();
         for run in buf.layout_runs() {
             w = w.max(run.line_w);
             h = h.max(run.line_top + run.line_height);
+            let base = starts
+                .get(run.line_i)
+                .copied()
+                .unwrap_or(full_len)
+                .min(full_len);
             for g in run.glyphs {
                 let p = g.physical((0.0, run.line_y), 1.0);
                 let which = g.metadata as u32;
+                let start = (g.start + base).min(full_len);
+                let end = (g.end + base).clamp(start, full_len);
                 glyphs.push(PlacedGlyph {
                     cache_key: p.cache_key,
                     x: p.x,
                     y: p.y,
-                    start: g.start,
-                    end: g.end,
+                    start,
+                    end,
                     left: g.x,
                     advance: g.w,
                     line_top: run.line_top,
@@ -699,6 +804,40 @@ fn attrs_of(font: &ResolvedFont) -> Attrs<'_> {
         attrs = attrs.letter_spacing(dequantize(font.letter_spacing_q) / font.size());
     }
     attrs
+}
+
+/// Byte offset where each logical line starts in shaped source text.
+///
+/// Cosmic reports glyph ranges relative to their logical line, but the
+/// rest of the pipeline reads them against the whole text (caret,
+/// selection, press mapping). Rebasing keeps one address space.
+/// Splitting mirrors cosmic's own line iterator, including `\r\n`.
+fn logical_line_starts(runs: &[(String, ResolvedFont)]) -> Vec<usize> {
+    let mut starts = vec![0];
+    let mut off = 0;
+    for (text, _) in runs {
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            // A two-byte ending counts once; the split mirrors cosmic's own
+            // line iterator.
+            let ending = if matches!(
+                (bytes[i], bytes.get(i + 1)),
+                (b'\r', Some(b'\n')) | (b'\n', Some(b'\r'))
+            ) {
+                2
+            } else if bytes[i] == b'\r' || bytes[i] == b'\n' {
+                1
+            } else {
+                i += 1;
+                continue;
+            };
+            i += ending;
+            starts.push(off + i);
+        }
+        off += text.len();
+    }
+    starts
 }
 
 /// A shaper plus the GPU glyph atlas.
@@ -1472,6 +1611,87 @@ mod tests {
             shaped.runs.len() == 1 && shaped.runs[0].rect.w >= 16.0,
             "the em space has no advance: {shaped:?}"
         );
+    }
+
+    /// Newlines are line starts: the caret drops instead of sticking to
+    /// the line above.
+    #[test]
+    fn caret_drops_past_a_newline() {
+        let mut sh = Shaper::new(1.0);
+        let text = "a\nb";
+        let shaped = sh.shape(text, &plain(16.0), None).clone();
+        let lh = shaped.line_height;
+
+        let first = shaped.caret(text, 0, 2.0);
+        let after_break = shaped.caret(text, 2, 2.0);
+        assert!(
+            (after_break.y - (first.y + lh)).abs() < 1.0,
+            "改行の下に来ていない {after_break:?} {first:?}"
+        );
+        assert!(after_break.x.abs() < 1.0, "行頭にいない {after_break:?}");
+
+        let end = shaped.caret(text, 3, 2.0);
+        assert!(
+            (end.y - after_break.y).abs() < 1.0,
+            "同じ行にいない {end:?} {after_break:?}"
+        );
+        assert!(end.x > after_break.x, "行末に進んでいない {end:?}");
+    }
+
+    /// At a line end the caret stays on that line, not the next one's start.
+    #[test]
+    fn caret_at_a_line_end_stays_on_that_line() {
+        let mut sh = Shaper::new(1.0);
+        let text = "a\nb";
+        let shaped = sh.shape(text, &plain(16.0), None).clone();
+
+        let line_end = shaped.caret(text, 1, 2.0);
+        let next_start = shaped.caret(text, 2, 2.0);
+        assert!(
+            line_end.y < next_start.y,
+            "次の行頭にいる {line_end:?} {next_start:?}"
+        );
+        assert!(line_end.x > 0.0, "行末にいない {line_end:?}");
+    }
+
+    /// Empty middle lines are landable.
+    #[test]
+    fn caret_lands_on_an_empty_line() {
+        let mut sh = Shaper::new(1.0);
+        let text = "a\n\nb";
+        let shaped = sh.shape(text, &plain(16.0), None).clone();
+        let lh = shaped.line_height;
+
+        let first = shaped.caret(text, 0, 2.0);
+        let empty = shaped.caret(text, 2, 2.0);
+        assert!(
+            (empty.y - (first.y + lh)).abs() < 1.0,
+            "空行にいない {empty:?} {first:?}"
+        );
+        assert!(empty.x.abs() < 1.0, "行頭にいない {empty:?}");
+
+        let last = shaped.caret(text, 3, 2.0);
+        assert!(
+            (last.y - (first.y + 2.0 * lh)).abs() < 1.0,
+            "最終行にいない {last:?} {first:?}"
+        );
+    }
+
+    /// Trailing newlines step below the last laid-out line.
+    #[test]
+    fn caret_after_trailing_newlines_steps_down() {
+        let mut sh = Shaper::new(1.0);
+        let text = "ab\n\n";
+        let shaped = sh.shape(text, &plain(16.0), None).clone();
+        let lh = shaped.line_height;
+
+        let first = shaped.caret(text, 0, 2.0);
+        let end = shaped.caret(text, 4, 2.0);
+        assert!(
+            (end.y - (first.y + 2.0 * lh)).abs() < 1.0,
+            "下に降りていない {end:?} {first:?}"
+        );
+        assert!(end.x.abs() < 1.0, "行頭にいない {end:?}");
     }
 
     /// The run index reaches the glyphs, which is what colours them.

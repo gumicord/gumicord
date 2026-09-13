@@ -1414,6 +1414,17 @@ impl Application for Gumicord {
         }
     }
 
+    /// Shift+Enter in the chat composer: a newline instead of sending.
+    /// Login fields stay single-line and report unhandled, so the caller
+    /// falls through to submitting.
+    fn shift_enter(&mut self) -> bool {
+        if self.login_view.field.is_some() || !self.chat.input_focused {
+            return false;
+        }
+        self.chat.input.insert("\n");
+        true
+    }
+
     /// Sends, edits or replies, depending on [`Composing`]. Missing that
     /// turns an intended edit into a new message.
     ///
@@ -1543,19 +1554,29 @@ impl Application for Gumicord {
                 }
                 true
             }
-            Paste => match gumicord_platform::clipboard::text() {
-                // The field is one line, so newlines would hide text. Discord
-                // collapses them on paste too.
-                Ok(Some(text)) => {
-                    doc.insert(&text.replace(['\r', '\n'], " "));
-                    true
+            Paste => {
+                // Login fields are one line, so pasted newlines would hide
+                // text there. The composer keeps them, like Discord.
+                let single_line = self.login_view.field.is_some();
+                let Some(doc) = self.focused_document() else {
+                    return false;
+                };
+                match gumicord_platform::clipboard::text() {
+                    Ok(Some(text)) => {
+                        if single_line {
+                            doc.insert(&text.replace(['\r', '\n'], " "));
+                        } else {
+                            doc.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
+                        }
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(e) => {
+                        tracing::warn!(%e, "could not read the clipboard");
+                        false
+                    }
                 }
-                Ok(None) => false,
-                Err(e) => {
-                    tracing::warn!(%e, "could not read the clipboard");
-                    false
-                }
-            },
+            }
         }
     }
 
@@ -2995,14 +3016,19 @@ mod plugin_tests {
         let mut a = app_with_plugins(&root);
         sign_in(&mut a);
         let cx = frame();
-        for _ in 0..2000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while confirm_action(&a).is_none() {
             a.build(&cx);
             if confirm_action(&a).is_some() {
                 break;
             }
-            // The worker scans on its own thread; spin without yielding
-            // and it never gets scheduled.
-            std::thread::yield_now();
+            // The worker scans on its own thread; a tight spin starves it
+            // on loaded machines, so pause between frames.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no approval dialog appeared"
+            );
         }
         let action = confirm_action(&a).expect("no approval dialog appeared");
         let (id, granted) = match action {
@@ -3013,11 +3039,12 @@ mod plugin_tests {
         assert_eq!(granted, ["log"]);
 
         assert!(a.run_action(crate::menu::button::CONFIRM));
-        for _ in 0..5000 {
-            if root.join("grants.json").is_file() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !root.join("grants.json").is_file() {
+            if std::time::Instant::now() >= deadline {
                 break;
             }
-            std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let grants = std::fs::read_to_string(root.join("grants.json")).expect("no grants file");
         assert!(
@@ -3040,31 +3067,38 @@ mod plugin_tests {
         let mut a = app_with_plugins(&root);
         sign_in(&mut a);
         let cx = frame();
-        for _ in 0..2000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while confirm_action(&a).is_none() {
             a.build(&cx);
             if confirm_action(&a).is_some() {
                 break;
             }
-            std::thread::yield_now();
+            // The worker scans on its own thread; a tight spin starves it
+            // on loaded machines, so pause between frames.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no approval dialog appeared"
+            );
         }
         assert!(confirm_action(&a).is_some(), "no approval dialog appeared");
 
         assert!(a.run_action(crate::menu::button::CANCEL));
-        for _ in 0..5000 {
-            if root.join("grants.json").is_file() {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        // One more frame lets the dismissal settle into a denial.
-        for _ in 0..5000 {
+        // Dismissal denies on the next frames: settling notices the gone
+        // dialog and records an empty grant, so keep building until it lands.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
             a.build(&cx);
             let grants = std::fs::read_to_string(root.join("grants.json")).unwrap_or_default();
             if grants.contains("com.example.hi") {
                 assert!(!grants.contains("storage"), "{grants}");
                 break;
             }
-            std::thread::yield_now();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "denial was never recorded: {grants}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         // Settled and gone: rebuilding asks nothing more.
         for _ in 0..50 {
@@ -3150,7 +3184,8 @@ mod plugin_tests {
         let cx = frame();
         let mut found = false;
         let mut seen: Vec<String> = Vec::new();
-        for _ in 0..2000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !found {
             let tree = a.build(&cx);
             // Mirror production: Patched goes back where it belongs, the
             // rest is only recorded.
@@ -3175,7 +3210,11 @@ mod plugin_tests {
                 found = true;
                 break;
             }
-            std::thread::yield_now();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the sample patch never reached the tree; {seen:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(found, "the sample patch never reached the tree; {seen:?}");
     }
