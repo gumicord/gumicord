@@ -163,6 +163,21 @@ fn q(v: f32) -> u32 {
     (v.max(0.0) * 16.0).round() as u32
 }
 
+/// Whether a text child spilled past one line. Placed at its longest
+/// line it would rewrap narrower when drawn and overflow the row, so it
+/// fills the remainder instead. Single-line text truncates in place and
+/// keeps hugging its width.
+fn spills_to_more_lines(node: &UiNode, measured: Size) -> bool {
+    match &node.content {
+        Content::Text(_) | Content::Editable(_) | Content::Rich(_) => {}
+        _ => return false,
+    }
+    if intrinsic(node.id).single_line {
+        return false;
+    }
+    measured.h > ResolvedFont::from_style(&node.style).line_height() * 1.5
+}
+
 /// The explicit size on an axis; the theme beats the default.
 fn explicit(node: &UiNode, it: &Intrinsic, axis_is_horizontal: bool) -> Option<f32> {
     if axis_is_horizontal {
@@ -344,8 +359,10 @@ impl<'a> Cx<'a, '_, '_> {
             })
             .collect();
 
-        // Measure the children that take no slack.
-
+        // Measure the children that take no slack. Wrapping text that
+        // spilled past one line joins the second pass instead: hugging its
+        // longest line would rewrap it narrower at draw time.
+        let mut fills = vec![false; n];
         for (i, c) in node.children.iter().enumerate() {
             if overlay[i] || (grows[i] > 0.0 && remaining.is_finite()) {
                 continue;
@@ -357,21 +374,28 @@ impl<'a> Cx<'a, '_, '_> {
                 Size::new((cross_avail - m.horizontal()).max(0.0), remaining.max(0.0))
             };
             let s = self.measure(c, avail);
+            if horizontal && remaining.is_finite() && spills_to_more_lines(c, s) {
+                fills[i] = true;
+                continue;
+            }
             sizes[i] = s;
             remaining -= if horizontal { s.w } else { s.h };
         }
 
         // Divide the remainder by grow. An infinite constraint, as on a
         // scroll region's main axis, leaves nothing to divide.
+        let fill: f32 = fills.iter().filter(|f| **f).count() as f32;
         let total_grow: f32 = grows.iter().sum();
-        if total_grow > 0.0 && remaining.is_finite() {
+        let total = total_grow + fill;
+        if total > 0.0 && remaining.is_finite() {
             let pool = remaining.max(0.0);
             for (i, c) in node.children.iter().enumerate() {
-                if grows[i] <= 0.0 {
+                let share = grows[i] + if fills[i] { 1.0 } else { 0.0 };
+                if share <= 0.0 {
                     continue;
                 }
                 let m = margins[i];
-                let main = pool * grows[i] / total_grow;
+                let main = pool * share / total;
                 let avail = if horizontal {
                     Size::new(main, (cross_avail - m.vertical()).max(0.0))
                 } else {
@@ -1205,6 +1229,104 @@ mod tests {
             !r.placed
                 .iter()
                 .any(|p| p.node.id == NodeId::NavUserPanelPresence)
+        );
+    }
+
+    /// A marker beside wrapping text: the text takes the width left
+    /// after the marker, so drawing wraps exactly as measured (regression:
+    /// multi-line list items overlapped the next item).
+    ///
+    /// ASCII only: the CI runner may have no Japanese font. Pinning Japanese
+    /// shaping needs the bundled font first.
+    #[test]
+    fn text_beside_a_marker_takes_the_remaining_width() {
+        use gumicord_uitree::{Content, Key, Span};
+
+        let mut shaper = shaper();
+        let font = ResolvedFont::from_style(&Style::default());
+        if shaper.measure("MMMMMMMM", &font, None).w == 0.0 {
+            // No usable font at all; shaping cannot happen, so assert
+            // nothing.
+            eprintln!("フォントが見つからないため、この試験は飛ばす");
+            return;
+        }
+
+        let rich = |slot: &'static str, text: &str| {
+            UiNode::new(NodeId::PrimitiveText)
+                .with_key(Key::Slot(slot))
+                .with_content(Content::Rich(vec![Span {
+                    text: text.to_owned(),
+                    ..Default::default()
+                }]))
+        };
+        let item = |key: u64| {
+            UiNode::new(NodeId::LayoutRow)
+                .with_id_key(key)
+                .child(rich("marker", "•"))
+                .child(rich(
+                    "body",
+                    "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.",
+                ))
+        };
+        let tree = UiNode::new(NodeId::ChatMessageList)
+            .child(item(1))
+            .child(item(2));
+
+        let r = layout(
+            &tree,
+            Size::new(400.0, 800.0),
+            &mut shaper,
+            &ScrollState::new(),
+        );
+
+        let row = |key: u64| {
+            r.placed
+                .iter()
+                .find(|p| p.node.id == NodeId::LayoutRow && p.node.key == Some(Key::Id(key)))
+                .expect("行が配置されていない")
+        };
+
+        let first = row(1);
+        let marker = r
+            .placed
+            .iter()
+            .find(|p| {
+                p.node.key == Some(Key::Slot("marker"))
+                    && p.rect.y >= first.rect.y
+                    && p.rect.y < first.rect.bottom()
+            })
+            .expect("印が配置されていない");
+        let body = r
+            .placed
+            .iter()
+            .find(|p| {
+                p.node.key == Some(Key::Slot("body"))
+                    && p.rect.y >= first.rect.y
+                    && p.rect.y < first.rect.bottom()
+            })
+            .expect("本文が配置されていない");
+
+        // The sentence must actually wrap, or the test proves nothing.
+        assert!(body.rect.h > marker.rect.h + 0.5, "本文が折り返していない");
+        // Placed narrower than measured, it would rewrap at draw time and
+        // overflow the row.
+        assert!(
+            (body.inner.w - (first.inner.w - marker.rect.w)).abs() < 0.5,
+            "本文が残り幅を取っていない (body {}, remaining {})",
+            body.inner.w,
+            first.inner.w - marker.rect.w
+        );
+
+        let rows: Vec<_> = r
+            .placed
+            .iter()
+            .filter(|p| p.node.id == NodeId::LayoutRow)
+            .map(|p| p.rect)
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[1].y >= rows[0].bottom() - 0.5,
+            "次の行と重なっている ({rows:?})"
         );
     }
 
