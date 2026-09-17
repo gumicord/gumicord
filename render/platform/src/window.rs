@@ -637,6 +637,22 @@ impl Host {
         Zone::Client
     }
 
+    /// The zone under the stored pointer, against the last frame's layout.
+    ///
+    /// Asked on every press, never trusted across events: a resize, snap,
+    /// maximise or DPI move can change what lies under a stationary pointer
+    /// without any `CursorMoved` arriving first, and routing the press by the
+    /// previous move's zone then misfires. Same reason [`Host::maximized`]
+    /// asks the window instead of remembering.
+    fn fresh_zone(&mut self) -> Zone {
+        let zone = self.zone_at(&self.hits());
+        if zone != self.zone {
+            self.zone = zone;
+            self.apply_cursor();
+        }
+        zone
+    }
+
     fn apply_cursor(&self) {
         let Some(w) = &self.window else { return };
         let icon = match self.zone {
@@ -810,10 +826,13 @@ impl Host {
             }
             return;
         }
-        if !has_input {
-            return;
-        }
 
+        // Mobile bridges poll while focused, even though winit IME stays
+        // off under them: keystrokes raise no winit events, so the poll is
+        // the only thing moving text into the document. Gating them on
+        // `has_input` would run them exactly once, leaving everything typed
+        // afterwards inside the native editor and off the screen.
+        //
         // iOS edits every field through the hidden UITextInput editor
         // (see ios_text). It runs while focused even though winit IME
         // stays off above.
@@ -864,6 +883,15 @@ impl Host {
             }
         };
 
+        // The winit IME cursor area is desktop-only; the bridges above
+        // already ran. Skipping it while a native editor owns the keyboard.
+        if !has_input {
+            if acted {
+                self.restart_caret();
+                self.request_redraw();
+            }
+            return;
+        }
         // The field's position comes from the hit record.
         let Some(field) = r
             .hit_boxes()
@@ -1057,6 +1085,12 @@ impl Host {
         if self.app.hover_changed(&self.hits()) {
             self.request_redraw();
         }
+
+        // A resize does the same to window management: the zone follows the
+        // layout, so it is re-asked once the fresh one exists. Otherwise the
+        // cursor icon and the next press answer with the pre-resize layout
+        // until the pointer happens to move.
+        self.fresh_zone();
 
         // The field's position is only known after layout, and it is what
         // positions the IME candidate window.
@@ -1453,11 +1487,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                 }
 
                 let hits = self.hits();
-                let zone = self.zone_at(&hits);
-                if zone != self.zone {
-                    self.zone = zone;
-                    self.apply_cursor();
-                }
+                self.fresh_zone();
                 // Asked against the last frame's layout, so a run that just
                 // scrolled under the pointer is noticed one frame late.
                 let on_link = self.link_under_cursor().is_some();
@@ -1521,7 +1551,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                 ..
             } => {
                 let Some(w) = self.window.clone() else { return };
-                match self.zone {
+                match self.fresh_zone() {
                     // Drag to move.
                     Zone::Titlebar => {
                         if let Err(e) = w.drag_window() {
@@ -1595,8 +1625,11 @@ impl ApplicationHandler<LoopEvent> for Host {
                 // consumed by this window and the one underneath is spared.
                 // Only if the pointer is still over the armed button does it
                 // count, matching how a dragged-off button press is cancelled.
+                // Asked fresh: the layout may have moved under a stationary
+                // pointer since the press, and the cached zone would lie.
+                let zone = self.fresh_zone();
                 if let Some(slot) = self.control_pending.take()
-                    && matches!(self.zone, Zone::Control(s) if s == slot)
+                    && matches!(zone, Zone::Control(s) if s == slot)
                 {
                     let Some(w) = self.window.clone() else { return };
                     match slot {
@@ -1615,7 +1648,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                 button: MouseButton::Right,
                 ..
             } => {
-                if self.zone == Zone::Client {
+                if self.fresh_zone() == Zone::Client {
                     let hits = self.hits();
                     if self.app.context_menu(&hits, self.cursor) {
                         self.request_redraw();
