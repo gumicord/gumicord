@@ -186,6 +186,11 @@ jobs:
 
       - uses: android-actions/setup-android@v3
         if: matrix.kind == 'android'
+        with:
+          # The action defaults to `tools platform-tools`, but Google removed
+          # the obsolete `tools` package, so installing it fails the job.
+          # NDK, platform and build-tools come from the next step.
+          packages: 'platform-tools'
 
       - name: Install NDK and platform
         if: matrix.kind == 'android'
