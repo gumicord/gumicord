@@ -184,6 +184,20 @@ wss://remote-auth-gateway.discord.gg/?v=2     Origin: https://discord.com が必
 
 ---
 
+## 追記 (2026-09-18): QR のチケット交換でも captcha が出る
+
+実機 (Windows 11) で `POST /users/@me/remote-auth/login` が `captcha-required`
+を返した。「QR には captcha が出ない」は成り立たない。決定自体は変えない
+(captcha は OS の webview モーダルで解く) が、適用範囲を広げる:
+
+- QR のチケット交換が challenged されたら、パスワードと同じモーダル
+  (`CaptchaHost`) で解き、**同じチケットを 1 度だけ** captcha ヘッダ付きで
+  再試行する。チケットは単発のため、それ以上の再送はせず失敗時は従来どおり
+  新しい QR を出し直す
+- 解決中も QR 画面に留まる (`LoginEvent::QrCaptchaNeeded`。`CaptchaNeeded`
+  はパスワードフォームへ遷移するまま)
+- キャンセル時は試行を捨てて QR を出し直す
+
 ## 参考
 
 - [Remote Authentication (Desktop) — Discord Userdoccers](https://docs.discord.food/remote-authentication/desktop)

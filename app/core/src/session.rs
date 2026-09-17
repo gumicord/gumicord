@@ -1,8 +1,10 @@
 //! Login state and the background work that advances it.
 //!
-//! QR login is the default because it never raises a captcha, and there is no
-//! way to draw hCaptcha in this renderer. A password path would borrow the
-//! OS WebView for that; QR stays the default either way.
+//! QR login is the default because it sidesteps the password form and usually
+//! raises no captcha, and there is no way to draw hCaptcha in this renderer.
+//! When Discord challenges the ticket exchange anyway, the same OS-WebView
+//! modal solves it and the exchange is retried; QR stays the default either
+//! way.
 //!
 //! Everything happens on tokio and comes back over a channel. The event loop
 //! is asleep, so whoever posts a message wakes it. Wakes coalesce, so always
@@ -136,6 +138,11 @@ pub enum LoginEvent {
     },
     /// The background needs a captcha solved before login can continue.
     CaptchaNeeded(CaptchaChallenge),
+    /// The QR ticket exchange was challenged. Unlike [`LoginEvent::CaptchaNeeded`],
+    /// the QR screen stays put: the retry belongs to the approved ticket.
+    ///
+    /// [`LoginEvent::CaptchaNeeded`]: LoginEvent::CaptchaNeeded
+    QrCaptchaNeeded(CaptchaChallenge),
 }
 
 /// A user-driven instruction, sent from the UI thread into the background
@@ -366,6 +373,12 @@ impl Login {
                 self.pending = Some(ch);
                 Session::Password
             }
+            // The QR screen likewise stays put; the solved token retries
+            // the already-approved ticket instead of opening a form.
+            LoginEvent::QrCaptchaNeeded(ch) => {
+                self.pending = Some(ch);
+                self.session.clone()
+            }
             LoginEvent::Ended => {
                 self.ended = true;
                 self.session.clone()
@@ -439,79 +452,102 @@ async fn run(
 
         // The QR runs in the background so a password command can interrupt
         // its wait.
-        let mut qr = tokio::spawn(attempt(tx.clone(), waker.clone(), store.clone()));
+        let (captcha_tx, captcha_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut qr = tokio::spawn(attempt(
+            tx.clone(),
+            waker.clone(),
+            store.clone(),
+            captcha_rx,
+        ));
 
-        let outcome = tokio::select! {
-            r = &mut qr => match r {
-                // In; the attempt already sent Done.
-                Ok(Ok(true)) => return,
-                // Expired; reissue at once.
-                Ok(Ok(false)) => {
-                    tracing::debug!("the QR expired; reissuing");
-                    QrOutcome::Reset
-                }
-                Ok(Err(e)) => QrOutcome::Failed(e),
-                Err(e) => {
-                    tracing::error!(%e, "the QR task panicked");
-                    QrOutcome::Reset
-                }
-            },
-            cmd = cmd_rx.recv() => match cmd {
-                Some(LoginCommand::Password { email, password }) => {
-                    qr.abort();
-                    let rest = match RestClient::anonymous() {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let _ = tx.send(LoginEvent::Failed(e.to_string()));
-                            waker.wake();
-                            continue;
-                        }
-                    };
-                    match run_password(&tx, &waker, store.as_ref(), rest, email, password, &mut cmd_rx).await {
-                        // In; the password path already sent Done.
-                        PasswordRun::LoggedIn => return,
-                        PasswordRun::Error(e) => {
-                            let _ = tx.send(LoginEvent::Failed(e));
-                            waker.wake();
-                        }
-                        PasswordRun::Cancelled => {}
+        // What one turn ended with. A solved captcha belongs to the attempt
+        // in flight: it is forwarded and the wait continues instead of
+        // reissuing the QR underneath the modal.
+        enum Turn {
+            Qr(QrOutcome),
+            Restarted,
+        }
+
+        let turn = loop {
+            tokio::select! {
+                r = &mut qr => break Turn::Qr(match r {
+                    // In; the attempt already sent Done.
+                    Ok(Ok(true)) => return,
+                    // Expired; reissue at once.
+                    Ok(Ok(false)) => {
+                        tracing::debug!("the QR expired; reissuing");
+                        QrOutcome::Reset
                     }
-                    wait = RETRY_MIN;
-                    let _ = tx.send(LoginEvent::Restarted);
-                    waker.wake();
-                    continue;
-                }
-                Some(LoginCommand::BotToken { token }) => {
-                    qr.abort();
-                    match run_bot_token(&tx, &waker, store.as_ref(), token).await {
-                        // In; the bot path already sent Done.
-                        true => return,
-                        false => {
-                            let _ = tx.send(LoginEvent::Restarted);
-                            waker.wake();
-                            continue;
+                    Ok(Err(e)) => QrOutcome::Failed(e),
+                    Err(e) => {
+                        tracing::error!(%e, "the QR task panicked");
+                        QrOutcome::Reset
+                    }
+                }),
+                cmd = cmd_rx.recv() => match cmd {
+                    Some(LoginCommand::Password { email, password }) => {
+                        qr.abort();
+                        let rest = match RestClient::anonymous() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let _ = tx.send(LoginEvent::Failed(e.to_string()));
+                                waker.wake();
+                                break Turn::Restarted;
+                            }
+                        };
+                        match run_password(&tx, &waker, store.as_ref(), rest, email, password, &mut cmd_rx).await {
+                            // In; the password path already sent Done.
+                            PasswordRun::LoggedIn => return,
+                            PasswordRun::Error(e) => {
+                                let _ = tx.send(LoginEvent::Failed(e));
+                                waker.wake();
+                            }
+                            PasswordRun::Cancelled => {}
+                        }
+                        wait = RETRY_MIN;
+                        break Turn::Restarted;
+                    }
+                    Some(LoginCommand::BotToken { token }) => {
+                        qr.abort();
+                        match run_bot_token(&tx, &waker, store.as_ref(), token).await {
+                            // In; the bot path already sent Done.
+                            true => return,
+                            false => break Turn::Restarted,
                         }
                     }
-                }
-                // A stray captcha or totp command with no password in flight.
-                // Cancelling with nothing in flight still leaves the form:
-                // without an answer the session keeps pinning it, and the
-                // way back looks dead.
-                Some(LoginCommand::CancelPassword) => {
-                    let _ = tx.send(LoginEvent::Restarted);
-                    waker.wake();
-                    continue;
-                }
-                Some(_) | None => continue,
+                    // Cancelling with nothing in flight still leaves the form:
+                    // without an answer the session keeps pinning it, and the
+                    // way back looks dead. The in-flight QR goes too, or it
+                    // would keep waiting on a solution nobody will send.
+                    Some(LoginCommand::CancelPassword) => {
+                        qr.abort();
+                        break Turn::Restarted;
+                    }
+                    Some(LoginCommand::Captcha(s)) => {
+                        let _ = captcha_tx.send(s);
+                    }
+                    // A stray TOTP with no password in flight answers nothing.
+                    Some(LoginCommand::Totp { .. }) => {}
+                    // The sender is gone with the Login holder; nothing can
+                    // interrupt anymore, so the attempt is on its own.
+                    None => {
+                        qr.abort();
+                        return;
+                    }
+                },
             }
         };
 
-        match outcome {
-            QrOutcome::Reset => {
+        match turn {
+            Turn::Restarted => {
                 let _ = tx.send(LoginEvent::Restarted);
                 waker.wake();
             }
-            QrOutcome::Failed(e) => {
+            Turn::Qr(QrOutcome::Reset) => {
+                let _ = tx.send(LoginEvent::Restarted);
+                waker.wake();
+            }
+            Turn::Qr(QrOutcome::Failed(e)) => {
                 tracing::warn!(error = %e, wait_s = wait.as_secs(), "remote auth failed");
                 let _ = tx.send(LoginEvent::Failed(e));
                 waker.wake();
@@ -831,6 +867,7 @@ async fn attempt(
     tx: Sender<LoginEvent>,
     waker: Waker,
     store: Option<SecretStore>,
+    mut captcha_rx: tokio::sync::mpsc::UnboundedReceiver<SolvedCaptcha>,
 ) -> Result<bool, String> {
     let mut auth = RemoteAuth::connect().await.map_err(|e| {
         // Display alone cannot tell DNS apart from TLS and refusals; the
@@ -862,11 +899,26 @@ async fn attempt(
                 let _ = tx.send(LoginEvent::Approved);
                 waker.wake();
 
-                // Single-use; never resend after a failure.
-                let encrypted = rest
-                    .remote_auth_login(&ticket)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                // Discord may challenge the exchange with a captcha. The
+                // modal solves it and the same ticket is retried once with
+                // the token in headers; anything after that restarts from
+                // a fresh QR like any other failure.
+                let encrypted = match rest.remote_auth_login(&ticket, None).await {
+                    Ok(encrypted) => encrypted,
+                    Err(RestError::CaptchaRequired(ch)) => {
+                        let _ = tx.send(LoginEvent::QrCaptchaNeeded(*ch));
+                        waker.wake();
+                        let solved = match captcha_rx.recv().await {
+                            Some(s) => s,
+                            // Cancelled or superseded; reissue quietly.
+                            None => return Ok(false),
+                        };
+                        rest.remote_auth_login(&ticket, Some(&solved))
+                            .await
+                            .map_err(|e| e.to_string())?
+                    }
+                    Err(e) => return Err(e.to_string()),
+                };
                 let token = auth.decrypt_token(&encrypted).map_err(|e| e.to_string())?;
 
                 // Decrypting proves nothing about validity; only a successful
@@ -1112,6 +1164,34 @@ mod tests {
             session_id: Some("s".to_owned()),
         }));
         assert!(matches!(login.session(), Session::Password));
+
+        let pending = login.take_pending().expect("the challenge is captured");
+        assert_eq!(pending.sitekey.as_deref(), Some("abc"));
+        assert_eq!(pending.rqtoken.as_deref(), Some("ghi"));
+        assert!(login.take_pending().is_none(), "read once");
+    }
+
+    /// A challenged ticket exchange keeps the QR screen up and is captured
+    /// for the platform, once.
+    #[test]
+    fn a_qr_captcha_challenge_keeps_the_qr_screen() {
+        let mut login = Login::fresh_for_test();
+        login.apply(LoginEvent::Qr("https://example/1".to_owned()));
+        login.apply(LoginEvent::Approved);
+        assert!(matches!(login.session(), Session::Exchanging));
+        login.apply(LoginEvent::QrCaptchaNeeded(
+            gumicord_rest::CaptchaChallenge {
+                sitekey: Some("abc".to_owned()),
+                service: None,
+                rqdata: None,
+                rqtoken: Some("ghi".to_owned()),
+                session_id: Some("s".to_owned()),
+            },
+        ));
+        assert!(
+            matches!(login.session(), Session::Exchanging),
+            "the QR screen must stay put while the modal solves it"
+        );
 
         let pending = login.take_pending().expect("the challenge is captured");
         assert_eq!(pending.sitekey.as_deref(), Some("abc"));

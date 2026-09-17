@@ -1584,8 +1584,14 @@ impl Application for Gumicord {
     /// which shows the modal. The password form stays up underneath.
     fn pending_captcha(&mut self) -> Option<gumicord_platform::CaptchaChallenge> {
         let pending = self.login.take_pending()?;
+        // Without a site key the widget cannot render; dropping it silently
+        // would leave the login parked with no modal and no hint.
+        let Some(site_key) = pending.sitekey.clone() else {
+            tracing::error!("a captcha challenge without a site key cannot be shown");
+            return None;
+        };
         let platform = gumicord_platform::CaptchaChallenge {
-            site_key: pending.sitekey.clone()?,
+            site_key,
             rqdata: pending.rqdata.clone(),
         };
         // Remember the challenge for the retry: the token comes back alone, but

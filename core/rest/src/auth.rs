@@ -112,16 +112,33 @@ impl RestClient {
     /// The result is still ciphertext; pass it to
     /// `gumicord_gateway::RemoteAuth::decrypt_token`, which holds the only
     /// key. The ticket is single-use: on failure, restart from a fresh QR
-    /// rather than retrying.
-    pub async fn remote_auth_login(&self, ticket: &str) -> Result<String, RestError> {
+    /// rather than retrying, except for a captcha retry of the challenged
+    /// exchange, which rides in headers like [`Self::login`].
+    pub async fn remote_auth_login(
+        &self,
+        ticket: &str,
+        captcha: Option<&SolvedCaptcha>,
+    ) -> Result<String, RestError> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
             ticket: &'a str,
         }
 
-        let response: RemoteAuthLogin = self
-            .send(Route::remote_auth_login(), Some(&Body { ticket }))
+        let mut extra: Vec<(&str, &str)> = Vec::with_capacity(3);
+        if let Some(c) = captcha {
+            extra.push(("X-Captcha-Key", c.key.as_str()));
+            if let Some(t) = &c.rqtoken {
+                extra.push(("X-Captcha-Rqtoken", t));
+            }
+            if let Some(s) = &c.session_id {
+                extra.push(("X-Captcha-Session-Id", s));
+            }
+        }
+
+        let text = self
+            .send_raw_h(Route::remote_auth_login(), Some(&Body { ticket }), &extra)
             .await?;
+        let response: RemoteAuthLogin = serde_json::from_str(&text).map_err(RestError::Decode)?;
         Ok(response.encrypted_token)
     }
 
