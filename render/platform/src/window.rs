@@ -76,6 +76,14 @@ pub struct RevealRequest {
     pub key: Option<Key>,
 }
 
+/// Which login field an iOS proxy mirrors, if any. Only these two pair
+/// for password autofill; everything else keeps the hidden editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImeProxy {
+    Username,
+    Password,
+}
+
 /// The application, as the platform layer sees it. No OS types appear here,
 /// so winit never leaks into the app crate.
 pub trait Application {
@@ -164,6 +172,18 @@ pub trait Application {
     /// What the focused field wants from the soft keyboard, if anything.
     /// Mobile only; desktop ignores it.
     fn ime_field(&self) -> Option<crate::text_input::ImeField> {
+        None
+    }
+
+    /// Writes polled native text into the named login field. Only iOS
+    /// proxies call this; elsewhere it is never invoked.
+    fn proxy_text(&mut self, _field: ImeProxy, _text: String) -> bool {
+        false
+    }
+
+    /// The login field an iOS proxy should mirror, if any. Only iOS reads
+    /// this; elsewhere the value is ignored.
+    fn ime_proxy(&self) -> Option<ImeProxy> {
         None
     }
 
@@ -370,9 +390,15 @@ fn run_loop(
         hovering_spoiler: false,
         scroll_grab: None,
         touch: crate::touch::Tracker::default(),
+        fling: None,
+        scroll_vel: 0.0,
+        last_scroll_at: None,
+        touch_scroll_id: None,
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
+        #[cfg(target_os = "ios")]
+        proxy: None,
         frame_us: std::collections::VecDeque::new(),
         first_frame: true,
         started: std::time::Instant::now(),
@@ -393,6 +419,13 @@ enum Zone {
     Titlebar,
     Control(&'static str),
     Resize(ResizeDirection),
+}
+
+/// A released touch still coasting through one region.
+struct FlingState {
+    id: NodeId,
+    fling: crate::touch::Fling,
+    at: std::time::Instant,
 }
 
 struct Host {
@@ -433,6 +466,14 @@ struct Host {
     scroll_grab: Option<ScrollGrab>,
     /// The finger being tracked, if any.
     touch: crate::touch::Tracker,
+    /// A released touch still coasting, if any.
+    fling: Option<FlingState>,
+    /// Smoothed scroll velocity in offset space, for the fling on release.
+    scroll_vel: f32,
+    /// When the touch last scrolled.
+    last_scroll_at: Option<std::time::Instant>,
+    /// Which region the touch is scrolling.
+    touch_scroll_id: Option<NodeId>,
     /// A title-bar control button armed on press; acted on on release.
     ///
     /// Acting on press lets Windows hand the release to whatever is now under
@@ -446,6 +487,9 @@ struct Host {
     modifiers: ModifiersState,
     /// Whether IME is allowed; only changes are told to the OS.
     ime_allowed: bool,
+    /// Native login-field mirrors for iOS password autofill.
+    #[cfg(target_os = "ios")]
+    proxy: Option<crate::proxy::Proxy>,
     /// Hidden UITextInput editor state (iOS only).
     #[cfg(target_os = "ios")]
     ios_text: crate::ios_text::IosText,
@@ -498,6 +542,8 @@ impl Host {
 
     /// A primary press in the client area: links, spoilers, then the app.
     fn press_client(&mut self) {
+        // A press takes over from any coast.
+        self.fling = None;
         // Scrollbars come before the app: they overlap the
         // list, and only one can answer.
         let grabbed = self
@@ -539,19 +585,45 @@ impl Host {
             self.restart_caret();
             self.request_redraw();
         }
+        // The app cleared focus (outside press, submit): resign on this
+        // event instead of the next redraw, or a login that just
+        // finished keeps the keyboard up over the screen that follows.
+        // Polling runs at most once per tick, so resigning here costs
+        // nothing while up and hides one frame sooner on dismiss.
+        #[cfg(target_os = "ios")]
+        if self.app.focused_document().is_none() {
+            if self.ios_text.is_live() {
+                self.ios_text.blur();
+            }
+            if let Some(proxy) = self.proxy.as_mut()
+                && proxy.is_active()
+            {
+                proxy.blur();
+            }
+        }
     }
 
-    /// Scrolls the frontmost scroll region under a point.
-    fn scroll_at(&mut self, x: f32, y: f32, dy: f32) {
+    /// Scrolls the frontmost scroll region under a point with a finger
+    /// movement. Content follows the finger: dragging up reveals what
+    /// is below, the opposite of dragging a scrollbar thumb. Returns
+    /// the region and the offset-space delta it moved.
+    fn scroll_touch(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> Option<(NodeId, f32)> {
         let hits = self.hits_at(x, y);
-        let Some(r) = &mut self.renderer else { return };
+        let Some(r) = &mut self.renderer else {
+            return None;
+        };
         // The frontmost scroll region under the pointer.
         let target = hits
             .iter()
             .find(|h| gumicord_render::intrinsic(h.id).scroll)
             .map(|h| h.id);
-        let Some(id) = target else { return };
-        let moved = r.scroll_by(id, dy);
+        let id = target?;
+        let delta = if gumicord_render::intrinsic(id).axis == gumicord_render::Axis::Row {
+            -dx
+        } else {
+            -dy
+        };
+        let moved = r.scroll_by(id, delta);
         let (at, max) = r.scroll_place(id);
         // Reported even when nothing moved: scrolling further at the
         // top is the request for more history, and by then the
@@ -560,6 +632,14 @@ impl Host {
         if moved {
             self.request_redraw();
         }
+        Some((id, delta))
+    }
+
+    /// Forgets the touch scroll being measured for a fling.
+    fn reset_touch_scroll(&mut self) {
+        self.scroll_vel = 0.0;
+        self.last_scroll_at = None;
+        self.touch_scroll_id = None;
     }
 
     /// The link run under the pointer, if any.
@@ -799,13 +879,25 @@ impl Host {
     /// Tells the IME where the field is, which is what positions the
     /// candidate window; without it, it appears in a corner of the screen.
     fn update_ime_area(&mut self) {
+        // While a native proxy mirrors a login field it owns the keyboard;
+        // winit's key-only view would fight it for first responder.
+        // Polled on the tick while focused, never spun: spinning redraws
+        // every frame while a field is up.
+        #[cfg(target_os = "ios")]
+        let proxy_changed = self.sync_ime_proxy();
+        #[cfg(not(target_os = "ios"))]
+        let proxy_changed = false;
+        if proxy_changed {
+            self.request_redraw();
+        }
+
         let (Some(w), Some(r)) = (&self.window, &self.renderer) else {
             return;
         };
         let focused = self.app.focused_document().is_some();
         // winit's key-only view would fight a native editor for first
-        // responder, so it stays off while one owns the keyboard.
-        let has_input = focused && !self.editor_active();
+        // responder, so it stays off while either owns the keyboard.
+        let has_input = focused && !self.proxy_active() && !self.editor_active();
 
         // No IME events arrive until this is allowed; winit defaults to off.
         //
@@ -833,30 +925,46 @@ impl Host {
         // `has_input` would run them exactly once, leaving everything typed
         // afterwards inside the native editor and off the screen.
         //
-        // iOS edits every field through the hidden UITextInput editor
-        // (see ios_text). It runs while focused even though winit IME
-        // stays off above.
+        // iOS edits non-login fields through the hidden UITextInput editor
+        // (see ios_text); login email/password keep the autofill proxies.
+        // It runs while focused even though winit IME stays off above.
         #[cfg(target_os = "ios")]
         let acted = {
-            let field = self.app.ime_field().unwrap_or_default();
-            let (x, y) = self.field_origin();
-            let parent = self
-                .window
-                .as_ref()
-                .and_then(|w| crate::ios_text::parent_view(w));
-            match (parent, self.app.focused_document()) {
-                (Some(parent), Some(doc)) => {
-                    if !self.ios_text.ensure(parent, &field, doc, x, y) {
-                        false
-                    } else {
-                        let (changed, newline) = self.ios_text.poll(doc);
-                        if changed {
-                            self.request_redraw();
-                        }
-                        newline && self.app.ime_newline()
-                    }
+            if self.app.ime_proxy().is_some() {
+                // The proxy owns the keyboard; a lingering editor would
+                // fight it for first responder.
+                if self.ios_text.is_live() {
+                    self.ios_text.blur();
                 }
-                _ => false,
+                false
+            } else {
+                let field = self.app.ime_field().unwrap_or_default();
+                let (x, y) = self.field_origin();
+                let parent = self
+                    .window
+                    .as_ref()
+                    .and_then(|w| crate::ios_text::parent_view(w));
+                match (parent, self.app.focused_document()) {
+                    (Some(parent), Some(doc)) => {
+                        if !self.ios_text.ensure(parent, &field, doc, x, y) {
+                            false
+                        } else {
+                            let (changed, newline) = self.ios_text.poll(doc);
+                            if changed {
+                                self.request_redraw();
+                            }
+                            let submitted = newline && self.app.ime_newline();
+                            if submitted
+                                && self.app.focused_document().is_none()
+                                && self.ios_text.is_live()
+                            {
+                                self.ios_text.blur();
+                            }
+                            submitted
+                        }
+                    }
+                    _ => false,
+                }
             }
         };
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -910,6 +1018,52 @@ impl Host {
         }
     }
 
+    /// Mirrors the login fields into the native proxies and polls their
+    /// text back. True when the tree needs another look. Rides the paced
+    /// redraws while focused; nothing here spins its own frames.
+    #[cfg(target_os = "ios")]
+    fn sync_ime_proxy(&mut self) -> bool {
+        let want = self.app.ime_proxy();
+        let text = self.app.focused_document().map(|d| d.text().to_owned());
+        let Some(parent) = self
+            .window
+            .as_ref()
+            .and_then(|w| crate::proxy::parent_view(w))
+        else {
+            return false;
+        };
+        let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
+        proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
+        let mut changed = false;
+        if let Some((kind, event)) = proxy.poll() {
+            match event {
+                crate::proxy::ProxyEvent::Text(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                }
+                crate::proxy::ProxyEvent::Submitted(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                    changed |= self.app.submit();
+                }
+            }
+        }
+        // A submit cleared focus: resign on this tick instead of the
+        // next redraw, or the keyboard lingers over what comes next.
+        if changed && self.app.ime_proxy().is_none() {
+            proxy.blur();
+        }
+        changed
+    }
+
+    #[cfg(target_os = "ios")]
+    fn proxy_active(&self) -> bool {
+        self.proxy.as_ref().is_some_and(|p| p.is_active())
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    fn proxy_active(&self) -> bool {
+        false
+    }
+
     /// Whether the hidden editor owns the keyboard (iOS only).
     #[cfg(target_os = "ios")]
     fn editor_active(&self) -> bool {
@@ -944,9 +1098,9 @@ impl Host {
         //
         // Missing a `Resized` leaves the surface stale, the swapchain
         // permanently outdated, and reconfiguring only rebuilds it at the old
-        // size — the window stays blank. This happened. One `inner_size()` per
-        // frame, and resizing to the same size is a no-op.
-        let size = self.window.as_ref().map(|w| w.inner_size());
+        // size — the window stays blank. This happened. One surface-sized
+        // query per frame, and resizing to the same size is a no-op.
+        let size = self.window.as_ref().map(|w| surface_size(w));
         if let (Some(size), Some(r)) = (size, &mut self.renderer) {
             r.resize(size.width, size.height);
         }
@@ -1031,17 +1185,47 @@ impl Host {
             // window, so lay out above it. Touches landing on the covered
             // part hit nothing, which is correct: the keyboard owns them.
             #[cfg(target_os = "ios")]
+            let keyboard = self.ios_text.keyboard_height();
+            #[cfg(target_os = "ios")]
             let viewport = {
                 let mut viewport = viewport;
-                viewport.h = (viewport.h - self.ios_text.keyboard_height()).max(0.0);
+                viewport.h = (viewport.h - keyboard).max(0.0);
                 viewport
             };
+            // PLT-041: the Metal layer spans the whole view, so the
+            // content is inset here. Only queried on iOS; elsewhere
+            // there is no safe area to respect.
+            #[cfg(target_os = "ios")]
+            let safe = self
+                .window
+                .as_ref()
+                .map(|w| crate::ios_text::safe_insets(w))
+                .unwrap_or((0.0, 0.0, 0.0, 0.0));
             let cx = FrameCx {
                 viewport,
                 scale: r.scale(),
             };
             tracing::trace!(w = cx.viewport.w, h = cx.viewport.h, "drawing");
             let mut tree = self.app.build(&cx);
+            // Fold the safe area into the root padding, under any theme
+            // padding: the background stays full-bleed while content
+            // clears the status bar, the rounded corners and the home
+            // bar. The keyboard already covers the bottom when up, so
+            // it owns that inset instead.
+            #[cfg(target_os = "ios")]
+            {
+                let (top, right, bottom, left) = safe;
+                let bottom = if keyboard > 0.0 { 0.0 } else { bottom };
+                if top > 0.0 || right > 0.0 || bottom > 0.0 || left > 0.0 {
+                    let p = tree.style.padding.unwrap_or_default();
+                    tree.style.padding = Some(gumicord_uitree::value::Edges {
+                        top: p.top + top,
+                        right: p.right + right,
+                        bottom: p.bottom + bottom,
+                        left: p.left + left,
+                    });
+                }
+            }
 
             // Move the resolved styles towards their targets.
             //
@@ -1171,7 +1355,7 @@ impl Host {
         let Some(window) = self.window.clone() else {
             return false;
         };
-        let size = window.inner_size();
+        let size = surface_size(&window);
         if size.width == 0 || size.height == 0 {
             return false;
         }
@@ -1276,6 +1460,24 @@ impl Host {
     }
 }
 
+/// The GPU surface covers the whole view. On iOS `inner_size` is only
+/// the safe area: configuring the Metal drawable with it stretches the
+/// safe-area image across the full layer, drawing under the status bar
+/// and into the rounded corners. Every surface sizing goes through here.
+#[cfg(target_os = "ios")]
+fn surface_size(window: &Window) -> winit::dpi::PhysicalSize<u32> {
+    window.outer_size()
+}
+
+/// The GPU surface covers the whole view. On iOS `inner_size` is only
+/// the safe area: configuring the Metal drawable with it stretches the
+/// safe-area image across the full layer, drawing under the status bar
+/// and into the rounded corners. Every surface sizing goes through here.
+#[cfg(not(target_os = "ios"))]
+fn surface_size(window: &Window) -> winit::dpi::PhysicalSize<u32> {
+    window.inner_size()
+}
+
 impl ApplicationHandler<LoopEvent> for Host {
     /// Decides what to wait for; the caret blink is driven from here.
     ///
@@ -1331,6 +1533,36 @@ impl ApplicationHandler<LoopEvent> for Host {
                     self.request_redraw();
                 }
                 soonest(self.next_ime_poll);
+            }
+        }
+
+        // A released touch coasting to a stop. Each step asks for the
+        // frame that shows it, so coasting sustains its own redraws.
+        if let Some(mut st) = self.fling.take() {
+            let dt = now.duration_since(st.at).as_secs_f32().clamp(0.0, 0.05);
+            st.at = now;
+            match st.fling.step(dt) {
+                None => {}
+                Some(delta) => {
+                    // A held frame spends nothing; anything else must
+                    // move the region to earn the next one. At a bound
+                    // the coast is spent: pushing further only re-asks
+                    // for history it already asked for.
+                    let mut keep = delta == 0.0;
+                    if !keep
+                        && let Some(r) = &mut self.renderer
+                        && r.scroll_by(st.id, delta)
+                    {
+                        let (at, max) = r.scroll_place(st.id);
+                        self.app.scrolled(st.id, at, max);
+                        self.request_redraw();
+                        keep = true;
+                    }
+                    if keep {
+                        self.fling = Some(st);
+                        soonest(now + std::time::Duration::from_millis(16));
+                    }
+                }
             }
         }
 
@@ -1456,6 +1688,14 @@ impl ApplicationHandler<LoopEvent> for Host {
                     "リサイズ"
                 );
                 if let Some(r) = &mut self.renderer {
+                    // iOS reports the safe area here, not the drawable:
+                    // size the surface like everywhere else instead.
+                    #[cfg(target_os = "ios")]
+                    let size = self
+                        .window
+                        .as_ref()
+                        .map(|w| surface_size(w))
+                        .unwrap_or(size);
                     r.resize(size.width, size.height);
                 }
                 self.request_redraw();
@@ -1519,6 +1759,8 @@ impl ApplicationHandler<LoopEvent> for Host {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // The wheel takes over from any coast.
+                self.fling = None;
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y * LINE_SCROLL,
                     MouseScrollDelta::PixelDelta(p) => {
@@ -1587,30 +1829,62 @@ impl ApplicationHandler<LoopEvent> for Host {
                 self.cursor = point;
                 match touch.phase {
                     TouchPhase::Started => {
+                        // A new finger takes over: stop coasting and
+                        // measure this drag fresh.
+                        self.fling = None;
+                        self.reset_touch_scroll();
                         self.touch.press(touch.id, point.0, point.1);
                     }
                     TouchPhase::Moved => {
-                        if let Some(crate::touch::TouchAction::Scroll { dy, .. }) =
+                        if let Some(crate::touch::TouchAction::Scroll { dx, dy }) =
                             self.touch.mov(touch.id, point.0, point.1)
+                            && let Some((id, delta)) = self.scroll_touch(point.0, point.1, dx, dy)
                         {
-                            self.scroll_at(point.0, point.1, dy);
+                            let now = std::time::Instant::now();
+                            if let Some(at) = self.last_scroll_at {
+                                let dt = (now - at).as_secs_f32();
+                                if dt > 0.0 && dt <= 0.1 {
+                                    let inst = delta / dt;
+                                    self.scroll_vel += 0.35 * (inst - self.scroll_vel);
+                                }
+                            }
+                            self.last_scroll_at = Some(now);
+                            self.touch_scroll_id = Some(id);
                         }
                     }
-                    TouchPhase::Ended => match self.touch.release(touch.id, point.0, point.1) {
-                        Some(crate::touch::TouchAction::Tap { .. }) => {
-                            self.press_client();
+                    TouchPhase::Ended => {
+                        // Coast on release when the finger was flying.
+                        // Gated on having scrolled (taps never fling),
+                        // not on the swipe verdict below: a fast upward
+                        // drag both scrolls and, incidentally, swipes.
+                        if let (Some(id), vel) = (self.touch_scroll_id, self.scroll_vel)
+                            && let Some(fling) = crate::touch::Fling::new(vel)
+                        {
+                            self.fling = Some(FlingState {
+                                id,
+                                fling,
+                                at: std::time::Instant::now(),
+                            });
+                            self.request_redraw();
                         }
-                        Some(crate::touch::TouchAction::Swipe(swipe)) => {
-                            let crate::touch::Swipe::Point { x, y, .. } = swipe;
-                            let hits = self.hits_at(x, y);
-                            if self.app.swiped(&hits, swipe) {
-                                self.request_redraw();
+                        self.reset_touch_scroll();
+                        match self.touch.release(touch.id, point.0, point.1) {
+                            Some(crate::touch::TouchAction::Tap { .. }) => {
+                                self.press_client();
                             }
+                            Some(crate::touch::TouchAction::Swipe(swipe)) => {
+                                let crate::touch::Swipe::Point { x, y, .. } = swipe;
+                                let hits = self.hits_at(x, y);
+                                if self.app.swiped(&hits, swipe) {
+                                    self.request_redraw();
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    },
+                    }
                     TouchPhase::Cancelled => {
                         self.touch.cancel(touch.id);
+                        self.reset_touch_scroll();
                     }
                 }
             }

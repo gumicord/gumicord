@@ -7,6 +7,14 @@
 pub const TAP_SLOP: f32 = 10.0;
 /// A release past this, going mostly one way, is a swipe.
 pub const SWIPE_MIN: f32 = 32.0;
+/// Below this speed a release just stops; there is nothing to coast on.
+pub const FLING_MIN: f32 = 200.0;
+/// Past this the finger must have teleported; clamp before coasting.
+pub const FLING_MAX: f32 = 6000.0;
+/// Below this speed coasting stops; slower is invisible frame to frame.
+pub const FLING_STOP: f32 = 60.0;
+/// Exponential decay: after this many seconds ~37% of the speed remains.
+pub const FLING_TAU: f32 = 0.12;
 
 /// Which way a swipe went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +124,42 @@ impl Tracker {
     }
 }
 
+/// A released scroll that keeps coasting.
+///
+/// Offset-space pixels per second, decaying exponentially. Pure numbers
+/// over explicit steps, so tests drive it without a clock; the host
+/// feeds real time and the scrolled region.
+#[derive(Debug, Clone, Copy)]
+pub struct Fling {
+    velocity: f32,
+}
+
+impl Fling {
+    /// Starts coasting, unless too slow to see or NaN. Clamps teleports.
+    pub fn new(velocity: f32) -> Option<Self> {
+        if !velocity.is_finite() {
+            return None;
+        }
+        let velocity = velocity.clamp(-FLING_MAX, FLING_MAX);
+        (velocity.abs() >= FLING_MIN).then_some(Fling { velocity })
+    }
+
+    /// Advances by `dt` seconds, returning the offset-space delta. `None`
+    /// when spent: stop asking for frames. Non-positive steps hold still
+    /// without decaying, so a paused loop resumes where it left off.
+    pub fn step(&mut self, dt: f32) -> Option<f32> {
+        if self.velocity.abs() < FLING_STOP {
+            return None;
+        }
+        if dt <= 0.0 {
+            return Some(0.0);
+        }
+        let delta = self.velocity * dt;
+        self.velocity *= (-dt / FLING_TAU).exp();
+        Some(delta)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +234,47 @@ mod tests {
             Some(TouchAction::Tap { x: 0.0, y: 0.0 })
         );
         t.cancel(2);
+    }
+
+    /// Too slow to see never starts; NaN never starts either.
+    #[test]
+    fn a_slow_or_nan_release_does_not_fling() {
+        assert!(Fling::new(199.0).is_none());
+        assert!(Fling::new(-199.0).is_none());
+        assert!(Fling::new(f32::NAN).is_none());
+        assert!(Fling::new(1000.0).is_some());
+    }
+
+    /// Coasting decays and then stops asking for frames.
+    #[test]
+    fn a_fling_decays_then_stops() {
+        let mut f = Fling::new(2000.0).expect("fast enough to fling");
+        // First step moves with nearly the full speed.
+        let first = f.step(1.0 / 60.0).expect("still coasting");
+        assert!(first > 20.0, "{first}");
+        // A second of steps spends it.
+        let mut frames = 0;
+        while f.step(1.0 / 60.0).is_some() {
+            frames += 1;
+            assert!(frames < 600, "coasting never stopped");
+        }
+        assert!(frames > 5, "stopped without coasting");
+    }
+
+    /// Teleports clamp instead of jumping across the whole list.
+    #[test]
+    fn a_wild_velocity_clamps() {
+        let mut f = Fling::new(1e9).expect("clamped, not refused");
+        let first = f.step(1.0 / 60.0).expect("still coasting");
+        assert!(first <= FLING_MAX / 60.0 + 1.0, "{first}");
+    }
+
+    /// A paused loop holds still without spending the fling.
+    #[test]
+    fn a_nonpositive_step_holds_still() {
+        let mut f = Fling::new(2000.0).expect("fast enough to fling");
+        assert_eq!(f.step(0.0), Some(0.0));
+        assert_eq!(f.step(-1.0), Some(0.0));
+        assert!(f.step(1.0 / 60.0).expect("still coasting") > 20.0);
     }
 }

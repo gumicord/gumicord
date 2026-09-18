@@ -36,7 +36,7 @@ passing the Documents directory across lives in `app/core`.
 |---|---|
 | `UITextInput` | Done (ADR-0011): hidden editor in `render/platform`. Field verification pending |
 | `accesskit_ios` | Still at 0.1.2; try it early, since its maturity is unknown |
-| Safe area | `PLT-041`. The shell draws edge to edge today; keyboard tracking (`PLT-040`) is in |
+| Safe area | `PLT-041`. The surface spans the full view and the root content is inset by `safeAreaInsets`; keyboard tracking (`PLT-040`) is in |
 | First-device run | The Xcode project, lifecycle order and Metal backend have never run on hardware. Expect a shake-out pass |
 
 ## Building (macOS only)

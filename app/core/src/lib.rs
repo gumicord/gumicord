@@ -1405,6 +1405,31 @@ impl Application for Gumicord {
         }
     }
 
+    /// Email and password mirror into native fields on iOS so the password
+    /// manager fills both at once. Read on every platform; only iOS acts.
+    fn ime_proxy(&self) -> Option<gumicord_platform::ImeProxy> {
+        match self.login_view.field {
+            Some(LoginField::Email) => Some(gumicord_platform::ImeProxy::Username),
+            Some(LoginField::Password) => Some(gumicord_platform::ImeProxy::Password),
+            _ => None,
+        }
+    }
+
+    /// Writes polled native text into the named login field, wherever focus
+    /// currently sits: a paired fill lands in both fields at once.
+    fn proxy_text(&mut self, field: gumicord_platform::ImeProxy, text: String) -> bool {
+        let doc = match field {
+            gumicord_platform::ImeProxy::Username => &mut self.login_view.email,
+            gumicord_platform::ImeProxy::Password => &mut self.login_view.input,
+        };
+        if doc.text() == text {
+            return false;
+        }
+        doc.take();
+        doc.insert(&text);
+        true
+    }
+
     /// The IME committed a newline in a single-line field (mobile only):
     /// advance through the login form, or submit.
     fn ime_newline(&mut self) -> bool {

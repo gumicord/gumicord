@@ -963,6 +963,21 @@ pub fn parent_view(window: &winit::window::Window) -> Option<&UIView> {
     }
 }
 
+/// Safe-area insets in points (== logical pixels) for the hosting view:
+/// top, right, bottom, left. Zeroes when the handle is missing.
+pub fn safe_insets(window: &winit::window::Window) -> (f32, f32, f32, f32) {
+    let Some(view) = parent_view(window) else {
+        return (0.0, 0.0, 0.0, 0.0);
+    };
+    let insets = view.safeAreaInsets();
+    (
+        insets.top as f32,
+        insets.right as f32,
+        insets.bottom as f32,
+        insets.left as f32,
+    )
+}
+
 /// Keyboard end-frame height in points, if the notice carries one.
 fn keyboard_height(notif: &NSNotification) -> Option<f32> {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};

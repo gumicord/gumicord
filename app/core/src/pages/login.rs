@@ -804,6 +804,40 @@ mod tests {
         assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
     }
 
+    /// Email and password ask for native mirrors; nothing else does.
+    #[test]
+    fn login_fields_report_their_proxy_kind() {
+        use gumicord_platform::ImeProxy;
+
+        let mut a = pending();
+        assert_eq!(a.ime_proxy(), None);
+        a.login_view.field = Some(LoginField::Email);
+        assert_eq!(a.ime_proxy(), Some(ImeProxy::Username));
+        a.login_view.field = Some(LoginField::Password);
+        assert_eq!(a.ime_proxy(), Some(ImeProxy::Password));
+        a.login_view.field = Some(LoginField::Totp);
+        assert_eq!(a.ime_proxy(), None);
+        a.login_view.field = None;
+        a.chat.input_focused = true;
+        assert_eq!(a.ime_proxy(), None);
+    }
+
+    /// Polled native text lands in the named field, wherever focus sits: a
+    /// paired fill reaches both fields from one poll.
+    #[test]
+    fn proxy_text_reaches_the_named_field() {
+        use gumicord_platform::ImeProxy;
+
+        let mut a = pending();
+        a.login_view.field = Some(LoginField::Email);
+        assert!(a.proxy_text(ImeProxy::Password, "secret".to_owned()));
+        assert_eq!(a.login_view.input.text(), "secret");
+        assert!(a.login_view.email.text().is_empty());
+        assert!(!a.proxy_text(ImeProxy::Password, "secret".to_owned()));
+        assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
+        assert_eq!(a.login_view.email.text(), "a@b.c");
+    }
+
     /// The konami code on the QR screen opens the bot-token form.
     #[test]
     fn the_konami_code_opens_the_bot_token_form() {

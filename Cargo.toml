@@ -102,7 +102,7 @@ keyring = { version = "3", features = ["apple-native", "linux-native-sync-persis
 objc2 = "0.6"
 objc2-core-foundation = "0.3"
 objc2-foundation = "0.3"
-objc2-ui-kit = { version = "0.3", features = ["UIResponder", "UITextInput", "UITextInputTraits", "UIView", "UIWindow"] }
+objc2-ui-kit = { version = "0.3", features = ["UIResponder", "UITextInput", "UITextInputTraits", "UIView", "UIWindow", "UIGeometry"] }
 # Heap blocks for NSNotificationCenter observers (iOS keyboard height).
 block2 = "0.6"
 
