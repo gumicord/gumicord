@@ -11,7 +11,7 @@
 //! | Linux | Secret Service, cached in-session (`keyring`) | done |
 //! | macOS | Keychain (`keyring`) | done |
 //! | Android | Keystore | to come |
-//! | iOS | Keychain | to come |
+//! | iOS | Keychain (`keyring`) | done |
 //!
 //! DPAPI keeps another user account out: the key derives from the Windows
 //! logon credentials, so pulling the disk out is not enough. It does not keep
@@ -59,7 +59,7 @@ impl SecretStore {
         Self::in_dir(base_dir()?.join("secrets"))
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     fn path(&self, name: &str) -> PathBuf {
         // Only our own constants reach this, but never let one traverse.
         let safe: String = name
@@ -70,7 +70,7 @@ impl SecretStore {
     }
 
     /// Stores, replacing anything already there.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     pub fn store(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
         let blob = protect(secret)?;
         // Written then renamed, so a crash leaves no half-written secret.
@@ -84,7 +84,7 @@ impl SecretStore {
     ///
     /// Unreadable happens normally — a different Windows user, a rebuilt
     /// profile — and the caller should discard it and log in again.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     pub fn load(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
         let blob = match std::fs::read(self.path(name)) {
             Ok(b) => b,
@@ -96,7 +96,7 @@ impl SecretStore {
 
     /// Discards one. Absent still succeeds: this runs when a token is
     /// rejected, and failing on "not there" makes that path awkward.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     pub fn clear(&self, name: &str) -> Result<(), SecretError> {
         match std::fs::remove_file(self.path(name)) {
             Ok(()) => Ok(()),
@@ -108,13 +108,13 @@ impl SecretStore {
 
 /// Keyring service. Production uses it plainly; anything else is a test
 /// or an isolated instance and is namespaced away from real credentials.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 const SERVICE: &str = "dev.gumicord";
 
 /// The namespace for this store. Only the production directory maps to
 /// the real service; test and scratch directories get their own, so a
 /// test run never touches the user's credentials.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 fn service_for(dir: &std::path::Path) -> String {
     match dir.file_name().and_then(|s| s.to_str()) {
         Some("secrets") => SERVICE.to_owned(),
@@ -123,7 +123,7 @@ fn service_for(dir: &std::path::Path) -> String {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 impl SecretStore {
     fn entry(&self, name: &str) -> Option<keyring::Entry> {
         keyring::Entry::new(&service_for(&self.dir), name).ok()
@@ -284,12 +284,12 @@ fn last_error() -> u32 {
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")))]
 fn protect(_secret: &[u8]) -> Result<Vec<u8>, SecretError> {
     Err(SecretError::Unsupported)
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")))]
 fn unprotect(_blob: &[u8]) -> Result<Vec<u8>, SecretError> {
     Err(SecretError::Unsupported)
 }
@@ -314,7 +314,7 @@ mod tests {
     }
 
     /// What went in comes back.
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos", target_os = "ios"))]
     #[test]
     fn what_goes_in_comes_back_out() {
         let s = scratch("roundtrip");
@@ -346,7 +346,7 @@ mod tests {
     }
 
     /// Overwriting works, so logging in again leaves no old token.
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos", target_os = "ios"))]
     #[test]
     fn storing_twice_replaces_the_first() {
         let s = scratch("overwrite");

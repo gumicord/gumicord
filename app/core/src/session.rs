@@ -190,6 +190,9 @@ pub struct Login {
     /// hands it to the platform, which shows the modal, then reads it back as
     /// the solved token.
     pending: Option<gumicord_rest::CaptchaChallenge>,
+    /// A login attempt is in flight. The form stays up with its submit
+    /// disabled until an answer lands; without this every tap re-sends.
+    busy: bool,
 }
 
 impl Login {
@@ -216,6 +219,7 @@ impl Login {
             field_errors: Vec::new(),
             ended: false,
             pending: None,
+            busy: false,
         }
     }
 
@@ -278,40 +282,54 @@ impl Login {
         });
     }
 
+    /// Whether a login attempt is in flight. While set, the form keeps
+    /// its submit disabled: re-sending only stacks duplicate attempts.
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
     /// Switches the screen to the password form.
     pub fn start_password(&mut self) {
         self.notice = None;
+        self.busy = false;
         self.session = Session::Password;
     }
 
     /// Switches the screen to the bot-token form.
     pub fn start_token(&mut self) {
         self.notice = None;
+        self.busy = false;
         self.session = Session::Token;
     }
 
     /// Asks the background to log in with these credentials.
-    pub fn submit_password(&self, email: String, password: String) {
+    pub fn submit_password(&mut self, email: String, password: String) {
+        self.busy = true;
         let _ = self.cmd_tx.send(LoginCommand::Password { email, password });
     }
 
     /// Asks the background to finish login with a TOTP code.
-    pub fn submit_totp(&self, code: String) {
+    pub fn submit_totp(&mut self, code: String) {
+        self.busy = true;
         let _ = self.cmd_tx.send(LoginCommand::Totp { code });
     }
 
     /// Hands a solved captcha to the background login.
-    pub fn submit_captcha(&self, solved: SolvedCaptcha) {
+    pub fn submit_captcha(&mut self, solved: SolvedCaptcha) {
+        self.busy = true;
         let _ = self.cmd_tx.send(LoginCommand::Captcha(solved));
     }
 
     /// Asks the background to log in with a bot token.
-    pub fn submit_bot_token(&self, token: String) {
+    pub fn submit_bot_token(&mut self, token: String) {
+        self.busy = true;
         let _ = self.cmd_tx.send(LoginCommand::BotToken { token });
     }
 
     /// Goes back to the QR screen, abandoning a password login.
-    pub fn cancel_password(&self) {
+    /// Clears the in-flight guard so the next form starts enabled.
+    pub fn cancel_password(&mut self) {
+        self.busy = false;
         let _ = self.cmd_tx.send(LoginCommand::CancelPassword);
     }
 
@@ -357,17 +375,26 @@ impl Login {
                 self.pending = None;
                 self.last_error = None;
                 self.field_errors.clear();
+                self.busy = false;
                 Session::LoggedIn(l)
             }
             LoginEvent::Failed(e) => {
                 self.last_error = Some(e.clone());
+                self.busy = false;
                 Session::Failed(e)
             }
             LoginEvent::FieldErrors(fields) => {
                 self.field_errors = fields;
+                // Back on the form for a retry; the next submit re-arms it.
+                self.busy = false;
                 self.session.clone()
             }
-            LoginEvent::TotpNeeded { .. } => Session::PasswordTotp,
+            LoginEvent::TotpNeeded { .. } => {
+                // Back to the form for another code; the next submit
+                // re-arms the guard.
+                self.busy = false;
+                Session::PasswordTotp
+            }
             // The form stays put while the challenge is solved elsewhere.
             LoginEvent::CaptchaNeeded(ch) => {
                 self.pending = Some(ch);
@@ -381,9 +408,13 @@ impl Login {
             }
             LoginEvent::Ended => {
                 self.ended = true;
+                self.busy = false;
                 self.session.clone()
             }
-            LoginEvent::Restarted => Session::Connecting,
+            LoginEvent::Restarted => {
+                self.busy = false;
+                Session::Connecting
+            }
         };
     }
 }
@@ -1214,7 +1245,7 @@ mod tests {
     #[test]
     fn password_commands_reach_the_background() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let login = Login {
+        let mut login = Login {
             cmd_tx: tx,
             ..Login::fresh_for_test()
         };
@@ -1237,5 +1268,33 @@ mod tests {
         );
         assert!(matches!(rx.try_recv(), Ok(LoginCommand::CancelPassword)));
         assert!(rx.try_recv().is_err(), "an extra command leaked");
+    }
+
+    /// Field errors return the form for a retry, so the guard lifts.
+    #[test]
+    fn field_errors_release_the_submit_guard() {
+        let mut login = Login::fresh_for_test();
+        login.submit_password("a@b.c".to_owned(), "secret".to_owned());
+        assert!(login.busy());
+        login.apply(LoginEvent::FieldErrors(vec![(
+            "password".to_owned(),
+            "wrong".to_owned(),
+        )]));
+        assert!(!login.busy(), "field errors left the form disabled");
+    }
+
+    /// Leaving the form lifts the guard; the next form starts enabled.
+    #[test]
+    fn cancelling_releases_the_submit_guard() {
+        let mut login = Login::fresh_for_test();
+        login.submit_password("a@b.c".to_owned(), "secret".to_owned());
+        assert!(login.busy());
+        login.cancel_password();
+        assert!(!login.busy(), "cancel left the form disabled");
+        login.start_password();
+        assert!(!login.busy());
+        login.submit_bot_token("bot-token".to_owned());
+        login.start_token();
+        assert!(!login.busy());
     }
 }

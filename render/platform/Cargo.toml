@@ -37,6 +37,8 @@ objc2-ui-kit.workspace = true
 block2.workspace = true
 png.workspace = true
 raw-window-handle.workspace = true
+# iOS Keychain through the same keyring backend as macOS.
+keyring.workspace = true
 
 # GameActivity backend for the Android shell. Desktop builds never see it.
 [target.'cfg(target_os = "android")'.dependencies]

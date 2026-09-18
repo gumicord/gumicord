@@ -588,8 +588,10 @@ impl Host {
         // The app cleared focus (outside press, submit): resign on this
         // event instead of the next redraw, or a login that just
         // finished keeps the keyboard up over the screen that follows.
-        // Polling runs at most once per tick, so resigning here costs
-        // nothing while up and hides one frame sooner on dismiss.
+        // Every owner resigns, not just the expected one: whoever holds
+        // the keyboard, it goes. Polling runs at most once per tick, so
+        // resigning here costs nothing while up and hides one frame
+        // sooner on dismiss.
         #[cfg(target_os = "ios")]
         if self.app.focused_document().is_none() {
             if self.ios_text.is_live() {
@@ -599,6 +601,12 @@ impl Host {
                 && proxy.is_active()
             {
                 proxy.blur();
+            }
+            if self.ime_allowed {
+                self.ime_allowed = false;
+                if let Some(w) = self.window.clone() {
+                    w.set_ime_allowed(false);
+                }
             }
         }
     }
@@ -916,6 +924,14 @@ impl Host {
             if self.ios_text.is_live() {
                 self.ios_text.blur();
             }
+            // The proxy already resigned in sync above, but a missing
+            // parent skips that path while the keyboard stays up.
+            #[cfg(target_os = "ios")]
+            if let Some(proxy) = self.proxy.as_mut()
+                && proxy.is_active()
+            {
+                proxy.blur();
+            }
             return;
         }
 
@@ -1024,6 +1040,14 @@ impl Host {
     #[cfg(target_os = "ios")]
     fn sync_ime_proxy(&mut self) -> bool {
         let want = self.app.ime_proxy();
+        // Gone before any view exists: drop the keyboard now rather than
+        // waiting for a parent that may never come.
+        if want.is_none() {
+            if let Some(proxy) = self.proxy.as_mut() {
+                proxy.blur();
+            }
+            return false;
+        }
         let text = self.app.focused_document().map(|d| d.text().to_owned());
         let Some(parent) = self
             .window
@@ -1034,6 +1058,32 @@ impl Host {
         };
         let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
+        // Park both siblings over the visible fields. The manager pairs by
+        // proximity, so off-screen fields only ever fill one half.
+        if proxy.is_active() {
+            let boxes = self.renderer.as_ref().map(|r| r.hit_boxes());
+            let mut user = None;
+            let mut pass = None;
+            if let Some(boxes) = boxes {
+                for h in boxes {
+                    if h.id != NodeId::AppScreenLoginField {
+                        continue;
+                    }
+                    let rect = (
+                        h.rect.x as f64,
+                        h.rect.y as f64,
+                        h.rect.w as f64,
+                        h.rect.h as f64,
+                    );
+                    if h.key == Some(Key::Slot("email")) {
+                        user = Some(rect);
+                    } else if h.key == Some(Key::Slot("password")) {
+                        pass = Some(rect);
+                    }
+                }
+            }
+            proxy.place(user, pass);
+        }
         let mut changed = false;
         if let Some((kind, event)) = proxy.poll() {
             match event {
@@ -1048,7 +1098,7 @@ impl Host {
         }
         // A submit cleared focus: resign on this tick instead of the
         // next redraw, or the keyboard lingers over what comes next.
-        if changed && self.app.ime_proxy().is_none() {
+        if self.app.ime_proxy().is_none() {
             proxy.blur();
         }
         changed

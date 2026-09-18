@@ -78,7 +78,12 @@ impl crate::Gumicord {
 
     /// Submits the active login step. Runs the password flow, hands off a TOTP
     /// code, or logs in with a bot token; nothing to send stays put.
+    /// While an attempt is in flight every submit is ignored: re-sending
+    /// only stacks duplicate attempts behind the running one.
     pub(crate) fn submit_login(&mut self) -> bool {
+        if self.login.busy() {
+            return false;
+        }
         self.login_view.error = None;
         self.login_view.field_errors.clear();
         match self.login_view.field {
@@ -387,7 +392,8 @@ impl crate::Gumicord {
         )
     }
 
-    /// The primary login form button (submit).
+    /// The primary login form button (submit). Dimmed while an attempt
+    /// is in flight; presses then fall through as ignored.
     fn login_submit(&self, label: &str) -> UiNode {
         UiNode::new(NodeId::PrimitiveButton)
             .with_key(Key::Slot("login_submit"))
@@ -395,6 +401,7 @@ impl crate::Gumicord {
                 self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot("login_submit"))),
                 State::Hover,
             )
+            .with_state_if(self.login.busy(), State::Disabled)
             .child(UiNode::text(NodeId::PrimitiveText, label))
     }
 
@@ -836,6 +843,79 @@ mod tests {
         assert!(!a.proxy_text(ImeProxy::Password, "secret".to_owned()));
         assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
         assert_eq!(a.login_view.email.text(), "a@b.c");
+    }
+
+    /// While an attempt is in flight every submit is ignored and the
+    /// button dims; a failure re-arms the form for a retry.
+    #[test]
+    fn resubmitting_while_busy_is_ignored() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("email"),
+        )]);
+        a.focused_document().unwrap().insert("a@b.c");
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+
+        assert!(a.submit_login(), "最初の送信が通らない");
+        assert!(a.login.busy(), "送信後も処理中にならない");
+
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+        assert!(!a.submit_login(), "処理中の再送信が通ってしまう");
+
+        a.login
+            .apply_for_test(LoginEvent::Failed("だめ".to_owned()));
+        assert!(!a.login.busy(), "失敗後も処理中のまま");
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        a.focused_document().unwrap().insert("secret");
+        assert!(a.submit_login(), "失敗後の再送が通らない");
+    }
+
+    /// The submit button carries the disabled state while busy, so the
+    /// theme dims it; idle forms stay undimmed.
+    #[test]
+    fn the_submit_button_dims_while_busy() {
+        use gumicord_uitree::State;
+
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        let mut submit_state = None;
+        a.build_tree(Panes::Three).walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot("login_submit")) {
+                submit_state = Some(n.states.contains(State::Disabled));
+            }
+        });
+        assert_eq!(submit_state, Some(false), "待機中なのに無効表示");
+
+        a.login_view.field = Some(LoginField::Password);
+        a.login_view.email.insert("a@b.c");
+        a.login_view.input.insert("secret");
+        assert!(a.submit_login());
+        let mut submit_state = None;
+        a.build_tree(Panes::Three).walk(&mut |n, _| {
+            if n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot("login_submit")) {
+                submit_state = Some(n.states.contains(State::Disabled));
+            }
+        });
+        assert_eq!(submit_state, Some(true), "処理中なのに通常表示");
     }
 
     /// The konami code on the QR screen opens the bot-token form.

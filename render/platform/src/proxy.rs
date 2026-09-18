@@ -4,7 +4,8 @@
 //! fill into. Two hidden `UITextField` siblings (username + password, so the
 //! manager pairs them) receive the fill; this layer polls their text into
 //! the app's documents. Visible editing stays in our rendered fields: the
-//! proxies are a single transparent pixel and never take touches.
+//! proxies sit transparently over them and never take touches (alpha-zero
+//! views are skipped by hit testing).
 //!
 //! Polled, not delegated: a delegate class from Rust is a maintenance
 //! burden, and a frame of latency is invisible on a login form.
@@ -30,6 +31,9 @@ pub struct Proxy {
     active: Option<super::ImeProxy>,
     last: [String; 2],
     parent: Option<std::ptr::NonNull<std::ffi::c_void>>,
+    /// Where the fields were last parked; setting the same frame every
+    /// tick churns layout for no reason.
+    placed: [(f64, f64, f64, f64); 2],
 }
 
 fn idx(kind: super::ImeProxy) -> usize {
@@ -86,6 +90,7 @@ impl Proxy {
             active: None,
             last: [String::new(), String::new()],
             parent: None,
+            placed: [(-5.0, -5.0, 1.0, 1.0), (-5.0, -5.0, 1.0, 1.0)],
         }
     }
 
@@ -122,10 +127,13 @@ impl Proxy {
             }
             let field = self.field(kind);
             set_text(field, text);
-            field.becomeFirstResponder();
+            // Either the call took it or it already holds it; anything
+            // else means no keyboard from here.
+            let became = field.becomeFirstResponder() || field.isFirstResponder();
+            tracing::debug!(?kind, became, "proxy field shown");
             // A refused responder means no keyboard from here; drop back to
             // winit's field instead of sitting focused with no keyboard.
-            if !field.isFirstResponder() {
+            if !became {
                 self.active = None;
             } else {
                 self.last[idx(kind)] = text.to_owned();
@@ -136,6 +144,35 @@ impl Proxy {
                     super::ImeProxy::Password => super::ImeProxy::Username,
                 };
                 self.last[idx(other)] = field_text(self.field(other));
+            }
+        }
+    }
+
+    /// Parks both fields over the visible login fields. Alpha-zero views
+    /// never take touches, so this only feeds the password manager's
+    /// pairing heuristics; typing still routes through the polls.
+    /// `None` rects leave that field where it is (not laid out yet).
+    pub fn place(
+        &mut self,
+        user: Option<(f64, f64, f64, f64)>,
+        pass: Option<(f64, f64, f64, f64)>,
+    ) {
+        for (kind, rect) in [
+            (super::ImeProxy::Username, user),
+            (super::ImeProxy::Password, pass),
+        ] {
+            let Some((x, y, w, h)) = rect else {
+                continue;
+            };
+            // Points, like the hit boxes they come from.
+            let rect = (x, y, w.max(1.0), h.max(1.0));
+            if self.placed[idx(kind)] != rect {
+                let field = self.field(kind);
+                field.setFrame(NSRect::new(
+                    NSPoint::new(rect.0, rect.1),
+                    NSSize::new(rect.2, rect.3),
+                ));
+                self.placed[idx(kind)] = rect;
             }
         }
     }
@@ -157,9 +194,11 @@ impl Proxy {
                 let field = self.field(kind);
                 set_text(field, &clean);
                 self.last[idx(kind)] = clean.clone();
+                tracing::debug!(?kind, "proxy submitted");
                 return Some((kind, ProxyEvent::Submitted(clean)));
             }
             self.last[idx(kind)] = current.clone();
+            tracing::debug!(?kind, "proxy fill polled");
             return Some((kind, ProxyEvent::Text(current)));
         }
         None
@@ -173,6 +212,9 @@ impl Proxy {
     /// when the app already cleared focus (outside press, submit) so the
     /// keyboard hides on this event instead of the next redraw.
     pub fn blur(&mut self) {
+        if self.active.is_some() {
+            tracing::debug!("proxy resigned");
+        }
         for field in [&self.user, &self.pass] {
             field.resignFirstResponder();
             field.removeFromSuperview();
