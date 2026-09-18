@@ -862,6 +862,18 @@
       }
     },
     {
+      "select": "overlay.fps",
+      "style": {
+        "font": "$font.small",
+        "color": "$color.text.primary",
+        "background": "$color.bg.raised",
+        "borderColor": "$color.border",
+        "borderWidth": 1,
+        "radius": "$radius.sm",
+        "padding": [4, 8, 4, 8]
+      }
+    },
+    {
       "select": "chat.message.reply_ref",
       "style": { "font": "$font.small", "color": "$color.text.muted", "opacity": 0.8 }
     },

@@ -1057,10 +1057,10 @@ impl Host {
             return false;
         };
         let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
-        proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
-        // Park both siblings over the visible fields. The manager pairs by
-        // proximity, so off-screen fields only ever fill one half.
-        if proxy.is_active() {
+        // Park before showing: an off-screen field may refuse first
+        // responder, and without it the manager never pairs. Parking a
+        // detached field only moves it, so doing this first is free.
+        {
             let boxes = self.renderer.as_ref().map(|r| r.hit_boxes());
             let mut user = None;
             let mut pass = None;
@@ -1084,6 +1084,7 @@ impl Host {
             }
             proxy.place(user, pass);
         }
+        proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
         let mut changed = false;
         if let Some((kind, event)) = proxy.poll() {
             match event {

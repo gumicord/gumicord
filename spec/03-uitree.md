@@ -312,6 +312,7 @@ M1 で公開するフィールド。
 | `overlay.modal.action.label` | — | ボタンの文字 (slot で cancel/confirm/danger) |
 | `overlay.tooltip` | — | 指しているものの短い説明。押せず消えるだけ |
 | `overlay.toast` | — | 下に出て数秒で消える知らせ。押すものはない |
+| `overlay.fps` | — | 右上に重ねて出す FPS 計。設定のサポートで切り替える |
 
 ### `settings.*` — プラグインも生成できる
 
@@ -352,7 +353,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 121 個** (中核 77 / プラグインも生成可 44)。
+**合計 122 個** (中核 77 / プラグインも生成可 45)。
 
 <!-- END GENERATED: node-ids -->
 

@@ -203,6 +203,8 @@ pub enum Action {
     /// Hand the log file to the OS: the share sheet on Android, the logs
     /// folder on desktop, the Files app location on iOS.
     ShareLog,
+    /// Show or hide the FPS meter pinned at the top right.
+    ToggleFps,
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary

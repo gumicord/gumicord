@@ -49,6 +49,10 @@ const QUERY: &str = "?v=10&encoding=json&compress=zstd-stream";
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 
+/// One connection attempt may take this long. Without it a black-holed
+/// network hangs `open` forever and the screen never leaves "connecting".
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// One resolved notification-setings row:
@@ -65,6 +69,8 @@ pub enum GatewayError {
     Decode(#[from] serde_json::Error),
     #[error("Hello が来ないまま接続が終わった")]
     NoHello,
+    #[error("接続が時間切れになった")]
+    Timeout,
     #[error("接続が閉じられた (コード {0})")]
     Closed(u16),
 }
@@ -584,34 +590,47 @@ impl Gateway {
     /// Connects, takes Hello, and sends identify or resume.
     async fn open(&mut self) -> Result<(), GatewayError> {
         let url = connect_url(self.session.as_ref().map(|s| &*s.url));
+        self.open_url(&url, OPEN_TIMEOUT).await
+    }
 
+    /// The same, with an explicit deadline. The timeout covers the whole
+    /// attempt: TCP and TLS give no error on a black-holed network, and
+    /// neither does waiting for Hello.
+    async fn open_url(&mut self, url: &str, timeout: Duration) -> Result<(), GatewayError> {
         crate::install_crypto_provider();
-        let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
-        let mut conn = Connection::new(ws)?;
+        let attempt = async {
+            let (ws, _) = tokio_tungstenite::connect_async(url).await?;
+            let mut conn = Connection::new(ws)?;
 
-        let hello = conn.wait_for_hello().await?;
-        conn.heartbeat = Duration::from_millis(hello);
+            let hello = conn.wait_for_hello().await?;
+            conn.heartbeat = Duration::from_millis(hello);
 
-        match &self.session {
-            Some(s) => {
-                tracing::debug!(session = %s.id, "resuming");
-                conn.last_seq = s.seq;
-                conn.send(json!({
-                    "op": OP_RESUME,
-                    "d": { "token": self.token.expose(), "session_id": s.id, "seq": s.seq },
-                }))
-                .await?;
-            }
-            None => {
-                tracing::debug!("identifying");
-                conn.send(identify(&self.token, bot_intents(self.bot_intent_attempt)))
+            match &self.session {
+                Some(s) => {
+                    tracing::debug!(session = %s.id, "resuming");
+                    conn.last_seq = s.seq;
+                    conn.send(json!({
+                        "op": OP_RESUME,
+                        "d": { "token": self.token.expose(), "session_id": s.id, "seq": s.seq },
+                    }))
                     .await?;
+                }
+                None => {
+                    tracing::debug!("identifying");
+                    conn.send(identify(&self.token, bot_intents(self.bot_intent_attempt)))
+                        .await?;
+                }
             }
-        }
 
-        // interval * jitter, so clients do not all beat at once.
-        conn.schedule_first_heartbeat();
-        self.conn = Some(conn);
+            // interval * jitter, so clients do not all beat at once.
+            conn.schedule_first_heartbeat();
+            Ok::<Connection, GatewayError>(conn)
+        };
+        self.conn = Some(
+            tokio::time::timeout(timeout, attempt)
+                .await
+                .map_err(|_| GatewayError::Timeout)??,
+        );
         Ok(())
     }
 }
@@ -1032,7 +1051,10 @@ fn fatal_of(error: &GatewayError) -> Option<Fatal> {
 fn recoverable_session(error: &GatewayError) -> bool {
     match error {
         // A network problem; the session is still alive.
-        GatewayError::Connect(_) | GatewayError::Decompress(_) | GatewayError::Decode(_) => true,
+        GatewayError::Connect(_)
+        | GatewayError::Decompress(_)
+        | GatewayError::Decode(_)
+        | GatewayError::Timeout => true,
         GatewayError::NoHello => true,
         GatewayError::Closed(code) => !matches!(
             *code,
@@ -1278,5 +1300,43 @@ mod tests {
         assert_eq!(payloads[0].op, OP_HEARTBEAT_ACK);
         assert_eq!(payloads[1].s, Some(5));
         assert_eq!(payloads[1].t.as_deref(), Some("MESSAGE_CREATE"));
+    }
+
+    /// A timed-out attempt is retried with the session kept, not fatal.
+    #[test]
+    fn a_timeout_is_retried_not_fatal() {
+        assert_eq!(fatal_of(&GatewayError::Timeout), None);
+        assert!(recoverable_session(&GatewayError::Timeout));
+    }
+
+    /// A host that takes the connection but never answers must surface as
+    /// a timeout, not hang the attempt forever.
+    #[tokio::test]
+    async fn a_black_holed_host_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("could not listen");
+        let addr = listener.local_addr().expect("no local address");
+        tokio::spawn(async move {
+            // Hold the socket open without answering: dropping it would
+            // reset the connection instead of hanging it.
+            let _held = listener.accept().await.map(|(sock, _)| sock);
+            std::future::pending::<()>().await;
+        });
+
+        let (mut gateway, _) = Gateway::new(Token::new("t"));
+        let start = std::time::Instant::now();
+        let err = gateway
+            .open_url(&format!("ws://{addr}"), Duration::from_millis(200))
+            .await
+            .expect_err("a silent host must not connect");
+        assert!(
+            matches!(err, GatewayError::Timeout),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the attempt hung past its deadline"
+        );
     }
 }

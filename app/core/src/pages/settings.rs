@@ -194,7 +194,10 @@ impl crate::Gumicord {
                 }
             },
             SettingsCategory::Support => {
-                vec![Item::new(Action::ShareLog, "ログを共有")]
+                vec![
+                    Item::new(Action::ToggleFps, "FPSを表示").selected(self.show_fps),
+                    Item::new(Action::ShareLog, "ログを共有"),
+                ]
             }
         }
     }
@@ -557,6 +560,37 @@ mod tests {
                 .any(|i| i.action == crate::menu::Action::ShareLog),
             "共有の行がない"
         );
+    }
+
+    /// Support carries the FPS toggle first: pressing it flips the meter
+    /// without leaving the screen, and the meter node rides the tree.
+    #[test]
+    fn support_carries_the_fps_toggle() {
+        let mut a = with_settings();
+        press_menu(&mut a, 3);
+        assert!(
+            a.settings_page_items()
+                .iter()
+                .any(|i| i.action == crate::menu::Action::ToggleFps),
+            "FPS の行がない"
+        );
+        assert!(!a.show_fps);
+        // Nav takes 0-3; the FPS row is 4.
+        assert!(press_menu(&mut a, 4));
+        assert!(a.show_fps, "押しても付かない");
+        assert!(a.settings.open, "押したら閉じた");
+        let mut found = 0;
+        a.build_tree(Panes::Four).walk(&mut |n, _| {
+            if n.id == NodeId::OverlayFps {
+                found += 1;
+                assert!(n.anchor.is_some(), "右上に寄っていない");
+                let text = n.content.as_text().unwrap_or_default();
+                assert!(text.ends_with("fps"), "計測文でない: {text}");
+            }
+        });
+        assert_eq!(found, 1, "計測が出ていない");
+        assert!(press_menu(&mut a, 4));
+        assert!(!a.show_fps, "押しても消えない");
     }
 
     /// A stale index stays put instead of acting on the wrong row.

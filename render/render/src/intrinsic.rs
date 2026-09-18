@@ -367,6 +367,8 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         // fullscreen either would paint its background over the chat it
         // must not block.
         OverlayToast => Intrinsic::row().cross(Cross::Center).hugs_content(),
+        // Pinned top-right by its anchor; sized by the reading itself.
+        OverlayFps => Intrinsic::row().hugs_content(),
         OverlayTooltip => Intrinsic::row()
             .cross(Cross::Center)
             .one_line()

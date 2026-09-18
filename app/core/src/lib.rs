@@ -281,6 +281,10 @@ pub struct Gumicord {
     floating: Option<crate::menu::Floating>,
     /// Transient notices; several share one node and none blocks input.
     toasts: VecDeque<crate::menu::Toast>,
+    /// Whether the FPS meter shows. Session-local until settings persist.
+    show_fps: bool,
+    /// Build timestamps for the meter, newest last.
+    fps_marks: VecDeque<std::time::Instant>,
     /// The login screens: fields, forms, errors. Owned outright by
     /// [`pages::login`](crate::pages::login).
     login_view: crate::pages::login::LoginView,
@@ -424,6 +428,8 @@ impl Gumicord {
             match_ctx: MatchContext::new(0.0),
             floating: None,
             toasts: VecDeque::new(),
+            show_fps: false,
+            fps_marks: VecDeque::new(),
             login_view: crate::pages::login::LoginView::new(),
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
@@ -1652,6 +1658,20 @@ impl Application for Gumicord {
         // Image sizes depend on it, so capture before building.
         self.scale = cx.scale;
 
+        // Feed the FPS meter. Stale marks would read idle time as frames,
+        // so only the recent window counts.
+        self.fps_marks.push_back(std::time::Instant::now());
+        while self.fps_marks.len() > 120 {
+            self.fps_marks.pop_front();
+        }
+        while self
+            .fps_marks
+            .front()
+            .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(2))
+        {
+            self.fps_marks.pop_front();
+        }
+
         // Read once per frame; re-reading mid-build makes adjacent relative
         // timestamps disagree.
         self.now = gumicord_platform::now_unix();
@@ -1861,6 +1881,12 @@ impl Gumicord {
             .child_if(tooltip.is_some(), || {
                 tooltip.clone().expect("直前に確かめた")
             })
+            // Pinned top-right by its anchor; the anchor flips inside when
+            // the reading is wider than the remaining space.
+            .child_if(self.show_fps, || {
+                UiNode::text(NodeId::OverlayFps, self.fps_label())
+                    .with_anchor(Anchor::at(self.match_ctx.window_width, 0.0))
+            })
     }
 
     /// Full date for a hovered timestamp. The header shows only the hour, and
@@ -1881,6 +1907,20 @@ impl Gumicord {
             "{} {}",
             row.day, row.time
         )))
+    }
+
+    /// The meter reading from recent builds. Too few marks means no rate
+    /// yet; idling leaves the last reading stale rather than zero.
+    fn fps_label(&self) -> String {
+        let n = self.fps_marks.len();
+        if n >= 2
+            && let (Some(first), Some(last)) = (self.fps_marks.front(), self.fps_marks.back())
+            && last.duration_since(*first).as_secs_f32() > 0.0
+        {
+            let span = last.duration_since(*first).as_secs_f32();
+            return format!("{:.0} fps", (n - 1) as f32 / span);
+        }
+        "-- fps".to_owned()
     }
 
     /// Shows a transient notice. User-initiated outcomes only: anything else
@@ -2112,6 +2152,9 @@ impl Gumicord {
                     Ok(note) => self.notify_toast(note),
                     Err(e) => self.notify_toast(e.to_string()),
                 }
+            }
+            crate::menu::Action::ToggleFps => {
+                self.show_fps = !self.show_fps;
             }
 
             crate::menu::Action::Cut => {
