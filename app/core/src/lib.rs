@@ -72,6 +72,8 @@ const THEME_ENV: &str = "GUMICORD_THEME";
 const TOAST_SECS: i64 = 4;
 /// How many toasts stack; older ones drop off unread.
 const TOAST_MAX: usize = 3;
+/// How many builds feed one FPS reading. Fewer turns idle taps into noise.
+const FPS_MARKS: usize = 4;
 
 /// Starts without loading any plugin. Plugin code runs on first sight, so
 /// a broken one can take the session with it before anything is visible.
@@ -285,6 +287,9 @@ pub struct Gumicord {
     show_fps: bool,
     /// Build timestamps for the meter, newest last.
     fps_marks: VecDeque<std::time::Instant>,
+    /// Last measured reading. Sparse builds never overwrite it: one or two
+    /// redraws read as single-digit fps, which is sampling noise.
+    fps_cached: String,
     /// The login screens: fields, forms, errors. Owned outright by
     /// [`pages::login`](crate::pages::login).
     login_view: crate::pages::login::LoginView,
@@ -430,6 +435,7 @@ impl Gumicord {
             toasts: VecDeque::new(),
             show_fps: false,
             fps_marks: VecDeque::new(),
+            fps_cached: "-- fps".to_owned(),
             login_view: crate::pages::login::LoginView::new(),
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
@@ -1671,6 +1677,9 @@ impl Application for Gumicord {
         {
             self.fps_marks.pop_front();
         }
+        if let Some(fps) = Self::fps_of(&self.fps_marks) {
+            self.fps_cached = format!("{fps:.0} fps");
+        }
 
         // Read once per frame; re-reading mid-build makes adjacent relative
         // timestamps disagree.
@@ -1884,7 +1893,7 @@ impl Gumicord {
             // Pinned top-right by its anchor; the anchor flips inside when
             // the reading is wider than the remaining space.
             .child_if(self.show_fps, || {
-                UiNode::text(NodeId::OverlayFps, self.fps_label())
+                UiNode::text(NodeId::OverlayFps, self.fps_cached.clone())
                     .with_anchor(Anchor::at(self.match_ctx.window_width, 0.0))
             })
     }
@@ -1909,18 +1918,15 @@ impl Gumicord {
         )))
     }
 
-    /// The meter reading from recent builds. Too few marks means no rate
-    /// yet; idling leaves the last reading stale rather than zero.
-    fn fps_label(&self) -> String {
-        let n = self.fps_marks.len();
-        if n >= 2
-            && let (Some(first), Some(last)) = (self.fps_marks.front(), self.fps_marks.back())
-            && last.duration_since(*first).as_secs_f32() > 0.0
-        {
-            let span = last.duration_since(*first).as_secs_f32();
-            return format!("{:.0} fps", (n - 1) as f32 / span);
+    /// The meter rate over recent builds. Needs a full window before the
+    /// rate means anything: redrawing is on demand, so one or two builds
+    /// read as single-digit fps even on a fast device.
+    fn fps_of(marks: &VecDeque<std::time::Instant>) -> Option<f32> {
+        if marks.len() < FPS_MARKS {
+            return None;
         }
-        "-- fps".to_owned()
+        let span = marks.back()?.duration_since(*marks.front()?).as_secs_f32();
+        (span > 0.0).then(|| (marks.len() - 1) as f32 / span)
     }
 
     /// Shows a transient notice. User-initiated outcomes only: anything else
@@ -2968,6 +2974,33 @@ mod responsive_tests {
             vec![NodeId::NavChannelList, NodeId::ChatView]
         );
         assert_eq!(panes_in(&a.build_tree(Panes::One)), vec![NodeId::ChatView]);
+    }
+}
+
+#[cfg(test)]
+mod fps_tests {
+    use super::*;
+
+    fn marks_every(total: usize, step_ms: u64) -> VecDeque<std::time::Instant> {
+        let start = std::time::Instant::now();
+        (0..total)
+            .map(|i| start + std::time::Duration::from_millis(i as u64 * step_ms))
+            .collect()
+    }
+
+    /// A steady stream reads back its own rate.
+    #[test]
+    fn steady_marks_read_their_rate() {
+        let fps = Gumicord::fps_of(&marks_every(60, 16)).expect("読めない");
+        assert!((fps - 62.5).abs() < 5.0, "おかしい: {fps}");
+    }
+
+    /// Sparse builds are sampling noise, not a measurement.
+    #[test]
+    fn sparse_marks_read_nothing() {
+        assert!(Gumicord::fps_of(&marks_every(2, 500)).is_none());
+        assert!(Gumicord::fps_of(&marks_every(3, 16)).is_none());
+        assert!(Gumicord::fps_of(&VecDeque::new()).is_none());
     }
 }
 
