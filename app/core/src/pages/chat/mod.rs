@@ -165,6 +165,9 @@ impl crate::Gumicord {
         if self.chat.drawer_open || self.panes().guilds() || !self.shows_main() {
             return false;
         }
+        // The drawer holds no text fields; opening it over the keyboard
+        // strands both.
+        self.release_text_focus();
         self.chat.drawer_open = true;
         self.chat.member_sheet_open = false;
         true
@@ -180,6 +183,9 @@ impl crate::Gumicord {
         if self.chat.member_sheet_open || self.panes().members() || !self.shows_main() {
             return false;
         }
+        // The sheet holds no text fields; opening it over the keyboard
+        // strands both.
+        self.release_text_focus();
         self.chat.member_sheet_open = true;
         self.chat.drawer_open = false;
         true

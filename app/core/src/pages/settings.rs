@@ -53,6 +53,9 @@ impl crate::Gumicord {
         if self.settings.open {
             return false;
         }
+        // The screen holds no text fields; opening it over the keyboard
+        // strands both.
+        self.release_text_focus();
         self.settings.open = true;
         true
     }

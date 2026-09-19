@@ -785,6 +785,22 @@ impl Gumicord {
 }
 
 impl Gumicord {
+    /// Drops text focus from every field. Any press outside a field owns
+    /// this: leaving focus behind keeps the keyboard over whatever opens
+    /// next, and on narrow screens the drawer is the only way to move.
+    fn release_text_focus(&mut self) -> bool {
+        let mut changed = false;
+        if self.chat.input_focused {
+            self.chat.input_focused = false;
+            changed = true;
+        }
+        if self.login_view.field.is_some() {
+            self.login_view.field = None;
+            changed = true;
+        }
+        changed
+    }
+
     /// One press against the hit arms. Returns what changed, if anything.
     fn press_loop(&mut self, hits: &[Hit]) -> bool {
         let mut changed = false;
@@ -867,10 +883,13 @@ impl Gumicord {
     /// A press while the drawer or the member sheet is open. Content acts
     /// through the normal arms; anything else dismisses.
     fn overlay_press(&mut self, hits: &[Hit]) -> bool {
+        // The drawer and the sheet hold no text fields, so every press here
+        // is outside one: the keyboard must go, or it covers what opens.
+        let mut changed = self.release_text_focus();
         // Member rows have no profile view yet; tapping one closes the
         // sheet instead of stranding the press.
         if self.chat.member_sheet_open && hits.iter().any(|h| h.id == NodeId::NavMemberListItem) {
-            return self.close_member_sheet();
+            return self.close_member_sheet() || changed;
         }
         let content = hits.iter().any(|h| {
             matches!(
@@ -897,7 +916,7 @@ impl Gumicord {
         if !content {
             let drawer = self.close_drawer();
             let sheet = self.close_member_sheet();
-            return drawer || sheet;
+            return drawer || sheet || changed;
         }
         let (guild, channel, settings_was, floating_was) = (
             self.chat.selected_guild,
@@ -905,7 +924,7 @@ impl Gumicord {
             self.settings.open,
             self.floating.is_some(),
         );
-        let changed = self.press_loop(hits);
+        changed |= self.press_loop(hits);
         if self.chat.selected_guild != guild
             || self.chat.selected_channel != channel
             || self.settings.open && !settings_was
@@ -1230,7 +1249,12 @@ impl Application for Gumicord {
                 // outcome ambiguous.
                 None => match &self.floating {
                     Some(crate::menu::Floating::Confirm(_)) => false,
-                    _ => self.close_menu(),
+                    // An outside press owns focus too: leaving it keeps the
+                    // keyboard over whatever opens next.
+                    _ => {
+                        let closed = self.close_menu();
+                        closed | self.release_text_focus()
+                    }
                 },
             };
         }
@@ -1238,18 +1262,21 @@ impl Application for Gumicord {
         // The settings screen owns every press while open: letting one
         // through would navigate the chat behind it.
         if self.settings.open {
+            // The screen holds no text fields, so every press here is
+            // outside one: the keyboard must go with the screen.
+            let focus = self.release_text_focus();
             let item = hits.iter().find_map(|h| match (h.id, &h.key) {
                 (NodeId::OverlayMenuItem, Some(Key::Index(i))) => Some(*i as usize),
                 _ => None,
             });
             return match item {
-                Some(i) => self.settings_action(i),
+                Some(i) => self.settings_action(i) | focus,
                 // An inert control inside a plugin's page: swallowed, so the
                 // screen does not close under a curious press.
-                None if hits.iter().any(|h| h.id == NodeId::PrimitiveButton) => false,
+                None if hits.iter().any(|h| h.id == NodeId::PrimitiveButton) => focus,
                 // An outside press closes; unlike a dialog there is no unmade
                 // decision to protect.
-                None => self.close_settings(),
+                None => self.close_settings() | focus,
             };
         }
 
@@ -1368,6 +1395,14 @@ impl Application for Gumicord {
 
     /// Secondary press; what was hit decides the menu.
     fn context_menu(&mut self, hits: &[Hit], at: (f32, f32)) -> bool {
+        // Anything but a field leaves the keyboard over the menu; phones
+        // have no other way to dismiss it. The field arms below refocus.
+        if !hits
+            .iter()
+            .any(|h| matches!(h.id, NodeId::ChatInputField | NodeId::AppScreenLoginField))
+        {
+            self.release_text_focus();
+        }
         // Reopens rather than closing, or opening the next message's menu
         // would take two presses.
         let items = hits.iter().find_map(|h| match (h.id, &h.key) {

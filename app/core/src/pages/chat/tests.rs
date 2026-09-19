@@ -387,6 +387,94 @@ fn tapping_outside_the_drawer_dismisses_it() {
     assert_eq!(a.chat.selected_channel, channel, "下のチャンネルへ移動した");
 }
 
+/// Any press outside a field drops focus, or phones keep the keyboard
+/// with no way to dismiss it.
+#[test]
+fn pressing_outside_a_field_releases_focus() {
+    let mut a = app();
+    a.chat.input_focused = true;
+    a.login_view.field = Some(LoginField::Email);
+    assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+    assert!(!a.chat.input_focused, "入力欄に焦点が残っている");
+    assert!(a.login_view.field.is_none(), "ログイン欄に焦点が残っている");
+}
+
+/// A message menu must not hide behind the keyboard.
+#[test]
+fn opening_a_message_menu_releases_focus() {
+    let mut a = app();
+    a.chat.input_focused = true;
+    let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+    assert!(a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)));
+    assert!(a.floating.is_some(), "メニューが開かなかった");
+    assert!(
+        !a.chat.input_focused,
+        "メニューの裏にキーボードが残っている"
+    );
+}
+
+/// The field menu acts on the focused field, so it keeps focus.
+#[test]
+fn opening_a_field_menu_keeps_focus() {
+    let mut a = app();
+    a.chat.input.insert("abc");
+    let hits = [hit_of(NodeId::ChatInputField, None)];
+    assert!(a.context_menu(&hits, (0.0, 0.0)));
+    assert!(a.floating.is_some(), "メニューが開かなかった");
+    assert!(a.chat.input_focused, "欄のメニューが欄を失った");
+}
+
+/// One tap outside the menu dismisses both it and the keyboard.
+#[test]
+fn pressing_outside_an_open_menu_releases_focus() {
+    let mut a = with_menu();
+    a.chat.input_focused = true;
+    let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+    assert!(a.pressed(std::slice::from_ref(&msg)));
+    assert!(a.floating.is_none(), "メニューが閉じていない");
+    assert!(!a.chat.input_focused, "キーボードが閉じていない");
+}
+
+/// Opening the drawer drops focus; it holds no text fields.
+#[test]
+fn opening_the_drawer_releases_focus() {
+    let mut a = narrow();
+    a.chat.input_focused = true;
+    assert!(a.open_drawer());
+    assert!(!a.chat.input_focused, "棚の裏にキーボードが残っている");
+}
+
+/// Tapping through the drawer drops focus, not just the drawer.
+#[test]
+fn tapping_outside_the_drawer_releases_focus() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    a.chat.input_focused = true;
+    assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+    assert!(!a.chat.drawer_open, "閉じていない");
+    assert!(!a.chat.input_focused, "キーボードが閉じていない");
+}
+
+/// Opening settings drops focus; the screen holds no text fields.
+#[test]
+fn opening_settings_releases_focus() {
+    let mut a = app();
+    a.chat.input_focused = true;
+    assert!(a.open_settings());
+    assert!(a.settings.open, "開かなかった");
+    assert!(!a.chat.input_focused, "設定の裏にキーボードが残っている");
+}
+
+/// Pressing a settings row drops focus too.
+#[test]
+fn pressing_a_settings_row_releases_focus() {
+    let mut a = app();
+    assert!(a.open_settings());
+    a.chat.input_focused = true;
+    assert!(press_menu(&mut a, 0));
+    assert!(!a.chat.input_focused, "キーボードが閉じていない");
+}
+
 /// Escape closes the drawer and the sheet, after menus and settings.
 #[test]
 fn escape_closes_drawer_and_sheet() {

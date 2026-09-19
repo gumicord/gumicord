@@ -9,6 +9,10 @@ pub const TAP_SLOP: f32 = 10.0;
 pub const SWIPE_MIN: f32 = 32.0;
 /// Below this speed a release just stops; there is nothing to coast on.
 pub const FLING_MIN: f32 = 120.0;
+/// A drag past this coasts even when slow: reaching it means intent,
+/// whatever the speed was. Signed offset-space pixels along the scroll
+/// axis, so dragging back to the start still stops.
+pub const FLING_DIST_MIN: f32 = 96.0;
 /// Past this the finger must have teleported; clamp before coasting.
 pub const FLING_MAX: f32 = 6000.0;
 /// Below this speed coasting stops; slower is invisible frame to frame.
@@ -144,6 +148,26 @@ impl Fling {
         (velocity.abs() >= FLING_MIN).then_some(Fling { velocity })
     }
 
+    /// Starts coasting on release. Fast enough always coasts; a long drag
+    /// coasts even when slow, at the minimum speed towards where the drag
+    /// went. `net` is the signed offset-space distance the drag moved
+    /// along its scroll axis.
+    pub fn new_release(velocity: f32, net: f32) -> Option<Self> {
+        if !velocity.is_finite() {
+            return None;
+        }
+        let velocity = velocity.clamp(-FLING_MAX, FLING_MAX);
+        if velocity.abs() >= FLING_MIN {
+            return Some(Fling { velocity });
+        }
+        if net.is_finite() && net.abs() >= FLING_DIST_MIN {
+            return Some(Fling {
+                velocity: net.signum() * FLING_MIN,
+            });
+        }
+        None
+    }
+
     /// Advances by `dt` seconds, returning the offset-space delta. `None`
     /// when spent: stop asking for frames. Non-positive steps hold still
     /// without decaying, so a paused loop resumes where it left off.
@@ -243,6 +267,31 @@ mod tests {
         assert!(Fling::new(-119.0).is_none());
         assert!(Fling::new(f32::NAN).is_none());
         assert!(Fling::new(1000.0).is_some());
+    }
+
+    /// A slow but long drag still coasts, towards where it went.
+    #[test]
+    fn a_long_slow_drag_flings() {
+        let f = Fling::new_release(10.0, 200.0).expect("long drag should coast");
+        assert_eq!(f.velocity, FLING_MIN);
+        let f = Fling::new_release(-5.0, -200.0).expect("long drag should coast");
+        assert_eq!(f.velocity, -FLING_MIN);
+    }
+
+    /// A slow short drag stops, and so does a drag back to its start.
+    #[test]
+    fn a_short_or_cancelled_drag_does_not_fling() {
+        assert!(Fling::new_release(10.0, 20.0).is_none());
+        assert!(Fling::new_release(10.0, -20.0).is_none());
+        assert!(Fling::new_release(10.0, 0.0).is_none());
+    }
+
+    /// A fast release keeps its own speed, and NaN never starts.
+    #[test]
+    fn a_fast_release_keeps_its_speed() {
+        let f = Fling::new_release(1000.0, 5.0).expect("fast enough to fling");
+        assert_eq!(f.velocity, 1000.0);
+        assert!(Fling::new_release(f32::NAN, 500.0).is_none());
     }
 
     /// Coasting decays and then stops asking for frames.

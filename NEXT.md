@@ -40,6 +40,8 @@
 - 実機の殻挙動 (Xcode のライフサイクル順・Metal・GameActivity)
 - 触って切り替える操作とセーフエリア、Android のクリップボード
 - 一員行の行き先 (プロフィール表示) は将来のまま。複数指は対象外
+- iPad Stage Manager の窓化時の上部余白: `safe area changed` ログで inset 実測値を取ること
+  (Y=0 で窓がメニューバーと重なる場合の PLT-041 適用か、winit の値の問題かの切分けが要る)
 
 ---
 

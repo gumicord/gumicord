@@ -402,6 +402,8 @@ fn run_loop(
         app: Box::new(app),
         #[cfg(target_os = "ios")]
         ios_text: crate::ios_text::IosText::new(waker.clone()),
+        #[cfg(target_os = "ios")]
+        last_safe: (0.0, 0.0, 0.0, 0.0),
         waker,
         window: None,
         renderer: None,
@@ -425,6 +427,7 @@ fn run_loop(
         scroll_vel_peak: 0.0,
         last_scroll_at: None,
         touch_scroll_id: None,
+        touch_scroll_net: 0.0,
         wheel_vel: 0.0,
         wheel_peak: 0.0,
         last_wheel_at: None,
@@ -523,6 +526,9 @@ struct Host {
     last_scroll_at: Option<std::time::Instant>,
     /// Which region the touch is scrolling.
     touch_scroll_id: Option<NodeId>,
+    /// Signed offset-space distance the touch dragged along its scroll
+    /// axis. A long drag coasts on release even when slow.
+    touch_scroll_net: f32,
     /// Smoothed wheel velocity in offset space, for the coast after a burst.
     wheel_vel: f32,
     /// Fastest instantaneous wheel velocity in the burst, signed, for
@@ -553,6 +559,10 @@ struct Host {
     /// Hidden UITextInput editor state (iOS only).
     #[cfg(target_os = "ios")]
     ios_text: crate::ios_text::IosText,
+    /// Last logged safe-area insets, so windowing changes can be told
+    /// apart from stale layout (iOS only).
+    #[cfg(target_os = "ios")]
+    last_safe: (f32, f32, f32, f32),
     /// Last frame times in microseconds, for the pacing log.
     frame_us: std::collections::VecDeque<u128>,
     /// Recent redraw timestamps, for the overlay's fps. Idle ticks count
@@ -714,6 +724,7 @@ impl Host {
         self.scroll_vel_peak = 0.0;
         self.last_scroll_at = None;
         self.touch_scroll_id = None;
+        self.touch_scroll_net = 0.0;
     }
 
     /// Forgets the wheel burst being measured for a coast.
@@ -1340,6 +1351,22 @@ impl Host {
             #[cfg(target_os = "ios")]
             {
                 let (top, right, bottom, left) = safe;
+                // Log changes only: a windowed iPad keeps reporting the
+                // fullscreen insets until told otherwise, and the numbers
+                // tell which side is stale.
+                if safe != self.last_safe {
+                    self.last_safe = safe;
+                    tracing::debug!(
+                        top = top,
+                        right = right,
+                        bottom = bottom,
+                        left = left,
+                        keyboard = keyboard,
+                        w = viewport.w,
+                        h = viewport.h,
+                        "safe area changed"
+                    );
+                }
                 let bottom = if keyboard > 0.0 { 0.0 } else { bottom };
                 if top > 0.0 || right > 0.0 || bottom > 0.0 || left > 0.0 {
                     let p = tree.style.padding.unwrap_or_default();
@@ -2111,6 +2138,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                             && let Some((id, delta)) = self.scroll_touch(point.0, point.1, dx, dy)
                         {
                             let now = std::time::Instant::now();
+                            self.touch_scroll_net += delta;
                             if let Some(at) = self.last_scroll_at {
                                 let dt = (now - at).as_secs_f32();
                                 if dt > 0.0 && dt <= 0.3 {
@@ -2130,10 +2158,11 @@ impl ApplicationHandler<LoopEvent> for Host {
                         if self.long_press.as_ref().is_some_and(|p| p.id == touch.id) {
                             self.long_press = None;
                         }
-                        // Coast on release when the finger was flying.
-                        // Gated on having scrolled (taps never fling),
-                        // not on the swipe verdict below: a fast upward
-                        // drag both scrolls and, incidentally, swipes.
+                        // Coast on release when the finger was flying, or dragged
+                        // far: a slow long drag means intent whatever the
+                        // speed was. Gated on having scrolled (taps never
+                        // fling), not on the swipe verdict below: a fast
+                        // upward drag both scrolls and, incidentally, swipes.
                         // Use peak velocity for quick flicks, smoothed for sustained drags.
                         let vel = if self.scroll_vel.abs() >= self.scroll_vel_peak.abs() {
                             self.scroll_vel
@@ -2141,7 +2170,8 @@ impl ApplicationHandler<LoopEvent> for Host {
                             self.scroll_vel_peak
                         };
                         if let (Some(id), vel) = (self.touch_scroll_id, vel)
-                            && let Some(fling) = crate::touch::Fling::new(vel)
+                            && let Some(fling) =
+                                crate::touch::Fling::new_release(vel, self.touch_scroll_net)
                         {
                             self.fling = Some(FlingState {
                                 id,
