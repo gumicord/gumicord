@@ -8,11 +8,11 @@ pub const TAP_SLOP: f32 = 10.0;
 /// A release past this, going mostly one way, is a swipe.
 pub const SWIPE_MIN: f32 = 32.0;
 /// Below this speed a release just stops; there is nothing to coast on.
-pub const FLING_MIN: f32 = 200.0;
+pub const FLING_MIN: f32 = 120.0;
 /// Past this the finger must have teleported; clamp before coasting.
 pub const FLING_MAX: f32 = 6000.0;
 /// Below this speed coasting stops; slower is invisible frame to frame.
-pub const FLING_STOP: f32 = 60.0;
+pub const FLING_STOP: f32 = 40.0;
 /// Exponential decay: after this many seconds ~37% of the speed remains.
 pub const FLING_TAU: f32 = 0.12;
 
@@ -239,8 +239,8 @@ mod tests {
     /// Too slow to see never starts; NaN never starts either.
     #[test]
     fn a_slow_or_nan_release_does_not_fling() {
-        assert!(Fling::new(199.0).is_none());
-        assert!(Fling::new(-199.0).is_none());
+        assert!(Fling::new(119.0).is_none());
+        assert!(Fling::new(-119.0).is_none());
         assert!(Fling::new(f32::NAN).is_none());
         assert!(Fling::new(1000.0).is_some());
     }

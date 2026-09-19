@@ -37,6 +37,8 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 const RESIZE_BORDER: f32 = 6.0;
 /// Distance per wheel notch, for platforms reporting lines.
 const LINE_SCROLL: f32 = 48.0;
+/// How long a touch holds still before it becomes a context menu.
+const LONG_PRESS_MS: u64 = 500;
 
 // Android only: read-only native-window queries for the GPU setup log.
 //
@@ -74,6 +76,29 @@ pub struct RevealRequest {
     pub region: NodeId,
     pub id: NodeId,
     pub key: Option<Key>,
+}
+
+/// One drawn frame, for the performance overlay.
+///
+/// Measured at the platform layer, where the redraws actually happen:
+/// counting builds in the app reads idle time as frames. `fps` is the
+/// redraw rate over the recent window; `frame_ms` is what the latest
+/// redraw cost, which stays meaningful while idle.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameReport {
+    /// Redraws per second over the recent window. Low while idle, which
+    /// is sleeping on purpose rather than dropping frames.
+    pub fps: f32,
+    /// What the latest redraw cost, in milliseconds.
+    pub frame_ms: f32,
+    /// Atlas pages live and their resident bytes.
+    pub atlas_pages: usize,
+    pub atlas_bytes: usize,
+    /// What the frame drew.
+    pub nodes: usize,
+    pub rects: u32,
+    pub glyphs: u32,
+    pub draw_calls: usize,
 }
 
 /// Which login field an iOS proxy mirrors, if any. Only these two pair
@@ -134,6 +159,11 @@ pub trait Application {
     /// A scroll region moved. Deciding what that means is the app's job; this
     /// layer does not know what the list holds.
     fn scrolled(&mut self, _id: NodeId, _at: f32, _max: f32) {}
+
+    /// One drawn frame, for the performance overlay. Called after every
+    /// redraw with the previous frame's numbers; the app shows them on the
+    /// next build.
+    fn report_frame(&mut self, _report: FrameReport) {}
 
     /// Redraw after this long even with no input.
     ///
@@ -392,14 +422,21 @@ fn run_loop(
         touch: crate::touch::Tracker::default(),
         fling: None,
         scroll_vel: 0.0,
+        scroll_vel_peak: 0.0,
         last_scroll_at: None,
         touch_scroll_id: None,
+        wheel_vel: 0.0,
+        wheel_peak: 0.0,
+        last_wheel_at: None,
+        wheel_id: None,
+        long_press: None,
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
         #[cfg(target_os = "ios")]
         proxy: None,
         frame_us: std::collections::VecDeque::new(),
+        frame_times: std::collections::VecDeque::new(),
         first_frame: true,
         started: std::time::Instant::now(),
         blink: crate::clock::caret_blink_interval(),
@@ -425,6 +462,14 @@ enum Zone {
 struct FlingState {
     id: NodeId,
     fling: crate::touch::Fling,
+    at: std::time::Instant,
+}
+
+/// A touch held still, waiting to become a context menu.
+struct PendingLongPress {
+    id: u64,
+    x: f32,
+    y: f32,
     at: std::time::Instant,
 }
 
@@ -470,10 +515,25 @@ struct Host {
     fling: Option<FlingState>,
     /// Smoothed scroll velocity in offset space, for the fling on release.
     scroll_vel: f32,
+    /// Fastest instantaneous velocity in the gesture, signed. Smoothing
+    /// understates a quick flick, so the release coasts with whichever
+    /// has the larger magnitude.
+    scroll_vel_peak: f32,
     /// When the touch last scrolled.
     last_scroll_at: Option<std::time::Instant>,
     /// Which region the touch is scrolling.
     touch_scroll_id: Option<NodeId>,
+    /// Smoothed wheel velocity in offset space, for the coast after a burst.
+    wheel_vel: f32,
+    /// Fastest instantaneous wheel velocity in the burst, signed, for
+    /// the same reason as the touch peak above.
+    wheel_peak: f32,
+    /// When the wheel last scrolled.
+    last_wheel_at: Option<std::time::Instant>,
+    /// Which region the wheel is scrolling.
+    wheel_id: Option<NodeId>,
+    /// A touch held still, waiting to become a context menu.
+    long_press: Option<PendingLongPress>,
     /// A title-bar control button armed on press; acted on on release.
     ///
     /// Acting on press lets Windows hand the release to whatever is now under
@@ -495,6 +555,9 @@ struct Host {
     ios_text: crate::ios_text::IosText,
     /// Last frame times in microseconds, for the pacing log.
     frame_us: std::collections::VecDeque<u128>,
+    /// Recent redraw timestamps, for the overlay's fps. Idle ticks count
+    /// too, so a low rate here means sleeping on purpose.
+    frame_times: std::collections::VecDeque<std::time::Instant>,
     first_frame: bool,
     /// When `run` started, for measuring time to first frame.
     started: std::time::Instant,
@@ -544,6 +607,8 @@ impl Host {
     fn press_client(&mut self) {
         // A press takes over from any coast.
         self.fling = None;
+        self.reset_wheel();
+        self.long_press = None;
         // Scrollbars come before the app: they overlap the
         // list, and only one can answer.
         let grabbed = self
@@ -646,8 +711,17 @@ impl Host {
     /// Forgets the touch scroll being measured for a fling.
     fn reset_touch_scroll(&mut self) {
         self.scroll_vel = 0.0;
+        self.scroll_vel_peak = 0.0;
         self.last_scroll_at = None;
         self.touch_scroll_id = None;
+    }
+
+    /// Forgets the wheel burst being measured for a coast.
+    fn reset_wheel(&mut self) {
+        self.wheel_vel = 0.0;
+        self.wheel_peak = 0.0;
+        self.last_wheel_at = None;
+        self.wheel_id = None;
     }
 
     /// The link run under the pointer, if any.
@@ -1313,6 +1387,49 @@ impl Host {
             return;
         }
 
+        // Hand the frame's numbers to the overlay. Measured here, where the
+        // redraws happen: counting builds in the app reads idle sleeps as
+        // frames and makes a quiet settings screen look slow.
+        {
+            const WINDOW_SECS: f32 = 2.0;
+            let now = std::time::Instant::now();
+            self.frame_times.push_back(now);
+            while self.frame_times.len() > 240 {
+                self.frame_times.pop_front();
+            }
+            while let Some(front) = self.frame_times.front()
+                && now.duration_since(*front).as_secs_f32() > WINDOW_SECS
+            {
+                self.frame_times.pop_front();
+            }
+            let fps = match (self.frame_times.front(), self.frame_times.back()) {
+                (Some(front), Some(back)) if self.frame_times.len() >= 2 => {
+                    let span = back.duration_since(*front).as_secs_f32();
+                    if span > 0.0 {
+                        (self.frame_times.len() - 1) as f32 / span
+                    } else {
+                        0.0
+                    }
+                }
+                _ => 0.0,
+            };
+            let (atlas_pages, atlas_bytes) = self
+                .renderer
+                .as_ref()
+                .map(|r| (r.atlas_pages(), r.atlas_bytes()))
+                .unwrap_or((0, 0));
+            self.app.report_frame(FrameReport {
+                fps,
+                frame_ms: frame_start.elapsed().as_secs_f32() * 1000.0,
+                atlas_pages,
+                atlas_bytes,
+                nodes: stats.nodes,
+                rects: stats.rects,
+                glyphs: stats.glyphs,
+                draw_calls: stats.draw_calls,
+            });
+        }
+
         // Hover changes with layout, not only with the pointer: scrolling
         // moves rows under a stationary cursor, and hit testing answers
         // against the previous frame. Without rechecking here the highlight
@@ -1617,6 +1734,60 @@ impl ApplicationHandler<LoopEvent> for Host {
             }
         }
 
+        // A wheel burst coasting to a stop. Unlike a touch there is no
+        // release event, so the burst ends by timeout: once the wheel rests
+        // past the window, the measured velocity becomes the coast.
+        if self.fling.is_none()
+            && let (Some(id), Some(at)) = (self.wheel_id, self.last_wheel_at)
+        {
+            const WHEEL_END: std::time::Duration = std::time::Duration::from_millis(80);
+            if now >= at + WHEEL_END {
+                let vel = if self.wheel_vel.abs() >= self.wheel_peak.abs() {
+                    self.wheel_vel
+                } else {
+                    self.wheel_peak
+                };
+                if let Some(fling) = crate::touch::Fling::new(vel) {
+                    self.fling = Some(FlingState { id, fling, at: now });
+                    self.request_redraw();
+                }
+                self.reset_wheel();
+            } else {
+                soonest(at + WHEEL_END);
+            }
+        }
+
+        // A touch held still becomes the context menu: phones have no
+        // right button, so this is how every menu opens there.
+        if let Some(pending) = self.long_press.take() {
+            if now >= pending.at {
+                let hits = self.hits_at(pending.x, pending.y);
+                if self.app.context_menu(&hits, (pending.x, pending.y)) {
+                    self.request_redraw();
+                    // Suppress the tap on release: the press already answered.
+                    // Only when something answered; a slow tap on empty space
+                    // still releases as a tap.
+                    self.touch.cancel(pending.id);
+                    self.reset_touch_scroll();
+                } else {
+                    // Nothing answered; leave the touch alone so the release
+                    // still taps, and re-arm only if the finger is still down.
+                    // The tracker still holds it, so a later move still scrolls.
+                    self.long_press = Some(PendingLongPress {
+                        id: pending.id,
+                        x: pending.x,
+                        y: pending.y,
+                        at: now + std::time::Duration::from_millis(LONG_PRESS_MS),
+                    });
+                    soonest(now + std::time::Duration::from_millis(LONG_PRESS_MS));
+                }
+            } else {
+                let at = pending.at;
+                self.long_press = Some(pending);
+                soonest(at);
+            }
+        }
+
         // With no reason, sleep: a stale deadline wakes for no change.
         event_loop.set_control_flow(match until {
             Some(at) => ControlFlow::WaitUntil(at),
@@ -1812,6 +1983,10 @@ impl ApplicationHandler<LoopEvent> for Host {
             WindowEvent::MouseWheel { delta, .. } => {
                 // The wheel takes over from any coast.
                 self.fling = None;
+                // Only notched wheels coast: precision trackpads already send
+                // smooth deltas with OS inertia, and a synthetic fling would
+                // apply it twice.
+                let lined = matches!(delta, MouseScrollDelta::LineDelta(..));
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y * LINE_SCROLL,
                     MouseScrollDelta::PixelDelta(p) => {
@@ -1836,6 +2011,32 @@ impl ApplicationHandler<LoopEvent> for Host {
                 if moved {
                     self.request_redraw();
                 }
+                if !lined {
+                    self.reset_wheel();
+                    return;
+                }
+                let now = std::time::Instant::now();
+                // A stale burst restarts fresh; otherwise the previous coast
+                // leaks into the new measurement.
+                if self
+                    .last_wheel_at
+                    .is_none_or(|at| (now - at).as_secs_f32() > 0.3 || self.wheel_id != Some(id))
+                {
+                    self.wheel_vel = 0.0;
+                    self.wheel_peak = 0.0;
+                }
+                if let Some(at) = self.last_wheel_at {
+                    let dt = (now - at).as_secs_f32();
+                    if dt > 0.0 && dt <= 0.3 {
+                        let inst = dy / dt;
+                        self.wheel_vel += 0.75 * (inst - self.wheel_vel);
+                        if inst.abs() > self.wheel_peak.abs() {
+                            self.wheel_peak = inst;
+                        }
+                    }
+                }
+                self.last_wheel_at = Some(now);
+                self.wheel_id = Some(id);
             }
 
             WindowEvent::MouseInput {
@@ -1884,19 +2085,40 @@ impl ApplicationHandler<LoopEvent> for Host {
                         // measure this drag fresh.
                         self.fling = None;
                         self.reset_touch_scroll();
+                        self.reset_wheel();
                         self.touch.press(touch.id, point.0, point.1);
+                        // First finger only: extras are ignored until it lifts.
+                        if self.long_press.is_none() {
+                            self.long_press = Some(PendingLongPress {
+                                id: touch.id,
+                                x: point.0,
+                                y: point.1,
+                                at: std::time::Instant::now()
+                                    + std::time::Duration::from_millis(LONG_PRESS_MS),
+                            });
+                        }
                     }
                     TouchPhase::Moved => {
-                        if let Some(crate::touch::TouchAction::Scroll { dx, dy }) =
-                            self.touch.mov(touch.id, point.0, point.1)
+                        let action = self.touch.mov(touch.id, point.0, point.1);
+                        // Moving past the slop is a drag, never a hold.
+                        if let Some(pending) = &self.long_press
+                            && pending.id == touch.id
+                            && matches!(action, Some(crate::touch::TouchAction::Scroll { .. }))
+                        {
+                            self.long_press = None;
+                        }
+                        if let Some(crate::touch::TouchAction::Scroll { dx, dy }) = action
                             && let Some((id, delta)) = self.scroll_touch(point.0, point.1, dx, dy)
                         {
                             let now = std::time::Instant::now();
                             if let Some(at) = self.last_scroll_at {
                                 let dt = (now - at).as_secs_f32();
-                                if dt > 0.0 && dt <= 0.1 {
+                                if dt > 0.0 && dt <= 0.3 {
                                     let inst = delta / dt;
-                                    self.scroll_vel += 0.35 * (inst - self.scroll_vel);
+                                    self.scroll_vel += 0.75 * (inst - self.scroll_vel);
+                                    if inst.abs() > self.scroll_vel_peak.abs() {
+                                        self.scroll_vel_peak = inst;
+                                    }
                                 }
                             }
                             self.last_scroll_at = Some(now);
@@ -1904,11 +2126,21 @@ impl ApplicationHandler<LoopEvent> for Host {
                         }
                     }
                     TouchPhase::Ended => {
+                        // A hold already answered; the release must not tap too.
+                        if self.long_press.as_ref().is_some_and(|p| p.id == touch.id) {
+                            self.long_press = None;
+                        }
                         // Coast on release when the finger was flying.
                         // Gated on having scrolled (taps never fling),
                         // not on the swipe verdict below: a fast upward
                         // drag both scrolls and, incidentally, swipes.
-                        if let (Some(id), vel) = (self.touch_scroll_id, self.scroll_vel)
+                        // Use peak velocity for quick flicks, smoothed for sustained drags.
+                        let vel = if self.scroll_vel.abs() >= self.scroll_vel_peak.abs() {
+                            self.scroll_vel
+                        } else {
+                            self.scroll_vel_peak
+                        };
+                        if let (Some(id), vel) = (self.touch_scroll_id, vel)
                             && let Some(fling) = crate::touch::Fling::new(vel)
                         {
                             self.fling = Some(FlingState {
@@ -1934,6 +2166,9 @@ impl ApplicationHandler<LoopEvent> for Host {
                         }
                     }
                     TouchPhase::Cancelled => {
+                        if self.long_press.as_ref().is_some_and(|p| p.id == touch.id) {
+                            self.long_press = None;
+                        }
                         self.touch.cancel(touch.id);
                         self.reset_touch_scroll();
                     }

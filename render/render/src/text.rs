@@ -71,6 +71,10 @@ const BUNDLED_JAPANESE_FAMILY: &str = "Noto Sans JP";
 /// system fonts follow for what it does not cover. The library's
 /// Windows table holds one entry; the UI-tuned variant goes first and
 /// an older one follows. Names for the other platforms come after.
+///
+/// Emoji faces ride at the end: this list also answers `common_fallback`,
+/// which is the path emoji resolve through, so leaving them out replaces
+/// the platform's emoji faces with nothing and channel names stay tofu.
 const JAPANESE_FALLBACK: &[&str] = &[
     BUNDLED_JAPANESE_FAMILY,
     // Windows
@@ -83,6 +87,10 @@ const JAPANESE_FALLBACK: &[&str] = &[
     // Linux / Android
     "Noto Sans CJK JP",
     "Noto Sans JP",
+    // Emoji, per platform. Only the installed one matches; the rest miss.
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Noto Color Emoji",
 ];
 
 /// Decides the font fallback order.
@@ -892,6 +900,16 @@ impl TextEngine {
     /// One texture per page.
     pub fn atlas_views(&self) -> Vec<&wgpu::TextureView> {
         self.atlas.pages.iter().map(|p| &p.view).collect()
+    }
+
+    /// How many atlas pages are live, as a rough memory signal.
+    pub fn atlas_pages(&self) -> usize {
+        self.atlas.pages.len()
+    }
+
+    /// Resident bytes held by atlas pages.
+    pub fn atlas_bytes(&self) -> usize {
+        self.atlas.pages.len() * ATLAS_SIZE as usize * ATLAS_SIZE as usize * 4
     }
 
     /// Whether a page was added; true once.
@@ -1818,6 +1836,19 @@ mod tests {
             japanese_common: false,
         };
         assert_ne!(zh.common_fallback(), JAPANESE_FALLBACK);
+    }
+
+    /// Emoji resolve through the common list too. Overriding it with
+    /// Japanese faces alone drops the platform's emoji faces, leaving
+    /// channel names as tofu.
+    #[test]
+    fn the_common_fallback_keeps_an_emoji_face() {
+        for name in ["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"] {
+            assert!(
+                JAPANESE_FALLBACK.contains(&name),
+                "{name} missing from the common fallback"
+            );
+        }
     }
 
     #[test]

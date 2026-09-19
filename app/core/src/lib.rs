@@ -72,8 +72,21 @@ const THEME_ENV: &str = "GUMICORD_THEME";
 const TOAST_SECS: i64 = 4;
 /// How many toasts stack; older ones drop off unread.
 const TOAST_MAX: usize = 3;
-/// How many builds feed one FPS reading. Fewer turns idle taps into noise.
-const FPS_MARKS: usize = 4;
+/// How often the performance overlay refreshes while shown, even with no
+/// other reason to redraw. Without this the numbers only move while the
+/// screen does, which reads as a stuck meter.
+const STATS_TICK_MS: u64 = 500;
+/// A redraw rate below this is sleeping on purpose, not dropping frames.
+/// While a fling coasts the loop draws every ~16ms, so anything this low
+/// is the 500ms tick keeping the overlay fresh while idle.
+const IDLE_FPS: f32 = 10.0;
+/// One 60Hz frame's budget, in milliseconds.
+const FRAME_BUDGET_MS: f32 = 16.7;
+/// Atlas capacity: 4 pages of 2048-square RGBA8.
+const ATLAS_PAGES_MAX: usize = 4;
+const ATLAS_BYTES_MAX: usize = 64 * 1024 * 1024;
+/// Bar width for the overlay's usage rows, in characters.
+const STATS_BAR: usize = 10;
 
 /// Starts without loading any plugin. Plugin code runs on first sight, so
 /// a broken one can take the session with it before anything is visible.
@@ -285,11 +298,10 @@ pub struct Gumicord {
     toasts: VecDeque<crate::menu::Toast>,
     /// Whether the FPS meter shows. Session-local until settings persist.
     show_fps: bool,
-    /// Build timestamps for the meter, newest last.
-    fps_marks: VecDeque<std::time::Instant>,
-    /// Last measured reading. Sparse builds never overwrite it: one or two
-    /// redraws read as single-digit fps, which is sampling noise.
-    fps_cached: String,
+    /// The last drawn frame's numbers, for the overlay. Measured at the
+    /// platform layer, where the redraws happen; counting builds here reads
+    /// idle sleeps as frames and makes a quiet settings screen look slow.
+    frame_report: Option<gumicord_platform::FrameReport>,
     /// The login screens: fields, forms, errors. Owned outright by
     /// [`pages::login`](crate::pages::login).
     login_view: crate::pages::login::LoginView,
@@ -434,8 +446,7 @@ impl Gumicord {
             floating: None,
             toasts: VecDeque::new(),
             show_fps: false,
-            fps_marks: VecDeque::new(),
-            fps_cached: "-- fps".to_owned(),
+            frame_report: None,
             login_view: crate::pages::login::LoginView::new(),
             images: images::Images::new(),
             now: gumicord_platform::now_unix(),
@@ -1017,12 +1028,29 @@ impl Application for Gumicord {
         }
     }
 
+    /// One drawn frame's numbers, for the overlay. Stored for the next
+    /// build; the overlay shows the previous frame.
+    fn report_frame(&mut self, report: gumicord_platform::FrameReport) {
+        self.frame_report = Some(report);
+    }
+
     /// How long the time-dependent parts of the tree stay valid. `None`
     /// means there is no reason to wake.
     fn next_frame_in(&self) -> Option<std::time::Duration> {
-        self.holds
+        let base = self
+            .holds
             .get()
-            .map(|s| std::time::Duration::from_secs(s.max(1) as u64))
+            .map(|s| std::time::Duration::from_secs(s.max(1) as u64));
+        // The overlay's numbers refresh on a tick even with no other reason
+        // to redraw; otherwise they only move while the screen does.
+        if self.show_fps {
+            let tick = std::time::Duration::from_millis(STATS_TICK_MS);
+            return Some(match base {
+                Some(d) => d.min(tick),
+                None => tick,
+            });
+        }
+        base
     }
 
     /// Something was prepended; hold the scroll position.
@@ -1664,23 +1692,6 @@ impl Application for Gumicord {
         // Image sizes depend on it, so capture before building.
         self.scale = cx.scale;
 
-        // Feed the FPS meter. Stale marks would read idle time as frames,
-        // so only the recent window counts.
-        self.fps_marks.push_back(std::time::Instant::now());
-        while self.fps_marks.len() > 120 {
-            self.fps_marks.pop_front();
-        }
-        while self
-            .fps_marks
-            .front()
-            .is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(2))
-        {
-            self.fps_marks.pop_front();
-        }
-        if let Some(fps) = Self::fps_of(&self.fps_marks) {
-            self.fps_cached = format!("{fps:.0} fps");
-        }
-
         // Read once per frame; re-reading mid-build makes adjacent relative
         // timestamps disagree.
         self.now = gumicord_platform::now_unix();
@@ -1821,6 +1832,17 @@ fn capability_bullets(caps: &[String]) -> String {
         .join("\n")
 }
 
+/// A usage bar against a budget, in text. Clamped, so over budget reads
+/// full rather than overflowing the row.
+fn bar(used: f32) -> String {
+    const FULL: char = '█';
+    const EMPTY: char = '░';
+    let filled = (used.clamp(0.0, 1.0) * STATS_BAR as f32).round() as usize;
+    std::iter::repeat_n(FULL, filled)
+        .chain(std::iter::repeat_n(EMPTY, STATS_BAR - filled))
+        .collect()
+}
+
 impl Gumicord {
     /// The current width class. Read from the last built frame; events
     /// never precede it meaningfully.
@@ -1893,7 +1915,7 @@ impl Gumicord {
             // Pinned top-right by its anchor; the anchor flips inside when
             // the reading is wider than the remaining space.
             .child_if(self.show_fps, || {
-                UiNode::text(NodeId::OverlayFps, self.fps_cached.clone())
+                UiNode::text(NodeId::OverlayFps, self.stats_text())
                     .with_anchor(Anchor::at(self.match_ctx.window_width, 0.0))
             })
     }
@@ -1918,15 +1940,38 @@ impl Gumicord {
         )))
     }
 
-    /// The meter rate over recent builds. Needs a full window before the
-    /// rate means anything: redrawing is on demand, so one or two builds
-    /// read as single-digit fps even on a fast device.
-    fn fps_of(marks: &VecDeque<std::time::Instant>) -> Option<f32> {
-        if marks.len() < FPS_MARKS {
-            return None;
-        }
-        let span = marks.back()?.duration_since(*marks.front()?).as_secs_f32();
-        (span > 0.0).then(|| (marks.len() - 1) as f32 / span)
+    /// The performance overlay's lines. The first line names the rate;
+    /// usage rows follow as text bars against their budgets, so no new
+    /// node kinds or theme vocabulary are needed.
+    ///
+    /// A low redraw rate while idle is sleeping on purpose, not dropping
+    /// frames, so below [`IDLE_FPS`] the head line says so instead of a
+    /// single-digit fps that reads as slowness.
+    fn stats_text(&self) -> String {
+        let Some(r) = &self.frame_report else {
+            return "計測中…".to_owned();
+        };
+        let head = if r.fps < IDLE_FPS {
+            format!("待機中 直近 {:.1}ms", r.frame_ms)
+        } else {
+            format!("{:.0} fps 直近 {:.1}ms", r.fps, r.frame_ms)
+        };
+        let cpu = bar(r.frame_ms / FRAME_BUDGET_MS);
+        let atlas_mb = r.atlas_bytes as f32 / (1024.0 * 1024.0);
+        let atlas_max_mb = ATLAS_BYTES_MAX as f32 / (1024.0 * 1024.0);
+        let atlas = bar(r.atlas_bytes as f32 / ATLAS_BYTES_MAX as f32);
+        format!(
+            "{head}\nCPU {cpu} {:.1}/{:.1}ms\nアトラス {atlas} {}/{ATLAS_PAGES_MAX}p {:.1}/{:.0}MB\n{}ノード {}矩形 {}グリフ {}描画",
+            r.frame_ms,
+            FRAME_BUDGET_MS,
+            r.atlas_pages,
+            atlas_mb,
+            atlas_max_mb,
+            r.nodes,
+            r.rects,
+            r.glyphs,
+            r.draw_calls,
+        )
     }
 
     /// Shows a transient notice. User-initiated outcomes only: anything else
@@ -2978,29 +3023,73 @@ mod responsive_tests {
 }
 
 #[cfg(test)]
-mod fps_tests {
+mod stats_tests {
     use super::*;
 
-    fn marks_every(total: usize, step_ms: u64) -> VecDeque<std::time::Instant> {
-        let start = std::time::Instant::now();
-        (0..total)
-            .map(|i| start + std::time::Duration::from_millis(i as u64 * step_ms))
-            .collect()
+    fn report(fps: f32) -> gumicord_platform::FrameReport {
+        gumicord_platform::FrameReport {
+            fps,
+            frame_ms: 4.0,
+            atlas_pages: 2,
+            atlas_bytes: 32 * 1024 * 1024,
+            nodes: 100,
+            rects: 80,
+            glyphs: 200,
+            draw_calls: 12,
+        }
     }
 
-    /// A steady stream reads back its own rate.
+    /// Usage bars fill against their budgets and never overflow the row.
     #[test]
-    fn steady_marks_read_their_rate() {
-        let fps = Gumicord::fps_of(&marks_every(60, 16)).expect("読めない");
-        assert!((fps - 62.5).abs() < 5.0, "おかしい: {fps}");
+    fn bars_fill_against_their_budgets() {
+        assert_eq!(bar(0.0), "░".repeat(STATS_BAR));
+        assert_eq!(bar(1.0), "█".repeat(STATS_BAR));
+        assert_eq!(bar(2.0).chars().count(), STATS_BAR, "はみ出した");
+        assert_eq!(bar(-1.0).chars().count(), STATS_BAR, "はみ出した");
+        assert!(bar(0.5).starts_with("█████"), "半分のはず: {}", bar(0.5));
     }
 
-    /// Sparse builds are sampling noise, not a measurement.
+    /// A low redraw rate while idle reads as waiting, not as slowness.
+    /// The frame cost beside it stays meaningful either way.
     #[test]
-    fn sparse_marks_read_nothing() {
-        assert!(Gumicord::fps_of(&marks_every(2, 500)).is_none());
-        assert!(Gumicord::fps_of(&marks_every(3, 16)).is_none());
-        assert!(Gumicord::fps_of(&VecDeque::new()).is_none());
+    fn an_idle_loop_reads_as_waiting() {
+        let mut a = Gumicord::demo();
+        a.frame_report = Some(report(2.0));
+        let text = a.stats_text();
+        assert!(text.contains("待機中"), "{text}");
+        assert!(text.contains("アトラス"), "{text}");
+        assert!(text.contains("CPU"), "{text}");
+    }
+
+    /// While drawing, the head line names the rate.
+    #[test]
+    fn a_busy_loop_names_its_rate() {
+        let mut a = Gumicord::demo();
+        a.frame_report = Some(report(59.0));
+        let text = a.stats_text();
+        assert!(text.contains("59 fps"), "{text}");
+        assert!(text.contains("2/4p"), "{text}");
+    }
+
+    /// Before the first frame there is nothing to show yet.
+    #[test]
+    fn no_frame_yet_measures_nothing() {
+        let a = Gumicord::demo();
+        assert_eq!(a.stats_text(), "計測中…");
+    }
+
+    /// The overlay keeps refreshing on a tick even with no other reason
+    /// to redraw; otherwise its numbers only move while the screen does.
+    #[test]
+    fn the_overlay_ticks_while_shown() {
+        use std::time::Duration;
+        let mut a = Gumicord::demo();
+        assert!(a.next_frame_in().is_none());
+        a.show_fps = true;
+        assert_eq!(
+            a.next_frame_in(),
+            Some(Duration::from_millis(STATS_TICK_MS))
+        );
     }
 }
 

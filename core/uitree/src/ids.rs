@@ -233,7 +233,7 @@ define_node_ids! {
     OverlayModalActionLabel,  "overlay.modal.action.label",        None,    Plugin, "ボタンの文字 (slot で cancel/confirm/danger)";
     OverlayTooltip,           "overlay.tooltip",                    None,    Plugin, "指しているものの短い説明。押せず消えるだけ";
     OverlayToast,             "overlay.toast",                      None,    Plugin, "下に出て数秒で消える知らせ。押すものはない";
-    OverlayFps,               "overlay.fps",                        None,    Plugin, "右上に重ねて出す FPS 計。設定のサポートで切り替える";
+    OverlayFps,               "overlay.fps",                        None,    Plugin, "右上に重ねて出す性能表示。fps・フレーム時間・アトラス使用量を棒で出す。設定のサポートで切り替える";
 
     // ─────────────────────────── settings.* — the client's own settings screen
     //

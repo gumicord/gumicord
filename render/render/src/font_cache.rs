@@ -57,10 +57,19 @@ pub fn populate(db: &mut Database, dir: Option<&Path>) -> Stats {
 /// `Database::load_system_fonts` with the platform gap closed: fontdb
 /// enumerates nothing on Android (no fontconfig, no Android branch), so a
 /// cache miss left the database empty and Japanese as tofu. `/system/fonts`
-/// holds Noto (including CJK) and reads from the sandbox.
+/// holds Noto (including CJK) and reads from the sandbox. iOS likewise needs
+/// its directories named: system enumeration misses Apple Color Emoji, so
+/// channel names carrying emoji stay tofu without this.
 fn load_platform_fonts(db: &mut Database) {
     #[cfg(target_os = "android")]
     db.load_fonts_dir("/system/fonts");
+    #[cfg(target_os = "ios")]
+    {
+        db.load_fonts_dir("/System/Library/Fonts");
+        db.load_fonts_dir("/System/Library/Fonts/Cache");
+        db.load_fonts_dir("/System/Library/Fonts/Core");
+        db.load_fonts_dir("/System/Library/Fonts/Supplemental");
+    }
     db.load_system_fonts();
 }
 
@@ -253,6 +262,8 @@ fn system_dirs() -> Vec<PathBuf> {
     {
         dirs.push(PathBuf::from("/System/Library/Fonts"));
         dirs.push(PathBuf::from("/System/Library/Fonts/Cache"));
+        dirs.push(PathBuf::from("/System/Library/Fonts/Core"));
+        dirs.push(PathBuf::from("/System/Library/Fonts/Supplemental"));
     }
     dirs
 }

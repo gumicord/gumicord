@@ -706,6 +706,16 @@ impl Renderer {
     pub fn has_image(&self, url: &str) -> bool {
         self.text.has_image(url)
     }
+
+    /// How many atlas pages are live, as a rough memory signal.
+    pub fn atlas_pages(&self) -> usize {
+        self.text.atlas_pages()
+    }
+
+    /// Resident bytes held by atlas pages.
+    pub fn atlas_bytes(&self) -> usize {
+        self.text.atlas_bytes()
+    }
 }
 
 /// Builds one bind group per atlas page; each can name only one texture.

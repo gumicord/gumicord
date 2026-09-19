@@ -579,13 +579,26 @@ mod tests {
         assert!(press_menu(&mut a, 4));
         assert!(a.show_fps, "押しても付かない");
         assert!(a.settings.open, "押したら閉じた");
+        // A drawn frame's numbers reach the overlay on the next build.
+        a.report_frame(gumicord_platform::FrameReport {
+            fps: 59.0,
+            frame_ms: 4.0,
+            atlas_pages: 1,
+            atlas_bytes: 16 * 1024 * 1024,
+            nodes: 10,
+            rects: 8,
+            glyphs: 20,
+            draw_calls: 3,
+        });
         let mut found = 0;
         a.build_tree(Panes::Four).walk(&mut |n, _| {
             if n.id == NodeId::OverlayFps {
                 found += 1;
                 assert!(n.anchor.is_some(), "右上に寄っていない");
                 let text = n.content.as_text().unwrap_or_default();
-                assert!(text.ends_with("fps"), "計測文でない: {text}");
+                assert!(text.contains("fps"), "計測文でない: {text}");
+                assert!(text.contains("アトラス"), "使用量が出ていない: {text}");
+                assert!(text.contains("CPU"), "使用量が出ていない: {text}");
             }
         });
         assert_eq!(found, 1, "計測が出ていない");

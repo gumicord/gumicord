@@ -47,7 +47,9 @@ pub use touch::{Swipe, SwipeDir};
 pub use url::{OpenUrlError, open_url};
 #[cfg(target_os = "android")]
 pub use window::run_android;
-pub use window::{Application, FrameCx, ImeProxy, PlatformError, RevealRequest, Waker, run};
+pub use window::{
+    Application, FrameCx, FrameReport, ImeProxy, PlatformError, RevealRequest, Waker, run,
+};
 
 /// Writes panics where they can be found: stderr vanishes on the phone,
 /// so the message survives in the data directory past the crash that
