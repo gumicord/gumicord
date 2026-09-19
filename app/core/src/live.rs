@@ -250,6 +250,10 @@ pub struct Live {
     status: Option<Status>,
     /// The account currently backing the open cache.
     current_account_cache: Option<(bool, UserId)>,
+    /// When a failed cache open may be tried again. Without this a phone
+    /// that cannot open the cache retries on every wake, spamming the log
+    /// and the disk.
+    cache_retry_at: Option<std::time::Instant>,
 }
 
 impl Live {
@@ -293,6 +297,7 @@ impl Live {
             bot_complete: HashSet::new(),
             me: None,
             current_account_cache: None,
+            cache_retry_at: None,
         }
     }
 
@@ -340,8 +345,14 @@ impl Live {
     /// Opens the cache for a specific account, replacing any currently open
     /// cache after joining its writer thread.
     pub fn open_cache(&mut self, is_bot: bool, id: UserId) -> bool {
-        if self.current_account_cache == Some((is_bot, id)) && self.db.is_some() {
-            return false;
+        if self.current_account_cache == Some((is_bot, id)) {
+            if self.db.is_some() {
+                return false;
+            }
+            // Same account, still no usable cache: the live connection (if
+            // any) stays up. Tearing it down here re-identified on every
+            // wake, which the server answers with invalid sessions.
+            return self.retry_cache(is_bot, id);
         }
 
         // A different account must never see the previous one's in-memory
@@ -351,23 +362,43 @@ impl Live {
         self.close_cache();
         self.clear_account_state();
         self.current_account_cache = Some((is_bot, id));
+        self.cache_retry_at = None;
+        self.retry_cache(is_bot, id)
+    }
+
+    /// Tries to open the current account's cache. Never touches the live
+    /// connection; only opening a new account does that. Retried at most
+    /// once a minute, so a phone without a cache does not hit the disk on
+    /// every wake.
+    fn retry_cache(&mut self, is_bot: bool, id: UserId) -> bool {
+        if self
+            .cache_retry_at
+            .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return false;
+        }
+        self.cache_retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
 
         match gumicord_store::account_path(is_bot, id).and_then(|p| Db::open(&p)) {
             Ok((db, snapshot)) => {
-                tracing::debug!(
-                    guilds = snapshot.guilds.len(),
-                    messages = snapshot.messages.len(),
-                    "loaded account cache"
-                );
-                self.store.replace_guilds(snapshot.guilds);
-                if !snapshot.guild_order.is_empty() {
-                    self.store.set_preferred_order(snapshot.guild_order);
-                }
-                self.store.set_sidebar(snapshot.folders);
-                self.store.set_collapsed(snapshot.collapsed);
-                self.last_channel = snapshot.last_channel;
-                if let Some(ch) = snapshot.last_channel {
-                    self.store.set_backlog(ch, snapshot.messages);
+                // A running session already holds newer state than the
+                // snapshot; only a fresh one takes it.
+                if !self.started || self.store.is_empty() {
+                    tracing::debug!(
+                        guilds = snapshot.guilds.len(),
+                        messages = snapshot.messages.len(),
+                        "loaded account cache"
+                    );
+                    self.store.replace_guilds(snapshot.guilds);
+                    if !snapshot.guild_order.is_empty() {
+                        self.store.set_preferred_order(snapshot.guild_order);
+                    }
+                    self.store.set_sidebar(snapshot.folders);
+                    self.store.set_collapsed(snapshot.collapsed);
+                    self.last_channel = snapshot.last_channel;
+                    if let Some(ch) = snapshot.last_channel {
+                        self.store.set_backlog(ch, snapshot.messages);
+                    }
                 }
                 self.db = Some(db);
                 true
@@ -1855,6 +1886,75 @@ mod tests {
         assert!(!live.started, "a later start() would return early");
         assert!(live.subs.is_none());
         assert!(live.me.is_none(), "the previous account is still current");
+    }
+
+    /// A throttled retry touches nothing: no disk, no reset.
+    #[test]
+    fn same_account_cache_retry_keeps_the_live_connection() {
+        let mut live = live();
+        let id = UserId::from(1u64);
+        live.current_account_cache = Some((false, id));
+        live.started = true;
+        live.link = Link::Up;
+        live.requested.insert(ch());
+        live.cache_retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+
+        assert!(!live.open_cache(false, id));
+        assert!(live.started, "the pump would be respawned");
+        assert_eq!(live.link, Link::Up);
+        assert!(
+            live.requested.contains(&ch()),
+            "in-memory state was cleared"
+        );
+        assert_eq!(live.current_account_cache, Some((false, id)));
+    }
+
+    /// A cache that will not open must not take a running session down:
+    /// re-identifying on every wake is answered with invalid sessions.
+    #[test]
+    fn same_account_open_failure_keeps_the_live_connection() {
+        // Point the cache base at a file, so no directory can be made.
+        let tag = format!(
+            "gumicord-live-nocache-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        );
+        let blocker = std::env::temp_dir().join(tag);
+        std::fs::write(&blocker, b"in the way").unwrap();
+        #[cfg(windows)]
+        const CACHE_ENV: &str = "APPDATA";
+        #[cfg(not(windows))]
+        const CACHE_ENV: &str = "XDG_CACHE_HOME";
+        let before = std::env::var_os(CACHE_ENV);
+        unsafe { std::env::set_var(CACHE_ENV, &blocker) };
+
+        let mut live = live();
+        let id = UserId::from(1u64);
+        live.current_account_cache = Some((false, id));
+        live.started = true;
+        live.link = Link::Up;
+        live.requested.insert(ch());
+
+        assert!(
+            !live.open_cache(false, id),
+            "an unopenable cache read as open"
+        );
+        assert!(live.started, "the pump would be respawned");
+        assert_eq!(live.link, Link::Up);
+        assert!(
+            live.requested.contains(&ch()),
+            "in-memory state was cleared"
+        );
+
+        unsafe {
+            std::env::remove_var(CACHE_ENV);
+            if let Some(v) = before {
+                std::env::set_var(CACHE_ENV, v);
+            }
+        }
+        let _ = std::fs::remove_file(&blocker);
     }
 
     #[test]

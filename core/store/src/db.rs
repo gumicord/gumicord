@@ -113,8 +113,12 @@ impl Db {
     /// Synchronous, because the first frame needs it and deferring shows an
     /// empty screen for a moment.
     pub fn open(path: &Path) -> Result<(Db, Snapshot), DbError> {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        // Loud when it fails: a silent skip here once hid why a phone
+        // never kept its cache.
+        if let Some(dir) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            tracing::warn!(%e, path = %path.display(), "cannot create the cache directory");
         }
         let conn = rusqlite::Connection::open(path)?;
         // Bound any SQLite lock wait so a stalled peer cannot block the writer
