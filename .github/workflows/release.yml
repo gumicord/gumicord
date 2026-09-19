@@ -178,14 +178,20 @@ jobs:
             -o Gumicord.app/Contents/Resources/Gumicord.icns
 
       # Opt-in: signs only when the certificate secrets exist, so forks
-      # and unconfigured repos keep building unsigned dmg files.
+      # and unconfigured repos keep building unsigned dmg files. The
+      # presence check lives in the script: the secrets context is not
+      # available in a step's if condition.
       - name: Sign app bundle
-        if: matrix.os == 'macos-latest' && secrets.MACOS_CERT_P12 != ''
+        if: matrix.os == 'macos-latest'
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: |
+          if [ -z "$MACOS_CERT_P12" ]; then
+            echo "signing secrets are not configured; leaving the bundle unsigned"
+            exit 0
+          fi
           echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           KEYCHAIN="$RUNNER_TEMP/gumicord-sign.keychain-db"
           security create-keychain -p actions "$KEYCHAIN"
@@ -214,14 +220,19 @@ jobs:
           ls -l Gumicord.dmg
 
       # Opt-in like signing above. Stapling lets a downloaded dmg pass
-      # Gatekeeper offline; without secrets this step stays skipped.
+      # Gatekeeper offline; without secrets this step reports and passes.
+      # The presence check lives in the script for the same reason.
       - name: Notarize dmg
-        if: matrix.os == 'macos-latest' && secrets.MACOS_NOTARY_APPLE_ID != ''
+        if: matrix.os == 'macos-latest'
         env:
           MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
           MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
         run: |
+          if [ -z "$MACOS_NOTARY_APPLE_ID" ]; then
+            echo "notarization secrets are not configured; skipping"
+            exit 0
+          fi
           xcrun notarytool submit Gumicord.dmg \
             --apple-id "$MACOS_NOTARY_APPLE_ID" \
             --password "$MACOS_NOTARY_PASSWORD" \
