@@ -467,6 +467,8 @@ struct FlingState {
     id: NodeId,
     fling: crate::touch::Fling,
     at: std::time::Instant,
+    /// Offset-space pixels travelled so far, for diagnostics.
+    travelled: f32,
 }
 
 /// A touch held still, waiting to become a context menu.
@@ -620,7 +622,11 @@ impl Host {
     /// A primary press in the client area: links, spoilers, then the app.
     fn press_client(&mut self) {
         // A press takes over from any coast.
-        self.fling = None;
+        if let Some(st) = self.fling.take()
+            && st.travelled > 0.0
+        {
+            tracing::debug!(region = ?st.id, travelled = st.travelled, "fling interrupted by a press");
+        }
         self.reset_wheel();
         self.long_press = None;
         // Scrollbars come before the app: they overlap the
@@ -1742,8 +1748,11 @@ impl ApplicationHandler<LoopEvent> for Host {
             let dt = now.duration_since(st.at).as_secs_f32().clamp(0.0, 0.05);
             st.at = now;
             match st.fling.step(dt) {
-                None => {}
+                None => {
+                    tracing::debug!(region = ?st.id, travelled = st.travelled, "fling spent");
+                }
                 Some(delta) => {
+                    st.travelled += delta.abs();
                     // A held frame spends nothing; anything else must
                     // move the region to earn the next one. At a bound
                     // the coast is spent: pushing further only re-asks
@@ -1761,6 +1770,8 @@ impl ApplicationHandler<LoopEvent> for Host {
                     if keep {
                         self.fling = Some(st);
                         soonest(now + std::time::Duration::from_millis(16));
+                    } else {
+                        tracing::debug!(region = ?st.id, travelled = st.travelled, "fling stopped at the bound");
                     }
                 }
             }
@@ -1780,7 +1791,12 @@ impl ApplicationHandler<LoopEvent> for Host {
                     self.wheel_peak
                 };
                 if let Some(fling) = crate::touch::Fling::new(vel) {
-                    self.fling = Some(FlingState { id, fling, at: now });
+                    self.fling = Some(FlingState {
+                        id,
+                        fling,
+                        at: now,
+                        travelled: 0.0,
+                    });
                     self.request_redraw();
                 }
                 self.reset_wheel();
@@ -2115,7 +2131,11 @@ impl ApplicationHandler<LoopEvent> for Host {
                     TouchPhase::Started => {
                         // A new finger takes over: stop coasting and
                         // measure this drag fresh.
-                        self.fling = None;
+                        if let Some(st) = self.fling.take()
+                            && st.travelled > 0.0
+                        {
+                            tracing::debug!(region = ?st.id, travelled = st.travelled, "fling interrupted by a touch");
+                        }
                         self.reset_touch_scroll();
                         self.reset_wheel();
                         // A finger landing on a scrollbar grabs it, like a
@@ -2218,20 +2238,33 @@ impl ApplicationHandler<LoopEvent> for Host {
                             } else {
                                 self.scroll_vel_peak
                             };
+                            tracing::debug!(
+                                smoothed = self.scroll_vel,
+                                peak = self.scroll_vel_peak,
+                                chosen = vel,
+                                net = self.touch_scroll_net,
+                                region = ?self.touch_scroll_id,
+                                "touch released"
+                            );
                             if let (Some(id), vel) = (self.touch_scroll_id, vel)
                                 && let Some(fling) =
                                     crate::touch::Fling::new_release(vel, self.touch_scroll_net)
                             {
+                                tracing::debug!(region = ?id, velocity = fling.velocity(), "fling started");
                                 self.fling = Some(FlingState {
                                     id,
                                     fling,
                                     at: std::time::Instant::now(),
+                                    travelled: 0.0,
                                 });
                                 self.request_redraw();
+                            } else {
+                                tracing::debug!(region = ?self.touch_scroll_id, "fling refused");
                             }
                             self.reset_touch_scroll();
                             match self.touch.release(touch.id, point.0, point.1) {
                                 Some(crate::touch::TouchAction::Tap { .. }) => {
+                                    tracing::debug!("release verdict: tap");
                                     self.press_client();
                                     // A tap cannot keep dragging afterwards: the
                                     // finger is up, so drop a grab it just made.
@@ -2240,6 +2273,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                                     }
                                 }
                                 Some(crate::touch::TouchAction::Swipe(swipe)) => {
+                                    tracing::debug!(?swipe, "release verdict: swipe");
                                     let crate::touch::Swipe::Point { x, y, .. } = swipe;
                                     let hits = self.hits_at(x, y);
                                     if self.app.swiped(&hits, swipe) {

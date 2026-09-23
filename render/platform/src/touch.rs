@@ -141,6 +141,11 @@ pub struct Fling {
 }
 
 impl Fling {
+    /// The current speed, for diagnostics.
+    pub fn velocity(&self) -> f32 {
+        self.velocity
+    }
+
     /// Starts coasting, unless too slow to see or NaN. Clamps teleports.
     pub fn new(velocity: f32) -> Option<Self> {
         if !velocity.is_finite() {
