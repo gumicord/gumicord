@@ -9,6 +9,7 @@ export type NodeId =
   | "app.window"
   | "app.screen"
   | "app.screen.loading"
+  | "app.screen.loading.icon"
   | "app.screen.login"
   | "app.screen.login.title"
   | "app.screen.login.hint"

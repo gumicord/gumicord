@@ -38,6 +38,12 @@ const IN_FLIGHT: usize = 6;
 /// and larger images fill it in dozens.
 const MAX_SIDE: u32 = 128;
 
+/// The splash icon, served from bytes baked into the binary so it shows
+/// with no cache and no network.
+pub const SPLASH_ICON_URL: &str = "bundled://splash/app-icon";
+/// Longest side for the splash decode, covering the 96pt box past 2x.
+const SPLASH_MAX_SIDE: u32 = 256;
+
 /// A fetched image on its way to the renderer.
 pub struct Images {
     tx: Sender<ImageData>,
@@ -87,6 +93,18 @@ impl Images {
     /// checks with `has_image` first.
     pub fn request(&mut self, url: &str) {
         if url.is_empty() {
+            return;
+        }
+        if url == SPLASH_ICON_URL {
+            if self.requested.insert(url.to_owned())
+                && let Some(image) = decode_image_capped(
+                    url,
+                    include_bytes!("../../../packaging/icons/gumicord.png"),
+                    SPLASH_MAX_SIDE,
+                )
+            {
+                self.ready.push(image);
+            }
             return;
         }
         // Mark the URL as asked only once we can actually fetch it. Asking
@@ -500,6 +518,21 @@ mod tests {
         assert!(decode_image_capped("x", &[0xFF, 0xD8, 0xFF, 0x00], 4096).is_none());
         assert!(decode_image_capped("x", b"RIFF....WEBP", 4096).is_none());
         assert!(decode_image_capped("x", b"GIF89a", 4096).is_none());
+    }
+
+    /// The splash icon decodes from baked-in bytes, with no runtime and
+    /// no network: it shows on a first start with nothing cached.
+    #[test]
+    fn the_splash_icon_needs_nothing() {
+        let mut images = Images::new();
+        images.request(SPLASH_ICON_URL);
+        images.request(SPLASH_ICON_URL);
+        let ready = images.take();
+        assert_eq!(ready.len(), 1, "asked twice, decoded once");
+        let icon = &ready[0];
+        assert_eq!(icon.url, SPLASH_ICON_URL);
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 
     fn solid(w: u32, h: u32, px: [u8; 4]) -> ImageData {

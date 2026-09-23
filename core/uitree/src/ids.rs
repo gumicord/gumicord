@@ -126,6 +126,7 @@ define_node_ids! {
     AppWindow,                "app.window",                      None,    Core,   "ウィンドウ 1 枚";
     AppScreen,                "app.screen",                      None,    Core,   "現在表示中の画面を包むコンテナ";
     AppScreenLoading,         "app.screen.loading",              None,    Core,   "起動中";
+    AppScreenLoadingIcon,     "app.screen.loading.icon",         None,    Core,   "起動中のアプリアイコン";
     AppScreenLogin,           "app.screen.login",                None,    Core,   "ログイン画面 (FR-001)";
     AppScreenLoginTitle,      "app.screen.login.title",          None,    Core,   "ログイン画面の見出し";
     AppScreenLoginHint,       "app.screen.login.hint",           None,    Core,   "ログイン画面の説明文・状態表示";

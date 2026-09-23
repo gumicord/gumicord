@@ -186,8 +186,14 @@ QR 画像 + 一行ヒント + リンク的ボタンだけ。ログイン手段�
 対象は `Session::Connecting` / `Exchanging` の復帰中であり、
 `Done` / `Ended` / `Failed` / `QR` などの確定イベントで通常画面へ遷移する。
 
-- 新しい安定 ID は足さない。中身は既存の `primitive.text` で組む。
+- 中身は文言なしで、中央にアプリアイコン (`AppScreenLoadingIcon`、96px) のみ。
+  横は `LayoutRow` の両側 `LayoutSpacer`、縦は行の交差軸中央寄せで真ん中に置く。
+- 画像はバイナリ同梱 (`packaging/icons/gumicord.png`) を `bundled://splash/app-icon`
+  として同期デコードする。復帰中はキャッシュも通信もあてにできないため、
+  CDN 経由の `primitive.image` 取得には載せない。
 - キャッシュがある起動は従来どおり即メイン (C6 の先行描画を崩さない)。
 - QR の期限切れによる再接続 (`Restarted`) ではスプラッシュに戻さない。
   `booting` は確定イベントでしか clear されないため、再接続中は
   ログイン画面のままとなる。
+- 読み上げ対応は持たない。起動直後のひとときだけの表示であり、
+  OS 標準の起動画面と同様に無言でよい。

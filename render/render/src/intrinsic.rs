@@ -176,6 +176,8 @@ const TITLEBAR_BUTTON_W: f32 = 46.0;
 const SCROLLBAR_W: f32 = 10.0;
 /// QR edge length, about what the official client uses.
 const QR_SIZE: f32 = 176.0;
+/// Splash icon edge length, large enough to read at a glance on a phone.
+const SPLASH_ICON: f32 = 96.0;
 /// Settings category width, narrower than the channel list: two words fit.
 const SETTINGS_NAV_W: f32 = 200.0;
 
@@ -197,6 +199,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         AppRoot => Intrinsic::stack().grow(1.0).cross(Cross::Stretch),
         AppWindow | AppScreen => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
         AppScreenLoading | AppScreenLogin => Intrinsic::column().grow(1.0).cross(Cross::Stretch),
+        AppScreenLoadingIcon => Intrinsic::stack().w(SPLASH_ICON).h(SPLASH_ICON),
         AppScreenLoginTitle | AppScreenLoginHint => Intrinsic::row().cross(Cross::Center),
         // Only the main screen is three columns.
         AppScreenMain => Intrinsic::row().grow(1.0).cross(Cross::Stretch),

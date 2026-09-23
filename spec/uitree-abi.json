@@ -5,6 +5,7 @@
     "app.window": "none",
     "app.screen": "none",
     "app.screen.loading": "none",
+    "app.screen.loading.icon": "none",
     "app.screen.login": "none",
     "app.screen.login.title": "none",
     "app.screen.login.hint": "none",

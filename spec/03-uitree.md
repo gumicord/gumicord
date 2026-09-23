@@ -199,6 +199,7 @@ M1 で公開するフィールド。
 | `app.window` | — | ウィンドウ 1 枚 |
 | `app.screen` | — | 現在表示中の画面を包むコンテナ |
 | `app.screen.loading` | — | 起動中 |
+| `app.screen.loading.icon` | — | 起動中のアプリアイコン |
 | `app.screen.login` | — | ログイン画面 (FR-001) |
 | `app.screen.login.title` | — | ログイン画面の見出し |
 | `app.screen.login.hint` | — | ログイン画面の説明文・状態表示 |
@@ -353,7 +354,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 122 個** (中核 77 / プラグインも生成可 45)。
+**合計 123 個** (中核 78 / プラグインも生成可 45)。
 
 <!-- END GENERATED: node-ids -->
 

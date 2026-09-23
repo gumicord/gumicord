@@ -137,14 +137,17 @@ impl crate::Gumicord {
 }
 
 impl crate::Gumicord {
-    /// The splash: logo and status while the restore is still in flight.
+    /// The splash: the app icon centred, with no text. The row's spacers
+    /// centre horizontally and its cross axis centres vertically.
     /// No new stable IDs; the container was already in the ABI, unused.
     pub(crate) fn loading_screen(&self) -> UiNode {
         UiNode::new(NodeId::AppScreenLoading).child(
-            UiNode::new(NodeId::LayoutColumn)
+            UiNode::new(NodeId::LayoutRow)
                 .child(UiNode::new(NodeId::LayoutSpacer))
-                .child(UiNode::text(NodeId::PrimitiveText, "Gumicord"))
-                .child(UiNode::text(NodeId::PrimitiveText, self.login.hint()))
+                .child(UiNode::image(
+                    NodeId::AppScreenLoadingIcon,
+                    crate::images::SPLASH_ICON_URL,
+                ))
                 .child(UiNode::new(NodeId::LayoutSpacer)),
         )
     }
@@ -495,6 +498,30 @@ mod tests {
         assert!(!seen.contains(&NodeId::ChatMessageList), "本文が漏れている");
     }
 
+    /// The splash icon sits in the middle of the screen, on a phone-sized
+    /// viewport. Rectangles stand in for seeing it.
+    #[test]
+    fn the_splash_icon_sits_centred() {
+        let a = pending();
+        let placed = gumicord_render::layout_for_test(
+            &a.build_tree(Panes::Three),
+            gumicord_render::Size::new(375.0, 667.0),
+        );
+        let rect = |id| placed.iter().find(|(i, _)| *i == id).map(|(_, r)| *r);
+        let screen = rect(NodeId::AppScreenLoading).expect("splash missing");
+        let icon = rect(NodeId::AppScreenLoadingIcon).expect("icon missing");
+        assert!((icon.w - 96.0).abs() < 0.01, "icon width {icon:?}");
+        assert!((icon.h - 96.0).abs() < 0.01, "icon height {icon:?}");
+        assert!(
+            ((icon.x - screen.x) - (screen.w - icon.w) / 2.0).abs() < 1.0,
+            "horizontally off-centre: {icon:?} in {screen:?}"
+        );
+        assert!(
+            ((icon.y - screen.y) - (screen.h - icon.h) / 2.0).abs() < 1.0,
+            "vertically off-centre: {icon:?} in {screen:?}"
+        );
+    }
+
     /// The first answer ends the splash: a QR shows the login screen.
     #[test]
     fn the_login_screen_follows_the_first_answer() {
@@ -543,26 +570,35 @@ mod tests {
         assert_eq!(data.as_deref(), Some("https://example/1"));
     }
 
-    /// Progress is always stated, so nothing looks silently stuck.
-    /// While booting the splash carries the status line instead.
+    /// The splash shows only the centred app icon, with no text. Login
+    /// states below still state their progress through the hint line.
     #[test]
     fn every_state_says_something() {
         let a = pending();
         let tree = a.build_tree(Panes::Three);
         let mut loading = false;
-        let mut status = false;
+        let mut icon = None;
+        let mut splash_text = false;
         tree.walk(&mut |n, _| {
             if n.id == NodeId::AppScreenLoading {
                 loading = true;
             }
+            if n.id == NodeId::AppScreenLoadingIcon {
+                icon = n.content.as_image().map(str::to_owned);
+            }
             if n.id == NodeId::PrimitiveText
                 && n.content.as_text().is_some_and(|s| !s.trim().is_empty())
             {
-                status = true;
+                splash_text = true;
             }
         });
         assert!(loading, "splash missing");
-        assert!(status, "splash without a status line");
+        assert_eq!(
+            icon.as_deref(),
+            Some(crate::images::SPLASH_ICON_URL),
+            "splash without the app icon"
+        );
+        assert!(!splash_text, "splash shows text");
 
         let mut a = pending();
         for event in [

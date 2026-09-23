@@ -2269,15 +2269,16 @@ impl ApplicationHandler<LoopEvent> for Host {
                             // fling), not on the swipe verdict below: a fast
                             // upward drag both scrolls and, incidentally, swipes.
                             // The window's slope decides; one wild pair cannot.
+                            // Offset moves opposite the finger, so negate to coast along the drag.
                             let (vx, vy) = self.touch_vel.velocity();
                             let (vel, net) = match self.touch_scroll_id {
                                 Some(id)
                                     if gumicord_render::intrinsic(id).axis
                                         == gumicord_render::Axis::Row =>
                                 {
-                                    (vx, self.touch_cum_x)
+                                    (-vx, -self.touch_cum_x)
                                 }
-                                Some(_) => (vy, self.touch_cum_y),
+                                Some(_) => (-vy, -self.touch_cum_y),
                                 None => (0.0, 0.0),
                             };
                             tracing::debug!(
