@@ -37,6 +37,10 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 const RESIZE_BORDER: f32 = 6.0;
 /// Distance per wheel notch, for platforms reporting lines.
 const LINE_SCROLL: f32 = 48.0;
+/// How long a coast may wait at the edge for history to arrive. Paging
+/// answers or fails, which ends the wait either way; without the cap a
+/// stalled load would redraw every frame forever.
+const FLING_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 /// How long a touch holds still before it becomes a context menu.
 const LONG_PRESS_MS: u64 = 500;
 
@@ -159,6 +163,13 @@ pub trait Application {
     /// A scroll region moved. Deciding what that means is the app's job; this
     /// layer does not know what the list holds.
     fn scrolled(&mut self, _id: NodeId, _at: f32, _max: f32) {}
+
+    /// Whether a coast dying at the edge should wait for history instead.
+    /// Only lists that page backwards ever answer yes; anything else ends
+    /// at its bound.
+    fn hold_fling(&self, _id: NodeId) -> bool {
+        false
+    }
 
     /// One drawn frame, for the performance overlay. Called after every
     /// redraw with the previous frame's numbers; the app shows them on the
@@ -467,6 +478,8 @@ struct FlingState {
     id: NodeId,
     fling: crate::touch::Fling,
     at: std::time::Instant,
+    /// When the coast started; waiting at the edge gives up past the cap.
+    born: std::time::Instant,
     /// Offset-space pixels travelled so far, for diagnostics.
     travelled: f32,
 }
@@ -1758,16 +1771,28 @@ impl ApplicationHandler<LoopEvent> for Host {
                     // the coast is spent: pushing further only re-asks
                     // for history it already asked for.
                     let mut keep = delta == 0.0;
-                    if !keep
-                        && let Some(r) = &mut self.renderer
-                        && r.scroll_by(st.id, delta)
-                    {
-                        let (at, max) = r.scroll_place(st.id);
-                        self.app.scrolled(st.id, at, max);
-                        self.request_redraw();
-                        keep = true;
+                    let mut place = None;
+                    if !keep && let Some(r) = &mut self.renderer {
+                        if r.scroll_by(st.id, delta) {
+                            let (at, max) = r.scroll_place(st.id);
+                            self.app.scrolled(st.id, at, max);
+                            self.request_redraw();
+                            keep = true;
+                        } else {
+                            place = Some(r.scroll_place(st.id));
+                        }
                     }
                     if keep {
+                        self.fling = Some(st);
+                        soonest(now + std::time::Duration::from_millis(16));
+                    } else if let Some((at, max)) = place
+                        && at <= 0.0
+                        && max > 0.0
+                        && st.born.elapsed() < FLING_HOLD_MAX
+                        && self.app.hold_fling(st.id)
+                    {
+                        // History on its way: wait for it instead of dying
+                        // at the edge; the next page resumes the coast.
                         self.fling = Some(st);
                         soonest(now + std::time::Duration::from_millis(16));
                     } else {
@@ -1795,6 +1820,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                         id,
                         fling,
                         at: now,
+                        born: now,
                         travelled: 0.0,
                     });
                     self.request_redraw();
@@ -2255,6 +2281,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                                     id,
                                     fling,
                                     at: std::time::Instant::now(),
+                                    born: std::time::Instant::now(),
                                     travelled: 0.0,
                                 });
                                 self.request_redraw();

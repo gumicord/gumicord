@@ -283,6 +283,9 @@ pub struct Gateway {
 pub enum Request {
     /// We are watching this channel, and which rows of its member list.
     Watch(GuildId, ChannelId, Vec<MemberRange>),
+    /// Forget the remembered subscription, so the next watch reaches the
+    /// wire even with identical ranges.
+    Forget(GuildId),
     /// We need these members in this guild.
     Members(GuildId, Vec<UserId>),
     /// Bot-only member list request. Unlike a user subscription, this is the
@@ -324,6 +327,14 @@ impl Subscriptions {
         let _ = self
             .tx
             .send(Request::Watch(guild, channel, ranges.to_vec()));
+    }
+
+    /// Drops the remembered subscription. The next `watch` reaches the wire
+    /// even with identical ranges: used when the server wiped a list
+    /// without syncing a replacement, which re-asking the same tuple would
+    /// otherwise never heal.
+    pub fn forget(&self, guild: GuildId) {
+        let _ = self.tx.send(Request::Forget(guild));
     }
 
     /// Requests members by id.
@@ -849,6 +860,10 @@ impl Connection {
             Step::Watch(Some(Request::Members(guild, users))) => {
                 tracing::debug!(%guild, users = users.len(), "requesting members by id");
                 self.send(request_members(guild, &users)).await?;
+                Ok(None)
+            }
+            Step::Watch(Some(Request::Forget(guild))) => {
+                wanted.remove(&guild);
                 Ok(None)
             }
             Step::Watch(Some(Request::AllMembers(guild))) => {

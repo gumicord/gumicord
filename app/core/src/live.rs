@@ -54,6 +54,11 @@ const MIN_MEMBER_ROWS: [gumicord_gateway::MemberRange; 1] = [[0, 0]];
 /// this throttles repeats while still healing a dropped ask.
 const BOT_ROSTER_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How soon an invalidated member list may be re-asked. The server wipes
+/// without a replacement often enough to need healing, but a wipe on every
+/// answer would resend forever without a pause.
+const MEMBER_REWATCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One person typing.
 #[derive(Debug, Clone)]
 struct Typist {
@@ -228,6 +233,10 @@ pub struct Live {
     /// Widened on scroll: the gateway re-sends the subscription when the
     /// ranges change and skips an identical one, so announcing again is free.
     member_rows: std::collections::HashMap<GuildId, Vec<gumicord_gateway::MemberRange>>,
+    /// When an invalidated member list was last re-asked, per guild. The
+    /// server sometimes wipes a list without syncing a replacement;
+    /// re-asking heals it, but every invalidate must not resend forever.
+    member_rewatch: std::collections::HashMap<GuildId, std::time::Instant>,
     /// Whether the member pane shows. Hidden narrows the subscription to the
     /// minimum instead of unsubscribing, which never worked. The app sets it
     /// every frame; widened rows are remembered regardless.
@@ -291,6 +300,7 @@ impl Live {
             typing: std::collections::HashMap::new(),
             members: std::collections::HashMap::new(),
             member_rows: std::collections::HashMap::new(),
+            member_rewatch: std::collections::HashMap::new(),
             members_visible: true,
             bot_roster: std::collections::HashMap::new(),
             bot_asked: std::collections::HashMap::new(),
@@ -327,6 +337,7 @@ impl Live {
         self.asked_members.clear();
         self.members.clear();
         self.member_rows.clear();
+        self.member_rewatch.clear();
         self.bot_roster.clear();
         self.bot_asked.clear();
         self.bot_complete.clear();
@@ -827,6 +838,35 @@ impl Live {
         subs.watch(guild, channel, visible_rows(self.members_visible, asked));
     }
 
+    /// Re-asks the watched guild's member list after the server wiped it
+    /// without syncing a replacement. Returning to such a guild re-asks an
+    /// identical tuple the gateway swallows as a duplicate, and an empty
+    /// list never scrolls to ask again — so without this the list stays
+    /// empty until something changes the ranges.
+    fn rewatch_members(&mut self, guild: GuildId) {
+        let Some(channel) = self.watching else { return };
+        if self.store.channel(channel).and_then(|c| c.guild_id) != Some(guild) {
+            return;
+        }
+        if self
+            .member_rewatch
+            .get(&guild)
+            .is_some_and(|at| at.elapsed() < MEMBER_REWATCH_COOLDOWN)
+        {
+            return;
+        }
+        let Some(subs) = &self.subs else { return };
+        let rows = self
+            .member_rows
+            .entry(guild)
+            .or_insert_with(|| MEMBER_ROWS.to_vec())
+            .clone();
+        tracing::debug!(%guild, "re-asking the wiped member list");
+        subs.forget(guild);
+        subs.watch(guild, channel, visible_rows(self.members_visible, &rows));
+        self.member_rewatch.insert(guild, std::time::Instant::now());
+    }
+
     /// Asks for a bot guild's roster. OP 8 answers in chunks, which
     /// accumulate in `bot_roster`.
     ///
@@ -1265,6 +1305,7 @@ impl Live {
             }
             LiveEvent::Members(update) => {
                 let guild = update.guild;
+                let invalidated = update.ops.iter().any(|op| matches!(op, ListOp::Invalidate));
                 // Small shapes only, never member payloads.
                 let ops: Vec<String> = update
                     .ops
@@ -1290,6 +1331,11 @@ impl Live {
                 tracing::debug!(%guild, online = update.online, total = update.total, ?ops, "member list update");
                 let changed = self.members.entry(guild).or_default().apply(*update);
                 tracing::debug!(%guild, held = self.members.get(&guild).map_or(0, |m| m.rows().len()), "member list held");
+
+                // A wipe without a replacement never heals by itself: heal it.
+                if invalidated {
+                    self.rewatch_members(guild);
+                }
 
                 // Remember members seen here: for REST messages this can be
                 // the only source of nicknames and role colours.
@@ -2568,6 +2614,75 @@ mod tests {
         // first may reach the wire.
         live.extend_members(guild);
         assert_eq!(live.member_rows[&guild].len(), 2);
+    }
+
+    /// A wiped member list is re-asked while watched: an identical tuple
+    /// would otherwise never reach the wire again, and an empty list never
+    /// scrolls to ask.
+    #[test]
+    fn an_invalidated_member_list_is_re_asked() {
+        use gumicord_gateway::Request;
+        use gumicord_gateway::member_list::MemberListUpdate;
+        use gumicord_model::{Channel, ChannelKind};
+
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        let (mut gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.watching = Some(ch());
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: vec![Channel {
+                id: ch(),
+                kind: ChannelKind::GuildText,
+                name: Some("一般".to_owned()),
+                guild_id: Some(guild),
+                parent_id: None,
+                position: 0,
+                topic: None,
+                nsfw: false,
+                recipients: Vec::new(),
+                last_message_id: None,
+            }],
+            roles: Vec::new(),
+        });
+        live.member_rows.insert(guild, vec![[0, 99]]);
+        live.members.insert(guild, held_list(100));
+
+        let wipe = || {
+            LiveEvent::Members(Box::new(MemberListUpdate {
+                guild,
+                online: 1,
+                total: 100,
+                ops: vec![ListOp::Invalidate],
+            }))
+        };
+        assert!(live.apply_for_test(wipe()));
+        assert!(live.members(guild).is_none(), "the wipe did not land");
+
+        let mut saw_forget = false;
+        let mut saw_watch = false;
+        for r in gateway.take_requests() {
+            match r {
+                Request::Forget(g) if g == guild => saw_forget = true,
+                Request::Watch(g, c, rows) if g == guild && c == ch() => {
+                    saw_watch = rows == vec![[0u32, 99]];
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_forget, "the remembered subscription was not dropped");
+        assert!(saw_watch, "the same rows were not re-asked");
+
+        // A second wipe inside the cooldown resends nothing.
+        live.apply_for_test(wipe());
+        assert!(
+            gateway.take_requests().is_empty(),
+            "re-asked inside the cooldown"
+        );
     }
 
     /// Another guild's scroll does not widen this one's ask.

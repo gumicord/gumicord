@@ -1049,6 +1049,18 @@ impl Application for Gumicord {
         }
     }
 
+    /// Whether a coast dying at the edge should wait for history instead.
+    ///
+    /// Only the message list pages backwards: a page on its way resumes
+    /// the coast once it lands, instead of stranding the flick at the top.
+    fn hold_fling(&self, id: NodeId) -> bool {
+        if id != NodeId::ChatMessageList {
+            return false;
+        }
+        let channel = ChannelId::from(self.chat.selected_channel);
+        self.live.paging_older(channel) || self.live.is_loading(channel)
+    }
+
     /// One drawn frame's numbers, for the overlay. Stored for the next
     /// build; the overlay shows the previous frame.
     fn report_frame(&mut self, report: gumicord_platform::FrameReport) {
@@ -1742,9 +1754,11 @@ impl Application for Gumicord {
 
         // [3] build the tree
         let panes = Panes::for_width(cx.viewport.w);
-        // The member subscription follows the member pane: hidden narrows to
-        // the minimum instead of unsubscribing, which never worked.
-        self.live.set_members_visible(panes.members());
+        // The member subscription follows the member pane, and the sheet
+        // while it is open: hidden narrows to the minimum instead of
+        // unsubscribing, which never worked.
+        self.live
+            .set_members_visible(panes.members() || self.chat.member_sheet_open);
         let tree = self.build_tree(panes);
 
         // [4] run it through the plugins; the newest finished output wins,
@@ -3069,6 +3083,29 @@ mod responsive_tests {
             vec![NodeId::NavChannelList, NodeId::ChatView]
         );
         assert_eq!(panes_in(&a.build_tree(Panes::One)), vec![NodeId::ChatView]);
+    }
+}
+
+#[cfg(test)]
+mod fling_hold_tests {
+    use super::*;
+
+    /// Nothing pages in demo, so every coast ends at its bound.
+    #[test]
+    fn an_idle_list_holds_nothing() {
+        let a = Gumicord::demo();
+        assert!(!a.hold_fling(NodeId::ChatMessageList));
+        assert!(!a.hold_fling(NodeId::NavMemberList));
+    }
+
+    /// A page on its way holds the message list's coast, and nothing else's.
+    #[test]
+    fn a_page_on_its_way_holds_the_message_list() {
+        let mut a = Gumicord::demo();
+        a.live.open_channel(GuildId::from(1), ChannelId::from(2));
+        a.chat.selected_channel = 2;
+        assert!(a.hold_fling(NodeId::ChatMessageList));
+        assert!(!a.hold_fling(NodeId::NavMemberList));
     }
 }
 
