@@ -1277,6 +1277,7 @@ impl Live {
                     self.exhausted.insert(channel);
                     return false;
                 }
+                tracing::debug!(%channel, added, "older page landed");
                 // Hold the scroll position: prepending grows the content and
                 // would push the line being read downwards.
                 self.prepended = true;

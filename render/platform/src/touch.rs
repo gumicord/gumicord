@@ -130,6 +130,13 @@ impl Tracker {
     }
 }
 
+/// How far back release velocity looks, in seconds. Android fits over a
+/// similar window: a single paired sample can report absurd speeds when
+/// the loop runs hot, and one pair must never decide the coast.
+pub const VELOCITY_WINDOW: f32 = 0.12;
+/// How many move samples the window keeps; bounds a frantic gesture.
+pub const VELOCITY_MAX_SAMPLES: usize = 32;
+
 /// A released scroll that keeps coasting.
 ///
 /// Offset-space pixels per second, decaying exponentially. Pure numbers
@@ -138,6 +145,20 @@ impl Tracker {
 #[derive(Debug, Clone, Copy)]
 pub struct Fling {
     velocity: f32,
+    /// Sub-pixel remainder. Hot loops step with tiny deltas, and dropping
+    /// the coast on the first sub-half-pixel one strands it mid-list.
+    carry: f32,
+}
+
+/// What one coasting step asks for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Step {
+    /// Move this many offset-space pixels; whole pixels only.
+    Move(f32),
+    /// Nothing visible yet; keep asking without deciding.
+    Wait,
+    /// Spent; stop asking for frames.
+    Spent,
 }
 
 impl Fling {
@@ -152,7 +173,10 @@ impl Fling {
             return None;
         }
         let velocity = velocity.clamp(-FLING_MAX, FLING_MAX);
-        (velocity.abs() >= FLING_MIN).then_some(Fling { velocity })
+        (velocity.abs() >= FLING_MIN).then_some(Fling {
+            velocity,
+            carry: 0.0,
+        })
     }
 
     /// Starts coasting on release. Fast enough always coasts; a long drag
@@ -165,29 +189,92 @@ impl Fling {
         }
         let velocity = velocity.clamp(-FLING_MAX, FLING_MAX);
         if velocity.abs() >= FLING_MIN {
-            return Some(Fling { velocity });
+            return Some(Fling {
+                velocity,
+                carry: 0.0,
+            });
         }
         if net.is_finite() && net.abs() >= FLING_DIST_MIN {
             return Some(Fling {
                 velocity: net.signum() * FLING_MIN,
+                carry: 0.0,
             });
         }
         None
     }
 
-    /// Advances by `dt` seconds, returning the offset-space delta. `None`
-    /// when spent: stop asking for frames. Non-positive steps hold still
-    /// without decaying, so a paused loop resumes where it left off.
-    pub fn step(&mut self, dt: f32) -> Option<f32> {
+    /// Advances by `dt` seconds. Non-positive steps hold still without
+    /// decaying, so a paused loop resumes where it left off. Sub-pixel
+    /// steps accumulate instead of deciding: only whole pixels move, and
+    /// only a bound or a spent coast ends it.
+    pub fn step(&mut self, dt: f32) -> Step {
         if self.velocity.abs() < FLING_STOP {
-            return None;
+            return Step::Spent;
         }
         if dt <= 0.0 {
-            return Some(0.0);
+            return Step::Wait;
         }
-        let delta = self.velocity * dt;
+        self.carry += self.velocity * dt;
         self.velocity *= (-dt / FLING_TAU).exp();
-        Some(delta)
+        let whole = self.carry.trunc();
+        if whole == 0.0 {
+            return Step::Wait;
+        }
+        self.carry -= whole;
+        Step::Move(whole)
+    }
+}
+
+/// Release velocity over a trailing window.
+///
+/// Fed every move with the elapsed seconds and the cumulative finger
+/// offset; answers with the window's slope. A burst of tiny-dt pairs
+/// reports wild instantaneous speeds, so no single pair may decide.
+#[derive(Debug, Default)]
+pub struct VelocityTracker {
+    samples: std::collections::VecDeque<(f32, f32, f32)>,
+}
+
+impl VelocityTracker {
+    /// Records a move. Times must not go backwards within one gesture.
+    pub fn push(&mut self, at: f32, x: f32, y: f32) {
+        while self
+            .samples
+            .front()
+            .is_some_and(|s| s.0 < at - VELOCITY_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+        self.samples.push_back((at, x, y));
+        while self.samples.len() > VELOCITY_MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+    }
+
+    /// The window's slope per axis, or zero with fewer than two samples.
+    /// A wiggle that returns holds nearly still, as it should.
+    pub fn velocity(&self) -> (f32, f32) {
+        let (Some(first), Some(last)) = (self.samples.front(), self.samples.back()) else {
+            return (0.0, 0.0);
+        };
+        let dt = last.0 - first.0;
+        if dt <= 0.0 {
+            return (0.0, 0.0);
+        }
+        ((last.1 - first.1) / dt, (last.2 - first.2) / dt)
+    }
+
+    /// How many samples the window holds, for diagnostics.
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
     }
 }
 
@@ -306,13 +393,20 @@ mod tests {
     fn a_fling_decays_then_stops() {
         let mut f = Fling::new(2000.0).expect("fast enough to fling");
         // First step moves with nearly the full speed.
-        let first = f.step(1.0 / 60.0).expect("still coasting");
+        let Step::Move(first) = f.step(1.0 / 60.0) else {
+            panic!("still coasting");
+        };
         assert!(first > 20.0, "{first}");
         // A second of steps spends it.
         let mut frames = 0;
-        while f.step(1.0 / 60.0).is_some() {
-            frames += 1;
-            assert!(frames < 600, "coasting never stopped");
+        loop {
+            match f.step(1.0 / 60.0) {
+                Step::Spent => break,
+                Step::Move(_) | Step::Wait => {
+                    frames += 1;
+                    assert!(frames < 600, "coasting never stopped");
+                }
+            }
         }
         assert!(frames > 5, "stopped without coasting");
     }
@@ -321,7 +415,9 @@ mod tests {
     #[test]
     fn a_wild_velocity_clamps() {
         let mut f = Fling::new(1e9).expect("clamped, not refused");
-        let first = f.step(1.0 / 60.0).expect("still coasting");
+        let Step::Move(first) = f.step(1.0 / 60.0) else {
+            panic!("still coasting");
+        };
         assert!(first <= FLING_MAX / 60.0 + 1.0, "{first}");
     }
 
@@ -329,8 +425,67 @@ mod tests {
     #[test]
     fn a_nonpositive_step_holds_still() {
         let mut f = Fling::new(2000.0).expect("fast enough to fling");
-        assert_eq!(f.step(0.0), Some(0.0));
-        assert_eq!(f.step(-1.0), Some(0.0));
-        assert!(f.step(1.0 / 60.0).expect("still coasting") > 20.0);
+        assert_eq!(f.step(0.0), Step::Wait);
+        assert_eq!(f.step(-1.0), Step::Wait);
+        let Step::Move(next) = f.step(1.0 / 60.0) else {
+            panic!("still coasting");
+        };
+        assert!(next > 20.0, "{next}");
+    }
+
+    /// Sub-pixel steps accumulate instead of ending the coast: a hot loop
+    /// must not strand it mid-list on the first tiny delta.
+    #[test]
+    fn sub_pixel_steps_accumulate() {
+        let mut f = Fling::new(120.0).expect("fast enough to fling");
+        let mut moved = 0.0;
+        for _ in 0..20 {
+            match f.step(0.001) {
+                Step::Move(d) => moved += d,
+                Step::Wait => {}
+                Step::Spent => panic!("spent on crumbs"),
+            }
+        }
+        assert!(moved >= 1.0, "crumbs never became a pixel: {moved}");
+    }
+
+    /// One wild pair inside the window barely moves the slope.
+    #[test]
+    fn a_spike_pair_does_not_decide_the_velocity() {
+        let mut v = VelocityTracker::default();
+        v.push(0.00, 0.0, 0.0);
+        v.push(0.04, -20.0, 0.0);
+        v.push(0.08, -40.0, 0.0);
+        // Two moves processed back-to-back: 69.5px in half a millisecond,
+        // the shape behind the absurd peaks on device.
+        v.push(0.0805, -109.5, 0.0);
+        v.push(0.12, -60.0, 0.0);
+        let (vx, _) = v.velocity();
+        assert!(vx < 0.0 && vx > -2000.0, "{vx}");
+    }
+
+    /// A single sample, a still finger and a wiggle answer nothing to fling.
+    #[test]
+    fn too_little_history_answers_zero() {
+        let mut v = VelocityTracker::default();
+        assert_eq!(v.velocity(), (0.0, 0.0));
+        v.push(0.0, 0.0, 0.0);
+        assert_eq!(v.velocity(), (0.0, 0.0));
+        v.push(0.05, 30.0, 0.0);
+        v.push(0.10, 0.0, 0.0);
+        assert_eq!(v.velocity(), (0.0, 0.0));
+    }
+
+    /// Old samples fall out of the window instead of dragging it.
+    #[test]
+    fn old_samples_expire() {
+        let mut v = VelocityTracker::default();
+        v.push(0.0, 0.0, 0.0);
+        v.push(0.05, -500.0, 0.0);
+        v.push(0.50, -500.0, 0.0);
+        v.push(0.55, -510.0, 0.0);
+        let (vx, _) = v.velocity();
+        assert!(vx < 0.0 && vx > -1000.0, "{vx}");
+        assert!(v.len() <= 3, "kept {}", v.len());
     }
 }

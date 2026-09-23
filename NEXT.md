@@ -52,6 +52,9 @@
   が出ないこと。Caches へ DB が作られ、再起動後に前回の画面が出ること。
   `fling stopped at the bound` に `at/max` が付くようになったため、
   端死と溢れゼロの区別もログで確認できる
+- 実機確認 (2026-09-24 夜追加分): 中央付近での長い惰性 (`fling stopped` が出ず
+  `fling interrupted` で終わること)、`older page landed` と上端フリックの対応、
+  ジャンプ報告時は直前の `older page landed` の有無と発生操作 (スクロール／フリック／切替)
 
 ---
 

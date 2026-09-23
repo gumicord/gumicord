@@ -435,11 +435,11 @@ fn run_loop(
         touch_grab: false,
         touch: crate::touch::Tracker::default(),
         fling: None,
-        scroll_vel: 0.0,
-        scroll_vel_peak: 0.0,
-        last_scroll_at: None,
+        touch_vel: crate::touch::VelocityTracker::default(),
+        touch_start: None,
+        touch_cum_x: 0.0,
+        touch_cum_y: 0.0,
         touch_scroll_id: None,
-        touch_scroll_net: 0.0,
         wheel_vel: 0.0,
         wheel_peak: 0.0,
         last_wheel_at: None,
@@ -535,19 +535,17 @@ struct Host {
     touch: crate::touch::Tracker,
     /// A released touch still coasting, if any.
     fling: Option<FlingState>,
-    /// Smoothed scroll velocity in offset space, for the fling on release.
-    scroll_vel: f32,
-    /// Fastest instantaneous velocity in the gesture, signed. Smoothing
-    /// understates a quick flick, so the release coasts with whichever
-    /// has the larger magnitude.
-    scroll_vel_peak: f32,
-    /// When the touch last scrolled.
-    last_scroll_at: Option<std::time::Instant>,
+    /// Release velocity over a trailing window. Fed by every move, whether
+    /// or not anything scrolled: one wild pair must never decide the coast.
+    touch_vel: crate::touch::VelocityTracker,
+    /// When the current gesture started, for the tracker's clock.
+    touch_start: Option<std::time::Instant>,
+    /// Cumulative finger offset per axis since the press. The release net
+    /// along the scrolled region's axis; a long drag coasts even when slow.
+    touch_cum_x: f32,
+    touch_cum_y: f32,
     /// Which region the touch is scrolling.
     touch_scroll_id: Option<NodeId>,
-    /// Signed offset-space distance the touch dragged along its scroll
-    /// axis. A long drag coasts on release even when slow.
-    touch_scroll_net: f32,
     /// Smoothed wheel velocity in offset space, for the coast after a burst.
     wheel_vel: f32,
     /// Fastest instantaneous wheel velocity in the burst, signed, for
@@ -744,11 +742,11 @@ impl Host {
 
     /// Forgets the touch scroll being measured for a fling.
     fn reset_touch_scroll(&mut self) {
-        self.scroll_vel = 0.0;
-        self.scroll_vel_peak = 0.0;
-        self.last_scroll_at = None;
+        self.touch_vel.clear();
+        self.touch_start = None;
+        self.touch_cum_x = 0.0;
+        self.touch_cum_y = 0.0;
         self.touch_scroll_id = None;
-        self.touch_scroll_net = 0.0;
     }
 
     /// Forgets the wheel burst being measured for a coast.
@@ -1766,18 +1764,21 @@ impl ApplicationHandler<LoopEvent> for Host {
             let dt = now.duration_since(st.at).as_secs_f32().clamp(0.0, 0.05);
             st.at = now;
             match st.fling.step(dt) {
-                None => {
+                crate::touch::Step::Spent => {
                     tracing::debug!(region = ?st.id, travelled = st.travelled, "fling spent");
                 }
-                Some(delta) => {
+                crate::touch::Step::Wait => {
+                    self.fling = Some(st);
+                    soonest(now + std::time::Duration::from_millis(16));
+                }
+                crate::touch::Step::Move(delta) => {
                     st.travelled += delta.abs();
-                    // A held frame spends nothing; anything else must
-                    // move the region to earn the next one. At a bound
-                    // the coast is spent: pushing further only re-asks
-                    // for history it already asked for.
-                    let mut keep = delta == 0.0;
+                    // Anything but a bound moves the region to earn the next
+                    // frame. At a bound the coast is spent: pushing further
+                    // only re-asks for history it already asked for.
+                    let mut keep = false;
                     let mut place = None;
-                    if !keep && let Some(r) = &mut self.renderer {
+                    if let Some(r) = &mut self.renderer {
                         if r.scroll_by(st.id, delta) {
                             let (at, max) = r.scroll_place(st.id);
                             self.app.scrolled(st.id, at, max);
@@ -2232,24 +2233,20 @@ impl ApplicationHandler<LoopEvent> for Host {
                             {
                                 self.long_press = None;
                             }
-                            if let Some(crate::touch::TouchAction::Scroll { dx, dy }) = action
-                                && let Some((id, delta)) =
-                                    self.scroll_touch(point.0, point.1, dx, dy)
-                            {
-                                let now = std::time::Instant::now();
-                                self.touch_scroll_net += delta;
-                                if let Some(at) = self.last_scroll_at {
-                                    let dt = (now - at).as_secs_f32();
-                                    if dt > 0.0 && dt <= 0.3 {
-                                        let inst = delta / dt;
-                                        self.scroll_vel += 0.75 * (inst - self.scroll_vel);
-                                        if inst.abs() > self.scroll_vel_peak.abs() {
-                                            self.scroll_vel_peak = inst;
-                                        }
-                                    }
+                            if let Some(crate::touch::TouchAction::Scroll { dx, dy }) = action {
+                                // Measured from every move, scrolled or not:
+                                // region gaps and stalls must not blind it.
+                                let at = self
+                                    .touch_start
+                                    .get_or_insert_with(std::time::Instant::now)
+                                    .elapsed()
+                                    .as_secs_f32();
+                                self.touch_cum_x += dx;
+                                self.touch_cum_y += dy;
+                                self.touch_vel.push(at, self.touch_cum_x, self.touch_cum_y);
+                                if let Some((id, _)) = self.scroll_touch(point.0, point.1, dx, dy) {
+                                    self.touch_scroll_id = Some(id);
                                 }
-                                self.last_scroll_at = Some(now);
-                                self.touch_scroll_id = Some(id);
                             }
                         }
                     }
@@ -2271,23 +2268,26 @@ impl ApplicationHandler<LoopEvent> for Host {
                             // speed was. Gated on having scrolled (taps never
                             // fling), not on the swipe verdict below: a fast
                             // upward drag both scrolls and, incidentally, swipes.
-                            // Use peak velocity for quick flicks, smoothed for sustained drags.
-                            let vel = if self.scroll_vel.abs() >= self.scroll_vel_peak.abs() {
-                                self.scroll_vel
-                            } else {
-                                self.scroll_vel_peak
+                            // The window's slope decides; one wild pair cannot.
+                            let (vx, vy) = self.touch_vel.velocity();
+                            let (vel, net) = match self.touch_scroll_id {
+                                Some(id)
+                                    if gumicord_render::intrinsic(id).axis
+                                        == gumicord_render::Axis::Row =>
+                                {
+                                    (vx, self.touch_cum_x)
+                                }
+                                Some(_) => (vy, self.touch_cum_y),
+                                None => (0.0, 0.0),
                             };
                             tracing::debug!(
-                                smoothed = self.scroll_vel,
-                                peak = self.scroll_vel_peak,
-                                chosen = vel,
-                                net = self.touch_scroll_net,
+                                velocity = vel,
+                                net,
                                 region = ?self.touch_scroll_id,
                                 "touch released"
                             );
-                            if let (Some(id), vel) = (self.touch_scroll_id, vel)
-                                && let Some(fling) =
-                                    crate::touch::Fling::new_release(vel, self.touch_scroll_net)
+                            if let Some(id) = self.touch_scroll_id
+                                && let Some(fling) = crate::touch::Fling::new_release(vel, net)
                             {
                                 tracing::debug!(region = ?id, velocity = fling.velocity(), "fling started");
                                 self.fling = Some(FlingState {
