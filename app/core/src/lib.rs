@@ -490,7 +490,9 @@ impl Gumicord {
     }
 
     fn scrollbar(&self, owner: NodeId) -> Option<UiNode> {
-        (self.hovered_scroll == Some(owner)).then(scrollbar_node)
+        // Phones have no hover, so the bar only exists when always built.
+        // Without overflow nothing is placed anyway.
+        (self.hovered_scroll == Some(owner) || is_mobile()).then(scrollbar_node)
     }
 
     fn hovered_id(&self, node: NodeId, id: u64) -> bool {
@@ -1771,6 +1773,8 @@ fn write_startup_diag(app: &Gumicord, tree: &UiNode, cx: &FrameCx, panes: Panes)
         "settings"
     } else if app.shows_main() {
         "main"
+    } else if app.shows_splash() {
+        "loading"
     } else {
         "login"
     };
@@ -1897,6 +1901,8 @@ impl Gumicord {
                 .children(self.sidebar(panes))
                 .child(self.chat_view())
                 .child_if(panes.members(), || self.member_list())
+        } else if self.shows_splash() {
+            self.loading_screen()
         } else {
             self.login_screen()
         };
@@ -2934,6 +2940,15 @@ impl Gumicord {
     /// Whether the main screen may be shown.
     fn shows_main(&self) -> bool {
         self.login.shows_main() || !self.live.is_empty()
+    }
+
+    /// Whether the splash covers the login screen.
+    ///
+    /// Only while booting with nothing real to show: the restore is still
+    /// in flight. A cache shows the main screen instead, and any answer
+    /// ends the boot.
+    fn shows_splash(&self) -> bool {
+        self.login.booting() && !self.shows_main()
     }
 
     /// Repairs the selection so it points at something real, and fetches what

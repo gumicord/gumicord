@@ -137,6 +137,18 @@ impl crate::Gumicord {
 }
 
 impl crate::Gumicord {
+    /// The splash: logo and status while the restore is still in flight.
+    /// No new stable IDs; the container was already in the ABI, unused.
+    pub(crate) fn loading_screen(&self) -> UiNode {
+        UiNode::new(NodeId::AppScreenLoading).child(
+            UiNode::new(NodeId::LayoutColumn)
+                .child(UiNode::new(NodeId::LayoutSpacer))
+                .child(UiNode::text(NodeId::PrimitiveText, "Gumicord"))
+                .child(UiNode::text(NodeId::PrimitiveText, self.login.hint()))
+                .child(UiNode::new(NodeId::LayoutSpacer)),
+        )
+    }
+
     /// The login screen. Shows a QR by default, the password form when that
     /// was chosen, or the TOTP step when a second factor is needed.
     pub(crate) fn login_screen(&self) -> UiNode {
@@ -470,11 +482,39 @@ mod tests {
         out
     }
 
+    /// While booting with nothing real to show, the splash covers the
+    /// login screen; the first answer decides which screen follows.
+    #[test]
+    fn the_splash_covers_the_login_screen_while_booting() {
+        let a = pending();
+        let seen = ids(&a.build_tree(Panes::Three));
+
+        assert!(seen.contains(&NodeId::AppScreenLoading));
+        assert!(!seen.contains(&NodeId::AppScreenLogin));
+        assert!(!seen.contains(&NodeId::AppScreenMain));
+        assert!(!seen.contains(&NodeId::ChatMessageList), "本文が漏れている");
+    }
+
+    /// The first answer ends the splash: a QR shows the login screen.
+    #[test]
+    fn the_login_screen_follows_the_first_answer() {
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        let seen = ids(&a.build_tree(Panes::Three));
+
+        assert!(!seen.contains(&NodeId::AppScreenLoading));
+        assert!(seen.contains(&NodeId::AppScreenLogin));
+        assert!(!seen.contains(&NodeId::AppScreenMain));
+    }
+
     /// The main screen is not even built while signed out; visible but
     /// untouchable is the worst state.
     #[test]
     fn the_main_screen_is_not_built_before_login() {
-        let a = pending();
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
         let seen = ids(&a.build_tree(Panes::Three));
 
         assert!(seen.contains(&NodeId::AppScreenLogin));
@@ -504,18 +544,33 @@ mod tests {
     }
 
     /// Progress is always stated, so nothing looks silently stuck.
+    /// While booting the splash carries the status line instead.
     #[test]
     fn every_state_says_something() {
+        let a = pending();
+        let tree = a.build_tree(Panes::Three);
+        let mut loading = false;
+        let mut status = false;
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoading {
+                loading = true;
+            }
+            if n.id == NodeId::PrimitiveText
+                && n.content.as_text().is_some_and(|s| !s.trim().is_empty())
+            {
+                status = true;
+            }
+        });
+        assert!(loading, "splash missing");
+        assert!(status, "splash without a status line");
+
         let mut a = pending();
         for event in [
-            None,
-            Some(LoginEvent::Qr("x".to_owned())),
-            Some(LoginEvent::Approved),
-            Some(LoginEvent::Failed("接続できない".to_owned())),
+            LoginEvent::Qr("x".to_owned()),
+            LoginEvent::Approved,
+            LoginEvent::Failed("接続できない".to_owned()),
         ] {
-            if let Some(e) = event {
-                a.login.apply_for_test(e);
-            }
+            a.login.apply_for_test(event);
             let tree = a.build_tree(Panes::Three);
 
             let mut hint = None;
@@ -893,6 +948,8 @@ mod tests {
         use gumicord_uitree::State;
 
         let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
         a.pressed(&[login_hit_of(
             NodeId::PrimitiveButton,
             Key::Slot("login_password"),

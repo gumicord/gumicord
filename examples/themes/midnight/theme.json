@@ -62,6 +62,10 @@
       "style": { "background": "$color.bg.base", "gap": "$space.3", "padding": [24, 24, 24, 24] }
     },
     {
+      "select": "app.screen.loading",
+      "style": { "background": "$color.bg.base", "gap": "$space.3", "padding": [24, 24, 24, 24] }
+    },
+    {
       "select": "app.screen.login.title",
       "style": { "font": { "size": 22, "lineHeight": 30, "weight": 600 } }
     },

@@ -8,7 +8,8 @@ pub const TAP_SLOP: f32 = 10.0;
 /// A release past this, going mostly one way, is a swipe.
 pub const SWIPE_MIN: f32 = 32.0;
 /// Below this speed a release just stops; there is nothing to coast on.
-pub const FLING_MIN: f32 = 120.0;
+/// Matches Android's minimum fling velocity, in logical pixels per second.
+pub const FLING_MIN: f32 = 50.0;
 /// A drag past this coasts even when slow: reaching it means intent,
 /// whatever the speed was. Signed offset-space pixels along the scroll
 /// axis, so dragging back to the start still stops.
@@ -18,7 +19,8 @@ pub const FLING_MAX: f32 = 6000.0;
 /// Below this speed coasting stops; slower is invisible frame to frame.
 pub const FLING_STOP: f32 = 40.0;
 /// Exponential decay: after this many seconds ~37% of the speed remains.
-pub const FLING_TAU: f32 = 0.12;
+/// Long enough to feel like a coast on a phone.
+pub const FLING_TAU: f32 = 0.25;
 
 /// Which way a swipe went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,8 +265,8 @@ mod tests {
     /// Too slow to see never starts; NaN never starts either.
     #[test]
     fn a_slow_or_nan_release_does_not_fling() {
-        assert!(Fling::new(119.0).is_none());
-        assert!(Fling::new(-119.0).is_none());
+        assert!(Fling::new(49.0).is_none());
+        assert!(Fling::new(-49.0).is_none());
         assert!(Fling::new(f32::NAN).is_none());
         assert!(Fling::new(1000.0).is_some());
     }

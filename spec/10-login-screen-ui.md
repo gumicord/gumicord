@@ -178,3 +178,16 @@ QR 画像 + 一行ヒント + リンク的ボタンだけ。ログイン手段�
 
 - 垂直中央寄せの実装（レイアウタ拡張）は「要スパイク」
 - デザイン方針そのもの（配色・レイアウト・空状態の文言）は担当 AI と `FR-001` で決定
+
+## 7. 起動スプラッシュ ([ADR-0014](adr/0014-mobile-gestures-and-splash.md))
+
+起動直後 (`Login::booting` が真) でキャッシュもログインもない間は、
+`AppScreenLogin` の代わりに `AppScreenLoading` を出す。
+対象は `Session::Connecting` / `Exchanging` の復帰中であり、
+`Done` / `Ended` / `Failed` / `QR` などの確定イベントで通常画面へ遷移する。
+
+- 新しい安定 ID は足さない。中身は既存の `primitive.text` で組む。
+- キャッシュがある起動は従来どおり即メイン (C6 の先行描画を崩さない)。
+- QR の期限切れによる再接続 (`Restarted`) ではスプラッシュに戻さない。
+  `booting` は確定イベントでしか clear されないため、再接続中は
+  ログイン画面のままとなる。

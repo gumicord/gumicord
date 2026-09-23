@@ -421,6 +421,7 @@ fn run_loop(
         hovering_link: false,
         hovering_spoiler: false,
         scroll_grab: None,
+        touch_grab: false,
         touch: crate::touch::Tracker::default(),
         fling: None,
         scroll_vel: 0.0,
@@ -512,6 +513,9 @@ struct Host {
     hovering_spoiler: bool,
     /// The scrollbar being dragged, while held.
     scroll_grab: Option<ScrollGrab>,
+    /// Whether the current grab belongs to a touch. A lifted finger cannot
+    /// drag, so its grab dies on release; a mouse grab lives until release.
+    touch_grab: bool,
     /// The finger being tracked, if any.
     touch: crate::touch::Tracker,
     /// A released touch still coasting, if any.
@@ -627,6 +631,7 @@ impl Host {
             .and_then(|r| r.grab_scrollbar(self.cursor.0, self.cursor.1));
         if let Some(g) = grabbed {
             self.scroll_grab = Some(g);
+            self.touch_grab = false;
             self.request_redraw();
             return;
         }
@@ -2113,86 +2118,136 @@ impl ApplicationHandler<LoopEvent> for Host {
                         self.fling = None;
                         self.reset_touch_scroll();
                         self.reset_wheel();
-                        self.touch.press(touch.id, point.0, point.1);
-                        // First finger only: extras are ignored until it lifts.
-                        if self.long_press.is_none() {
-                            self.long_press = Some(PendingLongPress {
-                                id: touch.id,
-                                x: point.0,
-                                y: point.1,
-                                at: std::time::Instant::now()
-                                    + std::time::Duration::from_millis(LONG_PRESS_MS),
-                            });
+                        // A finger landing on a scrollbar grabs it, like a
+                        // mouse press does. Phones have no hover, so without
+                        // this the thumb is decorative.
+                        let grabbed = self.scroll_grab.is_none().then(|| {
+                            self.renderer
+                                .as_mut()
+                                .and_then(|r| r.grab_scrollbar_touch(point.0, point.1))
+                        });
+                        if let Some(Some(grab)) = grabbed {
+                            let owner = grab.owner();
+                            self.scroll_grab = Some(grab);
+                            self.touch_grab = true;
+                            if let Some(r) = &self.renderer {
+                                let (at, max) = r.scroll_place(owner);
+                                self.app.scrolled(owner, at, max);
+                            }
+                            self.request_redraw();
+                        } else {
+                            self.touch.press(touch.id, point.0, point.1);
+                            // First finger only: extras are ignored until it lifts.
+                            if self.long_press.is_none() {
+                                self.long_press = Some(PendingLongPress {
+                                    id: touch.id,
+                                    x: point.0,
+                                    y: point.1,
+                                    at: std::time::Instant::now()
+                                        + std::time::Duration::from_millis(LONG_PRESS_MS),
+                                });
+                            }
                         }
                     }
                     TouchPhase::Moved => {
-                        let action = self.touch.mov(touch.id, point.0, point.1);
-                        // Moving past the slop is a drag, never a hold.
-                        if let Some(pending) = &self.long_press
-                            && pending.id == touch.id
-                            && matches!(action, Some(crate::touch::TouchAction::Scroll { .. }))
+                        // A grabbed scrollbar follows the finger; it never
+                        // becomes a scroll, a hold or a fling.
+                        if self.touch_grab
+                            && let Some(grab) = self.scroll_grab
                         {
-                            self.long_press = None;
-                        }
-                        if let Some(crate::touch::TouchAction::Scroll { dx, dy }) = action
-                            && let Some((id, delta)) = self.scroll_touch(point.0, point.1, dx, dy)
-                        {
-                            let now = std::time::Instant::now();
-                            self.touch_scroll_net += delta;
-                            if let Some(at) = self.last_scroll_at {
-                                let dt = (now - at).as_secs_f32();
-                                if dt > 0.0 && dt <= 0.3 {
-                                    let inst = delta / dt;
-                                    self.scroll_vel += 0.75 * (inst - self.scroll_vel);
-                                    if inst.abs() > self.scroll_vel_peak.abs() {
-                                        self.scroll_vel_peak = inst;
-                                    }
-                                }
-                            }
-                            self.last_scroll_at = Some(now);
-                            self.touch_scroll_id = Some(id);
-                        }
-                    }
-                    TouchPhase::Ended => {
-                        // A hold already answered; the release must not tap too.
-                        if self.long_press.as_ref().is_some_and(|p| p.id == touch.id) {
-                            self.long_press = None;
-                        }
-                        // Coast on release when the finger was flying, or dragged
-                        // far: a slow long drag means intent whatever the
-                        // speed was. Gated on having scrolled (taps never
-                        // fling), not on the swipe verdict below: a fast
-                        // upward drag both scrolls and, incidentally, swipes.
-                        // Use peak velocity for quick flicks, smoothed for sustained drags.
-                        let vel = if self.scroll_vel.abs() >= self.scroll_vel_peak.abs() {
-                            self.scroll_vel
-                        } else {
-                            self.scroll_vel_peak
-                        };
-                        if let (Some(id), vel) = (self.touch_scroll_id, vel)
-                            && let Some(fling) =
-                                crate::touch::Fling::new_release(vel, self.touch_scroll_net)
-                        {
-                            self.fling = Some(FlingState {
-                                id,
-                                fling,
-                                at: std::time::Instant::now(),
-                            });
-                            self.request_redraw();
-                        }
-                        self.reset_touch_scroll();
-                        match self.touch.release(touch.id, point.0, point.1) {
-                            Some(crate::touch::TouchAction::Tap { .. }) => {
-                                self.press_client();
-                            }
-                            Some(crate::touch::TouchAction::Swipe(swipe)) => {
-                                let crate::touch::Swipe::Point { x, y, .. } = swipe;
-                                let hits = self.hits_at(x, y);
-                                if self.app.swiped(&hits, swipe) {
+                            if let Some(r) = &mut self.renderer {
+                                let moved = r.drag_scrollbar(&grab, point.1);
+                                let owner = grab.owner();
+                                let (at, max) = r.scroll_place(owner);
+                                self.app.scrolled(owner, at, max);
+                                if moved {
                                     self.request_redraw();
                                 }
                             }
-                            _ => {}
+                        } else {
+                            let action = self.touch.mov(touch.id, point.0, point.1);
+                            // Moving past the slop is a drag, never a hold.
+                            if let Some(pending) = &self.long_press
+                                && pending.id == touch.id
+                                && matches!(action, Some(crate::touch::TouchAction::Scroll { .. }))
+                            {
+                                self.long_press = None;
+                            }
+                            if let Some(crate::touch::TouchAction::Scroll { dx, dy }) = action
+                                && let Some((id, delta)) =
+                                    self.scroll_touch(point.0, point.1, dx, dy)
+                            {
+                                let now = std::time::Instant::now();
+                                self.touch_scroll_net += delta;
+                                if let Some(at) = self.last_scroll_at {
+                                    let dt = (now - at).as_secs_f32();
+                                    if dt > 0.0 && dt <= 0.3 {
+                                        let inst = delta / dt;
+                                        self.scroll_vel += 0.75 * (inst - self.scroll_vel);
+                                        if inst.abs() > self.scroll_vel_peak.abs() {
+                                            self.scroll_vel_peak = inst;
+                                        }
+                                    }
+                                }
+                                self.last_scroll_at = Some(now);
+                                self.touch_scroll_id = Some(id);
+                            }
+                        }
+                    }
+                    TouchPhase::Ended => {
+                        // A lifted finger cannot keep dragging: its grab dies
+                        // here, never becoming a tap, a swipe or a fling.
+                        if self.touch_grab {
+                            self.scroll_grab = None;
+                            self.touch_grab = false;
+                            self.reset_touch_scroll();
+                            self.touch.cancel(touch.id);
+                        } else {
+                            // A hold already answered; the release must not tap too.
+                            if self.long_press.as_ref().is_some_and(|p| p.id == touch.id) {
+                                self.long_press = None;
+                            }
+                            // Coast on release when the finger was flying, or dragged
+                            // far: a slow long drag means intent whatever the
+                            // speed was. Gated on having scrolled (taps never
+                            // fling), not on the swipe verdict below: a fast
+                            // upward drag both scrolls and, incidentally, swipes.
+                            // Use peak velocity for quick flicks, smoothed for sustained drags.
+                            let vel = if self.scroll_vel.abs() >= self.scroll_vel_peak.abs() {
+                                self.scroll_vel
+                            } else {
+                                self.scroll_vel_peak
+                            };
+                            if let (Some(id), vel) = (self.touch_scroll_id, vel)
+                                && let Some(fling) =
+                                    crate::touch::Fling::new_release(vel, self.touch_scroll_net)
+                            {
+                                self.fling = Some(FlingState {
+                                    id,
+                                    fling,
+                                    at: std::time::Instant::now(),
+                                });
+                                self.request_redraw();
+                            }
+                            self.reset_touch_scroll();
+                            match self.touch.release(touch.id, point.0, point.1) {
+                                Some(crate::touch::TouchAction::Tap { .. }) => {
+                                    self.press_client();
+                                    // A tap cannot keep dragging afterwards: the
+                                    // finger is up, so drop a grab it just made.
+                                    if !self.touch_grab {
+                                        self.scroll_grab = None;
+                                    }
+                                }
+                                Some(crate::touch::TouchAction::Swipe(swipe)) => {
+                                    let crate::touch::Swipe::Point { x, y, .. } = swipe;
+                                    let hits = self.hits_at(x, y);
+                                    if self.app.swiped(&hits, swipe) {
+                                        self.request_redraw();
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     TouchPhase::Cancelled => {
@@ -2201,6 +2256,8 @@ impl ApplicationHandler<LoopEvent> for Host {
                         }
                         self.touch.cancel(touch.id);
                         self.reset_touch_scroll();
+                        self.scroll_grab = None;
+                        self.touch_grab = false;
                     }
                 }
             }
@@ -2211,6 +2268,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                 ..
             } => {
                 self.scroll_grab = None;
+                self.touch_grab = false;
                 // The action runs here, not on press, so the release is
                 // consumed by this window and the one underneath is spared.
                 // Only if the pointer is still over the armed button does it

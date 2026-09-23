@@ -89,6 +89,10 @@ pub struct SpoilerHit {
     pub clip: Option<Rect>,
 }
 
+/// How far past the track a touch may land and still grab the scrollbar.
+/// The track is 10px wide; a fingertip needs the extra room.
+const TOUCH_SCROLLBAR_PAD: f32 = 12.0;
+
 /// A scrollbar being dragged.
 ///
 /// Holds the measurements taken when it was grabbed, so a relayout mid-drag
@@ -361,7 +365,24 @@ impl Renderer {
     /// On the thumb it grabs in place; on the track it jumps the thumb's
     /// centre there first, so dragging works from the same press.
     pub fn grab_scrollbar(&mut self, x: f32, y: f32) -> Option<ScrollGrab> {
-        let bar = *self.scrollbars.iter().find(|b| b.track.contains(x, y))?;
+        self.grab_scrollbar_padded(x, y, 0.0)
+    }
+
+    /// Grabs a scrollbar with a wider touch target.
+    ///
+    /// The track is 10px wide, which a fingertip cannot aim at; the pad
+    /// widens the hit sideways only, so neighbouring rows keep their taps.
+    pub fn grab_scrollbar_touch(&mut self, x: f32, y: f32) -> Option<ScrollGrab> {
+        self.grab_scrollbar_padded(x, y, TOUCH_SCROLLBAR_PAD)
+    }
+
+    fn grab_scrollbar_padded(&mut self, x: f32, y: f32, pad: f32) -> Option<ScrollGrab> {
+        let bar = *self.scrollbars.iter().find(|b| {
+            x >= b.track.x - pad
+                && x < b.track.right() + pad
+                && y >= b.track.y
+                && y < b.track.bottom()
+        })?;
 
         let grab = if bar.thumb.contains(x, y) {
             y - bar.thumb.y

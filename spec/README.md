@@ -37,6 +37,7 @@
 | [0011](adr/0011-mobile-input-bridges.md) | モバイルのテキスト入力は自前橋渡しで実装する | 承認 |
 | [0012](adr/0012-bundle-noto-sans-jp.md) | CJK は Noto Sans JP のサブセット可変フォントを同梱する | 承認 |
 | [0013](adr/0013-login-autofill-proxies.md) | ログインの自動入力のため不可視プロキシを残す | 承認 |
+| [0014](adr/0014-mobile-gestures-and-splash.md) | モバイルのフリング緩和・スクロールバー常時表示・起動スプラッシュ | 承認 |
 ## ルール
 
 ### 1. 仕様が先

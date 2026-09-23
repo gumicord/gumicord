@@ -190,6 +190,9 @@ pub struct Login {
     /// hands it to the platform, which shows the modal, then reads it back as
     /// the solved token.
     pending: Option<gumicord_rest::CaptchaChallenge>,
+    /// Still waiting for the first answer. While set and with nothing real
+    /// to show, the splash covers the login screen.
+    booting: bool,
     /// A login attempt is in flight. The form stays up with its submit
     /// disabled until an answer lands; without this every tap re-sends.
     busy: bool,
@@ -220,6 +223,7 @@ impl Login {
             ended: false,
             pending: None,
             busy: false,
+            booting: true,
         }
     }
 
@@ -243,6 +247,12 @@ impl Login {
     /// Whether the session ended on its own since the last call.
     pub fn take_ended(&mut self) -> bool {
         std::mem::take(&mut self.ended)
+    }
+
+    /// Whether the first answer has arrived yet. While true the splash
+    /// covers the login screen, so a restore never flashes the QR first.
+    pub fn booting(&self) -> bool {
+        self.booting
     }
 
     /// The only thing that decides between the login and main screens.
@@ -356,6 +366,13 @@ impl Login {
     }
 
     fn apply(&mut self, event: LoginEvent) {
+        // The first answer ends the boot: whatever it says, the splash is
+        // over. Handover events (approval, restart) keep it up until one
+        // lands.
+        match &event {
+            LoginEvent::Approved | LoginEvent::Restarted => {}
+            _ => self.booting = false,
+        }
         self.session = match event {
             LoginEvent::Qr(url) => Session::WaitingForScan { url, scanned: None },
             // Keep the URL: if approval is cancelled the same QR still works.
@@ -1296,5 +1313,39 @@ mod tests {
         login.submit_bot_token("bot-token".to_owned());
         login.start_token();
         assert!(!login.busy());
+    }
+
+    /// The boot ends on the first answer, so the splash gives way to the
+    /// decided screen. Handover events keep it up until one lands.
+    #[test]
+    fn the_first_answer_ends_the_boot() {
+        let mut login = Login::fresh_for_test();
+        assert!(login.booting());
+
+        login.apply(LoginEvent::Approved);
+        assert!(login.booting(), "approval is not an answer yet");
+        login.apply(LoginEvent::Restarted);
+        assert!(login.booting(), "a reissue is not an answer yet");
+
+        login.apply(LoginEvent::Qr("https://example/1".to_owned()));
+        assert!(!login.booting());
+    }
+
+    /// Every settling event ends the boot, even without a visible session
+    /// change.
+    #[test]
+    fn every_settling_event_ends_the_boot() {
+        for event in [
+            LoginEvent::Ended,
+            LoginEvent::Failed("no".to_owned()),
+            LoginEvent::FieldErrors(vec![]),
+            LoginEvent::TotpNeeded {
+                email: "a@b.c".to_owned(),
+            },
+        ] {
+            let mut login = Login::fresh_for_test();
+            login.apply(event);
+            assert!(!login.booting());
+        }
     }
 }

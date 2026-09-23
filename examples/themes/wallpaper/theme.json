@@ -148,6 +148,10 @@
       "style": { "gap": 16, "padding": [24, 24, 24, 24] }
     },
     {
+      "select": "app.screen.loading",
+      "style": { "gap": 16, "padding": [24, 24, 24, 24] }
+    },
+    {
       "select": "app.screen.login.title",
       "style": { "font": { "size": 22, "lineHeight": 30, "weight": 600 } }
     },
