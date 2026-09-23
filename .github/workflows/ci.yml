@@ -158,6 +158,8 @@ jobs:
       # Published artifacts become nightly releases: their file logs default
       # to debug, since phones cannot set GUMICORD_LOG. PR builds stay quiet.
       GUMICORD_CHANNEL: ${{ github.event_name == 'pull_request' && '' || 'nightly' }}
+      # Baked into the binary so a log says which commit it came from.
+      GUMICORD_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
 

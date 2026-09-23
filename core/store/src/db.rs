@@ -854,4 +854,30 @@ mod tests {
         let bot = account_path(true, UserId::from(987654321u64)).unwrap();
         assert!(bot.ends_with(&expected_bot));
     }
+
+    /// A set cache home wins, so mobile shells can point it at Caches.
+    #[test]
+    fn an_explicit_cache_home_wins() {
+        #[cfg(windows)]
+        const CACHE_ENV: &str = "APPDATA";
+        #[cfg(not(windows))]
+        const CACHE_ENV: &str = "XDG_CACHE_HOME";
+        let before = std::env::var_os(CACHE_ENV);
+        let dir = std::env::temp_dir().join("gumicord-db-cache-home");
+        unsafe { std::env::set_var(CACHE_ENV, &dir) };
+        let path = account_path(false, UserId::from(1u64)).expect("読める");
+        assert_eq!(
+            path,
+            dir.join("gumicord")
+                .join("cache")
+                .join("accounts")
+                .join("user_1.db")
+        );
+        unsafe {
+            std::env::remove_var(CACHE_ENV);
+            if let Some(v) = before {
+                std::env::set_var(CACHE_ENV, v);
+            }
+        }
+    }
 }

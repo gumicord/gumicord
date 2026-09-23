@@ -183,6 +183,21 @@ pub fn default_own_level() -> tracing::Level {
     }
 }
 
+/// What is running: crate version, baked-in commit, channel. The run log
+/// carries this on its first line, so a nightly's log says which commit
+/// it came from without asking the tester.
+pub fn build_info() -> (&'static str, &'static str, &'static str) {
+    (
+        env!("CARGO_PKG_VERSION"),
+        option_env!("GUMICORD_BUILD_COMMIT").unwrap_or("unknown"),
+        if cfg!(gumicord_nightly) {
+            "nightly"
+        } else {
+            "dev"
+        },
+    )
+}
+
 /// Logs to a file beside the data directory. Phones have no console to
 /// read: without this, a crash leaves nothing behind but the panic line.
 ///
@@ -202,8 +217,19 @@ pub fn init_file_logging() {
     else {
         return;
     };
+    let file = std::sync::Mutex::new(file);
+    {
+        use std::io::Write as _;
+        let (version, commit, channel) = build_info();
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(
+                file,
+                "[INFO] gumicord: version={version} commit={commit} channel={channel}"
+            );
+        }
+    }
     let _ = tracing::subscriber::set_global_default(FileLogger {
-        file: std::sync::Mutex::new(file),
+        file,
         ours: level_from("GUMICORD_LOG", default_own_level()),
         theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
     });
@@ -270,6 +296,10 @@ impl log::Log for BridgeLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        let message = format!("{}", record.args());
+        if ios_winit_noise(record.target(), &message) {
+            return;
+        }
         if let Ok(mut file) = self.file.lock() {
             use std::io::Write as _;
             let _ = writeln!(
@@ -277,7 +307,7 @@ impl log::Log for BridgeLogger {
                 "[{}] {}: {}",
                 record.level(),
                 record.target(),
-                record.args()
+                message
             );
         }
         #[cfg(target_os = "android")]
@@ -315,6 +345,15 @@ fn level_from(var: &str, default: tracing::Level) -> tracing::Level {
     }
 }
 
+/// Whether a dependency's record is known iOS noise. winit logs its own
+/// no-ops at warn: events landing mid-redraw, and window queries iOS
+/// ignores. Hundreds per run, burying the app's own lines; the events
+/// themselves are still handled.
+fn ios_winit_noise(target: &str, message: &str) -> bool {
+    target.starts_with("winit::platform_impl::ios")
+        && (message.contains("after the main event loop") || message.contains("is ignored on iOS"))
+}
+
 /// One line per event, like the desktop logger but into a file.
 struct FileLogger {
     file: std::sync::Mutex<std::fs::File>,
@@ -343,6 +382,9 @@ impl tracing::Subscriber for FileLogger {
         let meta = event.metadata();
         let mut msg = String::new();
         event.record(&mut Visitor(&mut msg));
+        if ios_winit_noise(meta.target(), &msg) {
+            return;
+        }
         if let Ok(mut file) = self.file.lock() {
             use std::io::Write as _;
             let _ = writeln!(file, "[{}] {}{}", meta.level(), meta.target(), msg);
@@ -368,7 +410,10 @@ impl tracing::field::Visit for Visitor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeLogger, civil_from_days, default_own_level, prune_old_logs, stamp_now};
+    use super::{
+        BridgeLogger, build_info, civil_from_days, default_own_level, ios_winit_noise,
+        prune_old_logs, stamp_now,
+    };
 
     /// The channel flag reaches the crate: a typo in either name would
     /// silently leave every build on info.
@@ -380,6 +425,44 @@ mod tests {
                 tracing::Level::DEBUG
             } else {
                 tracing::Level::INFO
+            }
+        );
+    }
+
+    /// winit's own iOS no-ops never reach the file: they bury diagnostics.
+    #[test]
+    fn known_ios_noise_is_dropped() {
+        assert!(ios_winit_noise(
+            "winit::platform_impl::ios::app_state",
+            "processing non `RedrawRequested` event after the main event loop: AboutToWait",
+        ));
+        assert!(ios_winit_noise(
+            "winit::platform_impl::ios::window",
+            "`Window::is_maximized` is ignored on iOS",
+        ));
+        assert!(!ios_winit_noise(
+            "winit::platform_impl::ios::window",
+            "could not create the window",
+        ));
+        assert!(!ios_winit_noise(
+            "gumicord_app::live",
+            "after the main event loop",
+        ));
+    }
+
+    /// The run log header never blanks: the channel follows the same flag
+    /// as the log level, whatever the commit baked in.
+    #[test]
+    fn build_info_names_a_version_and_channel() {
+        let (version, commit, channel) = build_info();
+        assert!(!version.is_empty());
+        assert!(!commit.is_empty());
+        assert_eq!(
+            channel,
+            if cfg!(gumicord_nightly) {
+                "nightly"
+            } else {
+                "dev"
             }
         );
     }

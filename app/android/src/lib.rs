@@ -32,6 +32,14 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     // (render/platform); nothing else feeds it from here.
     // Safe: set once here, before any thread reads it.
     unsafe { std::env::set_var("GUMICORD_DATA_DIR", data_dir(&app)) };
+    // The store reads this for its database; plain Android never sets it,
+    // so without this there is no cache. Internal storage is always there.
+    unsafe {
+        std::env::set_var(
+            "XDG_CACHE_HOME",
+            app.internal_data_path().unwrap_or_else(|| data_dir(&app)),
+        )
+    };
     gumicord_platform::init_file_logging();
     gumicord_platform::install_panic_hook();
     init_tls_verifier();

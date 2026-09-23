@@ -9,4 +9,10 @@ fn main() {
     if std::env::var("GUMICORD_CHANNEL").as_deref() == Ok("nightly") {
         println!("cargo:rustc-cfg=gumicord_nightly");
     }
+    // Baked into the binary so a nightly's log says which commit it came
+    // from. Absent on local builds, which read "unknown".
+    println!("cargo:rerun-if-env-changed=GUMICORD_COMMIT");
+    if let Ok(commit) = std::env::var("GUMICORD_COMMIT") {
+        println!("cargo:rustc-env=GUMICORD_BUILD_COMMIT={commit}");
+    }
 }

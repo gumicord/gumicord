@@ -81,17 +81,29 @@ fn attach_parent_console() {
 /// `tracing-subscriber` is not worth ten crates for one line per event.
 /// Structured filtering or another destination would change that.
 fn init_tracing() {
-    let file = gumicord_platform::prepare_run_log().and_then(|path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-    });
+    let file = gumicord_platform::prepare_run_log()
+        .and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        })
+        .map(std::sync::Mutex::new);
+    if let Some(file) = &file {
+        use std::io::Write as _;
+        let (version, commit, channel) = gumicord_platform::build_info();
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(
+                file,
+                "[INFO] gumicord: version={version} commit={commit} channel={channel}"
+            );
+        }
+    }
     let _ = tracing::subscriber::set_global_default(Logger {
         ours: level_from("GUMICORD_LOG", gumicord_platform::default_own_level()),
         theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
-        file: file.map(std::sync::Mutex::new),
+        file,
     });
 }
 

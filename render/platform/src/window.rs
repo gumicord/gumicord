@@ -786,7 +786,12 @@ impl Host {
     /// happens through the keyboard, edge snapping, the taskbar and
     /// double-clicking, and a stale flag makes the border grab a resize while
     /// maximised and wastes a button press.
+    ///
+    /// Phones have no maximise state; asking only feeds an iOS warning.
     fn maximized(&self) -> bool {
+        if cfg!(any(target_os = "ios", target_os = "android")) {
+            return false;
+        }
         self.window.as_ref().is_some_and(|w| w.is_maximized())
     }
 
@@ -1793,10 +1798,18 @@ impl ApplicationHandler<LoopEvent> for Host {
                     {
                         // History on its way: wait for it instead of dying
                         // at the edge; the next page resumes the coast.
+                        tracing::debug!(region = ?st.id, travelled = st.travelled, "fling held for history");
                         self.fling = Some(st);
                         soonest(now + std::time::Duration::from_millis(16));
                     } else {
-                        tracing::debug!(region = ?st.id, travelled = st.travelled, "fling stopped at the bound");
+                        match place {
+                            Some((at, max)) => {
+                                tracing::debug!(region = ?st.id, travelled = st.travelled, at, max, "fling stopped at the bound")
+                            }
+                            None => {
+                                tracing::debug!(region = ?st.id, travelled = st.travelled, "fling stopped with no surface")
+                            }
+                        }
                     }
                 }
             }

@@ -10,4 +10,13 @@ let docs = NSSearchPathForDirectoriesInDomains(
     .userDomainMask,
     true
 ).first ?? ""
-docs.withCString { gumicord_ios_main($0) }
+let caches = NSSearchPathForDirectoriesInDomains(
+    .cachesDirectory,
+    .userDomainMask,
+    true
+).first ?? ""
+docs.withCString { docsPtr in
+    caches.withCString { cachesPtr in
+        gumicord_ios_main(docsPtr, cachesPtr)
+    }
+}

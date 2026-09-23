@@ -1,8 +1,8 @@
 //! The iOS entry point.
 //!
 //! A thin static library: Xcode owns the app bundle and calls in once, on
-//! the main thread, with the Documents directory. Everything else lives in
-//! [`gumicord_app`]. See `README.md` next to this file.
+//! the main thread, with the Documents and Caches directories. Everything
+//! else lives in [`gumicord_app`]. See `README.md` next to this file.
 
 use gumicord_app::Gumicord;
 
@@ -14,23 +14,36 @@ use gumicord_app::Gumicord;
 ///
 /// `documents_dir` is the app's Documents directory as UTF-8 (from
 /// `NSSearchPathForDirectoriesInDomains`). It is Files-visible when the
-/// bundle enables file sharing, which is how themes, logs and the database
-/// get on and off the phone. Null or invalid input falls back to the
-/// platform default rather than refusing to start.
+/// bundle enables file sharing, which is how themes and logs get on and
+/// off the phone. `caches_dir` is the Caches directory: the message
+/// database and image files live there, since the sandbox forbids the
+/// `HOME/.cache` fallback and Caches is purge-safe for refetchable data.
+/// Null or invalid input falls back to the platform default rather than
+/// refusing to start.
 ///
 /// # Safety
 ///
-/// `documents_dir` must be a valid NUL-terminated C string for the
-/// duration of the call. It is copied before returning.
+/// Both pointers must be valid NUL-terminated C strings for the duration
+/// of the call. They are copied before returning.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gumicord_ios_main(documents_dir: *const std::ffi::c_char) {
-    let dir = (!documents_dir.is_null())
-        .then(|| unsafe { std::ffi::CStr::from_ptr(documents_dir) })
-        .and_then(|s| s.to_str().ok())
-        .map(str::to_owned);
-    if let Some(dir) = dir {
+pub unsafe extern "C" fn gumicord_ios_main(
+    documents_dir: *const std::ffi::c_char,
+    caches_dir: *const std::ffi::c_char,
+) {
+    let cstr = |p: *const std::ffi::c_char| {
+        (!p.is_null())
+            .then(|| unsafe { std::ffi::CStr::from_ptr(p) })
+            .and_then(|s| s.to_str().ok())
+            .map(str::to_owned)
+    };
+    if let Some(dir) = cstr(documents_dir) {
         // Safe: set once here, before any thread reads it.
         unsafe { std::env::set_var("GUMICORD_DATA_DIR", dir) };
+    }
+    if let Some(dir) = cstr(caches_dir) {
+        // Safe: set once here, before any thread reads it. The store
+        // already prefers this for its database.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", dir) };
     }
     gumicord_platform::init_file_logging();
     gumicord_platform::install_panic_hook();
