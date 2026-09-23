@@ -172,11 +172,23 @@ pub fn prepare_run_log() -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// Our crates' default log level: debug on nightly, info otherwise.
+/// Explicit `GUMICORD_LOG` still wins; phones cannot set it, so nightly
+/// file logs stay readable without one.
+pub fn default_own_level() -> tracing::Level {
+    if cfg!(gumicord_nightly) {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    }
+}
+
 /// Logs to a file beside the data directory. Phones have no console to
 /// read: without this, a crash leaves nothing behind but the panic line.
 ///
-/// Same levels as the desktop logger: `info` for our crates, `warn` for
-/// dependencies, raised with `GUMICORD_LOG` / `GUMICORD_LOG_DEPS`.
+/// Same levels as the desktop logger: our crates log at
+/// [`default_own_level`], dependencies at `warn`, raised with
+/// `GUMICORD_LOG` / `GUMICORD_LOG_DEPS`.
 /// One file per run, named with the startup stamp; only the newest five
 /// are kept. All live in `logs/` next to the data.
 pub fn init_file_logging() {
@@ -192,7 +204,7 @@ pub fn init_file_logging() {
     };
     let _ = tracing::subscriber::set_global_default(FileLogger {
         file: std::sync::Mutex::new(file),
-        ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
+        ours: level_from("GUMICORD_LOG", default_own_level()),
         theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
     });
     // Dependencies log through the `log` facade, which the tracing
@@ -204,7 +216,7 @@ pub fn init_file_logging() {
         .append(true)
         .open(&path)
     {
-        let ours = level_from("GUMICORD_LOG", tracing::Level::INFO);
+        let ours = level_from("GUMICORD_LOG", default_own_level());
         let theirs = level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN);
         let max = if ours > theirs { ours } else { theirs };
         let logger: &'static BridgeLogger = Box::leak(Box::new(BridgeLogger {
@@ -356,7 +368,21 @@ impl tracing::field::Visit for Visitor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeLogger, civil_from_days, prune_old_logs, stamp_now};
+    use super::{BridgeLogger, civil_from_days, default_own_level, prune_old_logs, stamp_now};
+
+    /// The channel flag reaches the crate: a typo in either name would
+    /// silently leave every build on info.
+    #[test]
+    fn the_nightly_flag_sets_the_default_level() {
+        assert_eq!(
+            default_own_level(),
+            if cfg!(gumicord_nightly) {
+                tracing::Level::DEBUG
+            } else {
+                tracing::Level::INFO
+            }
+        );
+    }
 
     #[test]
     fn stamps_render_local_datetime() {

@@ -155,6 +155,9 @@ jobs:
             target: aarch64-apple-ios
     env:
       PROFILE: ${{ github.event_name == 'pull_request' && 'release' || 'dist' }}
+      # Published artifacts become nightly releases: their file logs default
+      # to debug, since phones cannot set GUMICORD_LOG. PR builds stay quiet.
+      GUMICORD_CHANNEL: ${{ github.event_name == 'pull_request' && '' || 'nightly' }}
     steps:
       - uses: actions/checkout@v5
 

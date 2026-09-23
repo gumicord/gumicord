@@ -69,7 +69,7 @@ fn attach_parent_console() {
 
 /// Sets up logging.
 ///
-/// `info` by default, raised with `GUMICORD_LOG=debug`. That raises our own
+/// `info` by default (`debug` on nightly), raised with `GUMICORD_LOG=debug`. That raises our own
 /// crates only: raising everything buried our lines under the dependencies —
 /// `hyper`'s connection pool alone ran to dozens of lines a second. The
 /// dependencies have their own `GUMICORD_LOG_DEPS`, defaulting to `warn`, so
@@ -89,7 +89,7 @@ fn init_tracing() {
             .ok()
     });
     let _ = tracing::subscriber::set_global_default(Logger {
-        ours: level_from("GUMICORD_LOG", tracing::Level::INFO),
+        ours: level_from("GUMICORD_LOG", gumicord_platform::default_own_level()),
         theirs: level_from("GUMICORD_LOG_DEPS", tracing::Level::WARN),
         file: file.map(std::sync::Mutex::new),
     });
