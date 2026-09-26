@@ -115,6 +115,7 @@ impl Proxy {
         if self.active == kind && self.parent == Some(ptr) {
             return;
         }
+        tracing::debug!(?kind, prev = ?self.active, "proxy re-attaching");
         for field in [&self.user, &self.pass] {
             field.resignFirstResponder();
             field.removeFromSuperview();
@@ -130,7 +131,7 @@ impl Proxy {
             // Either the call took it or it already holds it; anything
             // else means no keyboard from here.
             let became = field.becomeFirstResponder() || field.isFirstResponder();
-            tracing::debug!(?kind, became, "proxy field shown");
+            tracing::debug!(?kind, became, placed = ?self.placed, "proxy field shown");
             // A refused responder means no keyboard from here; drop back to
             // winit's field instead of sitting focused with no keyboard.
             if !became {
@@ -213,7 +214,10 @@ impl Proxy {
     /// keyboard hides on this event instead of the next redraw.
     pub fn blur(&mut self) {
         if self.active.is_some() {
-            tracing::debug!("proxy resigned");
+            // Whether anything still holds first responder after resigning
+            // tells a stuck keyboard apart from a slow one.
+            let held = self.user.isFirstResponder() || self.pass.isFirstResponder();
+            tracing::debug!(held, "proxy resigned");
         }
         for field in [&self.user, &self.pass] {
             field.resignFirstResponder();

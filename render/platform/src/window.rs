@@ -1258,7 +1258,14 @@ impl Host {
                 if changed {
                     self.request_redraw();
                 }
-                newline && self.app.ime_newline()
+                let submitted = newline && self.app.ime_newline();
+                // A submit cleared focus: drop the connection on this tick
+                // instead of the next redraw, or the keyboard lingers over
+                // what comes next.
+                if submitted && self.app.focused_document().is_none() {
+                    self.android_text.blur();
+                }
+                submitted
             } else {
                 false
             }
@@ -2051,6 +2058,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                 // here, on the thread with the window handle.
                 self.pump_captcha();
                 if woke {
+                    tracing::debug!("wake changed something; redrawing");
                     self.request_redraw();
                 }
             }
@@ -2722,6 +2730,12 @@ impl ApplicationHandler<LoopEvent> for Host {
                                 }
                                 _ => {}
                             }
+                            // Phones have no hover: the redraw's recheck would
+                            // otherwise leave the tapped button highlighted
+                            // after the finger lifts.
+                            if self.app.hover_changed(&[]) {
+                                self.request_redraw();
+                            }
                         }
                     }
                     TouchPhase::Cancelled => {
@@ -2760,6 +2774,10 @@ impl ApplicationHandler<LoopEvent> for Host {
                         self.reset_touch_scroll();
                         self.scroll_grab = None;
                         self.touch_grab = false;
+                        // Same as a lift: nothing stays highlighted.
+                        if self.app.hover_changed(&[]) {
+                            self.request_redraw();
+                        }
                     }
                 }
             }

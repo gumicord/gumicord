@@ -82,6 +82,7 @@ impl crate::Gumicord {
     /// only stacks duplicate attempts behind the running one.
     pub(crate) fn submit_login(&mut self) -> bool {
         if self.login.busy() {
+            tracing::debug!("login submit ignored while busy");
             return false;
         }
         self.login_view.error = None;
@@ -102,8 +103,14 @@ impl crate::Gumicord {
                 let password = self.login_view.input.text().to_owned();
 
                 if email.is_empty() || password.is_empty() {
+                    tracing::debug!(
+                        email_empty = email.is_empty(),
+                        password_empty = password.is_empty(),
+                        "password login not sent; a field is empty"
+                    );
                     return false;
                 }
+                tracing::debug!("submitting a password login");
                 self.login.submit_password(email, password);
                 // Keep the email for a retry; the password is a secret that
                 // has done its job.
@@ -114,8 +121,10 @@ impl crate::Gumicord {
             Some(LoginField::Totp) => {
                 let code = self.login_view.input.text().trim().to_owned();
                 if code.is_empty() {
+                    tracing::debug!("totp login not sent; the code is empty");
                     return false;
                 }
+                tracing::debug!("submitting a totp code");
                 self.login.submit_totp(code);
                 self.login_view.input.take();
                 self.login_view.field = None;
@@ -205,7 +214,7 @@ impl crate::Gumicord {
                         })
                         .child(self.login_forgot_password())
                         .child_if(self.login_view.error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン"))
+                        .child(self.login_submit("ログイン", self.login_password_ready()))
                         .child(self.login_divider())
                         // No QR screen on phones, so nowhere to go back to.
                         .child_if(!crate::is_mobile(), || self.login_qr_button())
@@ -232,7 +241,7 @@ impl crate::Gumicord {
                             self.login_field_error_node("login_error_code", &["code"])
                         })
                         .child_if(self.login_view.error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン"))
+                        .child(self.login_submit("ログイン", self.login_code_ready()))
                         .child(self.login_secondary("戻る", "login_back"))
                 }))
             }
@@ -248,7 +257,7 @@ impl crate::Gumicord {
                         .child(self.login_label("トークン"))
                         .child(self.login_field("token", "トークン", &self.login_view.input, false))
                         .child_if(self.login_view.error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン"))
+                        .child(self.login_submit("ログイン", self.login_code_ready()))
                         .child(self.login_secondary("戻る", "login_back"))
                 }))
             }
@@ -407,16 +416,28 @@ impl crate::Gumicord {
         )
     }
 
+    /// Whether the password form holds something to send. The button press
+    /// clears focus first, so this reads the documents, not the focus.
+    fn login_password_ready(&self) -> bool {
+        !self.login_view.email.text().trim().is_empty() && !self.login_view.input.text().is_empty()
+    }
+
+    /// Whether the single-box forms (TOTP code, bot token) hold something.
+    fn login_code_ready(&self) -> bool {
+        !self.login_view.input.text().trim().is_empty()
+    }
+
     /// The primary login form button (submit). Dimmed while an attempt
-    /// is in flight; presses then fall through as ignored.
-    fn login_submit(&self, label: &str) -> UiNode {
+    /// is in flight, and while there is nothing to send: an empty form
+    /// silently ignores the press, which reads as frozen.
+    fn login_submit(&self, label: &str, ready: bool) -> UiNode {
         UiNode::new(NodeId::PrimitiveButton)
             .with_key(Key::Slot("login_submit"))
             .with_state_if(
                 self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot("login_submit"))),
                 State::Hover,
             )
-            .with_state_if(self.login.busy(), State::Disabled)
+            .with_state_if(!ready || self.login.busy(), State::Disabled)
             .child(UiNode::text(NodeId::PrimitiveText, label))
     }
 
@@ -769,6 +790,7 @@ mod tests {
         // Discord asked for a second factor.
         a.login.apply_for_test(LoginEvent::TotpNeeded {
             email: "a@b.c".to_owned(),
+            error: None,
         });
         let tree = a.build_tree(Panes::Three);
         let mut slots = Vec::new();
@@ -784,6 +806,33 @@ mod tests {
         assert!(
             !slots.contains(&Some(Key::Slot("password"))),
             "password form lingers: {slots:?}"
+        );
+    }
+
+    /// A rejected TOTP code shows its reason on the code screen, so the
+    /// retry never looks like nothing happened.
+    #[test]
+    fn a_rejected_totp_code_shows_its_reason() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: Some("認証コードが違います。もう一度入力してください".to_owned()),
+        });
+        assert!(a.wake());
+        let tree = a.build_tree(Panes::Three);
+        let mut lines = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginError {
+                lines.push(n.content.as_text().unwrap_or("").to_owned());
+            }
+        });
+        assert!(
+            lines.iter().any(|t| t.contains("認証コードが違います")),
+            "no reason shown: {lines:?}"
         );
     }
 
@@ -990,6 +1039,8 @@ mod tests {
             NodeId::PrimitiveButton,
             Key::Slot("login_password"),
         )]);
+        a.login_view.email.insert("a@b.c");
+        a.login_view.input.insert("secret");
         let mut submit_state = None;
         a.build_tree(Panes::Three).walk(&mut |n, _| {
             if n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot("login_submit")) {
@@ -1009,6 +1060,37 @@ mod tests {
             }
         });
         assert_eq!(submit_state, Some(true), "処理中なのに通常表示");
+    }
+
+    /// The submit button dims while a form is empty, so an ignored press
+    /// never reads as frozen: half an autofill leaves the button dimmed.
+    #[test]
+    fn the_submit_button_dims_while_a_field_is_empty() {
+        use gumicord_uitree::State;
+
+        let state_of = |a: &Gumicord| {
+            let mut submit_state = None;
+            a.build_tree(Panes::Three).walk(&mut |n, _| {
+                if n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot("login_submit")) {
+                    submit_state = Some(n.states.contains(State::Disabled));
+                }
+            });
+            submit_state
+        };
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        // Only the password arrived (e.g. a one-sided autofill).
+        a.login_view.input.insert("secret");
+        assert_eq!(state_of(&a), Some(true), "片欄だけなのに押せる表示");
+
+        a.login_view.email.insert("a@b.c");
+        assert_eq!(state_of(&a), Some(false), "揃ったのに無効表示");
     }
 
     /// The konami code on the QR screen opens the bot-token form.

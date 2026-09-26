@@ -132,9 +132,12 @@ pub enum LoginEvent {
     Ended,
     /// Restarted, usually after the QR expired.
     Restarted,
-    /// The background needs a second factor to finish a login.
+    /// The background needs a second factor to finish a login. `error`
+    /// carries a retry reason (e.g. a rejected code) when the TOTP screen
+    /// is already up; without it a retry looks identical to the first ask.
     TotpNeeded {
         email: String,
+        error: Option<String>,
     },
     /// The background needs a captcha solved before login can continue.
     CaptchaNeeded(CaptchaChallenge),
@@ -396,17 +399,22 @@ impl Login {
                 Session::LoggedIn(l)
             }
             LoginEvent::Failed(e) => {
+                tracing::debug!(error = %e, "login failed");
                 self.last_error = Some(e.clone());
                 self.busy = false;
                 Session::Failed(e)
             }
             LoginEvent::FieldErrors(fields) => {
+                tracing::debug!(count = fields.len(), "login field errors arrived");
                 self.field_errors = fields;
                 // Back on the form for a retry; the next submit re-arms it.
                 self.busy = false;
                 self.session.clone()
             }
-            LoginEvent::TotpNeeded { .. } => {
+            LoginEvent::TotpNeeded { error, .. } => {
+                tracing::debug!("second factor needed; showing the totp screen");
+                // A retry reason reaches the form like any other failure.
+                self.last_error = error;
                 // Back to the form for another code; the next submit
                 // re-arms the guard.
                 self.busy = false;
@@ -678,14 +686,22 @@ async fn run_password(
                         }
                     }
                     // A wrong code is just another chance to ask, with the
-                    // reason under the field.
+                    // reason on the form. Field errors land under the box;
+                    // without them a general line is the only feedback.
                     Err(e) => {
-                        send_field_errors(tx, &e);
+                        let fields = e.field_errors();
+                        let paths: Vec<String> = fields.iter().map(|(p, _)| p.clone()).collect();
+                        tracing::debug!(error = %e, field_paths = ?paths, "totp rejected; asking again");
+                        if !fields.is_empty() {
+                            let _ = tx.send(LoginEvent::FieldErrors(fields));
+                        }
                         let _ = tx.send(LoginEvent::TotpNeeded {
                             email: email.clone(),
+                            error: Some(
+                                "認証コードが違います。もう一度入力してください".to_owned(),
+                            ),
                         });
                         waker.wake();
-                        tracing::debug!(%e, "totp rejected; asking again");
                         break None;
                     }
                 }
@@ -701,6 +717,7 @@ async fn run_password(
                 Ok(LoginOutcome::MfaRequired { ticket: t }) => {
                     let _ = tx.send(LoginEvent::TotpNeeded {
                         email: email.clone(),
+                        error: None,
                     });
                     waker.wake();
                     ticket = Some(t);
@@ -1270,9 +1287,29 @@ mod tests {
         let mut login = Login::fresh_for_test();
         login.apply(LoginEvent::TotpNeeded {
             email: "a@b.c".to_owned(),
+            error: None,
         });
         assert!(matches!(login.session(), Session::PasswordTotp));
         assert!(login.session().hint().contains("コード"));
+    }
+
+    /// A rejected code re-arms the form with a reason, so the retry never
+    /// looks identical to the first ask.
+    #[test]
+    fn a_rejected_totp_code_leaves_a_reason() {
+        let mut login = Login::fresh_for_test();
+        login.submit_totp("000000".to_owned());
+        assert!(login.busy());
+        login.apply(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: Some("認証コードが違います。もう一度入力してください".to_owned()),
+        });
+        assert!(!login.busy(), "the retry stayed disabled");
+        assert!(matches!(login.session(), Session::PasswordTotp));
+        assert_eq!(
+            login.take_last_error().as_deref(),
+            Some("認証コードが違います。もう一度入力してください")
+        );
     }
 
     /// The password command senders place exactly one command on the channel.
@@ -1358,6 +1395,7 @@ mod tests {
             LoginEvent::FieldErrors(vec![]),
             LoginEvent::TotpNeeded {
                 email: "a@b.c".to_owned(),
+                error: None,
             },
         ] {
             let mut login = Login::fresh_for_test();
