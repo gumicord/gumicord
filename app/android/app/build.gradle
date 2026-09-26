@@ -41,13 +41,25 @@ android {
         }
     }
 
+    // Channels as flavors: AGP has no per-buildType applicationId, so
+    // the nightly slot lives here. Nightly goes out as debug under its
+    // own ID so both channels install side by side (see
+    // packaging/README.md, AltStore sources). Stable keeps the
+    // defaultConfig ID.
+    flavorDimensions 'channel'
+    productFlavors {
+        nightly {
+            dimension 'channel'
+            applicationId 'dev.gumicord.nightly'
+        }
+        stable {
+            dimension 'channel'
+        }
+    }
+
     buildTypes {
         debug {
             debuggable true
-            // Nightly goes out as debug under its own bundle slot so both
-            // channels install side by side (see packaging/README.md,
-            // AltStore sources).
-            applicationId 'dev.gumicord.nightly'
             // One shared debug key for every nightly: CI runners are
             // throwaway machines, so the default debug keystore would sign
             // every build differently and updates would refuse to install.

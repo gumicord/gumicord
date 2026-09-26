@@ -162,7 +162,7 @@ jobs:
             app/android/app/src/main/jniLibs/arm64-v8a/
           cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so" \
             app/android/app/src/main/jniLibs/x86_64/
-          gradle -p app/android assembleRelease
+          gradle -p app/android assembleStableRelease
 
       - name: Build IPA
         if: matrix.label == 'ios'
@@ -320,7 +320,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ inputs.tag }}-android
-          path: app/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          path: app/android/app/build/outputs/apk/stable/release/app-stable-release-unsigned.apk
           retention-days: 14
 
       - name: Upload IPA
@@ -360,7 +360,7 @@ jobs:
           mv dist/release-$TAG-linux/Gumicord-*.AppImage dist/gumicord-$TAG-linux.AppImage
           mv dist/release-$TAG-macos/Gumicord.dmg dist/gumicord-$TAG-macos.dmg
           mv dist/release-$TAG-ios/Gumicord-unsigned.ipa dist/gumicord-$TAG.ipa
-          mv dist/release-$TAG-android/app-release-unsigned.apk dist/gumicord-$TAG.apk
+          mv dist/release-$TAG-android/app-stable-release-unsigned.apk dist/gumicord-$TAG.apk
           for entry in windows linux macos; do
             case "$entry" in
               windows) bin=gumicord.exe ;;

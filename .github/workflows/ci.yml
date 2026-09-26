@@ -262,7 +262,7 @@ jobs:
 
       - name: Assemble debug APK
         if: matrix.kind == 'android'
-        run: gradle -p app/android assembleDebug
+        run: gradle -p app/android assembleNightlyDebug
 
       - name: Build the Rust staticlib
         if: matrix.kind == 'ios'
@@ -369,7 +369,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gumicord-android-${{ github.sha }}
-          path: app/android/app/build/outputs/apk/debug/app-debug.apk
+          path: app/android/app/build/outputs/apk/nightly/debug/app-nightly-debug.apk
           retention-days: 14
 
       - name: Upload IPA
@@ -455,7 +455,7 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.name }}"
           SHA="${{ github.sha }}"
-          mv "dist/gumicord-android-$SHA/app-debug.apk" "dist/gumicord-$TAG.apk"
+          mv "dist/gumicord-android-$SHA/app-nightly-debug.apk" "dist/gumicord-$TAG.apk"
           mv "dist/gumicord-ios-$SHA/Gumicord-unsigned.ipa" "dist/gumicord-$TAG.ipa"
           mv "dist/gumicord-appimage-$SHA/"*.AppImage "dist/gumicord-$TAG-linux.AppImage"
           mv "dist/gumicord-dmg-$SHA/"*.dmg "dist/gumicord-$TAG-macos.dmg"

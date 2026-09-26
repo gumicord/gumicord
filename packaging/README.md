@@ -92,7 +92,7 @@ cargo xtask icons --check  # verify only (CI runs this)
 ```
 
 Derivatives: `AppIconNightly.appiconset` (iOS), `app/android/app/src/debug/res`
-(black launcher set, picked up automatically by `assembleDebug`), and the
+(black launcher set, picked up automatically by `assembleNightlyDebug`), and the
 512px icon above. Stable derivatives stay hand-maintained as before.
 
 `--check` compares decoded pixels with a 2/255 per-channel tolerance
@@ -104,7 +104,8 @@ The nightly identity rides on build settings, not branches: Xcode takes
 `ASSETCATALOG_COMPILER_APPICON_NAME=AppIconNightly`,
 `PRODUCT_BUNDLE_IDENTIFIER=dev.gumicord.nightly` and
 `APP_DISPLAY_NAME="Gumicord Nightly"` (defaults keep the stable values),
-while the Android `debug` build type sets `applicationId "dev.gumicord.nightly"`.
+while Android carries the nightly `applicationId "dev.gumicord.nightly"` as the
+`nightly` product flavor (AGP has no per-buildType applicationId).
 
 ### Source file generation
 

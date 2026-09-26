@@ -42,7 +42,7 @@ cargo install cargo-ndk
 cargo ndk -t arm64-v8a -o app/android/app/src/main/jniLibs build --release -p gumicord-android
 # libc++_shared.so next to libmain.so, from the NDK:
 # $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so
-gradle -p app/android assembleDebug
+gradle -p app/android assembleNightlyDebug
 ```
 
 See [`spec/07-roadmap.md`](../../spec/07-roadmap.md) (written in Japanese).
