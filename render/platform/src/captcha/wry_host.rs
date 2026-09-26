@@ -53,7 +53,7 @@ impl CaptchaHost for WryCaptcha {
                 .window_handle()
                 .map(|h| {
                     matches!(
-                        h.handle().as_ref(),
+                        h.as_raw(),
                         RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)
                     )
                 })
