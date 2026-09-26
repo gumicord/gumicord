@@ -435,12 +435,15 @@ jobs:
     permissions:
       actions: read
     steps:
+      # Checkout first: its default clean wipes untracked files, so
+      # downloading the build artifacts into dist/ must come after it,
+      # not before.
+      - uses: actions/checkout@v5
+
       - uses: actions/download-artifact@v4
         with:
           pattern: gumicord-*
           path: dist
-
-      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
