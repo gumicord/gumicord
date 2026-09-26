@@ -16,92 +16,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use winit::window::Window;
 
+use super::page::{Bridge, Outcome, html};
 use super::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha};
 
-/// The challenge page and its bridge back to Rust. `data-host` appears on both
-/// the widget and the script tag, matching Discord's enterprise setup. The page
-/// talks to Rust through `window.ipc.postMessage("type:payload")`; the token is
-/// URL-safe so a colon split is unambiguous.
-fn html(challenge: &CaptchaChallenge) -> String {
-    let rqdata = match &challenge.rqdata {
-        Some(r) => format!("hcaptcha.setData({r:?});"),
-        None => String::new(),
-    };
-    format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>セキュリティ確認</title>
-<style>
-  html, body {{ margin: 0; height: 100%; background: #313338; }}
-  body {{ display: flex; flex-direction: column; align-items: center; justify-content: center;
-         gap: 14px; font-family: sans-serif; color: #f2f3f5; }}
-  .box {{ background: #fff; border-radius: 8px; padding: 4px; }}
-  .h-captcha {{ min-width: 304px; min-height: 78px; }}
-  #cancel {{ background: #4e5058; color: #f2f3f5; border: 0; border-radius: 6px;
-             padding: 8px 20px; font-size: 14px; cursor: pointer; }}
-  #hint {{ font-size: 12px; color: #b5bac1; }}
-</style>
-</head>
-<body>
-  <div class="box"><div class="h-captcha"
-    data-sitekey="{0}"
-    data-host="discord.com"
-    data-theme="dark"></div></div>
-  <button id="cancel">キャンセル</button>
-  <div id="hint"></div>
-  <script src="https://hcaptcha.com/1/api.js?render=explicit&onload=onLoad" data-host="discord.com"></script>
-  <script>
-    function onLoad() {{
-      {1}
-      hcaptcha.render(document.querySelector('.h-captcha'), {{
-        theme: 'dark',
-        callback: function (token) {{
-          window.ipc.postMessage('solved:' + token);
-        }},
-        'expired-callback': function () {{
-          window.ipc.postMessage('expired');
-        }},
-        'error-callback': function () {{
-          document.getElementById('hint').textContent = 'エラーが発生しました。ウィンドウを閉じてやり直してください。';
-          window.ipc.postMessage('failed');
-        }}
-      }});
-    }}
-    document.getElementById('cancel').addEventListener('click', function () {{
-      window.ipc.postMessage('cancel');
-    }});
-  </script>
-</body>
-</html>"#,
-        challenge.site_key, rqdata
-    )
-}
-
-/// Parse what the page posted back over IPC (`type:payload`).
-enum Outcome {
-    Solved(String),
-    Expired,
-    Failed,
-    Cancel,
-}
-
-impl Outcome {
-    fn from_body(body: &str) -> Option<Outcome> {
-        let (ty, payload) = body.split_once(':').unwrap_or((body, ""));
-        match ty {
-            "solved" if !payload.is_empty() => Some(Outcome::Solved(payload.to_string())),
-            "solved" => None,
-            "expired" => Some(Outcome::Expired),
-            "failed" => Some(Outcome::Failed),
-            "cancel" => Some(Outcome::Cancel),
-            _ => None,
-        }
-    }
-}
-
 /// A WebView2-backed [`CaptchaHost`].
+#[derive(Debug, Default)]
 pub struct WebView2Captcha;
 
 impl CaptchaHost for WebView2Captcha {
@@ -126,7 +45,7 @@ impl CaptchaHost for WebView2Captcha {
 
         // Kept alive for the whole modal: dropping it closes the webview.
         let webview = wry::WebViewBuilder::new()
-            .with_html(html(&challenge))
+            .with_html(html(&challenge, Bridge::Wry))
             .with_ipc_handler(handler)
             .build_as_child(parent)
             .map_err(|e| CaptchaError::Open(e.to_string()))?;

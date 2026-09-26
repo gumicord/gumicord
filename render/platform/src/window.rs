@@ -23,7 +23,9 @@
 
 use std::sync::Arc;
 
-use crate::captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, WebView2Captcha};
+use crate::captcha::{
+    CaptchaChallenge, CaptchaError, CaptchaHost, Host as CaptchaHostImpl, SolvedCaptcha,
+};
 use crate::text_input::{ClipboardOp, EditKey, HiddenKey, TextDocument};
 use gumicord_render::{Hit, Presented, Renderer, ScrollGrab, Size};
 use gumicord_uitree::{Key, NodeId, UiNode};
@@ -41,8 +43,18 @@ const LINE_SCROLL: f32 = 48.0;
 /// answers or fails, which ends the wait either way; without the cap a
 /// stalled load would redraw every frame forever.
 const FLING_HOLD_MAX: std::time::Duration = std::time::Duration::from_secs(3);
+/// Whether this build drives a phone OS. Desktop leaves inertia to the OS
+/// (ADR-0014 B0): wheel bursts and touch releases scroll directly, and no
+/// coast of our own starts. Only mobile coasts from its own tracker.
+const fn is_mobile() -> bool {
+    cfg!(any(target_os = "android", target_os = "ios"))
+}
+
 /// How long a touch holds still before it becomes a context menu.
 const LONG_PRESS_MS: u64 = 500;
+/// Touches starting this far left may drag the drawer in. Mirrors the
+/// app's drawer edge; the app still decides whether one can start.
+const DRAWER_EDGE: f32 = 24.0;
 
 // Android only: read-only native-window queries for the GPU setup log.
 //
@@ -200,6 +212,71 @@ pub trait Application {
     /// where it landed.
     fn take_reveal(&mut self) -> Option<RevealRequest> {
         None
+    }
+
+    /// Whether a touch at x could start a drawer drag. The default never
+    /// drags; the app answers where its edge zone is.
+    fn drawer_drag_maybe(&self, _x: f32) -> bool {
+        false
+    }
+
+    /// Starts a finger-driven drawer open.
+    fn drawer_drag_start(&mut self) -> bool {
+        false
+    }
+
+    /// Starts a finger-driven drawer close from inside the open drawer.
+    fn drawer_close_drag_start(&mut self) -> bool {
+        false
+    }
+
+    /// Whether a touch inside the open drawer could start a close drag.
+    /// The layer checks the position; the app checks the state.
+    fn drawer_close_drag_maybe(&self) -> bool {
+        false
+    }
+
+    /// Follows the finger: dx over the drawer width.
+    fn drawer_drag_move(&mut self, _dx: f32, _width: f32) -> bool {
+        false
+    }
+
+    /// Lets go with a horizontal release velocity.
+    fn drawer_drag_end(&mut self, _velocity: f32) -> bool {
+        false
+    }
+
+    /// The drawer's slide progress, 0 (shut) to 1 (open). Pushed to the
+    /// renderer every frame; the default stays open.
+    fn drawer_slide(&self) -> f32 {
+        1.0
+    }
+
+    /// Whether a touch on a sheet handle could start a drag. The layer
+    /// checks the position; the app checks which sheet is open.
+    fn sheet_drag_maybe(&self) -> bool {
+        false
+    }
+
+    /// Starts a finger-driven sheet close from the handle.
+    fn sheet_drag_start(&mut self) -> bool {
+        false
+    }
+
+    /// Follows the finger: dy over the sheet height.
+    fn sheet_drag_move(&mut self, _dy: f32, _height: f32) -> bool {
+        false
+    }
+
+    /// Lets go with a vertical release velocity.
+    fn sheet_drag_end(&mut self, _velocity: f32) -> bool {
+        false
+    }
+
+    /// A bottom sheet's slide progress, 0 (shut) to 1 (open). Pushed to
+    /// the renderer every frame; the default stays open.
+    fn sheet_slide(&self) -> f32 {
+        1.0
     }
 
     fn title(&self) -> String;
@@ -426,7 +503,7 @@ fn run_loop(
         #[cfg(any(target_os = "android", target_os = "ios"))]
         next_ime_poll: std::time::Instant::now(),
         adapter: None,
-        captcha: WebView2Captcha,
+        captcha: CaptchaHostImpl,
         cursor: (0.0, 0.0),
         zone: Zone::Client,
         hovering_link: false,
@@ -445,6 +522,11 @@ fn run_loop(
         last_wheel_at: None,
         wheel_id: None,
         long_press: None,
+        edge_touch: None,
+        drawer_drag: None,
+        sheet_touch: None,
+        sheet_drag: None,
+        drawer_close_touch: None,
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
@@ -492,6 +574,56 @@ struct PendingLongPress {
     at: std::time::Instant,
 }
 
+/// A touch that started in the drawer's edge zone but has not moved past
+/// the slop yet. Still an ordinary touch: taps work from here, and only a
+/// rightward drag past the slop converts it below.
+#[derive(Debug, Clone, Copy)]
+struct EdgeTouch {
+    id: u64,
+    x: f32,
+    dx: f32,
+    dy: f32,
+}
+
+/// A finger driving the drawer open. Touch verdicts stay off it: release
+/// ends the drag instead of tapping or swiping.
+#[derive(Debug, Clone, Copy)]
+struct DrawerDrag {
+    id: u64,
+    start_x: f32,
+    last_x: f32,
+}
+
+/// A touch on a sheet handle but not past the slop yet. Still an
+/// ordinary touch: taps work from here, and only a downward drag past
+/// the slop converts it below.
+#[derive(Debug, Clone, Copy)]
+struct SheetTouch {
+    id: u64,
+    y: f32,
+    dx: f32,
+    dy: f32,
+}
+
+/// A finger driving a sheet shut. Touch verdicts stay off it: release
+/// ends the drag instead of tapping or swiping.
+#[derive(Debug, Clone, Copy)]
+struct SheetDrag {
+    id: u64,
+    start_y: f32,
+    last_y: f32,
+}
+
+/// A touch inside the open drawer but not past the slop yet. Still an
+/// ordinary touch; only a leftward drag past the slop converts it below.
+#[derive(Debug, Clone, Copy)]
+struct DrawerCloseTouch {
+    id: u64,
+    x: f32,
+    dx: f32,
+    dy: f32,
+}
+
 struct Host {
     app: Box<dyn Application>,
     /// Wakes the loop from another thread; handed to the renderer so system
@@ -517,7 +649,7 @@ struct Host {
     /// shows; without it Narrator never connects.
     adapter: Option<accesskit_winit::Adapter>,
     /// Presents a captcha challenge as a modal over the window (ADR-0007).
-    captcha: WebView2Captcha,
+    captcha: CaptchaHostImpl,
     /// Pointer position.
     cursor: (f32, f32),
     zone: Zone,
@@ -557,6 +689,19 @@ struct Host {
     wheel_id: Option<NodeId>,
     /// A touch held still, waiting to become a context menu.
     long_press: Option<PendingLongPress>,
+    /// A touch started in the drawer's edge zone, still an ordinary touch
+    /// until a rightward drag past the slop converts it below.
+    edge_touch: Option<EdgeTouch>,
+    /// The finger driving the drawer open, if any.
+    drawer_drag: Option<DrawerDrag>,
+    /// A touch on a sheet handle, still ordinary until a downward drag
+    /// past the slop converts it below.
+    sheet_touch: Option<SheetTouch>,
+    /// The finger driving a sheet shut, if any.
+    sheet_drag: Option<SheetDrag>,
+    /// A touch inside the open drawer, still ordinary until a leftward
+    /// drag past the slop converts it below.
+    drawer_close_touch: Option<DrawerCloseTouch>,
     /// A title-bar control button armed on press; acted on on release.
     ///
     /// Acting on press lets Windows hand the release to whatever is now under
@@ -1198,16 +1343,22 @@ impl Host {
         }
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
         let mut changed = false;
-        if let Some((kind, event)) = proxy.poll() {
+        let mut submitted = false;
+        // A paired fill moves both fields. Drain the pair before submitting
+        // so the submit never races the sibling's half of the fill.
+        while let Some((kind, event)) = proxy.poll() {
             match event {
                 crate::proxy::ProxyEvent::Text(text) => {
                     changed |= self.app.proxy_text(kind, text);
                 }
                 crate::proxy::ProxyEvent::Submitted(text) => {
                     changed |= self.app.proxy_text(kind, text);
-                    changed |= self.app.submit();
+                    submitted = true;
                 }
             }
+        }
+        if submitted {
+            changed |= self.app.submit();
         }
         // A submit cleared focus: resign on this tick instead of the
         // next redraw, or the keyboard lingers over what comes next.
@@ -1331,6 +1482,8 @@ impl Host {
             let Some(r) = &mut self.renderer else { return };
             r.set_caret_visible(caret_on);
             r.set_theme_namespace(self.app.theme_namespace());
+            r.set_slide(NodeId::OverlayDrawer, self.app.drawer_slide());
+            r.set_slide(NodeId::OverlaySheet, self.app.sheet_slide());
             if let Some(id) = keep_place {
                 r.keep_place(id);
             }
@@ -1818,8 +1971,10 @@ impl ApplicationHandler<LoopEvent> for Host {
 
         // A wheel burst coasting to a stop. Unlike a touch there is no
         // release event, so the burst ends by timeout: once the wheel rests
-        // past the window, the measured velocity becomes the coast.
-        if self.fling.is_none()
+        // past the window, the measured velocity becomes the coast. Mobile
+        // only: desktop leaves inertia to the OS (ADR-0014 B0).
+        if is_mobile()
+            && self.fling.is_none()
             && let (Some(id), Some(at)) = (self.wheel_id, self.last_wheel_at)
         {
             const WHEEL_END: std::time::Duration = std::time::Duration::from_millis(80);
@@ -2197,6 +2352,53 @@ impl ApplicationHandler<LoopEvent> for Host {
                             self.request_redraw();
                         } else {
                             self.touch.press(touch.id, point.0, point.1);
+                            // A touch in the drawer's edge zone may yet
+                            // become a drawer drag; until it moves past the
+                            // slop it stays an ordinary touch, so taps keep
+                            // working from here.
+                            if self.drawer_drag.is_none()
+                                && self.edge_touch.is_none()
+                                && point.0 <= DRAWER_EDGE
+                                && self.app.drawer_drag_maybe(point.0)
+                            {
+                                self.edge_touch = Some(EdgeTouch {
+                                    id: touch.id,
+                                    x: point.0,
+                                    dx: 0.0,
+                                    dy: 0.0,
+                                });
+                            }
+                            // A touch on a sheet handle may yet become a
+                            // sheet drag, and one inside the open drawer a
+                            // close drag; until either moves past the slop
+                            // both stay ordinary touches, so taps keep
+                            // working from here.
+                            if self.drawer_drag.is_none()
+                                && self.sheet_drag.is_none()
+                                && self.sheet_touch.is_none()
+                                && self.drawer_close_touch.is_none()
+                            {
+                                let hits = self.hits_at(point.0, point.1);
+                                if hits.iter().any(|h| h.id == NodeId::OverlaySheetHandle)
+                                    && self.app.sheet_drag_maybe()
+                                {
+                                    self.sheet_touch = Some(SheetTouch {
+                                        id: touch.id,
+                                        y: point.1,
+                                        dx: 0.0,
+                                        dy: 0.0,
+                                    });
+                                } else if hits.iter().any(|h| h.id == NodeId::OverlayDrawer)
+                                    && self.app.drawer_close_drag_maybe()
+                                {
+                                    self.drawer_close_touch = Some(DrawerCloseTouch {
+                                        id: touch.id,
+                                        x: point.0,
+                                        dx: 0.0,
+                                        dy: 0.0,
+                                    });
+                                }
+                            }
                             // First finger only: extras are ignored until it lifts.
                             if self.long_press.is_none() {
                                 self.long_press = Some(PendingLongPress {
@@ -2224,6 +2426,62 @@ impl ApplicationHandler<LoopEvent> for Host {
                                     self.request_redraw();
                                 }
                             }
+                        } else if let Some(drag) = self.drawer_drag
+                            && drag.id == touch.id
+                        {
+                            // The drawer follows the finger; verdicts stay
+                            // off it, and release ends the drag instead.
+                            let width = self
+                                .renderer
+                                .as_ref()
+                                .and_then(|r| {
+                                    r.hit_boxes().iter().find_map(|h| {
+                                        (h.id == NodeId::OverlayDrawer).then_some(h.rect.w)
+                                    })
+                                })
+                                .unwrap_or(300.0);
+                            let at = self
+                                .touch_start
+                                .get_or_insert_with(std::time::Instant::now)
+                                .elapsed()
+                                .as_secs_f32();
+                            self.touch_cum_x += point.0 - drag.last_x;
+                            self.touch_vel.push(at, self.touch_cum_x, self.touch_cum_y);
+                            if self.app.drawer_drag_move(point.0 - drag.start_x, width) {
+                                self.request_redraw();
+                            }
+                            self.drawer_drag = Some(DrawerDrag {
+                                last_x: point.0,
+                                ..drag
+                            });
+                        } else if let Some(drag) = self.sheet_drag
+                            && drag.id == touch.id
+                        {
+                            // The sheet follows the finger; verdicts stay
+                            // off it, and release ends the drag instead.
+                            let height = self
+                                .renderer
+                                .as_ref()
+                                .and_then(|r| {
+                                    r.hit_boxes().iter().find_map(|h| {
+                                        (h.id == NodeId::OverlaySheet).then_some(h.rect.h)
+                                    })
+                                })
+                                .unwrap_or(300.0);
+                            let at = self
+                                .touch_start
+                                .get_or_insert_with(std::time::Instant::now)
+                                .elapsed()
+                                .as_secs_f32();
+                            self.touch_cum_y += point.1 - drag.last_y;
+                            self.touch_vel.push(at, self.touch_cum_x, self.touch_cum_y);
+                            if self.app.sheet_drag_move(point.1 - drag.start_y, height) {
+                                self.request_redraw();
+                            }
+                            self.sheet_drag = Some(SheetDrag {
+                                last_y: point.1,
+                                ..drag
+                            });
                         } else {
                             let action = self.touch.mov(touch.id, point.0, point.1);
                             // Moving past the slop is a drag, never a hold.
@@ -2244,16 +2502,154 @@ impl ApplicationHandler<LoopEvent> for Host {
                                 self.touch_cum_x += dx;
                                 self.touch_cum_y += dy;
                                 self.touch_vel.push(at, self.touch_cum_x, self.touch_cum_y);
-                                if let Some((id, _)) = self.scroll_touch(point.0, point.1, dx, dy) {
+                                // A rightward drag from the edge becomes a
+                                // drawer drag past the slop; the list keeps
+                                // what earlier moves scrolled.
+                                let mut driving = false;
+                                if let Some(edge) = self.edge_touch
+                                    && edge.id == touch.id
+                                {
+                                    let (ndx, ndy) = (edge.dx + dx, edge.dy + dy);
+                                    if ndx > crate::touch::TAP_SLOP && ndx > ndy.abs() {
+                                        self.edge_touch = None;
+                                        if self
+                                            .long_press
+                                            .as_ref()
+                                            .is_some_and(|p| p.id == touch.id)
+                                        {
+                                            self.long_press = None;
+                                        }
+                                        self.reset_touch_scroll();
+                                        self.touch.cancel(touch.id);
+                                        if self.app.drawer_drag_start() {
+                                            self.drawer_drag = Some(DrawerDrag {
+                                                id: touch.id,
+                                                start_x: edge.x,
+                                                last_x: point.0,
+                                            });
+                                            driving = true;
+                                            self.request_redraw();
+                                        }
+                                    } else {
+                                        self.edge_touch = Some(EdgeTouch {
+                                            dx: ndx,
+                                            dy: ndy,
+                                            ..edge
+                                        });
+                                    }
+                                }
+                                // A downward drag from a sheet handle becomes
+                                // a sheet drag past the slop.
+                                if !driving
+                                    && let Some(handle) = self.sheet_touch
+                                    && handle.id == touch.id
+                                {
+                                    let (ndx, ndy) = (handle.dx + dx, handle.dy + dy);
+                                    if ndy > crate::touch::TAP_SLOP && ndy > ndx.abs() {
+                                        self.sheet_touch = None;
+                                        if self
+                                            .long_press
+                                            .as_ref()
+                                            .is_some_and(|p| p.id == touch.id)
+                                        {
+                                            self.long_press = None;
+                                        }
+                                        self.reset_touch_scroll();
+                                        self.touch.cancel(touch.id);
+                                        if self.app.sheet_drag_start() {
+                                            self.sheet_drag = Some(SheetDrag {
+                                                id: touch.id,
+                                                start_y: handle.y,
+                                                last_y: point.1,
+                                            });
+                                            driving = true;
+                                            self.request_redraw();
+                                        }
+                                    } else {
+                                        self.sheet_touch = Some(SheetTouch {
+                                            dx: ndx,
+                                            dy: ndy,
+                                            ..handle
+                                        });
+                                    }
+                                }
+                                // A leftward drag inside the open drawer
+                                // becomes a close drag past the slop.
+                                if !driving
+                                    && let Some(close) = self.drawer_close_touch
+                                    && close.id == touch.id
+                                {
+                                    let (ndx, ndy) = (close.dx + dx, close.dy + dy);
+                                    if ndx < -crate::touch::TAP_SLOP && -ndx > ndy.abs() {
+                                        self.drawer_close_touch = None;
+                                        if self
+                                            .long_press
+                                            .as_ref()
+                                            .is_some_and(|p| p.id == touch.id)
+                                        {
+                                            self.long_press = None;
+                                        }
+                                        self.reset_touch_scroll();
+                                        self.touch.cancel(touch.id);
+                                        if self.app.drawer_close_drag_start() {
+                                            self.drawer_drag = Some(DrawerDrag {
+                                                id: touch.id,
+                                                start_x: close.x,
+                                                last_x: point.0,
+                                            });
+                                            driving = true;
+                                            self.request_redraw();
+                                        }
+                                    } else {
+                                        self.drawer_close_touch = Some(DrawerCloseTouch {
+                                            dx: ndx,
+                                            dy: ndy,
+                                            ..close
+                                        });
+                                    }
+                                }
+                                if !driving
+                                    && let Some((id, _)) =
+                                        self.scroll_touch(point.0, point.1, dx, dy)
+                                {
                                     self.touch_scroll_id = Some(id);
                                 }
                             }
                         }
                     }
                     TouchPhase::Ended => {
-                        // A lifted finger cannot keep dragging: its grab dies
-                        // here, never becoming a tap, a swipe or a fling.
-                        if self.touch_grab {
+                        if self.edge_touch.is_some_and(|e| e.id == touch.id) {
+                            self.edge_touch = None;
+                        }
+                        if self.sheet_touch.is_some_and(|s| s.id == touch.id) {
+                            self.sheet_touch = None;
+                        }
+                        if self.drawer_close_touch.is_some_and(|c| c.id == touch.id) {
+                            self.drawer_close_touch = None;
+                        }
+                        // A finger that drove the drawer lets go: the release
+                        // velocity picks a side, and no tap, swipe or fling
+                        // follows.
+                        if let Some(drag) = self.drawer_drag
+                            && drag.id == touch.id
+                        {
+                            let (vx, _) = self.touch_vel.velocity();
+                            self.drawer_drag = None;
+                            self.reset_touch_scroll();
+                            if self.app.drawer_drag_end(vx) {
+                                self.request_redraw();
+                            }
+                        } else if let Some(drag) = self.sheet_drag
+                            && drag.id == touch.id
+                        {
+                            // A finger that drove a sheet lets go the same way.
+                            let (_, vy) = self.touch_vel.velocity();
+                            self.sheet_drag = None;
+                            self.reset_touch_scroll();
+                            if self.app.sheet_drag_end(vy) {
+                                self.request_redraw();
+                            }
+                        } else if self.touch_grab {
                             self.scroll_grab = None;
                             self.touch_grab = false;
                             self.reset_touch_scroll();
@@ -2287,7 +2683,10 @@ impl ApplicationHandler<LoopEvent> for Host {
                                 region = ?self.touch_scroll_id,
                                 "touch released"
                             );
-                            if let Some(id) = self.touch_scroll_id
+                            // Mobile only: desktop leaves inertia to the OS
+                            // (ADR-0014 B0), so a release ends the drag.
+                            if is_mobile()
+                                && let Some(id) = self.touch_scroll_id
                                 && let Some(fling) = crate::touch::Fling::new_release(vel, net)
                             {
                                 tracing::debug!(region = ?id, velocity = fling.velocity(), "fling started");
@@ -2328,6 +2727,34 @@ impl ApplicationHandler<LoopEvent> for Host {
                     TouchPhase::Cancelled => {
                         if self.long_press.as_ref().is_some_and(|p| p.id == touch.id) {
                             self.long_press = None;
+                        }
+                        // A driving finger must not hang: coast to a side
+                        // instead of stranding the drawer half open.
+                        if let Some(drag) = self.drawer_drag
+                            && drag.id == touch.id
+                        {
+                            self.drawer_drag = None;
+                            if self.app.drawer_drag_end(0.0) {
+                                self.request_redraw();
+                            }
+                        }
+                        // A driving sheet finger must not hang either.
+                        if let Some(drag) = self.sheet_drag
+                            && drag.id == touch.id
+                        {
+                            self.sheet_drag = None;
+                            if self.app.sheet_drag_end(0.0) {
+                                self.request_redraw();
+                            }
+                        }
+                        if self.edge_touch.is_some_and(|e| e.id == touch.id) {
+                            self.edge_touch = None;
+                        }
+                        if self.sheet_touch.is_some_and(|s| s.id == touch.id) {
+                            self.sheet_touch = None;
+                        }
+                        if self.drawer_close_touch.is_some_and(|c| c.id == touch.id) {
+                            self.drawer_close_touch = None;
                         }
                         self.touch.cancel(touch.id);
                         self.reset_touch_scroll();

@@ -900,6 +900,66 @@ mod tests {
         }
     }
 
+    /// Grouped rows keep their avatar-width indent on narrow screens. The
+    /// narrow `chat.message` rule sits after the grouped one and used to
+    /// override its padding, sliding follow-ups under the avatar column
+    /// on phones.
+    #[test]
+    fn grouped_messages_keep_their_indent_on_narrow_screens() {
+        use gumicord_uitree::{NodeId, value::Edges};
+        let midnight = Theme::parse(include_str!("../../../examples/themes/midnight/theme.json"))
+            .theme
+            .expect("midnight parses");
+        let wallpaper = Theme::parse(include_str!(
+            "../../../examples/themes/wallpaper/theme.json"
+        ))
+        .theme
+        .expect("wallpaper parses");
+        for (name, theme) in [("midnight", &midnight), ("wallpaper", &wallpaper)] {
+            let pad = |width: f32, grouped: bool| {
+                let mut ctx = MatchContext {
+                    window_width: width,
+                    ..ctx()
+                };
+                if grouped {
+                    ctx = ctx.with_state(State::Grouped);
+                }
+                theme.style_for(NodeId::ChatMessage, &ctx).padding
+            };
+            // Side + avatar + gap.
+            assert_eq!(
+                pad(390.0, true),
+                Some(Edges {
+                    top: 0.0,
+                    right: 8.0,
+                    bottom: 0.0,
+                    left: 56.0
+                }),
+                "{name}: grouped narrow loses the avatar indent"
+            );
+            assert_eq!(
+                pad(1280.0, true),
+                Some(Edges {
+                    top: 0.0,
+                    right: 16.0,
+                    bottom: 0.0,
+                    left: 64.0
+                }),
+                "{name}: grouped wide"
+            );
+            assert_eq!(
+                pad(390.0, false),
+                Some(Edges {
+                    top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 8.0
+                }),
+                "{name}: plain narrow"
+            );
+        }
+    }
+
     /// The fetcher sees every background image once, with fit and blur.
     #[test]
     fn background_images_are_collected_once_each() {

@@ -85,15 +85,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # The Secret Service backend links the system D-Bus library.
+      # The Secret Service backend links the system D-Bus library, and the
+      # Linux captcha host links WebKitGTK (ADR-0015).
       - name: Install D-Bus headers
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
         run: cargo fmt --all --check
+
+      # Derivatives stay generated: the nightly icon set must match its
+      # master, or a hand edit slipped in (see packaging/README.md).
+      - name: Nightly icons match their master
+        run: cargo xtask icons --check
 
       # --all-targets doubles memory use and destabilised the dev machine, so
       # it is off there. Tests and examples get linted here instead.
@@ -165,10 +171,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Desktop Linux links the system D-Bus library like the checks do.
+      # Desktop Linux links the system D-Bus library like the checks do,
+      # plus WebKitGTK for the captcha host (ADR-0015).
       - name: Install D-Bus headers
         if: matrix.os == 'ubuntu-latest' && matrix.kind == 'desktop'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config desktop-file-utils
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config desktop-file-utils libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Add mobile target
         if: matrix.kind != 'desktop'
@@ -267,10 +274,16 @@ jobs:
       - name: Build unsigned .app
         if: matrix.kind == 'ios'
         run: |
+          # dist mobile legs are the nightly channel: black icon, nightly
+          # bundle slot and display name. Stable builds its own legs in
+          # release.yml with the defaults.
           xcodebuild -project app/ios/Gumicord.xcodeproj -scheme Gumicord \
             -configuration Release -destination 'generic/platform=iOS' \
             -derivedDataPath build/ios-dd \
-            CODE_SIGNING_ALLOWED=NO build
+            CODE_SIGNING_ALLOWED=NO \
+            ASSETCATALOG_COMPILER_APPICON_NAME=AppIconNightly \
+            PRODUCT_BUNDLE_IDENTIFIER=dev.gumicord.nightly \
+            APP_DISPLAY_NAME="Gumicord Nightly" build
 
       - name: Zip Payload into .ipa
         if: matrix.kind == 'ios'
@@ -427,6 +440,10 @@ jobs:
           pattern: gumicord-*
           path: dist
 
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Compute tag
         id: tag
         run: echo "name=nightly-$(date +'%Y%m%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
@@ -455,6 +472,19 @@ jobs:
           done
           ls -l dist
 
+      # The source file points at the renamed assets by their final
+      # names, so it runs after the rename above.
+      - name: Write AltStore source
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          SHA="${{ github.sha }}"
+          MSG=$(git log -1 --format=%s "$SHA")
+          DATE=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
+          cargo xtask altstore --channel nightly --tag "$TAG" \
+            --ipa "dist/gumicord-$TAG.ipa" \
+            --commit "${SHA::7}" --commit-message "$MSG" --date "$DATE" \
+            --out dist/apps-nightly.json
+
       # Short-lived installation token (expires after the run); the key
       # itself never expires, so there is nothing to rotate yearly.
       - uses: actions/create-github-app-token@v2
@@ -477,6 +507,7 @@ jobs:
             dist/*.zip
             dist/*.AppImage
             dist/*.dmg
+            dist/apps-nightly.json
           fail_on_unmatched_files: true
           body: |
             Automated nightly for https://github.com/${{ github.repository }}/commit/${{ github.sha }}.
@@ -486,6 +517,7 @@ jobs:
             - Desktop builds (Windows / Linux / macOS), Linux AppImage, unsigned macOS dmg,
               debug APK (arm64 + x86_64) and unsigned IPA for sideloading.
             - Debug builds: slower, larger, logging enabled. No signing identity exists yet.
+            - AltStore source: https://gumicord.github.io/gumicord-sources/apps-nightly.json
             - WARNING: connecting to Discord with a third-party client breaks
               their terms of service and can cost you your account.
 
@@ -507,7 +539,45 @@ jobs:
               missing=1
             fi
           done
+          echo "$names" | grep -qF -- apps-nightly.json || { echo "missing apps-nightly.json"; missing=1; }
           [ "$missing" -eq 0 ]
+
+      # The AltStore source lives in its own repository, served over
+      # Pages; this job pushes the file the step above just wrote.
+      - uses: actions/create-github-app-token@v2
+        id: sources-token
+        with:
+          app-id: ${{ secrets.NIGHTLY_APP_ID }}
+          private-key: ${{ secrets.NIGHTLY_APP_PRIVATE_KEY }}
+          owner: gumicord
+          repositories: gumicord-sources
+
+      - name: Publish AltStore source
+        env:
+          GH_TOKEN: ${{ steps.sources-token.outputs.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          rm -rf "$RUNNER_TEMP/sources" && git clone --depth 1 \
+            "https://x-access-token:$GH_TOKEN@github.com/gumicord/gumicord-sources.git" \
+            "$RUNNER_TEMP/sources"
+          cp dist/apps-nightly.json "$RUNNER_TEMP/sources/"
+          cd "$RUNNER_TEMP/sources"
+          git config user.name "gumicord-nightly[bot]"
+          git config user.email "gumicord-nightly[bot]@users.noreply.github.com"
+          git add apps-nightly.json
+          git commit -m "nightly $TAG" || exit 0
+          git push origin main
+
+      # Pages deploys behind the push; poll until AltStore could read it.
+      - name: Verify AltStore source served
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          for i in $(seq 1 30); do
+            if curl -fsSL https://gumicord.github.io/gumicord-sources/apps-nightly.json \
+              | grep -qF -- "$TAG"; then exit 0; fi
+            sleep 20
+          done
+          echo "apps-nightly.json not serving $TAG" >&2; exit 1
 
   # ────────────────────────────────────────────────────────────
   # Confirms rust-version in Cargo.toml is true. A declared value nobody
@@ -523,7 +593,7 @@ jobs:
 
       # Same system dependency as the other Linux builds.
       - name: Install D-Bus headers
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - uses: Swatinem/rust-cache@v2
         with:

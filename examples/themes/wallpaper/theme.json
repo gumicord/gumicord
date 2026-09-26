@@ -1010,6 +1010,11 @@
       "style": { "padding": [4, 8, 4, 8] }
     },
     {
+      "select": "chat.message",
+      "when": { "state": "grouped", "maxWidth": 600 },
+      "style": { "padding": [0, 8, 0, 56] }
+    },
+    {
       "select": "layout.column",
       "when": { "slot": "qr_column" },
       "style": { "minWidth": 400, "maxWidth": 400 }

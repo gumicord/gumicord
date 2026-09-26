@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use crate::pages::chat::tests::{
-        app, hit_of, is_confirm, press_button, press_menu, swipe, with_menu,
+        app, hit_at, hit_of, is_confirm, press_button, press_menu, settle_sheet, swipe, with_menu,
     };
     use crate::*;
 
@@ -179,6 +179,18 @@ mod tests {
         assert_eq!(a.chat.composing, Composing::New);
     }
 
+    /// A menu sheet flicked down dismisses; a dialog never does, since it
+    /// represents an unmade decision.
+    #[test]
+    fn flicking_a_menu_sheet_down_dismisses_it() {
+        let mut a = with_menu();
+        let sheet = hit_at(NodeId::OverlaySheet, None, 0.0, 400.0, 400.0, 400.0);
+        assert!(a.swiped(&[sheet], swipe(SwipeDir::Down, 200.0)));
+        assert!(a.floating.is_some(), "払った瞬間に消えた");
+        settle_sheet(&mut a);
+        assert!(a.floating.is_none(), "閉じていない");
+    }
+
     /// A press hits both layers, so without a rule it passes through and
     /// navigates to whatever the user meant to dismiss the menu over.
     #[test]
@@ -189,6 +201,7 @@ mod tests {
         let hits = [hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))];
 
         assert!(a.pressed(&hits), "閉じるという変化はある");
+        settle_sheet(&mut a);
         assert!(a.floating.is_none(), "閉じていない");
         assert_eq!(a.chat.selected_channel, before, "下のチャンネルへ移動した");
     }
@@ -230,6 +243,7 @@ mod tests {
         a.chat.input_focused = true;
 
         assert!(a.cancel_input(), "何も起きなかった");
+        settle_sheet(&mut a);
         assert!(a.floating.is_none(), "メニューが閉じていない");
         assert!(a.chat.input_focused, "入力欄のフォーカスまで外れた");
 
@@ -501,6 +515,7 @@ mod tests {
     fn right_clicking_empty_space_closes_the_menu() {
         let mut a = with_menu();
         assert!(a.context_menu(&[], (0.0, 0.0)));
+        settle_sheet(&mut a);
         assert!(a.floating.is_none());
     }
 

@@ -659,18 +659,35 @@ async fn run_password(
                 Some(c) => c,
                 None => return PasswordRun::Cancelled,
             };
-            match rest.mfa_totp(&t, &code).await {
-                Ok(tok) => Some(tok),
-                // A wrong code is just another chance to ask, with the
-                // reason under the field.
-                Err(e) => {
-                    send_field_errors(tx, &e);
-                    let _ = tx.send(LoginEvent::TotpNeeded {
-                        email: email.clone(),
-                    });
-                    waker.wake();
-                    tracing::debug!(%e, "totp rejected; asking again");
-                    continue;
+            // Any call can be captcha-challenged, including this one. Solve
+            // it and retry the same ticket and code instead of asking for
+            // another code the user already typed.
+            let mut solved_totp: Option<SolvedCaptcha> = None;
+            loop {
+                match rest.mfa_totp(&t, &code, solved_totp.as_ref()).await {
+                    Ok(tok) => break Some(tok),
+                    Err(RestError::CaptchaRequired(ch)) => {
+                        let _ = tx.send(LoginEvent::CaptchaNeeded(*ch));
+                        waker.wake();
+                        match await_captcha(cmd_rx).await {
+                            Some(s) => {
+                                solved_totp = Some(s);
+                                continue;
+                            }
+                            None => return PasswordRun::Cancelled,
+                        }
+                    }
+                    // A wrong code is just another chance to ask, with the
+                    // reason under the field.
+                    Err(e) => {
+                        send_field_errors(tx, &e);
+                        let _ = tx.send(LoginEvent::TotpNeeded {
+                            email: email.clone(),
+                        });
+                        waker.wake();
+                        tracing::debug!(%e, "totp rejected; asking again");
+                        break None;
+                    }
                 }
             }
         } else {

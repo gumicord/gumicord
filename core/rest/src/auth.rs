@@ -90,16 +90,34 @@ impl RestClient {
     /// Completes a login with a TOTP (authenticator or backup) code.
     ///
     /// `ticket` comes from `LoginOutcome::MfaRequired`. A wrong code is an
-    /// ordinary API error; the caller asks again.
-    pub async fn mfa_totp(&self, ticket: &str, code: &str) -> Result<Token, RestError> {
+    /// ordinary API error; the caller asks again. Like [`Self::login`], a
+    /// challenged attempt returns `CaptchaRequired`; the caller solves it
+    /// and retries with `captcha` set, the solution riding in headers.
+    pub async fn mfa_totp(
+        &self,
+        ticket: &str,
+        code: &str,
+        captcha: Option<&SolvedCaptcha>,
+    ) -> Result<Token, RestError> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
             ticket: &'a str,
             code: &'a str,
         }
 
+        let mut extra: Vec<(&str, &str)> = Vec::with_capacity(3);
+        if let Some(c) = captcha {
+            extra.push(("X-Captcha-Key", c.key.as_str()));
+            if let Some(t) = &c.rqtoken {
+                extra.push(("X-Captcha-Rqtoken", t));
+            }
+            if let Some(s) = &c.session_id {
+                extra.push(("X-Captcha-Session-Id", s));
+            }
+        }
+
         let text = self
-            .send_raw(Route::mfa_totp(), Some(&Body { ticket, code }))
+            .send_raw_h(Route::mfa_totp(), Some(&Body { ticket, code }), &extra)
             .await?;
         let r: MfaResponse = serde_json::from_str(&text).map_err(RestError::Decode)?;
         r.token.map(Token::new).ok_or_else(|| {

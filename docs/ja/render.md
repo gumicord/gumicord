@@ -65,6 +65,12 @@
 
 ### `src/url.rs` — URL の OS 引き渡し。Key items: `open_url()`。`http`／`https` のみ許可する。
 
-### `src/captcha/mod.rs` — captcha 提示の抽象層。アプリは素データだけ扱い、表示は本モジュールが担う。Key items: `CaptchaChallenge`、`CaptchaHost`、`WebView2Captcha`。非 Windows の `solve()` は `Unsupported` のスタブ。
+### `src/captcha/mod.rs` — captcha 提示の抽象層。アプリは素データだけ扱い、表示は本モジュールが担う。Key items: `CaptchaChallenge`、`CaptchaHost`、`Host` (OS ごとの実体。Windows は WebView2、macOS／Linux／iOS は `wry`、Android は小さな Kotlin 受け口付き `WebView`)。
+
+### `src/captcha/page.rs` — 全ホスト共通のチャレンジ頁。Key items: `Bridge`、`html()`、`Outcome`。
 
 ### `src/captcha/webview2.rs` — Windows 専用の WebView2 captcha ホスト。子ウィンドウで hCaptcha ページを開き IPC でトークンを受ける。
+
+### `src/captcha/wry_host.rs` — macOS (子)・Linux (X11 は子、Wayland は自前のトップレベル窓)・iOS (全画面) の `wry` ホスト。頁の応答を待ちながら OS の待ち受けを回す。
+
+### `src/captcha/android.rs` — Android ホスト。JNI で `WebView` を作り `CaptchaBridge.kt` で受け、待ち受けを手回ししながら待つ。

@@ -187,6 +187,8 @@ pub enum Action {
     SelectSettingsPlugin(String),
     /// Back from a plugin's page to the plugin list.
     SettingsPluginBack,
+    /// Back from a narrow settings page to its menu.
+    SettingsNarrowBack,
     /// Turn a plugin off; its grants are kept.
     DisablePlugin(String),
     /// Turn a plugin back on. A denied plugin stays denied.
@@ -200,6 +202,11 @@ pub enum Action {
     SelectTheme(String),
     /// Go back to the bundled theme.
     UseBundledTheme,
+    /// Install a theme from an archive file chosen in the OS picker.
+    InstallThemeFile,
+    /// Install a plugin from an archive file chosen in the OS picker.
+    /// Capabilities still ask through the usual approval dialog.
+    InstallPluginFile,
     /// Hand the log file to the OS: the share sheet on Android, the logs
     /// folder on desktop, the Files app location on iOS.
     ShareLog,

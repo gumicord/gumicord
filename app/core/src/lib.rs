@@ -35,6 +35,7 @@ pub mod a11y;
 pub mod account;
 pub mod assets;
 pub mod images;
+pub mod install;
 pub mod live;
 pub mod markdown;
 pub mod menu;
@@ -70,6 +71,21 @@ const THEME_ENV: &str = "GUMICORD_THEME";
 
 /// How long a toast stays up, in seconds.
 const TOAST_SECS: i64 = 4;
+
+/// Which surface a closing sheet slide clears when it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SheetCloser {
+    Member,
+    Menu,
+}
+
+/// How fast a sheet coasts open or shut, in milliseconds. Drawers use
+/// the same pace; surfaces should agree with each other.
+pub(crate) const SHEET_ANIM_MS: f32 = 220.0;
+
+/// Release speed deciding a sheet drag, in px/s. Same threshold as drawers.
+pub(crate) const SHEET_FLING_PX_S: f32 = 200.0;
+
 /// How many toasts stack; older ones drop off unread.
 const TOAST_MAX: usize = 3;
 /// How often the performance overlay refreshes while shown, even with no
@@ -294,6 +310,19 @@ pub struct Gumicord {
     match_ctx: MatchContext,
     /// Whatever is floating; at most one.
     floating: Option<crate::menu::Floating>,
+    /// A bottom sheet's slide progress, shared by the member sheet and a
+    /// menu shown as a sheet. Never both at once: opening a menu closes
+    /// the member sheet first. 0 shut, 1 open; dismissals coast like
+    /// drawers, selections vanish at once.
+    sheet_slide: f32,
+    sheet_target: f32,
+    sheet_anim_from: f32,
+    sheet_anim_start: Option<std::time::Instant>,
+    sheet_drag: bool,
+    sheet_drag_from: f32,
+    /// Which surface a closing slide clears on landing. Openings set
+    /// their own flag at once and need none.
+    sheet_closing: Option<SheetCloser>,
     /// Transient notices; several share one node and none blocks input.
     toasts: VecDeque<crate::menu::Toast>,
     /// Whether the FPS meter shows. Session-local until settings persist.
@@ -333,6 +362,12 @@ pub struct Gumicord {
     showing: Option<Showing>,
     /// The settings screen. Closed most of the time.
     settings: crate::pages::settings::SettingsView,
+    /// Parsed message bodies by message id, with the content they came
+    /// from. `message_rows` runs several times a frame over thousands of
+    /// rows; parsing every body every time dwarfs the layout it feeds.
+    /// An edit changes the content, which misses and re-parses.
+    blocks_cache:
+        std::cell::RefCell<std::collections::HashMap<u64, (String, Vec<gumicord_markdown::Block>)>>,
 }
 
 impl Gumicord {
@@ -444,6 +479,13 @@ impl Gumicord {
             chat: crate::pages::chat::ChatView::new(guild, channel),
             match_ctx: MatchContext::new(0.0),
             floating: None,
+            sheet_slide: 1.0,
+            sheet_target: 1.0,
+            sheet_anim_from: 1.0,
+            sheet_anim_start: None,
+            sheet_drag: false,
+            sheet_drag_from: 1.0,
+            sheet_closing: None,
             toasts: VecDeque::new(),
             show_fps: false,
             frame_report: None,
@@ -460,6 +502,7 @@ impl Gumicord {
             dialogs: VecDeque::new(),
             showing: None,
             settings: crate::pages::settings::SettingsView::default(),
+            blocks_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         };
         app.refresh_theme_assets();
         app
@@ -758,10 +801,119 @@ impl Gumicord {
         self.notify_toast("標準のテーマに戻しました".to_owned());
     }
 
-    /// Which node the screen reader follows. Dialogs and menus grab it;
-    /// otherwise the focused field does, then the last pressed message.
-    /// Pressing a message is the only way to point the reader at the chat:
-    /// hovering moves nothing.
+    /// Installs a theme or plugin from an archive file. The OS picker runs
+    /// first; phones have no picker yet and say so instead of stalling.
+    /// The dialog blocks the loop while open, like any modal dialog.
+    fn install_package(&mut self, kind: crate::install::InstallKind) {
+        use crate::install::InstallKind;
+        use gumicord_platform::file_dialog::{FileFilter, PickOptions, pick_file};
+
+        let title = match kind {
+            InstallKind::Theme => "テーマのファイルを選ぶ",
+            InstallKind::Plugin => "プラグインのファイルを選ぶ",
+        };
+        let options = PickOptions {
+            title: Some(title.to_owned()),
+            filters: vec![FileFilter {
+                // Compound extensions carry dots, which filters refuse.
+                name: "パッケージ".to_owned(),
+                extensions: ["zip", "tgz", "tar", "gz"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }],
+            starting_dir: None,
+            file_name: None,
+        };
+        let path = match pick_file(&options) {
+            Ok(path) => path,
+            Err(gumicord_platform::FileDialogError::Unsupported) => {
+                self.notify_toast("ファイル選択はこの端末では未対応".to_owned());
+                return;
+            }
+            Err(e) => {
+                self.notify_toast(format!("ファイルを選べなかった：{e}"));
+                return;
+            }
+        };
+        let Some(path) = path else {
+            // Cancelled: no choice is ordinary, not an error.
+            return;
+        };
+        let filename = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                self.notify_toast(format!("読めなかった：{e}"));
+                return;
+            }
+        };
+        self.install_package_bytes(kind, &filename, &data);
+    }
+
+    /// Installs picked bytes. Split out for tests: the picker above opens
+    /// a real dialog, which tests must never do.
+    fn install_package_bytes(
+        &mut self,
+        kind: crate::install::InstallKind,
+        filename: &str,
+        data: &[u8],
+    ) {
+        self.install_package_bytes_in(
+            kind,
+            filename,
+            data,
+            self.themes_dir.clone(),
+            gumicord_platform::app_data_dir().map(|d| d.join("plugins")),
+        );
+    }
+
+    /// Installs into the given folders, so tests need no home directory.
+    fn install_package_bytes_in(
+        &mut self,
+        kind: crate::install::InstallKind,
+        filename: &str,
+        data: &[u8],
+        themes_dir: Option<std::path::PathBuf>,
+        plugins_root: Option<std::path::PathBuf>,
+    ) {
+        use crate::install::InstallKind;
+        match kind {
+            InstallKind::Theme => {
+                let Some(dir) = themes_dir else {
+                    self.notify_toast("テーマの置き場がない".to_owned());
+                    return;
+                };
+                match crate::install::install_archive(data, filename, kind, &dir) {
+                    Ok(done) => {
+                        self.refresh_theme_list();
+                        self.notify_toast(format!("「{}」を入れた", done.name));
+                    }
+                    Err(e) => self.notify_toast(format!("入れられなかった：{e}")),
+                }
+            }
+            InstallKind::Plugin => {
+                let Some(root) = plugins_root else {
+                    self.notify_toast("プラグインの置き場がない".to_owned());
+                    return;
+                };
+                match crate::install::install_archive(data, filename, kind, &root) {
+                    Ok(done) => {
+                        // The worker picks the new directory up; capabilities
+                        // ask through the usual approval dialog.
+                        self.plugins.rescan();
+                        self.refresh_settings_states();
+                        self.notify_toast(format!("「{}」を入れた", done.name));
+                    }
+                    Err(e) => self.notify_toast(format!("入れられなかった：{e}")),
+                }
+            }
+        }
+    }
+
     /// Which node the screen reader follows. Dialogs and menus grab it;
     /// otherwise the focused field does, then the drawer or the sheet,
     /// then the last pressed message.
@@ -882,8 +1034,11 @@ impl Gumicord {
         changed
     }
 
-    /// A press while the drawer or the member sheet is open. Content acts
-    /// through the normal arms; anything else dismisses.
+    /// A press while the drawer or the member sheet is open. Presses inside
+    /// an open surface act; anything else dismisses without touching what
+    /// is behind. Behind nodes share IDs with the drawer's reused lists,
+    /// so ID matching alone cannot tell them apart: only hits inside the
+    /// surface's rectangle count.
     fn overlay_press(&mut self, hits: &[Hit]) -> bool {
         // The drawer and the sheet hold no text fields, so every press here
         // is outside one: the keyboard must go, or it covers what opens.
@@ -893,40 +1048,43 @@ impl Gumicord {
         if self.chat.member_sheet_open && hits.iter().any(|h| h.id == NodeId::NavMemberListItem) {
             return self.close_member_sheet() || changed;
         }
-        let content = hits.iter().any(|h| {
-            matches!(
-                h.id,
-                NodeId::NavSidebar
-                    | NodeId::NavSidebarLists
-                    | NodeId::NavGuildList
-                    | NodeId::NavGuildListHome
-                    | NodeId::NavGuildListItem
-                    | NodeId::NavGuildListFolder
-                    | NodeId::NavChannelList
-                    | NodeId::NavChannelListItem
-                    | NodeId::NavDmList
-                    | NodeId::NavDmListItem
-                    | NodeId::NavUserPanel
-                    | NodeId::NavMemberList
-                    | NodeId::NavMemberListGroup
-                    | NodeId::NavMemberListSheet
-                    | NodeId::NavMemberListItem
-                    | NodeId::PrimitiveButton
-                    | NodeId::LayoutScrollbarThumb
-            )
-        });
-        if !content {
+        // The open surfaces' rectangles. A press outside every one is on
+        // the scrim: dismiss and swallow, never reaching the chat behind.
+        let mut surfaces = Vec::new();
+        if self.chat.drawer_open {
+            surfaces.extend(
+                hits.iter()
+                    .find(|h| h.id == NodeId::OverlayDrawer)
+                    .map(|h| h.rect),
+            );
+        }
+        if self.chat.member_sheet_open {
+            surfaces.extend(
+                hits.iter()
+                    .find(|h| h.id == NodeId::OverlaySheet)
+                    .map(|h| h.rect),
+            );
+        }
+        let inside = |r: &gumicord_render::Rect| {
+            surfaces.iter().any(|s| {
+                r.x >= s.x && r.y >= s.y && r.right() <= s.right() && r.bottom() <= s.bottom()
+            })
+        };
+        if !hits.iter().any(|h| inside(&h.rect)) {
             let drawer = self.close_drawer();
             let sheet = self.close_member_sheet();
             return drawer || sheet || changed;
         }
+        // Inside: only hits within a surface act, so a chat row behind the
+        // drawer cannot fire through it.
+        let inner: Vec<Hit> = hits.iter().filter(|h| inside(&h.rect)).cloned().collect();
         let (guild, channel, settings_was, floating_was) = (
             self.chat.selected_guild,
             self.chat.selected_channel,
             self.settings.open,
             self.floating.is_some(),
         );
-        changed |= self.press_loop(hits);
+        changed |= self.press_loop(&inner);
         if self.chat.selected_guild != guild
             || self.chat.selected_channel != channel
             || self.settings.open && !settings_was
@@ -1074,6 +1232,19 @@ impl Application for Gumicord {
             .holds
             .get()
             .map(|s| std::time::Duration::from_secs(s.max(1) as u64));
+        // A coasting drawer wakes the loop at display rate until it lands.
+        // Sheets coast the same way.
+        if (self.chat.drawer_open
+            && !self.chat.drawer_drag
+            && (self.chat.drawer_slide - self.chat.drawer_target).abs() >= 0.001)
+            || (!self.sheet_drag && (self.sheet_slide - self.sheet_target).abs() >= 0.001)
+        {
+            let tick = std::time::Duration::from_millis(16);
+            return Some(match base {
+                Some(d) => d.min(tick),
+                None => tick,
+            });
+        }
         // The overlay's numbers refresh on a tick even with no other reason
         // to redraw; otherwise they only move while the screen does.
         if self.show_fps {
@@ -1099,6 +1270,58 @@ impl Application for Gumicord {
             id: NodeId::ChatMessage,
             key: Some(Key::Id(target)),
         })
+    }
+
+    // The drawer slide, exposed to the platform layer. The same-named
+    // inherent methods own the logic; inherent resolution picks those,
+    // so these delegate without recursing.
+    fn drawer_drag_maybe(&self, x: f32) -> bool {
+        self.drawer_drag_maybe(x)
+    }
+
+    fn drawer_drag_start(&mut self) -> bool {
+        self.drawer_drag_start()
+    }
+
+    fn drawer_close_drag_start(&mut self) -> bool {
+        self.drawer_close_drag_start()
+    }
+
+    fn drawer_close_drag_maybe(&self) -> bool {
+        self.drawer_close_drag_maybe()
+    }
+
+    fn drawer_drag_move(&mut self, dx: f32, width: f32) -> bool {
+        self.drawer_drag_move(dx, width)
+    }
+
+    fn drawer_drag_end(&mut self, velocity: f32) -> bool {
+        self.drawer_drag_end(velocity)
+    }
+
+    fn drawer_slide(&self) -> f32 {
+        self.chat.drawer_slide
+    }
+
+    // The sheet slide, exposed the same way.
+    fn sheet_drag_maybe(&self) -> bool {
+        self.sheet_drag_maybe()
+    }
+
+    fn sheet_drag_start(&mut self) -> bool {
+        self.sheet_drag_start()
+    }
+
+    fn sheet_drag_move(&mut self, dy: f32, height: f32) -> bool {
+        self.sheet_drag_move(dy, height)
+    }
+
+    fn sheet_drag_end(&mut self, velocity: f32) -> bool {
+        self.sheet_drag_end(velocity)
+    }
+
+    fn sheet_slide(&self) -> f32 {
+        self.sheet_slide
     }
 
     /// Drains background events. The only entry point for them.
@@ -1288,9 +1511,10 @@ impl Application for Gumicord {
                 // An inert control inside a plugin's page: swallowed, so the
                 // screen does not close under a curious press.
                 None if hits.iter().any(|h| h.id == NodeId::PrimitiveButton) => focus,
-                // An outside press closes; unlike a dialog there is no unmade
-                // decision to protect.
-                None => self.close_settings() | focus,
+                // A press on rows, gaps, or an empty frame is swallowed: only
+                // the Close row and Esc leave the screen, so a finger
+                // missing a row never loses where it was.
+                None => focus,
             };
         }
 
@@ -1375,11 +1599,39 @@ impl Application for Gumicord {
     }
 
     fn swiped(&mut self, hits: &[Hit], swipe: Swipe) -> bool {
+        let Swipe::Point { dir, x, .. } = swipe;
+        // An open surface owns gestures starting inside it; anything else
+        // dismisses it instead of reaching the chat behind, like presses.
+        if self.chat.drawer_open || self.chat.member_sheet_open {
+            let inside = hits
+                .iter()
+                .any(|h| h.id == NodeId::OverlayDrawer || h.id == NodeId::OverlaySheet);
+            if !inside {
+                let drawer = self.close_drawer();
+                let sheet = self.close_member_sheet();
+                return drawer || sheet;
+            }
+            return match dir {
+                // Flicking a surface away dismisses it; flicking up scrolls
+                // the list inside instead.
+                SwipeDir::Left | SwipeDir::Right | SwipeDir::Down => {
+                    self.close_drawer() | self.close_member_sheet()
+                }
+                SwipeDir::Up => false,
+            };
+        }
         // Overlays own every gesture while open, like they own presses.
         if self.floating.is_some() || self.settings.open {
+            // A menu sheet flicked down dismisses; a dialog never does: it
+            // represents an unmade decision.
+            if dir == SwipeDir::Down
+                && matches!(self.floating, Some(crate::menu::Floating::Menu(_)))
+                && hits.iter().any(|h| h.id == NodeId::OverlaySheet)
+            {
+                return self.close_menu();
+            }
             return false;
         }
-        let Swipe::Point { dir, x, .. } = swipe;
         match dir {
             SwipeDir::Left => {
                 // A message swiped left starts a reply, like the menu does.
@@ -1746,6 +1998,10 @@ impl Application for Gumicord {
         self.now = gumicord_platform::now_unix();
         self.holds.set(None);
         self.settle_jump();
+        // A coasting drawer moves here, before the tree is built, so this
+        // frame already shows where it stands. Sheets coast the same way.
+        self.advance_drawer(std::time::Instant::now());
+        self.advance_sheet(std::time::Instant::now());
 
         // Inline decoration is spans, which stage [5] never walks, so the
         // theme is consulted while building.
@@ -1933,6 +2189,12 @@ impl Gumicord {
                 let f = self.floating.as_ref().expect("直前に確かめた");
                 f.node(panes.present(), self.hovered_item())
             })
+            // While the drawer or the sheet is open, a scrim dims the chat
+            // behind them and owns outside presses. A sibling, not a
+            // parent: wrapping would move the drawer in the tree.
+            .child_if(self.chat.drawer_open || self.chat.member_sheet_open, || {
+                UiNode::new(NodeId::OverlayScrim).with_key(Key::Slot("dim"))
+            })
             // The drawer and the member sheet sit above the chat but below
             // dialogs: a decision interrupts navigation, not the reverse.
             .child_if(self.chat.drawer_open, || {
@@ -2059,17 +2321,50 @@ impl Gumicord {
         }
     }
 
-    /// Opens a menu; an empty one closes instead.
+    /// Opens a menu; an empty one closes instead. A member sheet never
+    /// survives underneath: the overlay owns every press while open, so
+    /// the sheet behind is unreachable. This also keeps a single sheet
+    /// on the slide channel.
     fn open_menu(&mut self, at: (f32, f32), items: Vec<crate::menu::Item>) -> bool {
         if items.is_empty() {
             return self.close_menu();
         }
+        self.chat.member_sheet_open = false;
+        self.sheet_closing = None;
+        self.sheet_drag = false;
         self.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu { at, items }));
+        if self.panes().present() == crate::menu::Present::Sheet {
+            // Rise from the bottom rather than appearing.
+            self.sheet_slide = 0.0;
+            self.sheet_target = 1.0;
+            self.sheet_anim_from = 0.0;
+            self.sheet_anim_start = Some(std::time::Instant::now());
+        } else {
+            // No sheet on screen: park the channel so nothing wakes.
+            self.sheet_slide = self.sheet_target;
+        }
         true
     }
 
+    /// Dismisses the menu without acting. A sheet coasts out and leaves
+    /// on landing; anything else vanishes at once.
     fn close_menu(&mut self) -> bool {
-        self.floating.take().is_some()
+        let sheet = matches!(self.floating, Some(crate::menu::Floating::Menu(_)))
+            && self.panes().present() == crate::menu::Present::Sheet;
+        if !sheet {
+            // Instant take cannot orphan a landing slide: landing only
+            // clears what is still there.
+            return self.floating.take().is_some();
+        }
+        if self.floating.is_none() {
+            return false;
+        }
+        self.sheet_target = 0.0;
+        self.sheet_anim_from = self.sheet_slide;
+        self.sheet_anim_start = Some(std::time::Instant::now());
+        self.sheet_drag = false;
+        self.sheet_closing = Some(SheetCloser::Menu);
+        true
     }
 
     /// An item was pressed; also reached by dialog buttons.
@@ -2221,6 +2516,11 @@ impl Gumicord {
                 self.settings.category = *category;
                 self.settings.plugin = None;
                 self.settings.page = None;
+                // Narrow windows show the page on its own screen: choosing
+                // a category drills in. Wide windows ignore the flag.
+                if self.panes() == Panes::One {
+                    self.settings.narrow_page = true;
+                }
             }
             crate::menu::Action::SelectSettingsPlugin(id) => {
                 self.select_settings_plugin(id.clone());
@@ -2228,6 +2528,9 @@ impl Gumicord {
             crate::menu::Action::SettingsPluginBack => {
                 self.settings.plugin = None;
                 self.settings.page = None;
+            }
+            crate::menu::Action::SettingsNarrowBack => {
+                self.settings.narrow_page = false;
             }
             crate::menu::Action::DisablePlugin(id) => {
                 self.plugins.disable(id);
@@ -2250,6 +2553,12 @@ impl Gumicord {
             }
             crate::menu::Action::UseBundledTheme => {
                 self.use_bundled_theme();
+            }
+            crate::menu::Action::InstallThemeFile => {
+                self.install_package(crate::install::InstallKind::Theme);
+            }
+            crate::menu::Action::InstallPluginFile => {
+                self.install_package(crate::install::InstallKind::Plugin);
             }
             crate::menu::Action::ShareLog => {
                 // The toast is the whole result surface: success names
@@ -2864,9 +3173,27 @@ impl Gumicord {
 
     /// The body.
     ///
-    /// Parsed every frame. Bodies are a few hundred characters and parsing is
-    /// linear, so it does not show up in measurements yet. Cache by message id
-    /// when it does — but measure first.
+    /// Parsed once per content and remembered by message id. `message_rows`
+    /// runs several times a frame; parsing every body every time is linear
+    /// work that shows up at thousands of rows.
+    pub(crate) fn parsed_blocks(&self, id: u64, content: &str) -> Vec<gumicord_markdown::Block> {
+        /// Entries before the whole table is dropped and rebuilt.
+        const CAP: usize = 4096;
+        if let Some((known, blocks)) = self.blocks_cache.borrow().get(&id)
+            && *known == *content
+        {
+            return blocks.clone();
+        }
+        let blocks = gumicord_markdown::parse(content);
+        let mut cache = self.blocks_cache.borrow_mut();
+        if cache.len() >= CAP {
+            cache.clear();
+        }
+        cache.insert(id, (content.to_owned(), blocks.clone()));
+        blocks
+    }
+
+    /// The body, from blocks `message_rows` already parsed and cached.
     fn content_of(&self, m: &MessageRow) -> UiNode {
         let ink = crate::markdown::Ink::new(
             self.theme.as_ref(),

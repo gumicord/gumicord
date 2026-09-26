@@ -25,6 +25,9 @@ pub(crate) struct SettingsView {
     /// Installed themes, refreshed when the screen opens and after a
     /// switch. Scanning parses files, so frames never do it.
     pub(crate) themes: Vec<InstalledTheme>,
+    /// Narrow windows show the menu and the page on separate screens.
+    /// While set, the page covers the menu; the back row returns to it.
+    pub(crate) narrow_page: bool,
 }
 
 /// A plugin's state in the user's words. One place, so the list and the
@@ -48,6 +51,7 @@ impl crate::Gumicord {
         self.chat.member_sheet_open = false;
         self.settings.plugin = None;
         self.settings.page = None;
+        self.settings.narrow_page = false;
         self.refresh_settings_states();
         self.refresh_theme_list();
         if self.settings.open {
@@ -77,6 +81,7 @@ impl crate::Gumicord {
         self.settings.open = false;
         self.settings.plugin = None;
         self.settings.page = None;
+        self.settings.narrow_page = false;
         true
     }
 
@@ -93,8 +98,31 @@ impl crate::Gumicord {
     }
 
     /// A pressed settings row. The nav and the page share one index space,
-    /// in tree order.
+    /// in tree order. A narrow page stands alone: the back row is 0 and
+    /// the page rows follow from 1.
     pub(crate) fn settings_action(&mut self, index: usize) -> bool {
+        use crate::menu::Action;
+        if self.narrow_settings_page() {
+            if index == 0 {
+                let back = if self.settings.plugin.is_some() {
+                    Action::SettingsPluginBack
+                } else {
+                    Action::SettingsNarrowBack
+                };
+                return self.perform(back);
+            }
+            let action = self
+                .settings_page_items()
+                .into_iter()
+                .nth(index - 1)
+                .map(|item| item.action);
+            return match action {
+                Some(action) => self.perform(action),
+                // A stale index: the list changed under the press. Staying
+                // put beats acting on the wrong row.
+                None => true,
+            };
+        }
         let action = self
             .settings_nav_items()
             .into_iter()
@@ -107,6 +135,12 @@ impl crate::Gumicord {
             // beats acting on the wrong row.
             None => true,
         }
+    }
+
+    /// Whether the settings page covers its menu: narrow windows only,
+    /// once a category is chosen.
+    pub(crate) fn narrow_settings_page(&self) -> bool {
+        self.settings.open && self.panes() == crate::Panes::One && self.settings.narrow_page
     }
 
     pub(crate) fn settings_nav_items(&self) -> Vec<crate::menu::Item> {
@@ -143,27 +177,40 @@ impl crate::Gumicord {
                     )
                     .selected(self.theme_source == ThemeSource::Saved(t.id.clone()))
                 }));
+                // Last, so the existing rows keep their indices.
+                items.push(Item::new(
+                    Action::InstallThemeFile,
+                    "ファイルからインストール",
+                ));
                 items
             }
             SettingsCategory::Plugins => match &self.settings.plugin {
-                None => self
-                    .settings
-                    .states
-                    .iter()
-                    .map(|p| {
-                        // One-line rows assemble name, version and state;
-                        // split them when the message table arrives (ADR-0010).
-                        Item::new(
-                            Action::SelectSettingsPlugin(p.id.clone()),
-                            format!(
-                                "{} {}（{}）",
-                                p.name,
-                                p.version,
-                                plugin_state_label(p.state)
-                            ),
-                        )
-                    })
-                    .collect(),
+                None => {
+                    let mut items: Vec<Item> = self
+                        .settings
+                        .states
+                        .iter()
+                        .map(|p| {
+                            // One-line rows assemble name, version and state;
+                            // split them when the message table arrives (ADR-0010).
+                            Item::new(
+                                Action::SelectSettingsPlugin(p.id.clone()),
+                                format!(
+                                    "{} {}（{}）",
+                                    p.name,
+                                    p.version,
+                                    plugin_state_label(p.state)
+                                ),
+                            )
+                        })
+                        .collect();
+                    // Last, so the existing rows keep their indices.
+                    items.push(Item::new(
+                        Action::InstallPluginFile,
+                        "ファイルからインストール",
+                    ));
+                    items
+                }
                 Some(id) => {
                     let mut items = vec![Item::new(Action::SettingsPluginBack, "← プラグイン")];
                     if let Some(p) = self.settings.states.iter().find(|p| &p.id == id) {
@@ -265,11 +312,43 @@ impl crate::Gumicord {
 
     /// The settings screen, Discord-style: categories left, page right. Rows
     /// are menu items, so the theme and the press routing already know them.
-    /// Nav and page share one index space, in tree order.
+    /// Nav and page share one index space, in tree order. Narrow windows
+    /// show the menu and the page on separate screens instead: side by side
+    /// they fit neither.
     pub(crate) fn settings_screen(&self) -> UiNode {
+        use crate::menu::Item;
         let nav = self.settings_nav_items();
         let page_items = self.settings_page_items();
         let hovered = self.hovered_item();
+
+        // Narrow windows show the menu and the page on separate screens:
+        // side by side they fit neither.
+        if self.panes() == crate::Panes::One && !self.settings.narrow_page {
+            return UiNode::new(NodeId::SettingsScreen).child(
+                UiNode::new(NodeId::SettingsNav).child(crate::menu::rows(&nav, hovered, 0)),
+            );
+        }
+
+        if self.narrow_settings_page() {
+            let back = if self.settings.plugin.is_some() {
+                // Up one level, like the plugin's own back row below.
+                Item::new(crate::menu::Action::SettingsPluginBack, "← 設定")
+            } else {
+                Item::new(crate::menu::Action::SettingsNarrowBack, "← 設定")
+            };
+            let mut page = UiNode::new(NodeId::SettingsPage);
+            for text in self.settings_page_texts() {
+                page = page.child(UiNode::text(NodeId::PrimitiveText, text));
+            }
+            page = page.child(crate::menu::rows(std::slice::from_ref(&back), hovered, 0));
+            if !page_items.is_empty() {
+                page = page.child(crate::menu::rows(&page_items, hovered, 1));
+            }
+            if let Some(tree) = self.settings_page_embed() {
+                page = page.child(tree);
+            }
+            return UiNode::new(NodeId::SettingsScreen).child(page);
+        }
 
         let mut page = UiNode::new(NodeId::SettingsPage);
         for text in self.settings_page_texts() {
@@ -391,6 +470,7 @@ mod tests {
         let root = themes_root("rows");
         install_theme(&root, "wall", "dev.example.wall", "Wall");
         let mut a = Gumicord::demo_unthemed();
+        a.match_ctx = MatchContext::new(1280.0);
         a.settings.themes = scan_themes_in(&root);
         a.settings.open = true;
         a.settings.category = crate::menu::SettingsCategory::Theme;
@@ -467,6 +547,16 @@ mod tests {
 
     fn with_settings() -> Gumicord {
         let mut a = Gumicord::demo_unthemed();
+        // Width-dependent branches read the last built frame; production
+        // always builds before input, so tests say their width too.
+        a.match_ctx = MatchContext::new(1280.0);
+        assert!(a.open_settings(), "開かなかった");
+        a
+    }
+
+    fn narrow_settings() -> Gumicord {
+        let mut a = Gumicord::demo_unthemed();
+        a.match_ctx = MatchContext::new(400.0);
         assert!(a.open_settings(), "開かなかった");
         a
     }
@@ -617,15 +707,15 @@ mod tests {
         assert!(a.settings.open, "画面が消えた");
     }
 
-    /// Nothing underneath is reachable while it is open. Like a menu, an
-    /// outside press closes the screen instead of navigating behind it.
+    /// Nothing underneath is reachable while it is open. Presses that hit
+    /// no row are swallowed instead of navigating behind it.
     #[test]
     fn nothing_underneath_is_reachable_while_settings_are_open() {
         let mut a = with_settings();
         let before = a.chat.selected_channel;
-        assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]));
+        assert!(!a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(999)))]));
         assert_eq!(a.chat.selected_channel, before, "下のチャンネルへ移動した");
-        assert!(!a.settings.open, "外側の押下で閉じない");
+        assert!(a.settings.open, "行外の押下で閉じた");
     }
 
     /// The gear and its press handler address the same slot, and the icon
@@ -668,16 +758,207 @@ mod tests {
         assert_eq!(selected_index(&a), [2, 4], "移っていない");
     }
 
-    /// Escape closes it; an outside press does too, with nothing to decide.
+    /// Escape closes it; a press that hits no row does not, so a finger
+    /// missing a row never loses where it was.
     #[test]
-    fn escape_and_outside_press_close_settings() {
+    fn escape_closes_settings_while_a_missed_press_keeps_them() {
         let mut a = with_settings();
         assert!(a.cancel_input());
         assert!(!a.settings.open, "Esc で閉じない");
 
         let mut b = with_settings();
-        assert!(b.pressed(&[]), "閉じるという変化がない");
-        assert!(!b.settings.open, "外側の押下で閉じない");
+        assert!(!b.pressed(&[]), "何も変わっていないはず");
+        assert!(b.settings.open, "行外の押下で閉じた");
+    }
+
+    /// Narrow windows show the menu alone: nav and page side by side fit
+    /// neither.
+    #[test]
+    fn narrow_settings_shows_the_menu_alone() {
+        let a = narrow_settings();
+        let mut ids = Vec::new();
+        a.build_tree(Panes::One).walk(&mut |n, _| ids.push(n.id));
+        assert!(ids.contains(&NodeId::SettingsNav), "分類がない");
+        assert!(!ids.contains(&NodeId::SettingsPage), "中身まで出ている");
+    }
+
+    /// Choosing a category drills into its page with a back row.
+    #[test]
+    fn choosing_a_category_drills_into_its_page_when_narrow() {
+        let mut a = narrow_settings();
+        // Nav takes 0-3; 2 is the theme tab.
+        assert!(a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(2)))]));
+        assert!(a.settings.narrow_page, "掘り下げない");
+        let mut ids = Vec::new();
+        let mut labels = Vec::new();
+        a.build_tree(Panes::One).walk(&mut |n, _| {
+            ids.push(n.id);
+            if n.id == NodeId::OverlayMenuItemLabel {
+                labels.extend(n.content.as_text().map(str::to_owned));
+            }
+        });
+        assert!(!ids.contains(&NodeId::SettingsNav), "分類が残っている");
+        assert!(ids.contains(&NodeId::SettingsPage), "中身がない");
+        assert!(labels.iter().any(|l| l == "← 設定"), "戻る行がない");
+    }
+
+    /// The narrow back row returns to the menu; the screen stays open.
+    #[test]
+    fn the_narrow_back_row_returns_to_the_menu() {
+        let mut a = narrow_settings();
+        assert!(a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(2)))]));
+        assert!(a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(0)))]));
+        assert!(a.settings.open, "閉じた");
+        assert!(!a.settings.narrow_page, "戻らない");
+        let mut ids = Vec::new();
+        a.build_tree(Panes::One).walk(&mut |n, _| ids.push(n.id));
+        assert!(ids.contains(&NodeId::SettingsNav), "分類に戻らない");
+    }
+
+    /// The close row still closes from the narrow menu.
+    #[test]
+    fn closing_from_the_narrow_menu() {
+        let mut a = narrow_settings();
+        assert!(a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(0)))]));
+        assert!(!a.settings.open, "閉じない");
+    }
+
+    /// Both lists end with an install row; existing rows keep their indices.
+    #[test]
+    fn both_lists_end_with_an_install_row() {
+        use crate::menu::Action;
+        let mut a = with_settings();
+        a.settings.category = crate::menu::SettingsCategory::Theme;
+        assert!(
+            matches!(
+                a.settings_page_items().last().map(|r| &r.action),
+                Some(Action::InstallThemeFile)
+            ),
+            "テーマ欄に導入行がない"
+        );
+
+        a.settings.category = crate::menu::SettingsCategory::Plugins;
+        assert!(
+            matches!(
+                a.settings_page_items().last().map(|r| &r.action),
+                Some(Action::InstallPluginFile)
+            ),
+            "プラグイン欄に導入行がない"
+        );
+    }
+
+    /// A theme zip in memory, for installs that never touch a picker.
+    fn theme_zip_bytes() -> Vec<u8> {
+        use std::io::Write;
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut out);
+        zip.start_file("theme.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            br#"{"manifest": {"id": "dev.example.pack", "name": "Pack", "version": "1.0.0", "abi": 1}, "rules": []}"#,
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        out.into_inner()
+    }
+
+    /// Installing theme bytes lands the theme, lists it, and says its name.
+    #[test]
+    fn installing_theme_bytes_lands_the_theme() {
+        let dir = std::env::temp_dir().join("gumicord-install-ui-theme");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = with_settings();
+        a.themes_dir = Some(dir.clone());
+        a.install_package_bytes_in(
+            crate::install::InstallKind::Theme,
+            "pack.zip",
+            &theme_zip_bytes(),
+            Some(dir.clone()),
+            None,
+        );
+        assert!(dir.join("dev.example.pack").join("theme.json").is_file());
+        assert!(
+            a.toasts.back().is_some_and(|t| t.text.contains("Pack")),
+            "入れたと言っていない"
+        );
+        assert!(
+            a.settings.themes.iter().any(|t| t.id == "dev.example.pack"),
+            "一覧に出ていない"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A broken package toasts instead of landing anything.
+    #[test]
+    fn a_broken_package_toasts_instead_of_landing() {
+        let dir = std::env::temp_dir().join("gumicord-install-ui-broken");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut a = with_settings();
+        a.install_package_bytes_in(
+            crate::install::InstallKind::Theme,
+            "wall.zip",
+            b"not a zip",
+            Some(dir.clone()),
+            None,
+        );
+        assert!(
+            a.toasts
+                .back()
+                .is_some_and(|t| t.text.contains("入れられなかった")),
+            "失敗を言っていない"
+        );
+        assert!(dir.read_dir().unwrap().next().is_none(), "残骸がある");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A plugin tarball in memory.
+    fn plugin_tarball_bytes() -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut tar = tar::Builder::new(&mut enc);
+            for (name, body) in [
+                (
+                    "manifest.json",
+                    &br#"{"id": "dev.example.side", "name": "Side", "version": "1.0.0"}"#[..],
+                ),
+                ("plugin.js", &b"globalThis.__gumicord_apply = (n) => n;"[..]),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append_data(&mut header, name, body).unwrap();
+            }
+            tar.into_inner().unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    /// Installing plugin bytes lands the directory; capabilities still ask
+    /// through the usual dialog rather than granting silently.
+    #[test]
+    fn installing_plugin_bytes_lands_the_directory() {
+        let root = std::env::temp_dir().join("gumicord-install-ui-plugins");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut a = with_settings();
+        a.install_package_bytes_in(
+            crate::install::InstallKind::Plugin,
+            "side.tar.gz",
+            &plugin_tarball_bytes(),
+            None,
+            Some(root.clone()),
+        );
+        assert!(
+            root.join("dev.example.side")
+                .join("manifest.json")
+                .is_file()
+        );
+        assert!(
+            a.toasts.back().is_some_and(|t| t.text.contains("Side")),
+            "入れたと言っていない"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The bundled theme always parses; a broken one starts up black.

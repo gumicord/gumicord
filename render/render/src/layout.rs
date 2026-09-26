@@ -34,6 +34,10 @@ use crate::text::{ResolvedFont, Shaper};
 /// screen today; tabs or split views would need the key in there too.
 pub type ScrollState = HashMap<NodeId, f32>;
 
+/// Slide progress per surface, 0 (shut) to 1 (open). Missing means open:
+/// only a surface mid-gesture or mid-animation is listed.
+pub type SlideState = HashMap<NodeId, f32>;
+
 /// Below this the thumb cannot be grabbed.
 const MIN_THUMB: f32 = 24.0;
 /// Bottom sheets rise to this share of the window at most, like the
@@ -128,9 +132,23 @@ pub fn layout<'a>(
     text: &mut Shaper,
     scroll: &ScrollState,
 ) -> LayoutResult<'a> {
+    layout_slid(root, viewport, text, scroll, &SlideState::new())
+}
+
+/// Lays out the tree with sliding surfaces offset by their progress. A
+/// shut drawer stands a full width off its edge; open it sits at its
+/// anchor. Shape and sizes are untouched, so measuring matches drawing.
+pub fn layout_slid<'a>(
+    root: &'a UiNode,
+    viewport: Size,
+    text: &mut Shaper,
+    scroll: &ScrollState,
+    slide: &SlideState,
+) -> LayoutResult<'a> {
     let mut cx = Cx {
         text,
         scroll,
+        slide: Some(slide),
         cache: HashMap::new(),
         in_vscroll: false,
         out: Vec::new(),
@@ -148,6 +166,8 @@ pub fn layout<'a>(
 struct Cx<'a, 't, 's> {
     text: &'t mut Shaper,
     scroll: &'s ScrollState,
+    /// Slide progress per surface; `None` lays out everything as open.
+    slide: Option<&'s SlideState>,
     /// (node address, constraint, scroll context) -> size
     cache: HashMap<(usize, u32, u32, bool), Size>,
     /// Inside a vertical scroll region's content. Stacked children hug
@@ -628,9 +648,37 @@ impl<'a> Cx<'a, '_, '_> {
                 };
             }
 
+            // A sliding surface stands off its edge while shut. Children
+            // follow the parent rect, so shifting it moves them all.
+            let child_rect = self.slide_surface(child, child_rect);
             self.place(child, child_rect, clip);
         }
         self.in_vscroll = vscroll;
+    }
+
+    /// Offsets a sliding surface by its progress: shut it stands a full
+    /// size off its edge, open it sits at its anchor. Missing progress
+    /// means open.
+    fn slide_surface(&self, child: &UiNode, rect: Rect) -> Rect {
+        let horizontal = match child.id {
+            NodeId::OverlayDrawer => true,
+            NodeId::OverlaySheet => false,
+            _ => return rect,
+        };
+        let p = self
+            .slide
+            .and_then(|s| s.get(&child.id))
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        if p >= 1.0 {
+            return rect;
+        }
+        if horizontal {
+            Rect::new(rect.x - (1.0 - p) * rect.w, rect.y, rect.w, rect.h)
+        } else {
+            Rect::new(rect.x, rect.y + (1.0 - p) * rect.h, rect.w, rect.h)
+        }
     }
 
     /// Places a scrollbar at the list's edge.
@@ -1361,6 +1409,35 @@ mod tests {
         );
     }
 
+    /// A sliding drawer stands off its edge while shut and sits at its
+    /// anchor while open; sizes never change, so measuring matches drawing.
+    #[test]
+    fn a_sliding_drawer_stands_off_its_edge_while_shut() {
+        use gumicord_uitree::Anchor;
+        let drawer = styled(NodeId::OverlayDrawer, |s| s.width = Some(280.0))
+            .with_anchor(Anchor::at(0.0, 0.0));
+        let tree = UiNode::new(NodeId::AppRoot).child(drawer);
+        let slide = SlideState::new();
+        let placed_at = |slide: &SlideState, p: f32| {
+            let mut slide = slide.clone();
+            slide.insert(NodeId::OverlayDrawer, p);
+            let r = layout_slid(
+                &tree,
+                Size::new(400.0, 800.0),
+                &mut shaper(),
+                &ScrollState::new(),
+                &slide,
+            );
+            rect_of(&r, NodeId::OverlayDrawer)
+        };
+        let open = placed_at(&slide, 1.0);
+        assert_eq!((open.x, open.w), (0.0, 280.0));
+        let shut = placed_at(&slide, 0.0);
+        assert_eq!((shut.x, shut.w), (-280.0, 280.0));
+        let half = placed_at(&slide, 0.5);
+        assert_eq!((half.x, half.w), (-140.0, 280.0));
+    }
+
     /// Text wraps, so a narrower wrap width means more height.
     ///
     /// ASCII only: the CI runner may have no Japanese font. Pinning Japanese
@@ -1390,6 +1467,51 @@ mod tests {
         assert!(
             narrow > wide,
             "narrower should be taller ({narrow} <= {wide})"
+        );
+    }
+
+    /// A narrow message row keeps the body beside the avatar: at phone
+    /// widths the body must neither slide under the avatar nor overflow
+    /// the list. Locks the two-pass width split the wrapped text relies on.
+    #[test]
+    fn a_narrow_message_row_keeps_the_body_beside_the_avatar() {
+        let long = "The quick brown fox jumps over the lazy dog. \
+                    Pack my box with five dozen liquor jugs. \
+                    How vexingly quick daft zebras jump!";
+        let row = styled(NodeId::ChatMessage, |s| {
+            s.padding = Some(Edges {
+                top: 4.0,
+                right: 8.0,
+                bottom: 4.0,
+                left: 8.0,
+            });
+            s.gap = Some(8.0);
+        })
+        .child(UiNode::new(NodeId::ChatMessageAvatar))
+        .child(
+            UiNode::new(NodeId::LayoutColumn).child(UiNode::text(NodeId::ChatMessageContent, long)),
+        );
+        let tree = styled(NodeId::ChatMessageList, |s| s.height = Some(100.0)).child(row);
+        let r = layout(
+            &tree,
+            Size::new(390.0, 100.0),
+            &mut shaper(),
+            &ScrollState::new(),
+        );
+
+        let list = rect_of(&r, NodeId::ChatMessageList);
+        let avatar = rect_of(&r, NodeId::ChatMessageAvatar);
+        let body = rect_of(&r, NodeId::LayoutColumn);
+        let text = rect_of(&r, NodeId::ChatMessageContent);
+        assert_eq!((avatar.x, avatar.w), (8.0, 40.0));
+        assert_eq!(body.x, 56.0, "avatar plus gap, not under it ({body:?})");
+        assert!(
+            body.x + body.w <= list.x + list.w + 0.5,
+            "body overflows the list ({body:?} in {list:?})"
+        );
+        assert!(
+            text.x >= body.x - 0.5 && text.x + text.w <= body.x + body.w + 0.5,
+            "text escapes the body ({text:?} in {body:?})"
         );
     }
 }

@@ -11,3 +11,5 @@ publish = false
 # definition directly beats parsing the stable IDs out of the source.
 [dependencies]
 gumicord-uitree.workspace = true
+image.workspace = true
+serde_json.workspace = true

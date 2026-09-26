@@ -28,6 +28,43 @@ pub(crate) fn hit_of(id: NodeId, key: Option<Key>) -> Hit {
     }
 }
 
+/// A press at a rectangle, for surface containment: the drawer and the
+/// sheet only act on hits inside their own rectangle.
+pub(crate) fn hit_at(id: NodeId, key: Option<Key>, x: f32, y: f32, w: f32, h: f32) -> Hit {
+    Hit {
+        id,
+        key,
+        rect: gumicord_render::Rect::new(x, y, w, h),
+        clip: None,
+    }
+}
+
+/// Runs the drawer slide to its landing: closing flips the flag only
+/// when the slide arrives, like production frames do.
+pub(crate) fn settle_drawer(a: &mut Gumicord) {
+    a.advance_drawer(std::time::Instant::now() + std::time::Duration::from_secs(1));
+}
+
+/// Runs the sheet slide to its landing the same way.
+pub(crate) fn settle_sheet(a: &mut Gumicord) {
+    a.advance_sheet(std::time::Instant::now() + std::time::Duration::from_secs(1));
+}
+
+/// A menu on a narrow window, presented as a sheet.
+pub(crate) fn narrow_menu() -> Gumicord {
+    let mut a = narrow();
+    let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+    assert!(
+        a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)),
+        "メニューが開かなかった"
+    );
+    assert!(
+        matches!(a.floating, Some(crate::menu::Floating::Menu(_))),
+        "品物がない"
+    );
+    a
+}
+
 pub(crate) fn with_menu() -> Gumicord {
     let mut a = app();
     let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
@@ -340,6 +377,313 @@ fn swipe_left_on_a_message_starts_a_reply() {
     assert_eq!(a.chat.a11y_message, Some(7));
 }
 
+/// Flicking the drawer away closes it; flicking up scrolls instead.
+#[test]
+fn flicking_the_drawer_away_closes_it() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let drawer = hit_at(NodeId::OverlayDrawer, None, 0.0, 0.0, 280.0, 800.0);
+    assert!(a.swiped(std::slice::from_ref(&drawer), swipe(SwipeDir::Left, 100.0)));
+    settle_drawer(&mut a);
+    assert!(!a.chat.drawer_open, "閉じない");
+
+    assert!(a.open_drawer());
+    assert!(!a.swiped(std::slice::from_ref(&drawer), swipe(SwipeDir::Up, 100.0)));
+    assert!(a.chat.drawer_open, "上の払いで閉じた");
+}
+
+/// A swipe starting behind the drawer dismisses it without replying
+/// through it.
+#[test]
+fn a_swipe_behind_the_drawer_dismisses_without_replying() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let behind = hit_at(
+        NodeId::ChatMessage,
+        Some(Key::Id(7)),
+        300.0,
+        400.0,
+        80.0,
+        50.0,
+    );
+    assert!(a.swiped(&[behind], swipe(SwipeDir::Left, 320.0)));
+    settle_drawer(&mut a);
+    assert!(!a.chat.drawer_open, "閉じていない");
+    assert_eq!(a.chat.composing, Composing::New, "裏へ返信した");
+}
+
+/// Flicking the member sheet away closes it; flicking up does not.
+#[test]
+fn flicking_the_member_sheet_away_closes_it() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let sheet = hit_at(NodeId::OverlaySheet, None, 0.0, 400.0, 400.0, 400.0);
+    assert!(a.swiped(std::slice::from_ref(&sheet), swipe(SwipeDir::Down, 200.0)));
+    assert!(a.chat.member_sheet_open, "払った瞬間に消えた");
+    settle_sheet(&mut a);
+    assert!(!a.chat.member_sheet_open, "閉じない");
+
+    assert!(a.open_member_sheet());
+    assert!(!a.swiped(std::slice::from_ref(&sheet), swipe(SwipeDir::Up, 200.0)));
+    assert!(a.chat.member_sheet_open, "上の払いで閉じた");
+}
+
+/// Opening starts the drawer shut and coasts it in over time.
+#[test]
+fn opening_coasts_the_drawer_in_over_time() {
+    use std::time::{Duration, Instant};
+    let mut a = narrow();
+    let start = Instant::now();
+    assert!(a.open_drawer());
+    assert_eq!(a.chat.drawer_slide, 0.0, "開いた瞬間にいる");
+    assert!(a.advance_drawer(start + Duration::from_millis(110)));
+    let mid = a.chat.drawer_slide;
+    assert!(mid > 0.0 && mid < 1.0, "途中にいない: {mid}");
+    assert!(!a.advance_drawer(start + Duration::from_secs(1)));
+    assert_eq!(a.chat.drawer_slide, 1.0);
+    assert!(a.chat.drawer_open, "着いたのに閉じた");
+}
+
+/// Closing coasts out and flips the flag only on landing.
+#[test]
+fn closing_coasts_out_and_lands_shut() {
+    use std::time::{Duration, Instant};
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    settle_drawer(&mut a);
+    assert!(a.close_drawer());
+    assert!(a.chat.drawer_open, "閉じ始めに消えた");
+    assert!(!a.advance_drawer(Instant::now() + Duration::from_secs(1)));
+    assert!(!a.chat.drawer_open, "着いたのに残っている");
+    assert_eq!(a.chat.drawer_slide, 0.0);
+}
+
+/// Reopening mid-close swings back instead of refusing.
+#[test]
+fn reopening_mid_close_swings_back() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    settle_drawer(&mut a);
+    assert!(a.close_drawer());
+    assert!(a.open_drawer(), "閉じ途中に開けない");
+    assert!(a.chat.drawer_open, "開き直していない");
+}
+
+/// The finger drives the slide; letting go coasts to a side.
+#[test]
+fn the_finger_drives_the_slide_and_letting_go_coasts() {
+    // Slow release past halfway finishes opening (absolute from the start).
+    let mut a = narrow();
+    assert!(a.drawer_drag_start());
+    assert!(a.chat.drawer_drag, "掴んでいない");
+    assert!(a.drawer_drag_move(140.0, 280.0));
+    assert_eq!(a.chat.drawer_slide, 0.5);
+    assert!(a.drawer_drag_move(168.0, 280.0));
+    assert!(a.drawer_drag_end(0.0));
+    assert!(!a.chat.drawer_drag, "離したのに掴んだまま");
+    assert_eq!(a.chat.drawer_target, 1.0, "半分過ぎたのに戻る");
+
+    // A fast flick left falls back whatever the progress.
+    let mut b = narrow();
+    assert!(b.drawer_drag_start());
+    assert!(b.drawer_drag_move(200.0, 280.0));
+    assert!(b.drawer_drag_end(-1000.0));
+    assert_eq!(b.chat.drawer_target, 0.0, "払ったのに開く");
+
+    // A fast flick right opens from anywhere.
+    let mut c = narrow();
+    assert!(c.drawer_drag_start());
+    assert!(c.drawer_drag_move(10.0, 280.0));
+    assert!(c.drawer_drag_end(1000.0));
+    assert_eq!(c.chat.drawer_target, 1.0, "払ったのに戻る");
+}
+
+/// A coasting drawer wakes the loop until it lands.
+#[test]
+fn a_coasting_drawer_wakes_the_loop_until_it_lands() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let wake = a.next_frame_in().expect("寝てしまう");
+    assert!(wake <= std::time::Duration::from_millis(16), "{wake:?}");
+    settle_drawer(&mut a);
+    // Landed and idle: nothing to wake for without the overlay tick.
+    assert_eq!(a.next_frame_in(), None);
+}
+
+/// The platform-facing trait path drives the same state machine the
+/// gestures use; it must not recurse into itself.
+#[test]
+fn the_trait_path_drives_the_drawer_too() {
+    use gumicord_platform::Application;
+    let mut a = narrow();
+    assert!(Application::drawer_drag_maybe(&a, 10.0));
+    assert!(!Application::drawer_drag_maybe(&a, 300.0));
+    assert!(Application::drawer_drag_start(&mut a));
+    assert!(Application::drawer_drag_move(&mut a, 140.0, 280.0));
+    assert!(Application::drawer_drag_end(&mut a, 0.0));
+    assert_eq!(Application::drawer_slide(&a), 0.5);
+    // An open drawer answers a close drag through the same path.
+    assert!(a.open_drawer());
+    settle_drawer(&mut a);
+    assert!(a.chat.drawer_open);
+    assert!(Application::drawer_close_drag_maybe(&a));
+    assert!(Application::drawer_close_drag_start(&mut a));
+}
+
+/// Opening starts the sheet below and coasts it up over time.
+#[test]
+fn opening_coasts_the_sheet_in_over_time() {
+    use std::time::{Duration, Instant};
+    let mut a = narrow();
+    let start = Instant::now();
+    assert!(a.open_member_sheet());
+    assert_eq!(a.sheet_slide, 0.0, "開いた瞬間にいる");
+    assert!(a.advance_sheet(start + Duration::from_millis(110)));
+    let mid = a.sheet_slide;
+    assert!(mid > 0.0 && mid < 1.0, "途中にいない: {mid}");
+    assert!(!a.advance_sheet(start + Duration::from_secs(1)));
+    assert_eq!(a.sheet_slide, 1.0);
+    assert!(a.chat.member_sheet_open, "着いたのに閉じた");
+}
+
+/// Closing coasts out and flips the flag only on landing.
+#[test]
+fn closing_coasts_the_sheet_out_and_lands_shut() {
+    use std::time::{Duration, Instant};
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    settle_sheet(&mut a);
+    assert!(a.close_member_sheet());
+    assert!(a.chat.member_sheet_open, "閉じ始めに消えた");
+    assert!(!a.advance_sheet(Instant::now() + Duration::from_secs(1)));
+    assert!(!a.chat.member_sheet_open, "着いたのに残っている");
+    assert_eq!(a.sheet_slide, 0.0);
+}
+
+/// The finger drives the sheet; letting go coasts to a side.
+#[test]
+fn the_finger_drives_the_sheet_and_letting_go_coasts() {
+    // A slow release past halfway down finishes closing.
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    settle_sheet(&mut a);
+    assert!(a.sheet_drag_start());
+    assert!(a.sheet_drag, "掴んでいない");
+    assert!(a.sheet_drag_move(300.0, 500.0));
+    assert!(
+        (a.sheet_slide - 0.4).abs() < 0.001,
+        "付いてこない: {}",
+        a.sheet_slide
+    );
+    assert!(a.sheet_drag_end(0.0));
+    assert!(!a.sheet_drag, "離したのに掴んだまま");
+    assert_eq!(a.sheet_target, 0.0, "半分過ぎたのに戻る");
+
+    // A fast flick up swings back open from anywhere.
+    let mut b = narrow();
+    assert!(b.open_member_sheet());
+    settle_sheet(&mut b);
+    assert!(b.sheet_drag_start());
+    assert!(b.sheet_drag_move(400.0, 500.0));
+    assert!(b.sheet_drag_end(-1000.0));
+    assert_eq!(b.sheet_target, 1.0, "払ったのに閉じる");
+
+    // A fast flick down closes whatever the progress.
+    let mut c = narrow();
+    assert!(c.open_member_sheet());
+    settle_sheet(&mut c);
+    assert!(c.sheet_drag_start());
+    assert!(c.sheet_drag_move(10.0, 500.0));
+    assert!(c.sheet_drag_end(1000.0));
+    assert_eq!(c.sheet_target, 0.0, "払ったのに開く");
+}
+
+/// The finger drives an open drawer shut; letting go picks a side.
+#[test]
+fn the_finger_drives_an_open_drawer_shut() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    settle_drawer(&mut a);
+    // A slow drag left past halfway falls shut.
+    assert!(a.drawer_close_drag_start());
+    assert!(a.drawer_drag_move(-140.0, 280.0));
+    assert_eq!(a.chat.drawer_slide, 0.5);
+    assert!(a.drawer_drag_end(0.0));
+    assert_eq!(a.chat.drawer_target, 0.0, "半分過ぎたのに戻る");
+
+    // A small drag springs back open.
+    let mut b = narrow();
+    assert!(b.open_drawer());
+    settle_drawer(&mut b);
+    assert!(b.drawer_close_drag_start());
+    assert!(b.drawer_drag_move(-28.0, 280.0));
+    assert!(b.drawer_drag_end(0.0));
+    assert_eq!(b.chat.drawer_target, 1.0, "少しで閉じる");
+}
+
+/// A coasting sheet wakes the loop until it lands.
+#[test]
+fn a_coasting_sheet_wakes_the_loop_until_it_lands() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let wake = a.next_frame_in().expect("寝てしまう");
+    assert!(wake <= std::time::Duration::from_millis(16), "{wake:?}");
+    settle_sheet(&mut a);
+    // Landed and idle: nothing to wake for without the overlay tick.
+    assert_eq!(a.next_frame_in(), None);
+}
+
+/// The trait path drives the sheet too, without recursing.
+#[test]
+fn the_trait_path_drives_the_sheet_too() {
+    use gumicord_platform::Application;
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    settle_sheet(&mut a);
+    assert!(Application::sheet_drag_maybe(&a));
+    assert!(Application::sheet_drag_start(&mut a));
+    assert!(Application::sheet_drag_move(&mut a, 150.0, 500.0));
+    assert!(Application::sheet_drag_end(&mut a, 0.0));
+    assert!((Application::sheet_slide(&a) - 0.7).abs() < 0.001);
+}
+
+/// Dismissing a menu sheet coasts out; choosing acts at once.
+#[test]
+fn dismissing_a_menu_sheet_coasts_out_while_choosing_acts_at_once() {
+    let mut a = narrow_menu();
+    assert_eq!(a.sheet_slide, 0.0, "開いた瞬間にいる");
+    assert!(a.close_menu());
+    assert!(a.floating.is_some(), "閉じ始めに消えた");
+    settle_sheet(&mut a);
+    assert!(a.floating.is_none(), "着いたのに残っている");
+
+    // Choosing an item vanishes at once instead of coasting.
+    let mut b = narrow_menu();
+    settle_sheet(&mut b);
+    b.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu {
+        at: (0.0, 0.0),
+        items: vec![crate::menu::Item::new(
+            crate::menu::Action::MarkRead(1),
+            "既読にする",
+        )],
+    }));
+    let hits = [hit_of(NodeId::OverlayMenuItem, Some(Key::Index(0)))];
+    assert!(b.pressed(&hits));
+    assert!(b.floating.is_none(), "選んだのに残っている");
+}
+
+/// Opening a menu closes the member sheet: a single sheet rides the
+/// slide channel.
+#[test]
+fn opening_a_menu_closes_the_member_sheet() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+    assert!(a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)));
+    assert!(!a.chat.member_sheet_open, "面が残っている");
+    assert!(matches!(a.floating, Some(crate::menu::Floating::Menu(_))));
+}
+
 /// An edge swipe opens the drawer only where the lists hide.
 #[test]
 fn edge_swipe_opens_the_drawer_when_narrow() {
@@ -371,9 +715,83 @@ fn drawer_selects_a_channel_then_closes() {
     });
     assert!(found, "棚の中身がない");
 
-    assert!(a.pressed(&[hit_of(NodeId::NavChannelListItem, Some(Key::Id(10)))]));
+    // A real press inside the drawer carries the drawer's hit too.
+    let drawer = hit_at(NodeId::OverlayDrawer, None, 0.0, 0.0, 280.0, 800.0);
+    let item = hit_at(
+        NodeId::NavChannelListItem,
+        Some(Key::Id(10)),
+        8.0,
+        100.0,
+        264.0,
+        40.0,
+    );
+    assert!(a.pressed(&[item, drawer]));
     assert_eq!(a.chat.selected_channel, 10);
+    settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "選んだのに閉じない");
+}
+
+/// A press behind the drawer dismisses it but never acts through it:
+/// the drawer's reused lists share IDs with the chat behind, so only
+/// hits inside the drawer's rectangle count.
+#[test]
+fn a_press_behind_the_drawer_dismisses_without_acting() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let channel = a.chat.selected_channel;
+    // A channel row behind the drawer: the same ID, outside its
+    // rectangle, and no drawer hit at all.
+    let behind = hit_at(
+        NodeId::NavChannelListItem,
+        Some(Key::Id(20)),
+        300.0,
+        100.0,
+        80.0,
+        40.0,
+    );
+    assert!(a.pressed(&[behind]));
+    settle_drawer(&mut a);
+    assert!(!a.chat.drawer_open, "閉じていない");
+    assert_eq!(a.chat.selected_channel, channel, "裏の一覧が動いた");
+}
+
+/// The drawer's own background is a dead zone: it neither acts nor
+/// closes, so a finger missing a row does not lose the drawer.
+#[test]
+fn a_press_on_the_drawer_dead_zone_keeps_it_open() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let drawer = hit_at(NodeId::OverlayDrawer, None, 0.0, 0.0, 280.0, 800.0);
+    assert!(!a.pressed(&[drawer]));
+    assert!(a.chat.drawer_open, "隙間で閉じた");
+}
+
+/// The drawer drags a dim scrim over the chat behind it: what looks
+/// dimmed is also untouchable.
+#[test]
+fn the_drawer_drags_a_scrim_with_it() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let mut ids = Vec::new();
+    a.build_tree(Panes::One)
+        .walk(&mut |n, _| ids.push((n.id, n.key.clone())));
+    let scrim = ids
+        .iter()
+        .position(|(id, k)| *id == NodeId::OverlayScrim && *k == Some(Key::Slot("dim")))
+        .expect("覆いがない");
+    let drawer = ids
+        .iter()
+        .position(|(id, _)| *id == NodeId::OverlayDrawer)
+        .expect("棚がない");
+    assert!(scrim < drawer, "覆いが棚より手前にある");
+
+    let b = narrow();
+    let mut closed = Vec::new();
+    b.build_tree(Panes::One).walk(&mut |n, _| closed.push(n.id));
+    assert!(
+        !closed.contains(&NodeId::OverlayScrim),
+        "閉じているのに覆いがある"
+    );
 }
 
 /// Tapping outside the drawer dismisses it without navigating.
@@ -383,6 +801,7 @@ fn tapping_outside_the_drawer_dismisses_it() {
     assert!(a.open_drawer());
     let channel = a.chat.selected_channel;
     assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+    settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "閉じていない");
     assert_eq!(a.chat.selected_channel, channel, "下のチャンネルへ移動した");
 }
@@ -431,6 +850,7 @@ fn pressing_outside_an_open_menu_releases_focus() {
     a.chat.input_focused = true;
     let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
     assert!(a.pressed(std::slice::from_ref(&msg)));
+    settle_sheet(&mut a);
     assert!(a.floating.is_none(), "メニューが閉じていない");
     assert!(!a.chat.input_focused, "キーボードが閉じていない");
 }
@@ -451,6 +871,7 @@ fn tapping_outside_the_drawer_releases_focus() {
     assert!(a.open_drawer());
     a.chat.input_focused = true;
     assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+    settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "閉じていない");
     assert!(!a.chat.input_focused, "キーボードが閉じていない");
 }
@@ -481,10 +902,12 @@ fn escape_closes_drawer_and_sheet() {
     let mut a = narrow();
     assert!(a.open_drawer());
     assert!(a.cancel_input());
+    settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "Esc で閉じない");
 
     assert!(a.open_member_sheet());
     assert!(a.cancel_input());
+    settle_sheet(&mut a);
     assert!(!a.chat.member_sheet_open, "Esc で閉じない");
 }
 
@@ -503,6 +926,7 @@ fn members_button_opens_the_sheet_when_narrow() {
 
     // Tapping a row closes the sheet; there is no profile view yet.
     assert!(a.pressed(&[hit_of(NodeId::NavMemberListItem, Some(Key::Id(5)))]));
+    settle_sheet(&mut a);
     assert!(!a.chat.member_sheet_open, "閉じていない");
 
     let mut wide = app();
@@ -546,6 +970,7 @@ fn drawer_stands_at_the_left_edge() {
     let (w, h) = (400.0, 800.0);
     let mut a = narrow();
     assert!(a.open_drawer());
+    settle_drawer(&mut a);
     let cx = gumicord_platform::FrameCx {
         viewport: gumicord_render::Size::new(w, h),
         scale: 1.0,
@@ -1301,6 +1726,20 @@ mod member_tests {
 
         let a = app(message(None, None));
         assert_eq!(a.message_rows()[0].author, "ねんねこ");
+    }
+
+    /// Parsing once per content: repeats reuse the entry, an edit misses
+    /// and re-parses instead of showing the old body.
+    #[test]
+    fn parsed_bodies_are_remembered_until_edited() {
+        let a = app(message(None, None));
+        let first = a.parsed_blocks(1, "hello **world**");
+        let second = a.parsed_blocks(1, "hello **world**");
+        assert_eq!(first, second);
+        assert_eq!(a.blocks_cache.borrow().len(), 1);
+        let edited = a.parsed_blocks(1, "hello edited");
+        assert_ne!(edited, first);
+        assert_eq!(a.blocks_cache.borrow().len(), 1);
     }
 
     fn reply_text(a: &Gumicord, row: &MessageRow) -> (Option<String>, bool) {

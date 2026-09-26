@@ -90,6 +90,11 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 # and stay on their own pickers.
 rfd = "0.17"
 
+# Linux captcha host only: drives the WebKitGTK queue for the modal.
+# Unlike rfd above this links GTK/WebKit, so Linux CI installs the
+# webkit2gtk system packages (see .github/workflows/ci.yml).
+gtk = "0.18"
+
 # Linux secret storage (Secret Service) and macOS Keychain. No default
 # features in keyring do anything: without these every entry is a mock
 # that forgets on drop. The Linux combo keeps a session cache and
@@ -122,9 +127,19 @@ qrcode = { version = "0.14", default-features = false }
 # backgrounds, which are usually photos. Anything else falls back.
 png = "0.18"
 jpeg-decoder = "0.3"
+# Icon scaling for `cargo xtask icons` only: never shipped in the app.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Persistence
 rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+
+# Theme/plugin packages (Bundle D). zip and tar.gz only: 7z stays out
+# (mobile binary size, see spec/12-mobile-hotfix-plan.md). Reading only;
+# archives are never written. deflate covers stored entries too; the rest
+# of zip's formats are refused at install.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
 
 # Shared
 serde = { version = "1", features = ["derive"] }

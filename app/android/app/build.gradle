@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -43,6 +44,10 @@ android {
     buildTypes {
         debug {
             debuggable true
+            // Nightly goes out as debug under its own bundle slot so both
+            // channels install side by side (see packaging/README.md,
+            // AltStore sources).
+            applicationId 'dev.gumicord.nightly'
             // One shared debug key for every nightly: CI runners are
             // throwaway machines, so the default debug keystore would sign
             // every build differently and updates would refuse to install.
@@ -71,6 +76,9 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
     }
 }
 

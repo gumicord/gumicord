@@ -171,7 +171,7 @@ impl crate::Gumicord {
                     .as_ref()
                     .or_else(|| self.live.store().member(guild, m.author.id));
 
-                let blocks = gumicord_markdown::parse(&m.content);
+                let blocks = self.parsed_blocks(m.id.get(), &m.content);
                 let (time, day, unix) = row_time(&m.timestamp);
                 MessageRow {
                     id: m.id.get(),

@@ -93,6 +93,12 @@ jobs:
           - label: macos
             os: macos-latest
             bin: gumicord
+          # Stable ships unsigned release mobile builds for sideloading
+          # and the AltStore source (see packaging/README.md).
+          - label: ios
+            os: macos-latest
+          - label: android
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
@@ -100,9 +106,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Add mobile target
+        if: matrix.label == 'ios' || matrix.label == 'android'
+        run: rustup target add aarch64-apple-ios aarch64-linux-android x86_64-linux-android
+
       # Desktop Linux links the system D-Bus library like the checks do.
       - name: Install D-Bus headers
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.label == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config desktop-file-utils
 
       - uses: Swatinem/rust-cache@v2
@@ -114,9 +124,63 @@ jobs:
       - name: Build
         shell: bash
         run: cargo build -p gumicord-desktop --profile dist
+        if: matrix.label == 'windows' || matrix.label == 'linux' || matrix.label == 'macos'
 
+      - uses: actions/setup-java@v4
+        if: matrix.label == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        if: matrix.label == 'android'
+        with:
+          # The action defaults to `tools platform-tools`, but Google removed
+          # the obsolete `tools` package, so installing it fails the job.
+          packages: 'platform-tools'
+
+      - name: Install NDK and platform
+        if: matrix.label == 'android'
+        # Must match app/android/app/build.gradle (ndkVersion).
+        run: sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: matrix.label == 'android'
+        with:
+          gradle-version: '8.7'
+
+      # Unsigned release builds for sideloading (no signing identity yet,
+      # same as nightlies). The Rust cdylib builds --release like CI.
+      - name: Build APK
+        if: matrix.label == 'android'
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: |
+          cargo install cargo-ndk --locked
+          cargo ndk -t arm64-v8a -t x86_64 -o app/android/app/src/main/jniLibs build --release -p gumicord-android
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+            app/android/app/src/main/jniLibs/arm64-v8a/
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so" \
+            app/android/app/src/main/jniLibs/x86_64/
+          gradle -p app/android assembleRelease
+
+      - name: Build IPA
+        if: matrix.label == 'ios'
+        run: |
+          cargo build --release --target aarch64-apple-ios -p gumicord-ios
+          mkdir -p app/ios/lib
+          cp target/aarch64-apple-ios/release/libgumicord_ios.a app/ios/lib/
+          xcodebuild -project app/ios/Gumicord.xcodeproj -scheme Gumicord \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-dd \
+            CODE_SIGNING_ALLOWED=NO build
+          cd build/ios-dd/Build/Products/Release-iphoneos
+          mkdir Payload
+          cp -r Gumicord.app Payload/
+          zip -r Gumicord-unsigned.ipa Payload
       # Ship the themes so they can be swapped with GUMICORD_THEME.
       - name: Assemble
+        if: matrix.label == 'windows' || matrix.label == 'linux' || matrix.label == 'macos'
         shell: bash
         run: |
           mkdir -p dist
@@ -145,7 +209,7 @@ jobs:
 
       # One file to run, built from the binary above with stock tooling.
       - name: Build AppImage
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.label == 'linux'
         env:
           APPIMAGE_EXTRACT_AND_RUN: 1
         run: |
@@ -161,7 +225,7 @@ jobs:
           test -x squashfs-root/AppRun
 
       - name: Build app bundle
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-latest' && matrix.label == 'macos'
         run: |
           mkdir -p Gumicord.app/Contents/MacOS Gumicord.app/Contents/Resources dmg-staging
           cp "target/dist/gumicord" Gumicord.app/Contents/MacOS/
@@ -182,7 +246,7 @@ jobs:
       # presence check lives in the script: the secrets context is not
       # available in a step's if condition.
       - name: Sign app bundle
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-latest' && matrix.label == 'macos'
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -212,7 +276,7 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
 
       - name: Build dmg
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-latest' && matrix.label == 'macos'
         run: |
           mv Gumicord.app dmg-staging/
           cp -r dist/themes dist/LICENSE dist/README.txt dmg-staging/
@@ -223,7 +287,7 @@ jobs:
       # Gatekeeper offline; without secrets this step reports and passes.
       # The presence check lives in the script for the same reason.
       - name: Notarize dmg
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-latest' && matrix.label == 'macos'
         env:
           MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
@@ -241,6 +305,7 @@ jobs:
           xcrun stapler staple Gumicord.dmg
 
       - name: Upload build
+        if: matrix.label == 'windows' || matrix.label == 'linux' || matrix.label == 'macos'
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ inputs.tag }}-${{ matrix.label }}
@@ -248,6 +313,22 @@ jobs:
             dist/
             Gumicord-*.AppImage
             Gumicord.dmg
+          retention-days: 14
+
+      - name: Upload APK
+        if: matrix.label == 'android'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.tag }}-android
+          path: app/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 14
+
+      - name: Upload IPA
+        if: matrix.label == 'ios'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.tag }}-ios
+          path: build/ios-dd/Build/Products/Release-iphoneos/Gumicord-unsigned.ipa
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
@@ -264,6 +345,8 @@ jobs:
           ref: ${{ needs.guard.outputs.sha }}
           fetch-depth: 0
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: actions/download-artifact@v4
         with:
           pattern: release-${{ inputs.tag }}-*
@@ -276,6 +359,8 @@ jobs:
           TAG="${{ inputs.tag }}"
           mv dist/release-$TAG-linux/Gumicord-*.AppImage dist/gumicord-$TAG-linux.AppImage
           mv dist/release-$TAG-macos/Gumicord.dmg dist/gumicord-$TAG-macos.dmg
+          mv dist/release-$TAG-ios/Gumicord-unsigned.ipa dist/gumicord-$TAG.ipa
+          mv dist/release-$TAG-android/app-release-unsigned.apk dist/gumicord-$TAG.apk
           for entry in windows linux macos; do
             case "$entry" in
               windows) bin=gumicord.exe ;;
@@ -288,6 +373,19 @@ jobs:
             rm -rf "dist/release-$TAG-$entry"
           done
           ls -l dist
+
+      # The source file points at the renamed assets by their final
+      # names, so it runs after the rename above.
+      - name: Write AltStore source
+        run: |
+          TAG="${{ inputs.tag }}"
+          SHA="${{ needs.guard.outputs.sha }}"
+          MSG=$(git log -1 --format=%s "$SHA")
+          DATE=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
+          cargo xtask altstore --channel stable --tag "$TAG" \
+            --ipa "dist/gumicord-$TAG.ipa" \
+            --commit "${SHA::7}" --commit-message "$MSG" --date "$DATE" \
+            --out dist/apps-stable.json
 
       - name: Create and push the tag
         run: |
@@ -303,12 +401,53 @@ jobs:
             dist/*.zip
             dist/*.AppImage
             dist/*.dmg
+            dist/*.apk
+            dist/*.ipa
+            dist/apps-stable.json
           fail_on_unmatched_files: true
           body: |
-            Gumicord ${{ inputs.tag }} (desktop): Windows / Linux / macOS.
+            Gumicord ${{ inputs.tag }}: Windows / Linux / macOS, unsigned release APK and IPA for sideloading.
             Built from https://github.com/${{ github.repository }}/commit/${{ needs.guard.outputs.sha }}.
             Unsigned unless the signing secrets are configured: see
             packaging/README.md for what turns signatures on.
+            AltStore source: https://gumicord.github.io/gumicord-sources/apps-stable.json
 
             WARNING: connecting to Discord with a third-party client breaks
             their terms of service and can cost you your account.
+
+      # The AltStore source lives in its own repository, served over
+      # Pages; this job pushes the file the step above just wrote.
+      - uses: actions/create-github-app-token@v2
+        id: sources-token
+        with:
+          app-id: ${{ secrets.NIGHTLY_APP_ID }}
+          private-key: ${{ secrets.NIGHTLY_APP_PRIVATE_KEY }}
+          owner: gumicord
+          repositories: gumicord-sources
+
+      - name: Publish AltStore source
+        env:
+          GH_TOKEN: ${{ steps.sources-token.outputs.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          rm -rf "$RUNNER_TEMP/sources" && git clone --depth 1 \
+            "https://x-access-token:$GH_TOKEN@github.com/gumicord/gumicord-sources.git" \
+            "$RUNNER_TEMP/sources"
+          cp dist/apps-stable.json "$RUNNER_TEMP/sources/"
+          cd "$RUNNER_TEMP/sources"
+          git config user.name "gumicord-release[bot]"
+          git config user.email "gumicord-release[bot]@users.noreply.github.com"
+          git add apps-stable.json
+          git commit -m "stable $TAG" || exit 0
+          git push origin main
+
+      # Pages deploys behind the push; poll until AltStore could read it.
+      - name: Verify AltStore source served
+        run: |
+          TAG="${{ inputs.tag }}"
+          for i in $(seq 1 30); do
+            if curl -fsSL https://gumicord.github.io/gumicord-sources/apps-stable.json \
+              | grep -qF -- "$TAG"; then exit 0; fi
+            sleep 20
+          done
+          echo "apps-stable.json not serving $TAG" >&2; exit 1

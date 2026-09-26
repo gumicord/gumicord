@@ -340,6 +340,21 @@ mod tests {
         assert_eq!(t.release(1, 40.0, 40.0), None);
     }
 
+    /// One release, one verdict: a swipe never taps too. The window
+    /// matches on the single answer, so a confirmed gesture cannot act
+    /// twice.
+    #[test]
+    fn a_swipe_release_never_taps_too() {
+        let mut t = Tracker::default();
+        t.press(1, 100.0, 100.0);
+        t.mov(1, 100.0, 160.0);
+        let verdict = t.release(1, 100.0, 170.0);
+        assert!(
+            matches!(verdict, Some(TouchAction::Swipe(_))),
+            "a swipe must not fall back to a tap: {verdict:?}"
+        );
+    }
+
     /// A second finger voids the gesture; other fingers are ignored.
     #[test]
     fn an_extra_finger_is_ignored() {

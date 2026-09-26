@@ -55,6 +55,10 @@
 - 実機確認 (2026-09-24 夜追加分): 中央付近での長い惰性 (`fling stopped` が出ず
   `fling interrupted` で終わること)、`older page landed` と上端フリックの対応、
   ジャンプ報告時は直前の `older page landed` の有無と発生操作 (スクロール／フリック／切替)
+- 実機確認 (2026-09-26 追加分, ADR-0015): captcha モーダル (iOS／Android／macOS／Linux)。
+  パスワード・TOTP・QR の challenged 経路で頁が出て解けること、
+  キャンセルで破綻しないこと。Linux は CI の compile も見ること
+  (当地では host 試験と iOS／macOS／Android の target 検査までを通した)
 
 ---
 

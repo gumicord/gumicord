@@ -32,7 +32,13 @@ pub mod touch;
 pub mod url;
 pub mod window;
 
-pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha, WebView2Captcha};
+#[cfg(target_os = "android")]
+pub use captcha::AndroidCaptcha;
+#[cfg(windows)]
+pub use captcha::WebView2Captcha;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+pub use captcha::WryCaptcha;
+pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, Host, SolvedCaptcha};
 pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;

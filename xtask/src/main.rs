@@ -16,13 +16,20 @@
 //!     cargo xtask api-docs   regenerate the plugin API reference
 //!                             (--check to verify only, --out to point
 //!                             at the api-docs checkout)
+//!     cargo xtask icons       rebuild the nightly icon derivatives
+//!                             (--check to verify only)
+//!     cargo xtask altstore    write an AltStore source file
+//!                             (--channel/--tag/--ipa/--commit/
+//!                             --commit-message/--date/--out)
 //!
+
 //! A development machine may have four cores and 8 GB, so building tasks are
 //! held to `jobs = 2` in `.cargo/config.toml`. This can be overridden with
 //! `CARGO_BUILD_JOBS` when more parallelism is appropriate.
 
+mod altstore;
+mod icons;
 mod uitree;
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -45,6 +52,8 @@ fn main() -> ExitCode {
         "abi" => uitree::abi(&root, flag(&task_args, "--accept")),
         "gen" => uitree::generate(&root, flag(&task_args, "--check")),
         "api-docs" => api_docs(&root, &task_args),
+        "icons" => icons::icons(&root, &task_args),
+        "altstore" => altstore::altstore(&root, &task_args),
         "help" | "--help" | "-h" => {
             help();
             Ok(())

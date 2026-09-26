@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Nightly overlay: the black icon set beside this file tells the
+     channels apart before the name does. -->
+<resources>
+    <string name="app_name">Gumicord Nightly</string>
+</resources>

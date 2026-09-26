@@ -2,4 +2,7 @@
 // about the app, not the toolchain.
 plugins {
     id 'com.android.application' version '8.5.2' apply false
+    // CaptchaBridge.kt only (ADR-0015). Judgement stays in Rust; Kotlin
+    // declares the answer object and nothing else.
+    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
 }

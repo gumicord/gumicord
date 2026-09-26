@@ -104,6 +104,9 @@ enum Command {
     ListStates {
         reply: mpsc::Sender<Vec<PluginState>>,
     },
+    /// Re-read the directory: picks up installed or removed plugins.
+    /// New capability plugins ask through the usual approval event.
+    Rescan,
     SettingsTree {
         id: String,
         reply: mpsc::Sender<Option<UiNode>>,
@@ -122,6 +125,9 @@ struct PluginSet {
     known: HashMap<String, (PathBuf, Manifest)>,
     grants: HashMap<String, Vec<String>>,
     disabled: HashSet<String>,
+    /// Capability plugins already asked about. Scans repeat (installs),
+    /// but the dialog must not: one sighting, one question.
+    asked: HashSet<String>,
 }
 
 impl PluginSet {
@@ -143,6 +149,7 @@ impl PluginSet {
                 known: HashMap::new(),
                 grants,
                 disabled,
+                asked: HashSet::new(),
             },
             events,
         )
@@ -169,6 +176,17 @@ impl PluginSet {
             }
         }
         dirs.sort();
+        // Forget removed directories, or deleted plugins haunt the list.
+        let gone: Vec<String> = self
+            .known
+            .iter()
+            .filter(|(_, (dir, _))| !dirs.contains(dir))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            self.known.remove(&id);
+            self.unload(&id);
+        }
         for dir in dirs {
             let manifest = match Manifest::load(&dir) {
                 Err(e) => {
@@ -189,11 +207,16 @@ impl PluginSet {
                 events.extend(self.load_host(&id));
             } else {
                 match self.grants.get(&id) {
-                    None => events.push(ManagerEvent::NeedsApproval {
-                        id,
-                        name: manifest.name.clone(),
-                        capabilities: manifest.capabilities.clone(),
-                    }),
+                    // One sighting, one question: rescans repeat, the
+                    // dialog must not.
+                    None if self.asked.insert(id.clone()) => {
+                        events.push(ManagerEvent::NeedsApproval {
+                            id,
+                            name: manifest.name.clone(),
+                            capabilities: manifest.capabilities.clone(),
+                        })
+                    }
+                    None => {}
                     Some(granted) if granted.is_empty() => {}
                     Some(_) => events.extend(self.load_host(&id)),
                 }
@@ -588,6 +611,15 @@ impl PluginManager {
         }
     }
 
+    /// Re-reads the plugins directory, picking up installed or removed
+    /// plugins. Capability plugins ask through the usual approval event,
+    /// so installing never grants silently.
+    pub fn rescan(&self) {
+        if let Some(cmd) = &self.cmd {
+            let _ = cmd.send(Command::Rescan);
+        }
+    }
+
     pub fn unload(&self, id: &str) {
         if let Some(cmd) = &self.cmd {
             let _ = cmd.send(Command::Unload { id: id.to_owned() });
@@ -760,6 +792,11 @@ fn handle_command(
         Command::ListStates { reply } => {
             let _ = reply.send(set.states());
         }
+        Command::Rescan => {
+            for e in set.scan() {
+                send(e);
+            }
+        }
         Command::SettingsTree { id, reply } => {
             let _ = reply.send(set.settings_tree(&id));
         }
@@ -823,6 +860,57 @@ mod tests {
             .filter_map(|c| c.content.as_text().map(str::to_owned))
             .collect();
         assert_eq!(texts, ["A", "B"]);
+    }
+
+    /// A rescan picks up installed plugins and forgets removed ones.
+    /// Capability plugins ask through the usual approval event.
+    #[test]
+    fn rescan_picks_up_installed_and_removed_plugins() {
+        let root = dir("rescan");
+        plugin_dir(
+            &root,
+            "com.example.a",
+            r#"globalThis.__gumicord_apply = (n) => n;"#,
+            "",
+        );
+        let (mut set, _) = PluginSet::open(&root);
+        assert!(set.scan().is_empty());
+        assert_eq!(set.plugins.len(), 1);
+
+        // Installed behind its back: capabilities ask instead of loading.
+        plugin_dir(
+            &root,
+            "com.example.b",
+            r#"globalThis.__gumicord_apply = (n) => n;"#,
+            r#""storage""#,
+        );
+        let events = set.scan();
+        assert_eq!(set.plugins.len(), 1, "unapproved one loaded: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ManagerEvent::NeedsApproval { id, .. } if id == "com.example.b"
+            )),
+            "capabilities did not ask: {events:?}"
+        );
+        assert!(
+            set.states().iter().any(|s| s.id == "com.example.b"),
+            "new one is not even known"
+        );
+
+        // Removed behind its back. The unapproved one never loaded, so
+        // nothing runnable remains, but it stays known.
+        std::fs::remove_dir_all(root.join("com.example.a")).unwrap();
+        assert!(set.scan().is_empty(), "re-asked or warned");
+        assert!(set.plugins.is_empty());
+        assert!(
+            set.states().iter().all(|s| s.id != "com.example.a"),
+            "deleted one haunts the list"
+        );
+        assert!(
+            set.states().iter().any(|s| s.id == "com.example.b"),
+            "kept one is not known"
+        );
     }
 
     /// A denied plugin never loads; an unseen one asks first.

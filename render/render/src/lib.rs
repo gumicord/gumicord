@@ -24,7 +24,7 @@ pub mod text;
 pub use geom::{Rect, Size};
 pub use gpu::{GpuError, Presented, candidate_backends};
 pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
-pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState};
+pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState, SlideState};
 pub use motion::Motion;
 pub use text::ImageData;
 
@@ -140,6 +140,10 @@ pub struct Renderer {
     /// A region that grew at the top and should hold its position, for one
     /// frame.
     keep_place: Option<NodeId>,
+    /// Slide progress per surface, set by the platform every frame. Only a
+    /// surface mid-gesture or mid-animation is listed; the layout treats a
+    /// missing entry as open.
+    slide: SlideState,
     /// Images the last frame wanted and did not have. Only drawing reveals
     /// them, since visibility comes from layout and clipping.
     missing_images: Vec<String>,
@@ -180,6 +184,7 @@ impl Renderer {
             overflow: std::collections::HashMap::new(),
             scrollbars: Vec::new(),
             keep_place: None,
+            slide: SlideState::new(),
             missing_images: Vec::new(),
             missing_backgrounds: Vec::new(),
             theme_namespace: None,
@@ -221,6 +226,7 @@ impl Renderer {
             overflow: std::collections::HashMap::new(),
             scrollbars: Vec::new(),
             keep_place: None,
+            slide: SlideState::new(),
             missing_images: Vec::new(),
             missing_backgrounds: Vec::new(),
             theme_namespace: None,
@@ -360,6 +366,17 @@ impl Renderer {
         self.keep_place = Some(id);
     }
 
+    /// Sets a surface's slide progress, 0 (shut) to 1 (open). The platform
+    /// pushes the app's value every frame; removing the entry returns the
+    /// surface to open.
+    pub fn set_slide(&mut self, id: NodeId, progress: f32) {
+        if progress >= 1.0 {
+            self.slide.remove(&id);
+        } else {
+            self.slide.insert(id, progress.clamp(0.0, 1.0));
+        }
+    }
+
     /// Grabs a scrollbar.
     ///
     /// On the thumb it grabs in place; on the track it jumps the thumb's
@@ -428,28 +445,51 @@ impl Renderer {
         // copy of every text behind per wrap width it passed through.
         self.text.shaper().sweep();
         let viewport = self.viewport();
-        let mut layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
+        let mut layout = layout::layout_slid(
+            root,
+            viewport,
+            self.text.shaper(),
+            &self.scroll,
+            &self.slide,
+        );
 
-        // Shift the position down by however much was prepended.
+        // Hold the topmost visible row where it is across a prepend.
         //
         // Positions are measured from the top, so prepending pushes the row
         // being read downwards — which defeats the point of paging back.
         //
-        // The growth is the change in overflow, since the box did not change
-        // size.
+        // The anchor is a message row, not a height delta: variable rows, a
+        // vanishing loading row, and several pages landing between frames
+        // all hold still, since heights never enter the math.
         //
         // Measured again rather than corrected after drawing, which would
         // jump for one frame. Prepends are rare enough to pay for two passes.
-        if let Some(id) = self.keep_place.take()
-            && let (Some(before), Some(after)) =
-                (self.overflow.get(&id).copied(), layout.overflow.get(&id))
-        {
-            let grew = after - before;
+        if let Some(id) = self.keep_place.take() {
             let at = self.scroll.get(&id).copied().unwrap_or(0.0);
             // Someone pinned to the bottom stays there; the intent wins.
-            if grew > 0.0 && at != layout::SCROLL_TO_END {
-                self.scroll.insert(id, (at + grew).min(*after));
-                layout = layout::layout(root, viewport, self.text.shaper(), &self.scroll);
+            if at != layout::SCROLL_TO_END {
+                let after = layout.overflow.get(&id).copied().unwrap_or(0.0);
+                let next = anchor_row(&self.hits, id)
+                    .and_then(|a| anchor_scroll(&layout.placed, id, &a, at, after))
+                    .or_else(|| {
+                        // The anchor row is gone on either side; assume the
+                        // growth happened above, like before.
+                        let before = self.overflow.get(&id).copied()?;
+                        let grew = after - before;
+                        (grew > 0.0).then(|| (at + grew).min(after))
+                    });
+                if let Some(next) = next
+                    && (next - at).abs() >= 0.5
+                {
+                    self.scroll.insert(id, next);
+                    layout = layout::layout_slid(
+                        root,
+                        viewport,
+                        self.text.shaper(),
+                        &self.scroll,
+                        &self.slide,
+                    );
+                }
             }
         }
 
@@ -759,6 +799,74 @@ pub fn layout_for_test(
     r.placed.iter().map(|p| (p.node.id, p.rect)).collect()
 }
 
+/// The first visible message row and its offset from the visible top.
+/// A row is named by its message, which survives a prepend; rects do not.
+struct ScrollAnchor {
+    key: Option<Key>,
+    /// Row top minus visible top; negative when cut off above.
+    dy: f32,
+}
+
+/// Finds the anchor row: the topmost message at least partly below the
+/// visible top, from the previous frame's hits.
+fn anchor_row(hits: &[Hit], region: NodeId) -> Option<ScrollAnchor> {
+    let top = visible_top(hits, region)?;
+    hits.iter()
+        .filter(|h| h.id == NodeId::ChatMessage && h.key.is_some())
+        .filter(|h| h.rect.bottom() > top)
+        .min_by(|a, b| {
+            a.rect
+                .y
+                .partial_cmp(&b.rect.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|h| ScrollAnchor {
+            key: h.key.clone(),
+            dy: h.rect.y - top,
+        })
+}
+
+/// The visible top of a scroll region: its own top, or the chat header's
+/// bottom when the header covers it. Same measure as `reveal_at`.
+fn visible_top(hits: &[Hit], region: NodeId) -> Option<f32> {
+    let region_y = hits
+        .iter()
+        .find(|h| h.id == region && h.key.is_none())
+        .map(|h| h.rect.y)?;
+    Some(
+        hits.iter()
+            .filter(|h| h.id == NodeId::ChatHeader)
+            .map(|h| h.rect.y + h.rect.h)
+            .fold(region_y, f32::max),
+    )
+}
+
+/// Where the region must scroll to restore an anchor: the row's content
+/// position less the visible top and the recorded offset. Placed with the
+/// old offset, so the rect plus it is the content position.
+fn anchor_scroll(
+    placed: &[layout::Placed<'_>],
+    region: NodeId,
+    anchor: &ScrollAnchor,
+    at: f32,
+    max: f32,
+) -> Option<f32> {
+    let target = placed
+        .iter()
+        .find(|p| p.node.id == NodeId::ChatMessage && p.node.key == anchor.key)?;
+    let region_y = placed
+        .iter()
+        .find(|p| p.node.id == region && p.node.key.is_none())
+        .map(|p| p.rect.y)
+        .unwrap_or(0.0);
+    let top = placed
+        .iter()
+        .filter(|p| p.node.id == NodeId::ChatHeader)
+        .map(|p| p.rect.y + p.rect.h)
+        .fold(region_y, f32::max);
+    Some((target.rect.y + at - top - anchor.dy).clamp(0.0, max))
+}
+
 /// Where a region must scroll to show a node: its viewport rect plus the
 /// current offset is its content position, less what already covers the
 /// region's top. The chat header sits above the list in the flow, so that
@@ -788,6 +896,153 @@ fn reveal_at(
         .map(|h| h.rect.y + h.rect.h)
         .fold(region_y, f32::max);
     Some((target.rect.y + at - top).clamp(0.0, max))
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use gumicord_uitree::UiNode;
+
+    fn hit(id: NodeId, key: Option<Key>, y: f32, h: f32) -> Hit {
+        Hit {
+            id,
+            key,
+            rect: Rect::new(0.0, y, 380.0, h),
+            clip: None,
+        }
+    }
+
+    fn placed_at<'a>(node: &'a UiNode, y: f32, h: f32) -> layout::Placed<'a> {
+        layout::Placed {
+            node,
+            rect: Rect::new(0.0, y, 380.0, h),
+            clip: None,
+            inner: Rect::new(0.0, y, 380.0, h),
+        }
+    }
+
+    /// Old frame: region at y=100 under a 30px header, scrolled 50px down.
+    /// The first row ends exactly at the visible top, so it is already gone.
+    fn old_hits() -> Vec<Hit> {
+        vec![
+            hit(NodeId::ChatMessageList, None, 100.0, 500.0),
+            hit(NodeId::ChatHeader, None, 100.0, 30.0),
+            hit(NodeId::ChatMessage, Some(Key::Id(1)), 80.0, 50.0),
+            hit(NodeId::ChatMessage, Some(Key::Id(2)), 130.0, 70.0),
+            hit(NodeId::ChatMessage, Some(Key::Id(3)), 200.0, 50.0),
+        ]
+    }
+
+    /// The anchor is the topmost row still peeking in, not the one above it.
+    #[test]
+    fn the_topmost_visible_row_anchors() {
+        let anchor = anchor_row(&old_hits(), NodeId::ChatMessageList).expect("a row");
+        assert_eq!(anchor.key, Some(Key::Id(2)));
+        assert_eq!(anchor.dy, 0.0);
+    }
+
+    /// Two 50px rows prepended above: the anchor row sits exactly where it
+    /// was, so no further page is fetched until the reader scrolls again.
+    #[test]
+    fn a_prepend_holds_the_anchor_row_still() {
+        let old = old_hits();
+        let anchor = anchor_row(&old, NodeId::ChatMessageList).expect("a row");
+        let nodes = [2u64, 3].map(|id| UiNode::new(NodeId::ChatMessage).with_id_key(id));
+        // Laid out with the old offset of 50: everything old moved down 100.
+        let placed = vec![
+            placed_at(&nodes[0], 230.0, 70.0),
+            placed_at(&nodes[1], 300.0, 50.0),
+        ];
+        let region = UiNode::new(NodeId::ChatMessageList);
+        let header = UiNode::new(NodeId::ChatHeader);
+        let placed = [
+            placed_at(&region, 100.0, 500.0),
+            placed_at(&header, 100.0, 30.0),
+        ]
+        .into_iter()
+        .chain(placed)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            anchor_scroll(&placed, NodeId::ChatMessageList, &anchor, 50.0, 1000.0),
+            Some(150.0)
+        );
+    }
+
+    /// A vanishing loading row and uneven rows: heights never enter the
+    /// math, so the anchor still lands back where it was read.
+    #[test]
+    fn uneven_rows_and_a_vanished_loading_row_hold_still() {
+        let old = vec![
+            hit(NodeId::ChatMessageList, None, 100.0, 500.0),
+            hit(NodeId::ChatHeader, None, 100.0, 30.0),
+            hit(
+                NodeId::LayoutRow,
+                Some(Key::Slot("message_list_loading")),
+                130.0,
+                30.0,
+            ),
+            hit(NodeId::ChatMessage, Some(Key::Id(7)), 160.0, 40.0),
+        ];
+        let anchor = anchor_row(&old, NodeId::ChatMessageList).expect("a row");
+        assert_eq!(anchor.key, Some(Key::Id(7)));
+        assert_eq!(anchor.dy, 30.0);
+        // Three uneven rows (60, 20, 80) replaced the 30px loading row.
+        let nodes = [7u64].map(|id| UiNode::new(NodeId::ChatMessage).with_id_key(id));
+        let region = UiNode::new(NodeId::ChatMessageList);
+        let header = UiNode::new(NodeId::ChatHeader);
+        let placed = vec![
+            placed_at(&region, 100.0, 500.0),
+            placed_at(&header, 100.0, 30.0),
+            placed_at(&nodes[0], 320.0, 40.0),
+        ];
+        // Was 160 viewport with at=0; must read at 160 again: 320-160.
+        assert_eq!(
+            anchor_scroll(&placed, NodeId::ChatMessageList, &anchor, 0.0, 1000.0),
+            Some(160.0)
+        );
+    }
+
+    /// The anchor row deleted under us: no anchor, so the caller falls back.
+    #[test]
+    fn a_missing_anchor_row_answers_nothing() {
+        let old = old_hits();
+        let anchor = anchor_row(&old, NodeId::ChatMessageList).expect("a row");
+        let nodes = [3u64].map(|id| UiNode::new(NodeId::ChatMessage).with_id_key(id));
+        let region = UiNode::new(NodeId::ChatMessageList);
+        let placed = vec![
+            placed_at(&region, 100.0, 500.0),
+            placed_at(&nodes[0], 130.0, 50.0),
+        ];
+        assert_eq!(
+            anchor_scroll(&placed, NodeId::ChatMessageList, &anchor, 50.0, 1000.0),
+            None
+        );
+    }
+
+    /// No rows, or no region: nothing to hold.
+    #[test]
+    fn without_rows_or_a_region_there_is_no_anchor() {
+        let empty: Vec<Hit> = vec![hit(NodeId::ChatMessageList, None, 100.0, 500.0)];
+        assert!(anchor_row(&empty, NodeId::ChatMessageList).is_none());
+        assert!(anchor_row(&[], NodeId::ChatMessageList).is_none());
+    }
+
+    /// A row exactly at the overflow bound still clamps inside it.
+    #[test]
+    fn the_anchor_clamps_to_the_overflow() {
+        let old = old_hits();
+        let anchor = anchor_row(&old, NodeId::ChatMessageList).expect("a row");
+        let nodes = [2u64].map(|id| UiNode::new(NodeId::ChatMessage).with_id_key(id));
+        let region = UiNode::new(NodeId::ChatMessageList);
+        let placed = vec![
+            placed_at(&region, 100.0, 500.0),
+            placed_at(&nodes[0], 230.0, 70.0),
+        ];
+        assert_eq!(
+            anchor_scroll(&placed, NodeId::ChatMessageList, &anchor, 50.0, 100.0),
+            Some(100.0)
+        );
+    }
 }
 
 #[cfg(test)]

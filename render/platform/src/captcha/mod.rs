@@ -1,9 +1,19 @@
-//! Presenting a captcha challenge (ADR-0007).
+//! Presenting a captcha challenge (ADR-0007, ADR-0015).
 //!
-//! The app deals in plain data; only this module knows about webviews. On
-//! Windows the challenge is solved inside an OS-browser child window (WebView2)
-//! so the login flow never leaves the app. Elsewhere there is no provider yet;
-//! [`CaptchaHost::solve`] reports that rather than guess.
+//! The app deals in plain data; only this module knows about webviews.
+//! Windows shows WebView2, macOS and iOS use WKWebView through `wry`,
+//! Linux uses WebKitGTK through `wry`, and Android owns a `WebView`
+//! with a small Kotlin answer object. The challenge page ([`page`]) is
+//! shared; only the way back to Rust differs per OS.
+
+mod page;
+
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(windows)]
+mod webview2;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+mod wry_host;
 
 /// What a captcha challenge needs to be solved.
 #[derive(Debug, Clone)]
@@ -50,22 +60,53 @@ pub trait CaptchaHost {
     ) -> Result<SolvedCaptcha, CaptchaError>;
 }
 
+#[cfg(target_os = "android")]
+pub use self::android::AndroidCaptcha;
 #[cfg(windows)]
 pub use self::webview2::WebView2Captcha;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+pub use self::wry_host::WryCaptcha;
 
+#[cfg(target_os = "android")]
+pub use self::android::AndroidCaptcha as Host;
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "ios",
+    target_os = "android"
+)))]
+pub use self::unsupported::UnsupportedCaptcha as Host;
+/// The concrete captcha host for this platform. The window layer owns one
+/// without knowing which OS it runs on.
 #[cfg(windows)]
-mod webview2;
+pub use self::webview2::WebView2Captcha as Host;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+pub use self::wry_host::WryCaptcha as Host;
 
-#[cfg(not(windows))]
-pub struct WebView2Captcha;
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "ios",
+    target_os = "android"
+)))]
+mod unsupported {
+    use winit::window::Window;
 
-#[cfg(not(windows))]
-impl CaptchaHost for WebView2Captcha {
-    fn solve(
-        &mut self,
-        _parent: &winit::window::Window,
-        _challenge: CaptchaChallenge,
-    ) -> Result<SolvedCaptcha, CaptchaError> {
-        Err(CaptchaError::Unsupported)
+    use super::{CaptchaChallenge, CaptchaError, CaptchaHost, SolvedCaptcha};
+
+    /// Nowhere to show a challenge: reports that rather than guess.
+    #[derive(Debug, Default)]
+    pub struct UnsupportedCaptcha;
+
+    impl CaptchaHost for UnsupportedCaptcha {
+        fn solve(
+            &mut self,
+            _parent: &Window,
+            _challenge: CaptchaChallenge,
+        ) -> Result<SolvedCaptcha, CaptchaError> {
+            Err(CaptchaError::Unsupported)
+        }
     }
 }

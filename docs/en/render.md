@@ -145,8 +145,21 @@ mobile shells set it at startup.
 http/https; no scheme is guessed.
 
 ### `src/captcha/mod.rs` — Captcha presentation abstraction. The app only
-handles raw data. Key items: `CaptchaChallenge`, `CaptchaHost`,
-`WebView2Captcha`. Non-Windows `solve()` is an `Unsupported` stub.
+handles raw data. Key items: `CaptchaChallenge`, `CaptchaHost`, `Host`
+(the concrete host per OS: WebView2 on Windows, `wry` on macOS/Linux/iOS,
+a `WebView` with a small Kotlin answer object on Android).
+
+### `src/captcha/page.rs` — The challenge page shared by every host.
+Key items: `Bridge`, `html()`, `Outcome`.
 
 ### `src/captcha/webview2.rs` — Windows-only WebView2 captcha host. Opens
 the hCaptcha page in a child window and receives the token over IPC.
+
+### `src/captcha/wry_host.rs` — `wry` captcha host for macOS (child),
+Linux (child on X11, own top-level window on Wayland), and iOS
+(fullscreen). Pumps the platform queue while waiting for the page's
+answer.
+
+### `src/captcha/android.rs` — Android captcha host. Builds the `WebView`
+over JNI, answers through `CaptchaBridge.kt`, and pumps the looper while
+waiting.
