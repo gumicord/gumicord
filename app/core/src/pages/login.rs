@@ -87,49 +87,49 @@ impl crate::Gumicord {
         }
         self.login_view.error = None;
         self.login_view.field_errors.clear();
-        match self.login_view.field {
-            Some(LoginField::Token) => {
-                let token = self.login_view.input.text().trim().to_owned();
-                if token.is_empty() {
-                    return false;
-                }
-                self.login.submit_bot_token(token);
-                self.login_view.input.take();
-                self.login_view.field = None;
-                true
+        // A button press clears focus before routing here, so the focused
+        // field cannot name the step: on the TOTP screen the field is
+        // already `None` when this runs. The session names the TOTP and
+        // token steps instead; anything else is the password form.
+        if matches!(self.login.session(), Session::PasswordTotp) {
+            let code = self.login_view.input.text().trim().to_owned();
+            if code.is_empty() {
+                tracing::debug!("totp login not sent; the code is empty");
+                return false;
             }
-            Some(LoginField::Email) | Some(LoginField::Password) | None => {
-                let email = self.login_view.email.text().trim().to_owned();
-                let password = self.login_view.input.text().to_owned();
+            tracing::debug!("submitting a totp code");
+            self.login.submit_totp(code);
+            self.login_view.input.take();
+            self.login_view.field = None;
+            true
+        } else if matches!(self.login.session(), Session::Token) {
+            let token = self.login_view.input.text().trim().to_owned();
+            if token.is_empty() {
+                return false;
+            }
+            self.login.submit_bot_token(token);
+            self.login_view.input.take();
+            self.login_view.field = None;
+            true
+        } else {
+            let email = self.login_view.email.text().trim().to_owned();
+            let password = self.login_view.input.text().to_owned();
 
-                if email.is_empty() || password.is_empty() {
-                    tracing::debug!(
-                        email_empty = email.is_empty(),
-                        password_empty = password.is_empty(),
-                        "password login not sent; a field is empty"
-                    );
-                    return false;
-                }
-                tracing::debug!("submitting a password login");
-                self.login.submit_password(email, password);
-                // Keep the email for a retry; the password is a secret that
-                // has done its job.
-                self.login_view.input.take();
-                self.login_view.field = None;
-                true
+            if email.is_empty() || password.is_empty() {
+                tracing::debug!(
+                    email_empty = email.is_empty(),
+                    password_empty = password.is_empty(),
+                    "password login not sent; a field is empty"
+                );
+                return false;
             }
-            Some(LoginField::Totp) => {
-                let code = self.login_view.input.text().trim().to_owned();
-                if code.is_empty() {
-                    tracing::debug!("totp login not sent; the code is empty");
-                    return false;
-                }
-                tracing::debug!("submitting a totp code");
-                self.login.submit_totp(code);
-                self.login_view.input.take();
-                self.login_view.field = None;
-                true
-            }
+            tracing::debug!("submitting a password login");
+            self.login.submit_password(email, password);
+            // Keep the email for a retry; the password is a secret that
+            // has done its job.
+            self.login_view.input.take();
+            self.login_view.field = None;
+            true
         }
     }
 
@@ -834,6 +834,28 @@ mod tests {
             lines.iter().any(|t| t.contains("認証コードが違います")),
             "no reason shown: {lines:?}"
         );
+    }
+
+    /// Tapping the submit button clears focus before routing, so the TOTP
+    /// screen submits with no field focused. The session still names the
+    /// step: the code must go out as a code, not as a password login.
+    #[test]
+    fn tapping_submit_on_the_totp_screen_sends_the_code() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        // The button press left no focus behind, and the email box was
+        // never filled on this path: a password login would refuse.
+        a.login_view.field = None;
+        a.login_view.input.insert("123456");
+        assert!(a.submit_login(), "TOTP 画面の送信が送られない");
+        assert!(a.login.busy(), "送信後も処理中にならない");
     }
 
     /// Field failures show under each named input: INVALID_LOGIN names both

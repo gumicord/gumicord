@@ -213,15 +213,17 @@ impl Proxy {
     /// when the app already cleared focus (outside press, submit) so the
     /// keyboard hides on this event instead of the next redraw.
     pub fn blur(&mut self) {
-        if self.active.is_some() {
-            // Whether anything still holds first responder after resigning
-            // tells a stuck keyboard apart from a slow one.
-            let held = self.user.isFirstResponder() || self.pass.isFirstResponder();
-            tracing::debug!(held, "proxy resigned");
-        }
+        let was_active = self.active.is_some();
+        // Whether resigning took first responder away tells a stuck
+        // keyboard apart from a slow one.
+        let user = self.user.resignFirstResponder();
+        let pass = self.pass.resignFirstResponder();
         for field in [&self.user, &self.pass] {
-            field.resignFirstResponder();
             field.removeFromSuperview();
+        }
+        if was_active {
+            let held = self.user.isFirstResponder() || self.pass.isFirstResponder();
+            tracing::debug!(user, pass, held, "proxy resigned");
         }
         self.active = None;
         self.parent = None;
