@@ -95,6 +95,11 @@ Derivatives: `AppIconNightly.appiconset` (iOS), `app/android/app/src/debug/res`
 (black launcher set, picked up automatically by `assembleDebug`), and the
 512px icon above. Stable derivatives stay hand-maintained as before.
 
+`--check` compares decoded pixels with a 2/255 per-channel tolerance
+rather than raw bytes: encoder output and resize rounding can differ by
+a least significant bit across platforms, while a hand edit or a stale
+master differs far more.
+
 The nightly identity rides on build settings, not branches: Xcode takes
 `ASSETCATALOG_COMPILER_APPICON_NAME=AppIconNightly`,
 `PRODUCT_BUNDLE_IDENTIFIER=dev.gumicord.nightly` and
