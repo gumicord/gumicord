@@ -311,6 +311,18 @@ pub trait Application {
         false
     }
 
+    /// Types text into the focused field. The default inserts it whole;
+    /// login steps with a fixed shape narrow it (digits only for TOTP).
+    fn insert_text(&mut self, text: &str) -> bool {
+        match self.focused_document() {
+            Some(doc) => {
+                doc.insert(text);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Commits and sends, on enter.
     ///
     /// Never called while composing: mistaking the enter that commits an IME
@@ -1131,13 +1143,7 @@ impl Host {
             .as_ref()
             .filter(|t| !t.is_empty() && !t.chars().any(|c| c.is_control()))
         {
-            Some(t) => match self.app.focused_document() {
-                Some(doc) => {
-                    doc.insert(t);
-                    true
-                }
-                None => false,
-            },
+            Some(t) => self.app.insert_text(t),
             None => false,
         }
     }

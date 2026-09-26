@@ -484,6 +484,9 @@ fn all_details(errors: &serde_json::Value) -> Vec<(String, String)> {
 
 fn build_http(identity: &Identity) -> Result<reqwest::Client, RestError> {
     Ok(reqwest::Client::builder()
+        // The MFA ticket belongs to the login session: without the jar the
+        // cookies set by `/auth/login` never reach `/auth/mfa/totp`.
+        .cookie_store(true)
         // Must equal `browser_user_agent` in the claim; a difference is
         // itself a mismatch.
         .user_agent(identity.user_agent())

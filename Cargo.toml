@@ -66,7 +66,7 @@ rquickjs = "0.12"
 # Networking
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "cookies"] }
 # The crypto provider is chosen explicitly. rustls picks one from its own
 # features, but only when exactly one is enabled, and panics at runtime
 # otherwise. Which features end up on depends on how dependencies merge.

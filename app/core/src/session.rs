@@ -193,6 +193,9 @@ pub struct Login {
     /// hands it to the platform, which shows the modal, then reads it back as
     /// the solved token.
     pending: Option<gumicord_rest::CaptchaChallenge>,
+    /// Whose second factor is being asked for. Shown on the TOTP screen so
+    /// a code is never read for the wrong account.
+    totp_email: Option<String>,
     /// Still waiting for the first answer. While set and with nothing real
     /// to show, the splash covers the login screen.
     booting: bool,
@@ -225,6 +228,7 @@ impl Login {
             field_errors: Vec::new(),
             ended: false,
             pending: None,
+            totp_email: None,
             busy: false,
             booting: true,
         }
@@ -318,6 +322,7 @@ impl Login {
     /// Asks the background to log in with these credentials.
     pub fn submit_password(&mut self, email: String, password: String) {
         self.busy = true;
+        self.totp_email = None;
         let _ = self.cmd_tx.send(LoginCommand::Password { email, password });
     }
 
@@ -343,6 +348,7 @@ impl Login {
     /// Clears the in-flight guard so the next form starts enabled.
     pub fn cancel_password(&mut self) {
         self.busy = false;
+        self.totp_email = None;
         let _ = self.cmd_tx.send(LoginCommand::CancelPassword);
     }
 
@@ -350,6 +356,11 @@ impl Login {
     /// Consumed once: the app hands it to the platform's modal.
     pub fn take_pending(&mut self) -> Option<gumicord_rest::CaptchaChallenge> {
         self.pending.take()
+    }
+
+    /// Whose second factor the TOTP screen asks for, if any.
+    pub fn totp_email(&self) -> Option<&str> {
+        self.totp_email.as_deref()
     }
 
     /// Drains every pending event. One wake can carry several.
@@ -394,6 +405,7 @@ impl Login {
                 self.notice = None;
                 self.pending = None;
                 self.last_error = None;
+                self.totp_email = None;
                 self.field_errors.clear();
                 self.busy = false;
                 Session::LoggedIn(l)
@@ -411,10 +423,11 @@ impl Login {
                 self.busy = false;
                 self.session.clone()
             }
-            LoginEvent::TotpNeeded { error, .. } => {
+            LoginEvent::TotpNeeded { email, error } => {
                 tracing::debug!("second factor needed; showing the totp screen");
                 // A retry reason reaches the form like any other failure.
                 self.last_error = error;
+                self.totp_email = Some(email);
                 // Back to the form for another code; the next submit
                 // re-arms the guard.
                 self.busy = false;

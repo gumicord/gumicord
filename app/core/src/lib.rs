@@ -1719,6 +1719,41 @@ impl Application for Gumicord {
         }
     }
 
+    /// Types text, narrowing TOTP input to six half-width digits. Anything
+    /// else in that box can never verify, so it never lands.
+    fn insert_text(&mut self, text: &str) -> bool {
+        use crate::pages::login::{TOTP_LEN, normalize_totp, totp_digit};
+
+        if !matches!(self.login_view.field, Some(LoginField::Totp)) {
+            return match self.focused_document() {
+                Some(doc) => {
+                    doc.insert(text);
+                    true
+                }
+                None => false,
+            };
+        }
+        let Some(doc) = self.focused_document() else {
+            return false;
+        };
+        let mut room = TOTP_LEN.saturating_sub(normalize_totp(doc.text()).len());
+        let mut digits = String::new();
+        for c in text.chars() {
+            if room == 0 {
+                break;
+            }
+            if let Some(d) = totp_digit(c) {
+                digits.push(d);
+                room -= 1;
+            }
+        }
+        if digits.is_empty() {
+            return false;
+        }
+        doc.insert(&digits);
+        true
+    }
+
     /// What the focused field wants from the soft keyboard (mobile only).
     fn ime_field(&self) -> Option<gumicord_platform::ImeField> {
         use gumicord_platform::{ImeField, ImeKind};

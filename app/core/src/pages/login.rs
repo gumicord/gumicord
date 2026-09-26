@@ -9,6 +9,25 @@ use gumicord_uitree::{Content, Editable, Key, NodeId, State, UiNode};
 
 use super::super::session::Session;
 
+/// Digits a TOTP code holds. Discord uses six half-width digits; anything
+/// else in the box can never verify.
+pub(crate) const TOTP_LEN: usize = 6;
+
+/// One TOTP digit, half-width. Full-width digits come from Japanese input
+/// and verify the same once narrowed; anything else is dropped.
+pub(crate) fn totp_digit(c: char) -> Option<char> {
+    match c {
+        '0'..='9' => Some(c),
+        '０'..='９' => char::from_u32(c as u32 - '０' as u32 + '0' as u32),
+        _ => None,
+    }
+}
+
+/// Narrows a TOTP box to what the API reads: half-width digits only.
+pub(crate) fn normalize_totp(raw: &str) -> String {
+    raw.chars().filter_map(totp_digit).collect()
+}
+
 /// Which login-form field, if any, has focus. Only one at a time, and only
 /// while a form is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,9 +111,15 @@ impl crate::Gumicord {
         // already `None` when this runs. The session names the TOTP and
         // token steps instead; anything else is the password form.
         if matches!(self.login.session(), Session::PasswordTotp) {
-            let code = self.login_view.input.text().trim().to_owned();
-            if code.is_empty() {
-                tracing::debug!("totp login not sent; the code is empty");
+            let raw = self.login_view.input.text().to_owned();
+            let code = normalize_totp(&raw);
+            tracing::debug!(
+                raw_len = raw.chars().count(),
+                digit_len = code.len(),
+                "totp code normalized"
+            );
+            if code.len() != TOTP_LEN {
+                self.login_view.error = Some("認証コードは6桁の数字で入力してください".to_owned());
                 return false;
             }
             tracing::debug!("submitting a totp code");
@@ -230,6 +255,14 @@ impl crate::Gumicord {
                             NodeId::AppScreenLoginTitle,
                             "認証コードを入力",
                         ))
+                        // Whose code this is, verbatim: a code read for the
+                        // wrong account can never verify.
+                        .child_if(self.login.totp_email().is_some(), || {
+                            UiNode::text(
+                                NodeId::AppScreenLoginHint,
+                                self.login.totp_email().unwrap_or_default(),
+                            )
+                        })
                         .child(self.login_label("認証コード"))
                         .child(self.login_field(
                             "totp",
@@ -241,7 +274,7 @@ impl crate::Gumicord {
                             self.login_field_error_node("login_error_code", &["code"])
                         })
                         .child_if(self.login_view.error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン", self.login_code_ready()))
+                        .child(self.login_submit("ログイン", self.login_totp_ready()))
                         .child(self.login_secondary("戻る", "login_back"))
                 }))
             }
@@ -420,6 +453,12 @@ impl crate::Gumicord {
     /// clears focus first, so this reads the documents, not the focus.
     fn login_password_ready(&self) -> bool {
         !self.login_view.email.text().trim().is_empty() && !self.login_view.input.text().is_empty()
+    }
+
+    /// Whether the TOTP box holds a sendable code: exactly six digits once
+    /// narrowed. Anything else is refused at submit, so the button says so.
+    fn login_totp_ready(&self) -> bool {
+        normalize_totp(self.login_view.input.text()).len() == TOTP_LEN
     }
 
     /// Whether the single-box forms (TOTP code, bot token) hold something.
@@ -856,6 +895,105 @@ mod tests {
         a.login_view.input.insert("123456");
         assert!(a.submit_login(), "TOTP 画面の送信が送られない");
         assert!(a.login.busy(), "送信後も処理中にならない");
+    }
+
+    /// TOTP codes narrow to half-width digits: full-width digits and stray
+    /// separators verify the same once narrowed, letters never do.
+    #[test]
+    fn totp_codes_narrow_to_half_width_digits() {
+        assert_eq!(normalize_totp("123456"), "123456");
+        assert_eq!(normalize_totp("１２３４５６"), "123456");
+        assert_eq!(normalize_totp("123 456"), "123456");
+        assert_eq!(normalize_totp("123-456"), "123456");
+        assert_eq!(normalize_totp("ab12cd"), "12");
+        assert_eq!(normalize_totp(""), "");
+    }
+
+    /// A code typed full-width still sends, narrowed: the digits are what
+    /// verify, not their width.
+    #[test]
+    fn a_full_width_totp_code_still_sends() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        a.login_view.field = None;
+        a.login_view.input.insert("１２３４５６");
+        assert!(a.submit_login(), "全角のコードが送られない");
+        assert!(a.login.busy());
+    }
+
+    /// A short code is refused on the spot with a reason, instead of
+    /// spending the ticket on a certain rejection.
+    #[test]
+    fn a_short_totp_code_is_refused_with_a_reason() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        a.login_view.field = Some(LoginField::Totp);
+        a.login_view.input.insert("12345");
+        assert!(!a.submit_login(), "5桁のコードが送られてしまう");
+        assert!(!a.login.busy(), "送っていないのに処理中になる");
+        let tree = a.build_tree(Panes::Three);
+        let mut lines = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginError {
+                lines.push(n.content.as_text().unwrap_or("").to_owned());
+            }
+        });
+        assert!(
+            lines.iter().any(|t| t.contains("6桁")),
+            "no format reason shown: {lines:?}"
+        );
+    }
+
+    /// Typed TOTP input keeps half-width digits only, up to six: the rest
+    /// can never verify.
+    #[test]
+    fn typed_totp_input_keeps_digits_only() {
+        let mut a = pending();
+        a.login_view.field = Some(LoginField::Totp);
+        assert!(a.insert_text("a1b2"));
+        assert_eq!(a.login_view.input.text(), "12");
+        assert!(!a.insert_text("xy"), "非数字が消費された");
+        assert!(a.insert_text("3456789"));
+        assert_eq!(a.login_view.input.text(), "123456", "6桁で止まらない");
+    }
+
+    /// The TOTP screen names whose code it asks for.
+    #[test]
+    fn the_totp_screen_names_its_account() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        let tree = a.build_tree(Panes::Three);
+        let mut hints = Vec::new();
+        tree.walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginHint {
+                hints.push(n.content.as_text().unwrap_or("").to_owned());
+            }
+        });
+        assert!(
+            hints.iter().any(|t| t == "a@b.c"),
+            "account missing: {hints:?}"
+        );
     }
 
     /// Field failures show under each named input: INVALID_LOGIN names both
