@@ -179,8 +179,9 @@ impl Db {
     }
 }
 
-/// The default location.
-pub fn default_path() -> Result<PathBuf, DbError> {
+/// Where the cache lives. Mobile shells point it at Caches through the
+/// standard variable; everywhere else the platform default applies.
+fn cache_base() -> Result<PathBuf, DbError> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
@@ -188,28 +189,28 @@ pub fn default_path() -> Result<PathBuf, DbError> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
 
-    Ok(base
-        .ok_or(DbError::NoHome)?
-        .join("gumicord")
-        .join("cache.db"))
+    base.ok_or(DbError::NoHome)
+}
+
+/// The default location.
+pub fn default_path() -> Result<PathBuf, DbError> {
+    Ok(cache_base()?.join("gumicord").join("cache.db"))
 }
 
 /// The location for a specific account's cache.
 pub fn account_path(is_bot: bool, id: UserId) -> Result<PathBuf, DbError> {
-    #[cfg(windows)]
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
+    Ok(account_path_in(&cache_base()?, is_bot, id))
+}
 
+/// The account location under an explicit base. Kept separate so tests
+/// can check the layout without touching process-wide variables, which
+/// parallel tests would otherwise race on.
+fn account_path_in(base: &Path, is_bot: bool, id: UserId) -> PathBuf {
     let prefix = if is_bot { "bot" } else { "user" };
-    Ok(base
-        .ok_or(DbError::NoHome)?
-        .join("gumicord")
+    base.join("gumicord")
         .join("cache")
         .join("accounts")
-        .join(format!("{prefix}_{id}.db")))
+        .join(format!("{prefix}_{id}.db"))
 }
 
 // ─────────────────────────────────────────────── Schema
@@ -842,17 +843,23 @@ mod tests {
 
     #[test]
     fn account_path_generates_correct_locations() {
-        let expected_user = PathBuf::from("cache")
-            .join("accounts")
-            .join("user_123456789.db");
-        let user = account_path(false, UserId::from(123456789u64)).unwrap();
-        assert!(user.ends_with(&expected_user));
-
-        let expected_bot = PathBuf::from("cache")
-            .join("accounts")
-            .join("bot_987654321.db");
-        let bot = account_path(true, UserId::from(987654321u64)).unwrap();
-        assert!(bot.ends_with(&expected_bot));
+        let base = Path::new("base");
+        assert_eq!(
+            account_path_in(base, false, UserId::from(123456789u64)),
+            PathBuf::from("base")
+                .join("gumicord")
+                .join("cache")
+                .join("accounts")
+                .join("user_123456789.db")
+        );
+        assert_eq!(
+            account_path_in(base, true, UserId::from(987654321u64)),
+            PathBuf::from("base")
+                .join("gumicord")
+                .join("cache")
+                .join("accounts")
+                .join("bot_987654321.db")
+        );
     }
 
     /// A set cache home wins, so mobile shells can point it at Caches.
