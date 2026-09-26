@@ -277,13 +277,19 @@ jobs:
           # dist mobile legs are the nightly channel: black icon, nightly
           # bundle slot and display name. Stable builds its own legs in
           # release.yml with the defaults.
+          # MARKETING_VERSION must equal the version the nightly job later
+          # advertises, or AltStore refuses the IPA as mismatched. The TAG
+          # formula repeats there; keep the two in step.
+          TAG="nightly-$(date +'%Y%m%d')-${GITHUB_SHA::7}"
+          VERSION="$(cargo xtask altstore --channel nightly --tag "$TAG" --print-version)"
           xcodebuild -project app/ios/Gumicord.xcodeproj -scheme Gumicord \
             -configuration Release -destination 'generic/platform=iOS' \
             -derivedDataPath build/ios-dd \
             CODE_SIGNING_ALLOWED=NO \
             ASSETCATALOG_COMPILER_APPICON_NAME=AppIconNightly \
             PRODUCT_BUNDLE_IDENTIFIER=dev.gumicord.nightly \
-            APP_DISPLAY_NAME="Gumicord Nightly" build
+            APP_DISPLAY_NAME="Gumicord Nightly" \
+            MARKETING_VERSION="$VERSION" build
 
       - name: Zip Payload into .ipa
         if: matrix.kind == 'ios'

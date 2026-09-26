@@ -20,7 +20,9 @@
 //!                             (--check to verify only)
 //!     cargo xtask altstore    write an AltStore source file
 //!                             (--channel/--tag/--ipa/--commit/
-//!                             --commit-message/--date/--out)
+//!                             --commit-message/--date/--out;
+//!                             --print-version only prints the app
+//!                             version and writes nothing)
 //!
 
 //! A development machine may have four cores and 8 GB, so building tasks are

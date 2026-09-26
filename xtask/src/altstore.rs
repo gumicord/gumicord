@@ -10,6 +10,11 @@
 //!       --ipa dist/gumicord-nightly-20260926-abcdef1.ipa --commit abcdef1 \
 //!       --commit-message "..." --date 2026-09-26T12:00:00+00:00 \
 //!       --out dist/apps-nightly.json
+//!
+//! With `--print-version` (and only `--channel` plus `--tag`) it prints
+//! the app version the source would advertise and writes nothing: CI
+//! stamps the installable with it before the source file exists, so the
+//! two can never disagree.
 
 use std::path::{Path, PathBuf};
 
@@ -19,13 +24,17 @@ pub fn altstore(root: &Path, args: &[String]) -> Result<(), String> {
         return Err("--channel must be nightly or stable".to_owned());
     }
     let tag = value(args, "--tag")?;
+    let workspace_version = workspace_version(root)?;
+    if args.iter().any(|a| a == "--print-version") {
+        print!("{}", app_version(&channel, &workspace_version, &tag)?);
+        return Ok(());
+    }
     let ipa = PathBuf::from(value(args, "--ipa")?);
     let commit = value(args, "--commit")?;
     let commit_message = value(args, "--commit-message")?;
     let date = value(args, "--date")?;
     let out = PathBuf::from(value(args, "--out")?);
 
-    let workspace_version = workspace_version(root)?;
     let size = std::fs::metadata(&ipa)
         .map_err(|e| format!("cannot stat {}: {e}", ipa.display()))?
         .len();
@@ -98,21 +107,7 @@ fn source_json(
     size: u64,
 ) -> Result<serde_json::Value, String> {
     let nightly = channel == "nightly";
-    if nightly && !is_nightly_tag(tag) {
-        return Err(format!("nightly tag looks wrong: {tag}"));
-    }
-    if !nightly && tag != format!("v{workspace_version}") {
-        return Err(format!(
-            "stable tag {tag} does not match workspace version {workspace_version}"
-        ));
-    }
-
-    let version = if nightly {
-        let (date8, sha) = nightly_tag_parts(tag);
-        format!("{workspace_version}-nightly-{date8}-{sha}")
-    } else {
-        workspace_version.to_owned()
-    };
+    let version = app_version(channel, workspace_version, tag)?;
     let version_description = if nightly {
         // First line only: the rest is not a changelog.
         let first = commit_message.lines().next().unwrap_or("").trim();
@@ -160,6 +155,27 @@ fn source_json(
             "size": size,
         }],
     }))
+}
+
+/// The app version the source advertises. Nightly versions carry the
+/// date and the commit, so one build never hides behind another; the
+/// installable is stamped with this before the source file exists.
+fn app_version(channel: &str, workspace_version: &str, tag: &str) -> Result<String, String> {
+    let nightly = channel == "nightly";
+    if nightly && !is_nightly_tag(tag) {
+        return Err(format!("nightly tag looks wrong: {tag}"));
+    }
+    if !nightly && tag != format!("v{workspace_version}") {
+        return Err(format!(
+            "stable tag {tag} does not match workspace version {workspace_version}"
+        ));
+    }
+    if nightly {
+        let (date8, sha) = nightly_tag_parts(tag);
+        Ok(format!("{workspace_version}-nightly-{date8}-{sha}"))
+    } else {
+        Ok(workspace_version.to_owned())
+    }
 }
 
 /// Every required field present and shaped: AltStore skips what it
@@ -323,5 +339,23 @@ mod tests {
         let mut zero = nightly();
         zero["apps"][0]["size"] = serde_json::json!(0);
         assert!(validate(&zero).is_err());
+    }
+
+    /// The printed version is the advertised one: CI stamps the
+    /// installable with it before the source file exists.
+    #[test]
+    fn printed_version_matches_the_source() {
+        assert_eq!(
+            app_version("nightly", "0.0.3", "nightly-20260926-abcdef1").expect("valid tag"),
+            "0.0.3-nightly-20260926-abcdef1"
+        );
+        assert_eq!(
+            app_version("stable", "0.0.3", "v0.0.3").expect("matching tag"),
+            "0.0.3"
+        );
+        assert_eq!(
+            nightly().pointer("/apps/0/version").expect("has version"),
+            &serde_json::json!("0.0.3-nightly-20260926-abcdef1")
+        );
     }
 }

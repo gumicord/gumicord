@@ -18,9 +18,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.0.3</string>
+	<!-- Per channel at build time: MARKETING_VERSION carries the version
+	     the AltStore source advertises, so they always agree. -->
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<!-- The Documents directory shows in Files; that is how themes, logs

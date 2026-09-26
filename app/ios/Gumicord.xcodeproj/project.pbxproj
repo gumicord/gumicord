@@ -162,6 +162,7 @@
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGN_IDENTITY = "";
 				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = "Gumicord/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -172,6 +173,7 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/lib",
 				);
+				MARKETING_VERSION = 0.0.3;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -205,6 +207,7 @@
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGN_IDENTITY = "";
 				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = "Gumicord/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -215,6 +218,7 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/lib",
 				);
+				MARKETING_VERSION = 0.0.3;
 				ONLY_ACTIVE_ARCH = NO;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
