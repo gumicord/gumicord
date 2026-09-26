@@ -1,0 +1,4 @@
+# Generated files keep LF on every OS, so `cargo xtask icons --check`
+# compares the same bytes everywhere instead of tripping on CRLF checkouts.
+/app/ios/Gumicord/Assets.xcassets/AppIconNightly.appiconset/Contents.json text eol=lf
+/app/android/app/src/debug/res/values/colors.xml text eol=lf
