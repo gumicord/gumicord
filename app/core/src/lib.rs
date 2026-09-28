@@ -1380,7 +1380,23 @@ impl Application for Gumicord {
 
     /// Drains background events. The only entry point for them.
     fn wake(&mut self) -> bool {
+        let was_totp = matches!(self.login.session(), crate::session::Session::PasswordTotp);
+        let was_logged_in = self.login.session().logged_in().is_some();
         let mut changed = self.login.poll();
+        // Arriving on the TOTP step focuses its field: the code goes
+        // straight in with no extra tap. Only the transition: later wakes
+        // must not steal focus back after an outside press.
+        if !was_totp && matches!(self.login.session(), crate::session::Session::PasswordTotp) {
+            self.login_view.field = Some(LoginField::Totp);
+            self.chat.input_focused = false;
+            changed = true;
+        }
+        // Signed in: the secret has done its job, and memory should not
+        // keep what the screen already hides.
+        if !was_logged_in && self.login.session().logged_in().is_some() {
+            self.login_view.input.take();
+            changed = true;
+        }
         if let Some(msg) = self.login.take_last_error() {
             self.login_view.error = Some(msg);
             changed = true;
@@ -2894,6 +2910,11 @@ impl Gumicord {
         self.chat.composing = Composing::New;
         self.chat.input.take();
         self.chat.input_focused = false;
+        self.login_view.field = None;
+        // Secrets must not survive the account: the next person on this
+        // machine starts from empty fields.
+        self.login_view.email.take();
+        self.login_view.input.take();
         self.chat.reveals = crate::markdown::Reveals::default();
         true
     }

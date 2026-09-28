@@ -1066,6 +1066,13 @@ impl Login {
     pub(crate) fn apply_for_test(&mut self, event: LoginEvent) {
         self.apply(event);
     }
+
+    /// Queues an event for the next poll, like the background loop does.
+    /// `apply_for_test` skips the channel, so transitions observed during
+    /// `wake` need this instead.
+    pub(crate) fn send_for_test(&self, event: LoginEvent) {
+        let _ = self.tx.send(event);
+    }
 }
 
 impl Login {

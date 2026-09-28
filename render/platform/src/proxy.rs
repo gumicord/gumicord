@@ -243,9 +243,13 @@ impl Proxy {
         // keyboard apart from a slow one.
         let user = self.user.resignFirstResponder();
         let pass = self.pass.resignFirstResponder();
+        // Drop native text too: a refocus seeds from the document, so a
+        // stale fill from before the blur must never replay into it.
         for field in [&self.user, &self.pass] {
+            set_text(field, "");
             field.removeFromSuperview();
         }
+        self.last = [String::new(), String::new()];
         if was_active {
             let held = self.user.isFirstResponder() || self.pass.isFirstResponder();
             tracing::debug!(user, pass, held, "proxy resigned");

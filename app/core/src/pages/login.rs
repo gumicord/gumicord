@@ -150,9 +150,9 @@ impl crate::Gumicord {
             }
             tracing::debug!("submitting a password login");
             self.login.submit_password(email, password);
-            // Keep the email for a retry; the password is a secret that
-            // has done its job.
-            self.login_view.input.take();
+            // Keep both for a retry or a trip back from the TOTP step.
+            // The secret is masked on screen, and signing out wipes the
+            // documents.
             self.login_view.field = None;
             true
         }
@@ -166,7 +166,6 @@ impl crate::Gumicord {
         self.login_view.form = crate::is_mobile().then_some(LoginField::Password);
         self.login_view.error = None;
         self.login_view.field_errors.clear();
-        self.login_view.input.take();
     }
 }
 
@@ -848,6 +847,48 @@ mod tests {
         );
     }
 
+    /// Arriving on the TOTP step focuses its field: the code goes straight
+    /// in with no extra tap. Only the transition: later wakes must not
+    /// steal focus back after an outside press.
+    #[test]
+    fn arriving_on_the_totp_step_focuses_its_field() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        assert!(a.login_view.field.is_none());
+        a.login.send_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        assert!(a.wake());
+        assert_eq!(a.login_view.field, Some(LoginField::Totp));
+
+        a.login_view.field = None;
+        a.wake();
+        assert!(a.login_view.field.is_none(), "外し直した焦点が戻った");
+    }
+
+    /// Signing in wipes the password: memory should not keep what the
+    /// screen already hides. The email stays for the next attempt.
+    #[test]
+    fn signing_in_wipes_the_password() {
+        use crate::session::LoggedIn;
+
+        let mut a = pending();
+        a.login_view.email.insert("a@b.c");
+        a.login_view.input.insert("secret");
+        a.login.send_for_test(LoginEvent::Done(Box::new(LoggedIn {
+            me: serde_json::from_str(r#"{"id":"1","username":"ねんねこ"}"#).unwrap(),
+            client: gumicord_rest::RestClient::anonymous().unwrap(),
+            token: gumicord_model::Token::new("t"),
+        })));
+        assert!(a.wake());
+        assert!(a.login_view.input.text().is_empty());
+        assert_eq!(a.login_view.email.text(), "a@b.c");
+    }
+
     /// A rejected TOTP code shows its reason on the code screen, so the
     /// retry never looks like nothing happened.
     #[test]
@@ -1109,6 +1150,25 @@ mod tests {
 
         assert!(a.submit_login(), "パスワードログインが送信されなかった");
         assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
+        // A retry or a trip back from the TOTP step must not retype.
+        assert_eq!(a.login_view.email.text(), "a@b.c");
+        assert_eq!(a.login_view.input.text(), "secret");
+    }
+
+    /// Backing out of the password form keeps what was typed; only signing
+    /// out wipes the documents.
+    #[test]
+    fn leaving_the_password_form_keeps_the_password() {
+        let mut a = pending();
+        a.login_view.email.insert("a@b.c");
+        a.login_view.input.insert("secret");
+        a.leave_login_form();
+        assert_eq!(a.login_view.email.text(), "a@b.c");
+        assert_eq!(a.login_view.input.text(), "secret");
+
+        assert!(a.forget_account());
+        assert!(a.login_view.email.text().is_empty());
+        assert!(a.login_view.input.text().is_empty());
     }
 
     /// Email and password ask for native mirrors; nothing else does.
