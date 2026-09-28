@@ -1375,13 +1375,13 @@ impl Host {
                 }
             }
             proxy.place(user, pass);
-        }
-        // Pairing needs both twins parked: a lone parked field fills
-        // alone, so wait for the sibling's rect instead of going
-        // half-active. Parked rects arrive within a tick or two.
-        if user.is_none() || pass.is_none() {
-            tracing::debug!("proxy waiting for both field rects");
-            return false;
+            // Pairing needs both twins parked: a lone parked field fills
+            // alone, so wait for the sibling's rect instead of going
+            // half-active. Parked rects arrive within a tick or two.
+            if user.is_none() || pass.is_none() {
+                tracing::debug!("proxy waiting for both field rects");
+                return false;
+            }
         }
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
         let mut changed = false;
