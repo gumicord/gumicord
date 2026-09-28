@@ -1087,14 +1087,9 @@ fn a_menu_opened_from_the_drawer_paints_in_front_of_it() {
             order.push(n.id);
         }
     });
-    let drawer = order
-        .iter()
-        .position(|id| *id == NodeId::OverlayDrawer);
+    let drawer = order.iter().position(|id| *id == NodeId::OverlayDrawer);
     let layer = order.iter().position(|id| *id == NodeId::OverlayLayer);
-    assert!(
-        drawer < layer,
-        "メニューが棚の後ろに回っている {order:?}"
-    );
+    assert!(drawer < layer, "メニューが棚の後ろに回っている {order:?}");
 }
 
 #[test]
