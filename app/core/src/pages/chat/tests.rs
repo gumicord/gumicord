@@ -403,6 +403,27 @@ fn scrolling_the_drawer_down_keeps_it_open() {
     assert!(a.chat.drawer_open, "下スクロールで棚が閉じた");
 }
 
+/// Signing out clears navigation surfaces too: the drawer belongs to the
+/// account that just left, and must not linger over the login screen.
+#[test]
+fn signing_out_closes_the_drawer() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    assert!(a.forget_account());
+    settle_drawer(&mut a);
+    assert!(!a.chat.drawer_open, "棚が残っている");
+}
+
+/// Same for the member sheet.
+#[test]
+fn signing_out_closes_the_member_sheet() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    assert!(a.forget_account());
+    settle_sheet(&mut a);
+    assert!(!a.chat.member_sheet_open, "面が残っている");
+}
+
 /// A swipe starting behind the drawer dismisses it without replying
 /// through it.
 #[test]

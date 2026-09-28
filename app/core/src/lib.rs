@@ -2889,6 +2889,8 @@ impl Gumicord {
 
         // Anything still on screen belongs to the account that just left.
         self.floating = None;
+        self.close_drawer();
+        self.close_member_sheet();
         self.chat.composing = Composing::New;
         self.chat.input.take();
         self.chat.input_focused = false;
