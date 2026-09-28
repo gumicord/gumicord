@@ -21,6 +21,7 @@
 //! Redraws are on demand. Drawing continuously cannot coexist with stopping
 //! while inactive, so the loop waits and only redraws when something changed.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::captcha::{
@@ -560,7 +561,9 @@ fn run_loop(
         caret_on: true,
         next_blink: std::time::Instant::now(),
         next_frame: None,
-        wake_dirty: false,
+        redraw_owed: Cell::new(false),
+        redraw_retries: Cell::new(0),
+        redraw_skipped: Cell::new(0),
         motion: gumicord_render::Motion::new(),
     };
     event_loop.run_app(&mut host)?;
@@ -763,10 +766,15 @@ struct Host {
     /// When to redraw without input; `None` means never.
     /// ([`Application::next_frame_in`])
     next_frame: Option<std::time::Instant>,
-    /// A wake asked for a frame that may never have been served (dropped
-    /// request, skipped present). Held until a frame actually runs, so a
-    /// quiet screen still shows what the wake delivered.
-    wake_dirty: bool,
+    /// A redraw was asked for but no frame has reached the screen since.
+    /// Held until a frame actually runs, so a quiet screen still shows
+    /// the latest state. iOS drops requested redraws that Windows serves,
+    /// stranding new screens until the next input.
+    redraw_owed: Cell<bool>,
+    /// AboutToWait turns while the debt above is owed; bounds the rescue.
+    redraw_retries: Cell<u32>,
+    /// Consecutive skipped presents; a hidden window stops fast.
+    redraw_skipped: Cell<u32>,
     /// Styles in motion; the loop sleeps once they settle.
     motion: gumicord_render::Motion,
 }
@@ -775,9 +783,16 @@ impl Host {
     fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
+            self.redraw_owed.set(true);
         } else {
             tracing::debug!("redraw asked for without a window");
         }
+    }
+
+    fn clear_redraw_debt(&self) {
+        self.redraw_owed.set(false);
+        self.redraw_retries.set(0);
+        self.redraw_skipped.set(0);
     }
 
     /// Restarts the blink from visible. A dark phase mid-keystroke loses the
@@ -1641,23 +1656,29 @@ impl Host {
             .next_frame_in()
             .map(|d| std::time::Instant::now() + d);
 
-        // A failed present asks again: the loop waits, so giving up here
-        // leaves the window blank until the next input. Being merely hidden
-        // does not, or it would spin for as long as the window is minimised.
+        // A failed present asks again and keeps the debt: the loop waits,
+        // so giving up here leaves the window blank until the next input.
+        // Hidden windows report skipped instead, which stops fast below.
         if stats.presented == Presented::Failed {
             tracing::debug!("frame failed to present; asking again");
             self.request_redraw();
-            self.wake_dirty = false;
             return;
         }
-        // A wake's frame is owed until one is actually served. A skipped
-        // present may have been that frame, so retry once: the flag is
-        // already clear, so a persistently hidden window stops here.
-        if stats.presented == Presented::Skipped && std::mem::take(&mut self.wake_dirty) {
-            tracing::debug!("wake frame skipped; retrying once");
-            self.request_redraw();
+        // A requested frame is owed until one is actually served. A skipped
+        // present may have been that frame: retry while transient, but a
+        // persistently hidden window stops after a few.
+        if stats.presented == Presented::Skipped {
+            let skipped = self.redraw_skipped.get() + 1;
+            self.redraw_skipped.set(skipped);
+            if skipped >= 3 {
+                tracing::debug!("frames skipped in a row; stopping");
+                self.clear_redraw_debt();
+            } else {
+                tracing::debug!("frame skipped; asking again");
+                self.request_redraw();
+            }
         } else if stats.presented == Presented::Yes {
-            self.wake_dirty = false;
+            self.clear_redraw_debt();
         }
 
         // Hand the frame's numbers to the overlay. Measured here, where the
@@ -2097,12 +2118,21 @@ impl ApplicationHandler<LoopEvent> for Host {
             }
         }
 
-        // A wake's frame may never have been served (dropped request,
-        // skipped present). Re-ask while it is owed: this only runs on
-        // wakeups, so a hidden window cannot spin here. Served frames
-        // clear the debt in `redraw`.
-        if self.wake_dirty {
-            self.request_redraw();
+        // A requested redraw may never have been served (dropped request,
+        // failed present): iOS drops requested redraws while Windows does
+        // not, stranding the new screen until the next input. Re-ask on a
+        // deadline until served, bounded so a hidden window stops. Served
+        // frames clear the debt in `redraw`.
+        if self.redraw_owed.get() {
+            const OWED_RETRY_MAX: u32 = 20;
+            if self.redraw_retries.get() >= OWED_RETRY_MAX {
+                tracing::debug!("owed frame still unserved; giving up");
+                self.clear_redraw_debt();
+            } else {
+                self.redraw_retries.set(self.redraw_retries.get() + 1);
+                self.request_redraw();
+                soonest(now + std::time::Duration::from_millis(100));
+            }
         }
 
         // With no reason, sleep: a stale deadline wakes for no change.
@@ -2126,7 +2156,6 @@ impl ApplicationHandler<LoopEvent> for Host {
                 self.pump_captcha();
                 if woke {
                     tracing::debug!("wake changed something; redrawing");
-                    self.wake_dirty = true;
                     self.request_redraw();
                 }
             }
