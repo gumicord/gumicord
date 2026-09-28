@@ -1657,21 +1657,30 @@ impl Application for Gumicord {
         // An open surface owns gestures starting inside it; anything else
         // dismisses it instead of reaching the chat behind, like presses.
         if self.chat.drawer_open || self.chat.member_sheet_open {
-            let inside = hits
-                .iter()
-                .any(|h| h.id == NodeId::OverlayDrawer || h.id == NodeId::OverlaySheet);
-            if !inside {
+            let in_drawer = hits.iter().any(|h| h.id == NodeId::OverlayDrawer);
+            let in_sheet = hits.iter().any(|h| h.id == NodeId::OverlaySheet);
+            if !in_drawer && !in_sheet {
                 let drawer = self.close_drawer();
                 let sheet = self.close_member_sheet();
                 return drawer || sheet;
             }
+            // A downward drag inside the drawer scrolls its lists; closing
+            // on it would make scrolling down impossible, so only sideways
+            // flicks close there. The sheet below keeps its down-to-close:
+            // it paints above the drawer where they overlap.
+            if in_sheet {
+                return match dir {
+                    // Flicking a surface away dismisses it; flicking up scrolls
+                    // the list inside instead.
+                    SwipeDir::Left | SwipeDir::Right | SwipeDir::Down => {
+                        self.close_drawer() | self.close_member_sheet()
+                    }
+                    SwipeDir::Up => false,
+                };
+            }
             return match dir {
-                // Flicking a surface away dismisses it; flicking up scrolls
-                // the list inside instead.
-                SwipeDir::Left | SwipeDir::Right | SwipeDir::Down => {
-                    self.close_drawer() | self.close_member_sheet()
-                }
-                SwipeDir::Up => false,
+                SwipeDir::Left | SwipeDir::Right => self.close_drawer() | self.close_member_sheet(),
+                SwipeDir::Up | SwipeDir::Down => false,
             };
         }
         // Overlays own every gesture while open, like they own presses.

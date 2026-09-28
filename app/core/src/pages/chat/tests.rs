@@ -392,6 +392,17 @@ fn flicking_the_drawer_away_closes_it() {
     assert!(a.chat.drawer_open, "上の払いで閉じた");
 }
 
+/// Scrolling the drawer lists down releases as a downward swipe too, but
+/// it must not close the drawer: only sideways flicks do.
+#[test]
+fn scrolling_the_drawer_down_keeps_it_open() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let drawer = hit_at(NodeId::OverlayDrawer, None, 0.0, 0.0, 280.0, 800.0);
+    assert!(!a.swiped(std::slice::from_ref(&drawer), swipe(SwipeDir::Down, 100.0)));
+    assert!(a.chat.drawer_open, "下スクロールで棚が閉じた");
+}
+
 /// A swipe starting behind the drawer dismisses it without replying
 /// through it.
 #[test]
