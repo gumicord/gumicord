@@ -1069,6 +1069,34 @@ fn back_button_opens_the_drawer() {
 // ═══════════════════════════════════════════════════════════════
 //  Context menus
 
+/// A menu opened from inside the drawer paints in front of it. Drawing
+/// follows tree order, so the floating layer must come after the drawer.
+#[test]
+fn a_menu_opened_from_the_drawer_paints_in_front_of_it() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
+    assert!(
+        a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)),
+        "メニューが開かなかった"
+    );
+    assert!(a.chat.drawer_open, "メニューで棚が閉じた");
+    let mut order = Vec::new();
+    a.build_tree(Panes::One).walk(&mut |n, _| {
+        if n.id == NodeId::OverlayDrawer || n.id == NodeId::OverlayLayer {
+            order.push(n.id);
+        }
+    });
+    let drawer = order
+        .iter()
+        .position(|id| *id == NodeId::OverlayDrawer);
+    let layer = order.iter().position(|id| *id == NodeId::OverlayLayer);
+    assert!(
+        drawer < layer,
+        "メニューが棚の後ろに回っている {order:?}"
+    );
+}
+
 #[test]
 fn right_clicking_a_message_opens_the_menu() {
     let a = with_menu();

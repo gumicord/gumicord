@@ -2290,11 +2290,6 @@ impl Gumicord {
                     .child_if(!is_mobile(), || self.titlebar())
                     .child(UiNode::new(NodeId::AppScreen).child(screen)),
             )
-            // Only while open: a full-window layer would absorb every press.
-            .child_if(self.floating.is_some(), || {
-                let f = self.floating.as_ref().expect("直前に確かめた");
-                f.node(panes.present(), self.hovered_item())
-            })
             // While the drawer or the sheet is open, a scrim dims the chat
             // behind them and owns outside presses. A sibling, not a
             // parent: wrapping would move the drawer in the tree.
@@ -2302,7 +2297,9 @@ impl Gumicord {
                 UiNode::new(NodeId::OverlayScrim).with_key(Key::Slot("dim"))
             })
             // The drawer and the member sheet sit above the chat but below
-            // dialogs: a decision interrupts navigation, not the reverse.
+            // the floating layer: a menu or a dialog interrupts navigation,
+            // not the reverse. Drawing follows tree order, so placing the
+            // floating layer here keeps it in front of the drawer.
             .child_if(self.chat.drawer_open, || {
                 UiNode::new(NodeId::OverlayDrawer)
                     .with_anchor(Anchor::at(0.0, 0.0))
@@ -2324,6 +2321,13 @@ impl Gumicord {
                     }
                 }
                 sheet.child(list)
+            })
+            // Only while open: a full-window layer would absorb every press.
+            // After the drawer and the sheet, so a menu opened from inside
+            // the drawer never paints behind it.
+            .child_if(self.floating.is_some(), || {
+                let f = self.floating.as_ref().expect("直前に確かめた");
+                f.node(panes.present(), self.hovered_item())
             })
             .child_if(!self.toasts.is_empty(), || {
                 let texts: Vec<String> = self.toasts.iter().map(|t| t.text.clone()).collect();
