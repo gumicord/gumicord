@@ -1778,7 +1778,10 @@ impl Application for Gumicord {
         match items {
             Some(items) => self.open_menu(at, items),
             // A press on nothing just closes whatever is open.
-            None => self.close_menu(),
+            None => {
+                tracing::debug!("empty menu area closes the floating layer");
+                self.close_menu()
+            }
         }
     }
 
@@ -2498,6 +2501,7 @@ impl Gumicord {
             crate::menu::Floating::Menu(m) => match m.items.get(index) {
                 Some(item) => item.action.clone(),
                 None => {
+                    tracing::debug!(index, "menu item out of range");
                     self.menu_field = None;
                     return true;
                 }
@@ -2505,7 +2509,10 @@ impl Gumicord {
             crate::menu::Floating::Confirm(c) => match index {
                 crate::menu::button::CONFIRM => c.action.clone(),
                 // Cancel does nothing; the dialog is already closed.
-                _ => return true,
+                _ => {
+                    tracing::debug!("dialog cancelled");
+                    return true;
+                }
             },
         };
         // Variant only: payloads may carry message text or account keys.
