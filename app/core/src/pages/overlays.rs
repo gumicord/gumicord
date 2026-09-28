@@ -284,6 +284,17 @@ mod tests {
         );
     }
 
+    /// Opening a dialog dismisses the keyboard with whatever opened it:
+    /// a dialog decides alone.
+    #[test]
+    fn opening_a_dialog_releases_text_focus() {
+        let mut a = with_delete_menu();
+        a.chat.input_focused = true;
+        press_menu(&mut a, 0);
+        assert!(is_confirm(&a), "確認の窓が出ていない");
+        assert!(!a.chat.input_focused, "窓が出たのにキーボードが残っている");
+    }
+
     /// Cancelling does nothing and closes the dialog.
     #[test]
     fn cancelling_the_dialog_does_nothing() {

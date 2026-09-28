@@ -127,14 +127,24 @@ impl Proxy {
                 parent.addSubview(field);
             }
             let field = self.field(kind);
-            set_text(field, text);
+            // Seed only an empty native from the doc: the OS may have
+            // filled it between the focus tap and this tick, and
+            // overwriting that with a stale doc loses the fill. The
+            // baseline below stays doc-side, so a kept fill still
+            // diffs and routes on the next poll.
+            if field_text(field).is_empty() && !text.is_empty() {
+                set_text(field, text);
+            }
             // Either the call took it or it already holds it; anything
             // else means no keyboard from here.
             let became = field.becomeFirstResponder() || field.isFirstResponder();
             tracing::debug!(?kind, became, placed = ?self.placed, "proxy field shown");
-            // A refused responder means no keyboard from here; drop back to
-            // winit's field instead of sitting focused with no keyboard.
+            // A refused responder means no keyboard from here; detach
+            // instead of sitting focused with no keyboard.
             if !became {
+                for field in [&self.user, &self.pass] {
+                    field.removeFromSuperview();
+                }
                 self.active = None;
             } else {
                 self.last[idx(kind)] = text.to_owned();

@@ -176,6 +176,12 @@ pub trait Application {
     /// layer does not know what the list holds.
     fn scrolled(&mut self, _id: NodeId, _at: f32, _max: f32) {}
 
+    /// Content started moving under a finger. Phones dismiss the keyboard
+    /// here; the default keeps it.
+    fn scroll_started(&mut self) -> bool {
+        false
+    }
+
     /// Whether a coast dying at the edge should wait for history instead.
     /// Only lists that page backwards ever answer yes; anything else ends
     /// at its bound.
@@ -454,7 +460,9 @@ impl Waker {
     /// Wakes the main thread, from any thread. A no-op once the loop has
     /// ended, which happens normally during shutdown.
     pub fn wake(&self) {
-        let _ = self.0.send_event(LoopEvent::Wake);
+        if self.0.send_event(LoopEvent::Wake).is_err() {
+            tracing::debug!("wake arrived after the loop closed");
+        }
     }
 
     /// A second sender for the screen-reader adapter. The adapter needs its
@@ -552,6 +560,7 @@ fn run_loop(
         caret_on: true,
         next_blink: std::time::Instant::now(),
         next_frame: None,
+        wake_dirty: false,
         motion: gumicord_render::Motion::new(),
     };
     event_loop.run_app(&mut host)?;
@@ -754,6 +763,10 @@ struct Host {
     /// When to redraw without input; `None` means never.
     /// ([`Application::next_frame_in`])
     next_frame: Option<std::time::Instant>,
+    /// A wake asked for a frame that may never have been served (dropped
+    /// request, skipped present). Held until a frame actually runs, so a
+    /// quiet screen still shows what the wake delivered.
+    wake_dirty: bool,
     /// Styles in motion; the loop sleeps once they settle.
     motion: gumicord_render::Motion,
 }
@@ -762,6 +775,8 @@ impl Host {
     fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
+        } else {
+            tracing::debug!("redraw asked for without a window");
         }
     }
 
@@ -847,19 +862,26 @@ impl Host {
         // resigning here costs nothing while up and hides one frame
         // sooner on dismiss.
         #[cfg(target_os = "ios")]
-        if self.app.focused_document().is_none() {
-            if self.ios_text.is_live() {
-                self.ios_text.blur();
-            }
-            if let Some(proxy) = self.proxy.as_mut()
-                && proxy.is_active()
-            {
-                proxy.blur();
-            }
-            if self.ime_allowed {
-                self.ime_allowed = false;
-                if let Some(w) = self.window.clone() {
-                    w.set_ime_allowed(false);
+        {
+            tracing::debug!(
+                hits = hits.len(),
+                still_focused = self.app.focused_document().is_some(),
+                "press assessed focus"
+            );
+            if self.app.focused_document().is_none() {
+                if self.ios_text.is_live() {
+                    self.ios_text.blur();
+                }
+                if let Some(proxy) = self.proxy.as_mut()
+                    && proxy.is_active()
+                {
+                    proxy.blur();
+                }
+                if self.ime_allowed {
+                    self.ime_allowed = false;
+                    if let Some(w) = self.window.clone() {
+                        w.set_ime_allowed(false);
+                    }
                 }
             }
         }
@@ -1354,6 +1376,13 @@ impl Host {
             }
             proxy.place(user, pass);
         }
+        // Pairing needs both twins parked: a lone parked field fills
+        // alone, so wait for the sibling's rect instead of going
+        // half-active. Parked rects arrive within a tick or two.
+        if user.is_none() || pass.is_none() {
+            tracing::debug!("proxy waiting for both field rects");
+            return false;
+        }
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
         let mut changed = false;
         let mut submitted = false;
@@ -1604,7 +1633,17 @@ impl Host {
         // does not, or it would spin for as long as the window is minimised.
         if stats.presented == Presented::Failed {
             self.request_redraw();
+            self.wake_dirty = false;
             return;
+        }
+        // A wake's frame is owed until one is actually served. A skipped
+        // present may have been that frame, so retry once: the flag is
+        // already clear, so a persistently hidden window stops here.
+        if stats.presented == Presented::Skipped && std::mem::take(&mut self.wake_dirty) {
+            tracing::debug!("wake frame skipped; retrying once");
+            self.request_redraw();
+        } else if stats.presented == Presented::Yes {
+            self.wake_dirty = false;
         }
 
         // Hand the frame's numbers to the overlay. Measured here, where the
@@ -2044,6 +2083,14 @@ impl ApplicationHandler<LoopEvent> for Host {
             }
         }
 
+        // A wake's frame may never have been served (dropped request,
+        // skipped present). Re-ask while it is owed: this only runs on
+        // wakeups, so a hidden window cannot spin here. Served frames
+        // clear the debt in `redraw`.
+        if self.wake_dirty {
+            self.request_redraw();
+        }
+
         // With no reason, sleep: a stale deadline wakes for no change.
         event_loop.set_control_flow(match until {
             Some(at) => ControlFlow::WaitUntil(at),
@@ -2065,6 +2112,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                 self.pump_captcha();
                 if woke {
                     tracing::debug!("wake changed something; redrawing");
+                    self.wake_dirty = true;
                     self.request_redraw();
                 }
             }
@@ -2627,6 +2675,12 @@ impl ApplicationHandler<LoopEvent> for Host {
                                         self.scroll_touch(point.0, point.1, dx, dy)
                                 {
                                     self.touch_scroll_id = Some(id);
+                                    // Phones dismiss the keyboard on
+                                    // scroll-start, like a tap outside.
+                                    // Desktop wheels never reach here.
+                                    if is_mobile() && self.app.scroll_started() {
+                                        self.request_redraw();
+                                    }
                                 }
                             }
                         }

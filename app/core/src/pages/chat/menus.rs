@@ -19,10 +19,11 @@ impl crate::Gumicord {
         }
     }
 
-    /// A field's menu, desktop only. Lists only what would do something.
+    /// A field's menu. Lists only what would do something; items resolve
+    /// through the menu's target, which outlives focus on mobile.
     pub(crate) fn field_menu(&self) -> Vec<crate::menu::Item> {
         use crate::menu::{Action, Item};
-        let doc = self.field_doc();
+        let doc = self.menu_field_doc();
         let mut items = Vec::new();
 
         if !doc.selection().is_empty() {

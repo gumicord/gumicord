@@ -829,20 +829,30 @@ impl IosText {
             parent.addSubview(&editor);
             self.parent = Some(ptr);
         }
-        let became = editor.becomeFirstResponder();
-        self.editor = became.then_some(editor);
-        self.multiline = field.multiline;
+        // Either the call took it or it already holds it; anything else
+        // means no keyboard from here.
+        let became = editor.becomeFirstResponder() || editor.isFirstResponder();
+        tracing::debug!(became, "ios editor focus");
         if became {
+            self.editor = Some(editor);
             let (text, sel, marked) = self.snapshot();
             self.last_seen = snapshot_of(&text, sel, marked);
+        } else {
+            // Refused: detach, or an orphan view sits attached while the
+            // guards believe nobody holds the keyboard.
+            editor.removeFromSuperview();
         }
+        self.multiline = field.multiline;
         became
     }
 
     /// Focus lost.
     pub fn blur(&mut self) {
         if let Some(editor) = self.editor.take() {
-            editor.resignFirstResponder();
+            // Whether resigning took first responder away tells a stuck
+            // keyboard apart from a slow one.
+            let resigned = editor.resignFirstResponder();
+            tracing::debug!(resigned, "ios editor blur");
             editor.removeFromSuperview();
         }
         self.parent = None;

@@ -22,6 +22,11 @@ and passing native handles across lives in `app/core`.
   The one exception is `CaptchaBridge.kt`, the captcha page's answer object
   ([ADR-0015](../../spec/adr/0015-mobile-captcha-hosts.md)). Judgement stays
   in Rust; Kotlin only carries strings.
+- **TLS through the system store**: `reqwest` verifies against it via
+  `rustls-platform-verifier`, which needs its Kotlin helper on the classpath
+  (`settings.gradle` locates the AAR through `cargo metadata`, `app/build.gradle`
+  implements it). Without that helper every HTTPS request fails on Android.
+  The JVM handover itself happens in `src/lib.rs` before the loop starts.
 - **Runtime backend fallback**: Android cannot spawn the GPU probe's children, so a GLES setup failure (seen as `eglCreateWindowSurface: BadAlloc` on some drivers) rotates to the next candidate on the next event instead of retrying GLES forever. GLES-first order is kept; devices where GLES works never touch Vulkan.
 
 ## Still open

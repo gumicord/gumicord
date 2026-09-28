@@ -310,6 +310,10 @@ pub struct Gumicord {
     match_ctx: MatchContext,
     /// Whatever is floating; at most one.
     floating: Option<crate::menu::Floating>,
+    /// Which field a field menu acts on. Set when a field menu opens so
+    /// items keep their target while the menu holds no focus (mobile
+    /// dismisses the keyboard with the menu open); cleared with the menu.
+    menu_field: Option<MenuField>,
     /// A bottom sheet's slide progress, shared by the member sheet and a
     /// menu shown as a sheet. Never both at once: opening a menu closes
     /// the member sheet first. 0 shut, 1 open; dismissals coast like
@@ -479,6 +483,7 @@ impl Gumicord {
             chat: crate::pages::chat::ChatView::new(guild, channel),
             match_ctx: MatchContext::new(0.0),
             floating: None,
+            menu_field: None,
             sheet_slide: 1.0,
             sheet_target: 1.0,
             sheet_anim_from: 1.0,
@@ -938,6 +943,14 @@ impl Gumicord {
     }
 }
 
+/// A field menu's target: the composer or one login field. The menu
+/// holds it because the menu itself holds no focus on mobile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuField {
+    Composer,
+    Login(crate::pages::login::LoginField),
+}
+
 impl Gumicord {
     /// Drops text focus from every field. Any press outside a field owns
     /// this: leaving focus behind keeps the keyboard over whatever opens
@@ -953,6 +966,47 @@ impl Gumicord {
             changed = true;
         }
         changed
+    }
+
+    /// The document a field menu lists items for: the menu's target
+    /// while one opens, else the focused field.
+    pub(crate) fn menu_field_doc(&self) -> &TextDocument {
+        match self.menu_field {
+            Some(MenuField::Composer) => &self.chat.input,
+            Some(MenuField::Login(f)) => match f {
+                crate::pages::login::LoginField::Email => &self.login_view.email,
+                _ => &self.login_view.input,
+            },
+            None => self.field_doc(),
+        }
+    }
+
+    /// The document a field menu and its items act on: the menu's target
+    /// while one is open, else the focused field (shortcuts).
+    fn menu_doc(&mut self) -> Option<&mut TextDocument> {
+        match self.menu_field {
+            Some(MenuField::Composer) => Some(&mut self.chat.input),
+            Some(MenuField::Login(f)) => match f {
+                crate::pages::login::LoginField::Email => Some(&mut self.login_view.email),
+                _ => Some(&mut self.login_view.input),
+            },
+            None => self.focused_document(),
+        }
+    }
+
+    /// Focuses a menu's target field. Only pasting re-arms typing on
+    /// mobile; every other menu action leaves the keyboard down.
+    fn focus_menu_field(&mut self, target: MenuField) {
+        match target {
+            MenuField::Composer => {
+                self.chat.input_focused = true;
+                self.login_view.field = None;
+            }
+            MenuField::Login(f) => {
+                self.login_view.field = Some(f);
+                self.chat.input_focused = false;
+            }
+        }
     }
 
     /// One press against the hit arms. Returns what changed, if anything.
@@ -1662,7 +1716,7 @@ impl Application for Gumicord {
     /// Secondary press; what was hit decides the menu.
     fn context_menu(&mut self, hits: &[Hit], at: (f32, f32)) -> bool {
         // Anything but a field leaves the keyboard over the menu; phones
-        // have no other way to dismiss it. The field arms below refocus.
+        // have no other way to dismiss it.
         if !hits
             .iter()
             .any(|h| matches!(h.id, NodeId::ChatInputField | NodeId::AppScreenLoginField))
@@ -1672,26 +1726,37 @@ impl Application for Gumicord {
         // Reopens rather than closing, or opening the next message's menu
         // would take two presses.
         let items = hits.iter().find_map(|h| match (h.id, &h.key) {
-            // The composer first: it overlaps the message list. Focusing it
-            // makes the menu and its items act on the composer.
+            // The composer first: it overlaps the message list. The menu
+            // remembers it as its target; on mobile the keyboard goes
+            // down with the menu open, on desktop focus stays up.
             (NodeId::ChatInputField, _) => {
-                self.chat.input_focused = true;
-                self.login_view.field = None;
+                self.menu_field = Some(MenuField::Composer);
+                if is_mobile() {
+                    self.release_text_focus();
+                } else {
+                    self.chat.input_focused = true;
+                    self.login_view.field = None;
+                }
                 Some(self.field_menu())
             }
-            // A login-form field: focusing it makes the menu and its items
-            // act on that field.
+            // A login-form field: the menu remembers it as its target.
             (
                 NodeId::AppScreenLoginField,
                 Some(Key::Slot(s @ ("email" | "password" | "totp" | "token"))),
             ) => {
-                self.login_view.field = Some(match *s {
+                let field = match *s {
                     "email" => LoginField::Email,
                     "password" => LoginField::Password,
                     "token" => LoginField::Token,
                     _ => LoginField::Totp,
-                });
-                self.chat.input_focused = false;
+                };
+                self.menu_field = Some(MenuField::Login(field));
+                if is_mobile() {
+                    self.release_text_focus();
+                } else {
+                    self.login_view.field = Some(field);
+                    self.chat.input_focused = false;
+                }
                 Some(self.field_menu())
             }
             (NodeId::ChatMessage, Some(Key::Id(id))) => Some(self.message_menu(*id)),
@@ -1705,6 +1770,12 @@ impl Application for Gumicord {
             // A press on nothing just closes whatever is open.
             None => self.close_menu(),
         }
+    }
+
+    /// Content started moving under a finger: the keyboard goes with the
+    /// scroll, like a tap outside the field.
+    fn scroll_started(&mut self) -> bool {
+        self.release_text_focus()
     }
 
     /// Only a focused field receives input: a login-form field, or the
@@ -1932,11 +2003,19 @@ impl Application for Gumicord {
         true
     }
 
-    /// A clipboard operation on the focused field, from a Ctrl shortcut or a
-    /// field-menu item. Without a focused field every operation does nothing.
+    /// A clipboard operation on the menu's target field, or the focused
+    /// field from a Ctrl shortcut (no menu open). Without either every
+    /// operation does nothing.
     fn clipboard(&mut self, op: gumicord_platform::ClipboardOp) -> bool {
         use gumicord_platform::ClipboardOp::{Copy, Cut, Paste};
-        let Some(doc) = self.focused_document() else {
+        // Login fields are one line, so pasted newlines would hide text
+        // there. The composer keeps them, like Discord.
+        let single_line = match self.menu_field {
+            Some(MenuField::Login(_)) => true,
+            Some(MenuField::Composer) => false,
+            None => self.login_view.field.is_some(),
+        };
+        let Some(doc) = self.menu_doc() else {
             return false;
         };
         match op {
@@ -1955,29 +2034,21 @@ impl Application for Gumicord {
                 }
                 true
             }
-            Paste => {
-                // Login fields are one line, so pasted newlines would hide
-                // text there. The composer keeps them, like Discord.
-                let single_line = self.login_view.field.is_some();
-                let Some(doc) = self.focused_document() else {
-                    return false;
-                };
-                match gumicord_platform::clipboard::text() {
-                    Ok(Some(text)) => {
-                        if single_line {
-                            doc.insert(&text.replace(['\r', '\n'], " "));
-                        } else {
-                            doc.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
-                        }
-                        true
+            Paste => match gumicord_platform::clipboard::text() {
+                Ok(Some(text)) => {
+                    if single_line {
+                        doc.insert(&text.replace(['\r', '\n'], " "));
+                    } else {
+                        doc.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
                     }
-                    Ok(None) => false,
-                    Err(e) => {
-                        tracing::warn!(%e, "could not read the clipboard");
-                        false
-                    }
+                    true
                 }
-            }
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(%e, "could not read the clipboard");
+                    false
+                }
+            },
         }
     }
 
@@ -2384,6 +2455,7 @@ impl Gumicord {
     /// Dismisses the menu without acting. A sheet coasts out and leaves
     /// on landing; anything else vanishes at once.
     fn close_menu(&mut self) -> bool {
+        self.menu_field = None;
         let sheet = matches!(self.floating, Some(crate::menu::Floating::Menu(_)))
             && self.panes().present() == crate::menu::Present::Sheet;
         if !sheet {
@@ -2410,7 +2482,10 @@ impl Gumicord {
         let action = match &f {
             crate::menu::Floating::Menu(m) => match m.items.get(index) {
                 Some(item) => item.action.clone(),
-                None => return true,
+                None => {
+                    self.menu_field = None;
+                    return true;
+                }
             },
             crate::menu::Floating::Confirm(c) => match index {
                 crate::menu::button::CONFIRM => c.action.clone(),
@@ -2420,13 +2495,18 @@ impl Gumicord {
         };
 
         // Anything needing confirmation turns back here and opens the dialog;
-        // the next call comes from its buttons.
+        // the next call comes from its buttons. A dialog decides alone, so
+        // the keyboard goes with whatever opened it.
         if let Some(confirm) = self.needs_confirming(&f, &action) {
             self.floating = Some(crate::menu::Floating::Confirm(confirm));
+            self.menu_field = None;
+            self.release_text_focus();
             return true;
         }
 
-        self.perform(action)
+        let done = self.perform(action);
+        self.menu_field = None;
+        done
     }
 
     /// Whether an action needs confirming, and with what.
@@ -2615,9 +2695,15 @@ impl Gumicord {
             }
             crate::menu::Action::Paste => {
                 self.clipboard(gumicord_platform::ClipboardOp::Paste);
+                // Pasting chooses the field back: the menu dismissed the
+                // keyboard, and typing resumes where the paste landed. Any
+                // other menu action leaves it down.
+                if let Some(target) = self.menu_field {
+                    self.focus_menu_field(target);
+                }
             }
             crate::menu::Action::SelectAll => {
-                if let Some(doc) = self.focused_document() {
+                if let Some(doc) = self.menu_doc() {
                     doc.select_all();
                 }
             }

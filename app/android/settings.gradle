@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 pluginManagement {
     repositories {
         google()
@@ -11,8 +13,33 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // rustls-platform-verifier verifies HTTPS against the system trust
+        // store through the JVM. Without this its Kotlin helper is missing
+        // and every HTTPS request fails on Android.
+        maven {
+            url = findRustlsPlatformVerifierProject()
+            metadataSources { artifact() }
+        }
     }
 }
 
 rootProject.name = "Gumicord"
 include(":app")
+
+String findRustlsPlatformVerifierProject() {
+    def dependencyText = providers.exec {
+        it.workingDir = new File(rootDir, "../..")
+        it.commandLine(
+            "cargo", "metadata",
+            "--format-version", "1",
+            "--filter-platform", "aarch64-linux-android",
+            "--manifest-path", "Cargo.toml",
+        )
+    }.standardOutput.asText.get()
+
+    def dependencyJson = new JsonSlurper().parseText(dependencyText)
+    def manifestPath = file(
+        dependencyJson.packages.find { it.name == "rustls-platform-verifier-android" }.manifest_path
+    )
+    return new File(manifestPath.parentFile, "maven").path
+}

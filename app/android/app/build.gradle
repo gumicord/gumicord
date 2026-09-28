@@ -101,6 +101,11 @@ dependencies {
     // Java interface only; 2.x crashes before any Rust runs.
     implementation 'androidx.games:games-activity:4.4.0'
     implementation 'androidx.appcompat:appcompat:1.7.0'
+    // rustls-platform-verifier checks HTTPS against the system trust store
+    // through the JVM. Without this every HTTPS request fails on Android.
+    // The version follows the Rust crate via cargo metadata (see
+    // ../settings.gradle); cargo keeps the two in sync.
+    implementation 'rustls:rustls-platform-verifier:latest.release'
 }
 
 configurations.all {

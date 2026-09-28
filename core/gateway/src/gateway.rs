@@ -526,7 +526,7 @@ impl Gateway {
                             tracing::warn!("cannot reach the resume host; starting from identify");
                         }
                         let wait = self.grow_backoff();
-                        tracing::warn!(error = %e, wait_ms = wait.as_millis() as u64, "cannot connect");
+                        tracing::warn!(error = %e, debug = ?e, wait_ms = wait.as_millis() as u64, "cannot connect");
                         // Reported before waiting, or the screen looks frozen
                         // for up to a minute.
                         self.pending_notice = Some(Event::Reconnecting {
@@ -580,7 +580,7 @@ impl Gateway {
                         self.session = None;
                     }
                     let wait = self.grow_backoff();
-                    tracing::warn!(error = %e, "disconnected; reconnecting");
+                    tracing::warn!(error = %e, debug = ?e, "disconnected; reconnecting");
                     self.pending_notice = Some(Event::Reconnecting {
                         reason: e.to_string(),
                         wait,

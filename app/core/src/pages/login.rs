@@ -1145,6 +1145,36 @@ mod tests {
         assert_eq!(a.login_view.email.text(), "a@b.c");
     }
 
+    /// Field-menu items act on the menu's target while nothing holds
+    /// focus; pasting chooses the target back for typing.
+    #[test]
+    fn menu_items_act_on_the_menu_target_without_focus() {
+        let mut a = pending();
+        a.login_view.input.insert("secret");
+        a.login_view.field = None;
+        a.menu_field = Some(crate::MenuField::Login(LoginField::Password));
+        a.perform(crate::menu::Action::SelectAll);
+        assert_eq!(a.login_view.input.selection(), 0.."secret".len());
+        a.perform(crate::menu::Action::Paste);
+        assert_eq!(a.login_view.field, Some(LoginField::Password));
+    }
+
+    /// A paired fill reaches both documents before the single submit reads
+    /// them, whichever field holds focus.
+    #[test]
+    fn a_paired_fill_lands_in_both_fields_before_submit() {
+        use gumicord_platform::ImeProxy;
+
+        let mut a = pending();
+        a.login_view.field = Some(LoginField::Email);
+        assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
+        assert!(a.proxy_text(ImeProxy::Password, "secret".to_owned()));
+        assert_eq!(a.login_view.email.text(), "a@b.c");
+        assert_eq!(a.login_view.input.text(), "secret");
+        assert!(a.submit_login(), "pair-filled form does not submit");
+        assert!(a.login.busy());
+    }
+
     /// While an attempt is in flight every submit is ignored and the
     /// button dims; a failure re-arms the form for a retry.
     #[test]

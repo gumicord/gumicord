@@ -559,6 +559,7 @@ async fn run(
                         let rest = match RestClient::anonymous() {
                             Ok(r) => r,
                             Err(e) => {
+                                tracing::warn!(error = %e, debug = ?e, "cannot build the REST client");
                                 let _ = tx.send(LoginEvent::Failed(e.to_string()));
                                 waker.wake();
                                 break Turn::Restarted;
@@ -654,6 +655,16 @@ fn send_field_errors(tx: &Sender<LoginEvent>, e: &RestError) {
     }
 }
 
+/// What the TOTP screen shows for an MFA failure. Only a refused code is
+/// the user's to fix; transport trouble must read as such, or every outage
+/// looks like a mistyped code.
+fn totp_error(e: &RestError) -> &'static str {
+    match e {
+        RestError::Api { status: 400, .. } => "認証コードが違います。もう一度入力してください",
+        _ => "通信に失敗しました。接続を確認してもう一度お試しください",
+    }
+}
+
 /// Drives a password login to completion, interrupting the QR.
 ///
 /// Walks the steps: password check, a captcha if Discord challenges it, then
@@ -698,21 +709,21 @@ async fn run_password(
                             None => return PasswordRun::Cancelled,
                         }
                     }
-                    // A wrong code is just another chance to ask, with the
+                    // A refused code is another chance to ask, with the
                     // reason on the form. Field errors land under the box;
                     // without them a general line is the only feedback.
+                    // Anything else (network, limits) is the connection's
+                    // fault, and must not read as a wrong code.
                     Err(e) => {
                         let fields = e.field_errors();
                         let paths: Vec<String> = fields.iter().map(|(p, _)| p.clone()).collect();
-                        tracing::debug!(error = %e, field_paths = ?paths, "totp rejected; asking again");
+                        tracing::warn!(error = %e, debug = ?e, field_paths = ?paths, "totp attempt failed; asking again");
                         if !fields.is_empty() {
                             let _ = tx.send(LoginEvent::FieldErrors(fields));
                         }
                         let _ = tx.send(LoginEvent::TotpNeeded {
                             email: email.clone(),
-                            error: Some(
-                                "認証コードが違います。もう一度入力してください".to_owned(),
-                            ),
+                            error: Some(totp_error(&e).to_owned()),
                         });
                         waker.wake();
                         break None;
@@ -749,6 +760,7 @@ async fn run_password(
                 }
                 Err(e) => {
                     send_field_errors(tx, &e);
+                    tracing::warn!(error = %e, debug = ?e, "password login failed");
                     return PasswordRun::Error(e.to_string());
                 }
             }
@@ -770,6 +782,7 @@ async fn run_password(
                 }
                 Err(e) => {
                     send_field_errors(tx, &e);
+                    tracing::warn!(error = %e, debug = ?e, "token verification failed");
                     return PasswordRun::Error(e.to_string());
                 }
             }
@@ -794,6 +807,7 @@ async fn run_bot_token(
     let rest = match RestClient::anonymous() {
         Ok(r) => r,
         Err(e) => {
+            tracing::warn!(error = %e, debug = ?e, "cannot build the REST client");
             let _ = tx.send(LoginEvent::Failed(e.to_string()));
             waker.wake();
             return false;
@@ -809,6 +823,7 @@ async fn run_bot_token(
             true
         }
         Err(e) => {
+            tracing::warn!(error = %e, debug = ?e, "bot token verification failed");
             let _ = tx.send(LoginEvent::Failed(e.to_string()));
             waker.wake();
             false
@@ -923,7 +938,7 @@ async fn restore(store: Option<&SecretStore>) -> RestoreOutcome {
     let rest = match RestClient::anonymous() {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(%e, "cannot build client to restore token");
+            tracing::warn!(error = %e, debug = ?e, "cannot build client to restore token");
             return RestoreOutcome::Unchecked;
         }
     };
@@ -948,7 +963,7 @@ async fn restore(store: Option<&SecretStore>) -> RestoreOutcome {
             RestoreOutcome::Gone
         }
         Err(e) => {
-            tracing::warn!(%e, "could not verify stored token; retaining for later");
+            tracing::warn!(error = %e, debug = ?e, "could not verify stored token; retaining for later");
             RestoreOutcome::Unchecked
         }
     }
@@ -970,7 +985,10 @@ async fn attempt(
         tracing::warn!(error = %e, debug = ?e, "remote auth connect failed");
         e.to_string()
     })?;
-    let rest = RestClient::anonymous().map_err(|e| e.to_string())?;
+    let rest = RestClient::anonymous().map_err(|e| {
+        tracing::warn!(error = %e, debug = ?e, "cannot build the REST client");
+        e.to_string()
+    })?;
 
     loop {
         let event = match auth.next().await {
@@ -979,7 +997,10 @@ async fn attempt(
             // Treating that as an error puts "failed" on screen every two
             // minutes.
             Err(gumicord_gateway::RemoteAuthError::Closed) => return Ok(false),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                tracing::warn!(error = %e, debug = ?e, "remote auth event failed");
+                return Err(e.to_string());
+            }
         };
         match event {
             RemoteAuthEvent::Ready { url, fingerprint } => {
@@ -1323,6 +1344,36 @@ mod tests {
             login.take_last_error().as_deref(),
             Some("認証コードが違います。もう一度入力してください")
         );
+    }
+
+    /// Only a refused code reads as one: transport trouble must not look
+    /// like a mistyped code, or every outage blames the user.
+    #[test]
+    fn only_a_refused_code_reads_as_a_wrong_code() {
+        assert_eq!(
+            totp_error(&RestError::Api {
+                status: 400,
+                body: String::new(),
+            }),
+            "認証コードが違います。もう一度入力してください"
+        );
+        for e in [
+            RestError::Api {
+                status: 500,
+                body: String::new(),
+            },
+            RestError::Api {
+                status: 401,
+                body: String::new(),
+            },
+            RestError::RateLimited,
+        ] {
+            assert_eq!(
+                totp_error(&e),
+                "通信に失敗しました。接続を確認してもう一度お試しください",
+                "{e:?}"
+            );
+        }
     }
 
     /// The password command senders place exactly one command on the channel.
