@@ -104,8 +104,10 @@ dependencies {
     // rustls-platform-verifier checks HTTPS against the system trust store
     // through the JVM. Without this every HTTPS request fails on Android.
     // The version follows the Rust crate via cargo metadata (see
-    // ../settings.gradle); cargo keeps the two in sync.
-    implementation 'rustls:rustls-platform-verifier:latest.release'
+    // ../settings.gradle); cargo keeps the two in sync. The @aar suffix
+    // is required: the local maven repo is artifact-only, so Gradle
+    // ignores the POM packaging and would look for a .jar otherwise.
+    implementation "rustls:rustls-platform-verifier:${gradle.ext.rustlsPlatformVerifierVersion}@aar"
 }
 
 configurations.all {

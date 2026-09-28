@@ -8,6 +8,15 @@ pluginManagement {
     }
 }
 
+// Resolved once here so app/build.gradle can pin the exact AAR version.
+// The crate's maven/ ships no maven-metadata.xml (only
+// maven-metadata-local.xml), and metadataSources { artifact() } ignores
+// metadata anyway, so a dynamic version like latest.release can never
+// resolve. The POM packaging (aar) is ignored too, so the consumer must
+// ask for @aar explicitly.
+def rustlsMaven = findRustlsPlatformVerifier()
+gradle.ext.rustlsPlatformVerifierVersion = rustlsMaven.version
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
@@ -17,7 +26,7 @@ dependencyResolutionManagement {
         // store through the JVM. Without this its Kotlin helper is missing
         // and every HTTPS request fails on Android.
         maven {
-            url = findRustlsPlatformVerifierProject()
+            url = rustlsMaven.url
             metadataSources { artifact() }
         }
     }
@@ -26,7 +35,7 @@ dependencyResolutionManagement {
 rootProject.name = "Gumicord"
 include(":app")
 
-String findRustlsPlatformVerifierProject() {
+Map findRustlsPlatformVerifier() {
     def dependencyText = providers.exec {
         it.workingDir = new File(rootDir, "../..")
         it.commandLine(
@@ -38,8 +47,10 @@ String findRustlsPlatformVerifierProject() {
     }.standardOutput.asText.get()
 
     def dependencyJson = new JsonSlurper().parseText(dependencyText)
-    def manifestPath = file(
-        dependencyJson.packages.find { it.name == "rustls-platform-verifier-android" }.manifest_path
-    )
-    return new File(manifestPath.parentFile, "maven").path
+    def rustlsPackage = dependencyJson.packages.find { it.name == "rustls-platform-verifier-android" }
+    def manifestPath = file(rustlsPackage.manifest_path)
+    return [
+        url: new File(manifestPath.parentFile, "maven").path,
+        version: rustlsPackage.version.toString(),
+    ]
 }
