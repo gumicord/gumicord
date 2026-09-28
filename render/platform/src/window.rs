@@ -1419,18 +1419,24 @@ impl Host {
     /// Drops the keyboard when the app holds no focus. Resigning our own
     /// views is not always enough: a stale view elsewhere in the hierarchy
     /// keeps the keyboard up while every resign reports success. Forcing
-    /// the hosting view to end editing also dethrones those.
+    /// the hosting view to end editing also dethrones those. Only when
+    /// something was holding: every unfocused redraw would otherwise force
+    /// it (and its log line) again.
     #[cfg(target_os = "ios")]
     fn ios_hide_keyboard(&mut self) {
+        let mut held = false;
         if self.ios_text.is_live() {
             self.ios_text.blur();
+            held = true;
         }
         if let Some(proxy) = self.proxy.as_mut()
             && proxy.is_active()
         {
             proxy.blur();
+            held = true;
         }
-        if let Some(w) = self.window.as_ref()
+        if held
+            && let Some(w) = self.window.as_ref()
             && let Some(parent) = crate::ios_text::parent_view(w)
         {
             let ended = parent.endEditing(true);

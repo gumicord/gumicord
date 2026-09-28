@@ -51,10 +51,11 @@ fn make_field() -> Retained<UITextField> {
     field.setFrame(NSRect::new(NSPoint::new(-5.0, -5.0), NSSize::new(1.0, 1.0)));
     // Invisible but present: hidden and alpha-zero fields are ignored by
     // password autofill, so the password half of a paired fill never lands.
-    // No border, clear text and caret, and no touches instead.
+    // No border, clear text and caret instead. Interaction stays on here:
+    // becoming first responder needs it, and it goes back off once the
+    // keyboard is up (see set_active) so touches fall through to the app.
     field.setBorderStyle(UITextBorderStyle::None);
     field.setTextColor(Some(&UIColor::clearColor()));
-    field.setUserInteractionEnabled(false);
     // Tints the caret: only MainThreadOnly is unsafe, and this runs there.
     unsafe { field.setTintColor(Some(&UIColor::clearColor())) };
     field.setAutocapitalizationType(UITextAutocapitalizationType::None);
@@ -127,6 +128,9 @@ impl Proxy {
         for field in [&self.user, &self.pass] {
             field.resignFirstResponder();
             field.removeFromSuperview();
+            // Becoming first responder refuses without interaction; it
+            // goes back off below once the keyboard is up.
+            field.setUserInteractionEnabled(true);
         }
         self.active = kind;
         self.parent = kind.map(|_| ptr);
@@ -155,6 +159,9 @@ impl Proxy {
                 }
                 self.active = None;
             } else {
+                // Up and untouchable from here: touches fall through to
+                // the app while fills still land programmatically.
+                field.setUserInteractionEnabled(false);
                 self.last[idx(kind)] = text.to_owned();
                 // Snapshot the sibling too: a paired fill moves both, and
                 // the poll below must see whose text actually changed.
