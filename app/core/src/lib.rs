@@ -1543,6 +1543,7 @@ impl Application for Gumicord {
                     // An outside press owns focus too: leaving it keeps the
                     // keyboard over whatever opens next.
                     _ => {
+                        tracing::debug!("menu dismissed by outside press");
                         let closed = self.close_menu();
                         closed | self.release_text_focus()
                     }
@@ -2445,6 +2446,7 @@ impl Gumicord {
     /// the sheet behind is unreachable. This also keeps a single sheet
     /// on the slide channel.
     fn open_menu(&mut self, at: (f32, f32), items: Vec<crate::menu::Item>) -> bool {
+        tracing::debug!(items = items.len(), "menu opened");
         if items.is_empty() {
             return self.close_menu();
         }
@@ -2506,11 +2508,20 @@ impl Gumicord {
                 _ => return true,
             },
         };
+        // Variant only: payloads may carry message text or account keys.
+        let name = Self::action_name(&action);
+        tracing::debug!(
+            index,
+            action = name,
+            dialog = matches!(f, crate::menu::Floating::Confirm(_)),
+            "menu item pressed"
+        );
 
         // Anything needing confirmation turns back here and opens the dialog;
         // the next call comes from its buttons. A dialog decides alone, so
         // the keyboard goes with whatever opened it.
         if let Some(confirm) = self.needs_confirming(&f, &action) {
+            tracing::debug!(action = name, "confirm dialog opened");
             self.floating = Some(crate::menu::Floating::Confirm(confirm));
             self.menu_field = None;
             self.release_text_focus();
@@ -2518,8 +2529,48 @@ impl Gumicord {
         }
 
         let done = self.perform(action);
+        tracing::debug!(action = name, done, "action performed");
         self.menu_field = None;
         done
+    }
+
+    /// The action's variant name for diagnostics. Payloads stay out of the
+    /// log: they may carry message text or account keys.
+    fn action_name(action: &crate::menu::Action) -> &'static str {
+        use crate::menu::Action::*;
+        match action {
+            Copy(_) => "copy",
+            MarkRead(_) => "mark_read",
+            Reply(_) => "reply",
+            Edit(_) => "edit",
+            Delete(_) => "delete",
+            SwitchAccount(_) => "switch_account",
+            AddAccount => "add_account",
+            LogOut => "logout",
+            ApprovePlugin { .. } => "approve_plugin",
+            ApproveThemeHosts { .. } => "approve_theme_hosts",
+            Acknowledge => "acknowledge",
+            OpenSettings => "open_settings",
+            CloseSettings => "close_settings",
+            SettingsCategory(_) => "settings_category",
+            SelectSettingsPlugin(_) => "select_settings_plugin",
+            SettingsPluginBack => "settings_plugin_back",
+            SettingsNarrowBack => "settings_narrow_back",
+            DisablePlugin(_) => "disable_plugin",
+            EnablePlugin(_) => "enable_plugin",
+            ReapprovePlugin(_) => "reapprove_plugin",
+            ReloadPlugin(_) => "reload_plugin",
+            SelectTheme(_) => "select_theme",
+            UseBundledTheme => "use_bundled_theme",
+            InstallThemeFile => "install_theme_file",
+            InstallPluginFile => "install_plugin_file",
+            ShareLog => "share_log",
+            ToggleFps => "toggle_fps",
+            Cut => "cut",
+            CopySelection => "copy_selection",
+            Paste => "paste",
+            SelectAll => "select_all",
+        }
     }
 
     /// Whether an action needs confirming, and with what.
