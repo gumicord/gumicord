@@ -869,14 +869,7 @@ impl Host {
                 "press assessed focus"
             );
             if self.app.focused_document().is_none() {
-                if self.ios_text.is_live() {
-                    self.ios_text.blur();
-                }
-                if let Some(proxy) = self.proxy.as_mut()
-                    && proxy.is_active()
-                {
-                    proxy.blur();
-                }
+                self.ios_hide_keyboard();
                 if self.ime_allowed {
                     self.ime_allowed = false;
                     if let Some(w) = self.window.clone() {
@@ -1205,18 +1198,10 @@ impl Host {
             if self.android_text.is_live() {
                 self.android_text.blur();
             }
-            #[cfg(target_os = "ios")]
-            if self.ios_text.is_live() {
-                self.ios_text.blur();
-            }
             // The proxy already resigned in sync above, but a missing
             // parent skips that path while the keyboard stays up.
             #[cfg(target_os = "ios")]
-            if let Some(proxy) = self.proxy.as_mut()
-                && proxy.is_active()
-            {
-                proxy.blur();
-            }
+            self.ios_hide_keyboard();
             return;
         }
 
@@ -1431,6 +1416,28 @@ impl Host {
         false
     }
 
+    /// Drops the keyboard when the app holds no focus. Resigning our own
+    /// views is not always enough: a stale view elsewhere in the hierarchy
+    /// keeps the keyboard up while every resign reports success. Forcing
+    /// the hosting view to end editing also dethrones those.
+    #[cfg(target_os = "ios")]
+    fn ios_hide_keyboard(&mut self) {
+        if self.ios_text.is_live() {
+            self.ios_text.blur();
+        }
+        if let Some(proxy) = self.proxy.as_mut()
+            && proxy.is_active()
+        {
+            proxy.blur();
+        }
+        if let Some(w) = self.window.as_ref()
+            && let Some(parent) = crate::ios_text::parent_view(w)
+        {
+            let ended = parent.endEditing(true);
+            tracing::debug!(ended, "ios end editing");
+        }
+    }
+
     /// Where the focused field sits, for anchoring the hidden editor and
     /// the candidate UI. Falls back through the known field ids.
     #[cfg(target_os = "ios")]
@@ -1632,6 +1639,7 @@ impl Host {
         // leaves the window blank until the next input. Being merely hidden
         // does not, or it would spin for as long as the window is minimised.
         if stats.presented == Presented::Failed {
+            tracing::debug!("frame failed to present; asking again");
             self.request_redraw();
             self.wake_dirty = false;
             return;

@@ -4,8 +4,8 @@
 //! fill into. Two hidden `UITextField` siblings (username + password, so the
 //! manager pairs them) receive the fill; this layer polls their text into
 //! the app's documents. Visible editing stays in our rendered fields: the
-//! proxies sit transparently over them and never take touches (alpha-zero
-//! views are skipped by hit testing).
+//! proxies sit transparently over them and never take touches (user
+//! interaction is off).
 //!
 //! Polled, not delegated: a delegate class from Rust is a maintenance
 //! burden, and a frame of latency is invisible on a login form.
@@ -14,8 +14,9 @@ use objc2::rc::Retained;
 use objc2::{class, msg_send};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_ui_kit::{
-    UIKeyboardType, UITextAutocapitalizationType, UITextAutocorrectionType,
-    UITextContentTypePassword, UITextContentTypeUsername, UITextField, UITextInputTraits, UIView,
+    UIColor, UIKeyboardType, UITextAutocapitalizationType, UITextAutocorrectionType,
+    UITextBorderStyle, UITextContentTypePassword, UITextContentTypeUsername, UITextField,
+    UITextInputTraits, UIView,
 };
 
 /// What the poll found. A return key arrives as a newline inside the text;
@@ -48,7 +49,14 @@ fn make_field() -> Retained<UITextField> {
     // Off-screen, not untouchable: a view that takes no interaction may
     // refuse first responder, and outside the parent bounds no touch lands.
     field.setFrame(NSRect::new(NSPoint::new(-5.0, -5.0), NSSize::new(1.0, 1.0)));
-    field.setAlpha(0.0);
+    // Invisible but present: hidden and alpha-zero fields are ignored by
+    // password autofill, so the password half of a paired fill never lands.
+    // No border, clear text and caret, and no touches instead.
+    field.setBorderStyle(UITextBorderStyle::None);
+    field.setTextColor(Some(&UIColor::clearColor()));
+    field.setUserInteractionEnabled(false);
+    // Tints the caret: only MainThreadOnly is unsafe, and this runs there.
+    unsafe { field.setTintColor(Some(&UIColor::clearColor())) };
     field.setAutocapitalizationType(UITextAutocapitalizationType::None);
     field.setAutocorrectionType(UITextAutocorrectionType::No);
     field
@@ -159,9 +167,9 @@ impl Proxy {
         }
     }
 
-    /// Parks both fields over the visible login fields. Alpha-zero views
-    /// never take touches, so this only feeds the password manager's
-    /// pairing heuristics; typing still routes through the polls.
+    /// Parks both fields over the visible login fields. Interaction is off,
+    /// so this only feeds the password manager's pairing heuristics; typing
+    /// still routes through the polls.
     /// `None` rects leave that field where it is (not laid out yet).
     pub fn place(
         &mut self,
