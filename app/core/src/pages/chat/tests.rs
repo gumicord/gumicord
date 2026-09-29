@@ -28,6 +28,39 @@ pub(crate) fn hit_of(id: NodeId, key: Option<Key>) -> Hit {
     }
 }
 
+/// Writes text into the current channel's draft, by address.
+pub(crate) fn composer_input(a: &mut Gumicord, text: &str) {
+    a.inputs
+        .ensure(a.draft_addr(), InputKind::Text)
+        .insert(text);
+}
+
+/// Reads the current channel's draft, by address.
+pub(crate) fn composer_text(a: &Gumicord) -> String {
+    use crate::inputs::empty_doc;
+
+    a.inputs
+        .doc(&a.draft_addr())
+        .unwrap_or(empty_doc())
+        .text()
+        .to_owned()
+}
+
+/// Focuses the composer box, by address.
+pub(crate) fn focus_composer(a: &mut Gumicord) {
+    a.focus = Some(crate::inputs::composer_addr());
+}
+
+/// Whether the composer holds focus.
+pub(crate) fn composer_focused(a: &Gumicord) -> bool {
+    a.focus.as_ref() == Some(&crate::inputs::composer_addr())
+}
+
+/// Focuses one login box, by field.
+pub(crate) fn focus_login(a: &mut Gumicord, field: crate::pages::login::LoginField) {
+    a.focus = Some(crate::pages::login::login_addr(field));
+}
+
 /// A press at a rectangle, for surface containment: the drawer and the
 /// sheet only act on hits inside their own rectangle.
 pub(crate) fn hit_at(id: NodeId, key: Option<Key>, x: f32, y: f32, w: f32, h: f32) -> Hit {
@@ -245,14 +278,14 @@ fn cancelling_a_reply_keeps_the_draft_but_cancelling_an_edit_clears_it() {
     let press = |c: Composing| {
         let mut a = app();
         a.chat.composing = c;
-        a.chat.input.insert("書いた文");
+        composer_input(&mut a, "書いた文");
         let hits = [hit_of(
             NodeId::PrimitiveButton,
             Some(Key::Slot(CANCEL_COMPOSING)),
         )];
         assert!(a.pressed(&hits), "何も起きなかった");
         assert_eq!(a.chat.composing, Composing::New, "やめていない");
-        a.chat.input.text().to_owned()
+        composer_text(&a).to_owned()
     };
     assert_eq!(press(Composing::Reply(1)), "書いた文", "返信で消えた");
     assert_eq!(press(Composing::Edit(1)), "", "編集で残った");
@@ -279,13 +312,13 @@ fn another_button_does_not_cancel() {
 #[test]
 fn esc_は返信をやめてから閉じる() {
     let mut a = app();
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     a.chat.composing = Composing::Reply(1);
-    a.chat.input.insert("書きかけ");
+    composer_input(&mut a, "書きかけ");
 
     assert!(a.cancel_input());
     assert_eq!(a.chat.composing, Composing::New, "返信のままである");
-    assert!(a.chat.input_focused, "フォーカスまで外れた");
+    assert!(composer_focused(&a), "フォーカスまで外れた");
 }
 
 /// Clearing the field and pressing enter must not destroy the message.
@@ -303,7 +336,7 @@ fn submitting_an_empty_field_does_nothing() {
 fn submitting_returns_to_composing_a_new_message() {
     let mut a = app();
     a.chat.composing = Composing::Reply(1);
-    a.chat.input.insert("やあ");
+    composer_input(&mut a, "やあ");
     assert!(a.submit());
     assert_eq!(a.chat.composing, Composing::New);
 }
@@ -354,11 +387,13 @@ fn cut_and_copy_are_absent_without_a_selection() {
     assert!(!has(&a, Action::SelectAll), "空なのに全選択が出ている");
     assert!(has(&a, Action::Paste), "貼り付けはいつでも出る");
 
-    a.chat.input.insert("あいう");
+    composer_input(&mut a, "あいう");
     assert!(has(&a, Action::SelectAll));
     assert!(!has(&a, Action::CopySelection), "まだ選んでいない");
 
-    a.chat.input.select_all();
+    a.inputs
+        .ensure(a.draft_addr(), InputKind::Text)
+        .select_all();
     assert!(has(&a, Action::CopySelection));
     assert!(has(&a, Action::Cut));
 }
@@ -373,8 +408,83 @@ fn swipe_left_on_a_message_starts_a_reply() {
     let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
     assert!(a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
     assert_eq!(a.chat.composing, Composing::Reply(7));
-    assert!(a.chat.input_focused, "入力欄に焦点がない");
+    assert!(composer_focused(&a), "入力欄に焦点がない");
     assert_eq!(a.chat.a11y_message, Some(7));
+}
+
+/// A driven row follows the finger, clamped; anything else is ignored.
+#[test]
+fn a_driven_row_follows_the_finger() {
+    let mut a = app();
+    assert!(a.message_swipe_move(7, -30.0));
+    assert_eq!(a.message_swipe_offset(), Some((7, -30.0)));
+
+    // Clamped at the rail, and tiny moves are noise.
+    assert!(a.message_swipe_move(7, -200.0));
+    assert_eq!(a.message_swipe_offset(), Some((7, -96.0)));
+    assert!(!a.message_swipe_move(7, -96.2));
+
+    // Another row never hijacks the drive.
+    assert!(!a.message_swipe_move(8, -50.0));
+    assert_eq!(a.message_swipe_offset(), Some((7, -96.0)));
+}
+
+/// Releasing past the threshold starts a reply and springs back.
+#[test]
+fn releasing_past_the_threshold_replies_and_springs_back() {
+    use std::time::{Duration, Instant};
+
+    let mut a = app();
+    assert!(a.message_swipe_move(7, -80.0));
+    let start = Instant::now();
+    assert!(a.message_swipe_end(7, start));
+    assert_eq!(a.chat.composing, Composing::Reply(7));
+    assert!(composer_focused(&a), "入力欄に焦点がない");
+    assert_eq!(a.chat.a11y_message, Some(7));
+
+    // Mid-return the row is still out...
+    assert!(a.poll_message_swipe(start + Duration::from_millis(90)));
+    let (_, dx) = a.message_swipe_offset().expect("行が消えた");
+    assert!(dx < 0.0 && dx > -80.0, "戻っていない: {dx}");
+
+    // ...and then it lands and lets go.
+    assert!(a.poll_message_swipe(start + Duration::from_secs(1)));
+    assert_eq!(a.message_swipe_offset(), None);
+    assert!(!a.poll_message_swipe(start + Duration::from_secs(2)));
+}
+
+/// Releasing short of the threshold springs back without replying.
+#[test]
+fn releasing_short_springs_back_without_replying() {
+    use std::time::{Duration, Instant};
+
+    let mut a = app();
+    assert!(a.message_swipe_move(7, -20.0));
+    let start = Instant::now();
+    assert!(a.message_swipe_end(7, start));
+    assert_eq!(a.chat.composing, Composing::New, "返信が始まった");
+    assert!(a.poll_message_swipe(start + Duration::from_secs(1)));
+    assert_eq!(a.message_swipe_offset(), None);
+}
+
+/// Ending an unknown drive does nothing.
+#[test]
+fn ending_an_unknown_drive_does_nothing() {
+    use std::time::Instant;
+
+    let mut a = app();
+    assert!(!a.message_swipe_end(7, Instant::now()));
+    assert_eq!(a.message_swipe_offset(), None);
+    assert!(!a.poll_message_swipe(Instant::now()));
+}
+
+/// Overlays own their touches: a drive never starts above them.
+#[test]
+fn a_drive_never_starts_above_overlays() {
+    let mut a = narrow();
+    assert!(a.open_drawer());
+    assert!(!a.message_swipe_move(7, -30.0));
+    assert_eq!(a.message_swipe_offset(), None);
 }
 
 /// Flicking the drawer away closes it; flicking up scrolls instead.
@@ -467,12 +577,12 @@ fn opening_coasts_the_drawer_in_over_time() {
     let mut a = narrow();
     let start = Instant::now();
     assert!(a.open_drawer());
-    assert_eq!(a.chat.drawer_slide, 0.0, "開いた瞬間にいる");
+    assert_eq!(a.chat.drawer.slide, 0.0, "開いた瞬間にいる");
     assert!(a.advance_drawer(start + Duration::from_millis(110)));
-    let mid = a.chat.drawer_slide;
+    let mid = a.chat.drawer.slide;
     assert!(mid > 0.0 && mid < 1.0, "途中にいない: {mid}");
     assert!(!a.advance_drawer(start + Duration::from_secs(1)));
-    assert_eq!(a.chat.drawer_slide, 1.0);
+    assert_eq!(a.chat.drawer.slide, 1.0);
     assert!(a.chat.drawer_open, "着いたのに閉じた");
 }
 
@@ -487,7 +597,7 @@ fn closing_coasts_out_and_lands_shut() {
     assert!(a.chat.drawer_open, "閉じ始めに消えた");
     assert!(!a.advance_drawer(Instant::now() + Duration::from_secs(1)));
     assert!(!a.chat.drawer_open, "着いたのに残っている");
-    assert_eq!(a.chat.drawer_slide, 0.0);
+    assert_eq!(a.chat.drawer.slide, 0.0);
 }
 
 /// Reopening mid-close swings back instead of refusing.
@@ -507,27 +617,27 @@ fn the_finger_drives_the_slide_and_letting_go_coasts() {
     // Slow release past halfway finishes opening (absolute from the start).
     let mut a = narrow();
     assert!(a.drawer_drag_start());
-    assert!(a.chat.drawer_drag, "掴んでいない");
+    assert!(a.chat.drawer.drag, "掴んでいない");
     assert!(a.drawer_drag_move(140.0, 280.0));
-    assert_eq!(a.chat.drawer_slide, 0.5);
+    assert_eq!(a.chat.drawer.slide, 0.5);
     assert!(a.drawer_drag_move(168.0, 280.0));
     assert!(a.drawer_drag_end(0.0));
-    assert!(!a.chat.drawer_drag, "離したのに掴んだまま");
-    assert_eq!(a.chat.drawer_target, 1.0, "半分過ぎたのに戻る");
+    assert!(!a.chat.drawer.drag, "離したのに掴んだまま");
+    assert_eq!(a.chat.drawer.target, 1.0, "半分過ぎたのに戻る");
 
     // A fast flick left falls back whatever the progress.
     let mut b = narrow();
     assert!(b.drawer_drag_start());
     assert!(b.drawer_drag_move(200.0, 280.0));
     assert!(b.drawer_drag_end(-1000.0));
-    assert_eq!(b.chat.drawer_target, 0.0, "払ったのに開く");
+    assert_eq!(b.chat.drawer.target, 0.0, "払ったのに開く");
 
     // A fast flick right opens from anywhere.
     let mut c = narrow();
     assert!(c.drawer_drag_start());
     assert!(c.drawer_drag_move(10.0, 280.0));
     assert!(c.drawer_drag_end(1000.0));
-    assert_eq!(c.chat.drawer_target, 1.0, "払ったのに戻る");
+    assert_eq!(c.chat.drawer.target, 1.0, "払ったのに戻る");
 }
 
 /// A coasting drawer wakes the loop until it lands.
@@ -569,12 +679,12 @@ fn opening_coasts_the_sheet_in_over_time() {
     let mut a = narrow();
     let start = Instant::now();
     assert!(a.open_member_sheet());
-    assert_eq!(a.sheet_slide, 0.0, "開いた瞬間にいる");
+    assert_eq!(a.sheet.slide, 0.0, "開いた瞬間にいる");
     assert!(a.advance_sheet(start + Duration::from_millis(110)));
-    let mid = a.sheet_slide;
+    let mid = a.sheet.slide;
     assert!(mid > 0.0 && mid < 1.0, "途中にいない: {mid}");
     assert!(!a.advance_sheet(start + Duration::from_secs(1)));
-    assert_eq!(a.sheet_slide, 1.0);
+    assert_eq!(a.sheet.slide, 1.0);
     assert!(a.chat.member_sheet_open, "着いたのに閉じた");
 }
 
@@ -589,7 +699,7 @@ fn closing_coasts_the_sheet_out_and_lands_shut() {
     assert!(a.chat.member_sheet_open, "閉じ始めに消えた");
     assert!(!a.advance_sheet(Instant::now() + Duration::from_secs(1)));
     assert!(!a.chat.member_sheet_open, "着いたのに残っている");
-    assert_eq!(a.sheet_slide, 0.0);
+    assert_eq!(a.sheet.slide, 0.0);
 }
 
 /// The finger drives the sheet; letting go coasts to a side.
@@ -600,16 +710,16 @@ fn the_finger_drives_the_sheet_and_letting_go_coasts() {
     assert!(a.open_member_sheet());
     settle_sheet(&mut a);
     assert!(a.sheet_drag_start());
-    assert!(a.sheet_drag, "掴んでいない");
+    assert!(a.sheet.drag, "掴んでいない");
     assert!(a.sheet_drag_move(300.0, 500.0));
     assert!(
-        (a.sheet_slide - 0.4).abs() < 0.001,
+        (a.sheet.slide - 0.4).abs() < 0.001,
         "付いてこない: {}",
-        a.sheet_slide
+        a.sheet.slide
     );
     assert!(a.sheet_drag_end(0.0));
-    assert!(!a.sheet_drag, "離したのに掴んだまま");
-    assert_eq!(a.sheet_target, 0.0, "半分過ぎたのに戻る");
+    assert!(!a.sheet.drag, "離したのに掴んだまま");
+    assert_eq!(a.sheet.target, 0.0, "半分過ぎたのに戻る");
 
     // A fast flick up swings back open from anywhere.
     let mut b = narrow();
@@ -618,7 +728,7 @@ fn the_finger_drives_the_sheet_and_letting_go_coasts() {
     assert!(b.sheet_drag_start());
     assert!(b.sheet_drag_move(400.0, 500.0));
     assert!(b.sheet_drag_end(-1000.0));
-    assert_eq!(b.sheet_target, 1.0, "払ったのに閉じる");
+    assert_eq!(b.sheet.target, 1.0, "払ったのに閉じる");
 
     // A fast flick down closes whatever the progress.
     let mut c = narrow();
@@ -627,7 +737,7 @@ fn the_finger_drives_the_sheet_and_letting_go_coasts() {
     assert!(c.sheet_drag_start());
     assert!(c.sheet_drag_move(10.0, 500.0));
     assert!(c.sheet_drag_end(1000.0));
-    assert_eq!(c.sheet_target, 0.0, "払ったのに開く");
+    assert_eq!(c.sheet.target, 0.0, "払ったのに開く");
 }
 
 /// The finger drives an open drawer shut; letting go picks a side.
@@ -639,9 +749,9 @@ fn the_finger_drives_an_open_drawer_shut() {
     // A slow drag left past halfway falls shut.
     assert!(a.drawer_close_drag_start());
     assert!(a.drawer_drag_move(-140.0, 280.0));
-    assert_eq!(a.chat.drawer_slide, 0.5);
+    assert_eq!(a.chat.drawer.slide, 0.5);
     assert!(a.drawer_drag_end(0.0));
-    assert_eq!(a.chat.drawer_target, 0.0, "半分過ぎたのに戻る");
+    assert_eq!(a.chat.drawer.target, 0.0, "半分過ぎたのに戻る");
 
     // A small drag springs back open.
     let mut b = narrow();
@@ -650,7 +760,28 @@ fn the_finger_drives_an_open_drawer_shut() {
     assert!(b.drawer_close_drag_start());
     assert!(b.drawer_drag_move(-28.0, 280.0));
     assert!(b.drawer_drag_end(0.0));
-    assert_eq!(b.chat.drawer_target, 1.0, "少しで閉じる");
+    assert_eq!(b.chat.drawer.target, 1.0, "少しで閉じる");
+}
+
+/// Exactly halfway with no flick ties towards each surface's old rule:
+/// sheets spring back open, the drawer falls shut.
+#[test]
+fn halfway_ties_keep_each_surface_rule() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    settle_sheet(&mut a);
+    assert!(a.sheet_drag_start());
+    assert!(a.sheet_drag_move(140.0, 280.0));
+    assert!(a.sheet_drag_end(0.0));
+    assert_eq!(a.sheet.target, 1.0, "半分で閉じた");
+
+    let mut b = narrow();
+    assert!(b.open_drawer());
+    settle_drawer(&mut b);
+    assert!(b.drawer_close_drag_start());
+    assert!(b.drawer_drag_move(-140.0, 280.0));
+    assert!(b.drawer_drag_end(0.0));
+    assert_eq!(b.chat.drawer.target, 0.0, "半分で開いたまま");
 }
 
 /// A coasting sheet wakes the loop until it lands.
@@ -683,7 +814,7 @@ fn the_trait_path_drives_the_sheet_too() {
 #[test]
 fn dismissing_a_menu_sheet_coasts_out_while_choosing_acts_at_once() {
     let mut a = narrow_menu();
-    assert_eq!(a.sheet_slide, 0.0, "開いた瞬間にいる");
+    assert_eq!(a.sheet.slide, 0.0, "開いた瞬間にいる");
     assert!(a.close_menu());
     assert!(a.floating.is_some(), "閉じ始めに消えた");
     settle_sheet(&mut a);
@@ -843,23 +974,25 @@ fn tapping_outside_the_drawer_dismisses_it() {
 #[test]
 fn pressing_outside_a_field_releases_focus() {
     let mut a = app();
-    a.chat.input_focused = true;
-    a.login_view.field = Some(LoginField::Email);
+    focus_composer(&mut a);
     assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
-    assert!(!a.chat.input_focused, "入力欄に焦点が残っている");
-    assert!(a.login_view.field.is_none(), "ログイン欄に焦点が残っている");
+    assert!(!composer_focused(&a), "入力欄に焦点が残っている");
+
+    focus_login(&mut a, LoginField::Email);
+    assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
+    assert!(a.focus.is_none(), "ログイン欄に焦点が残っている");
 }
 
 /// A message menu must not hide behind the keyboard.
 #[test]
 fn opening_a_message_menu_releases_focus() {
     let mut a = app();
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
     assert!(a.context_menu(std::slice::from_ref(&msg), (10.0, 20.0)));
     assert!(a.floating.is_some(), "メニューが開かなかった");
     assert!(
-        !a.chat.input_focused,
+        !composer_focused(&a),
         "メニューの裏にキーボードが残っている"
     );
 }
@@ -868,32 +1001,32 @@ fn opening_a_message_menu_releases_focus() {
 #[test]
 fn opening_a_field_menu_keeps_focus() {
     let mut a = app();
-    a.chat.input.insert("abc");
+    composer_input(&mut a, "abc");
     let hits = [hit_of(NodeId::ChatInputField, None)];
     assert!(a.context_menu(&hits, (0.0, 0.0)));
     assert!(a.floating.is_some(), "メニューが開かなかった");
-    assert!(a.chat.input_focused, "欄のメニューが欄を失った");
+    assert!(composer_focused(&a), "欄のメニューが欄を失った");
 }
 
 /// One tap outside the menu dismisses both it and the keyboard.
 #[test]
 fn pressing_outside_an_open_menu_releases_focus() {
     let mut a = with_menu();
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     let msg = hit_of(NodeId::ChatMessage, Some(Key::Id(1)));
     assert!(a.pressed(std::slice::from_ref(&msg)));
     settle_sheet(&mut a);
     assert!(a.floating.is_none(), "メニューが閉じていない");
-    assert!(!a.chat.input_focused, "キーボードが閉じていない");
+    assert!(!composer_focused(&a), "キーボードが閉じていない");
 }
 
 /// Opening the drawer drops focus; it holds no text fields.
 #[test]
 fn opening_the_drawer_releases_focus() {
     let mut a = narrow();
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     assert!(a.open_drawer());
-    assert!(!a.chat.input_focused, "棚の裏にキーボードが残っている");
+    assert!(!composer_focused(&a), "棚の裏にキーボードが残っている");
 }
 
 /// Tapping through the drawer drops focus, not just the drawer.
@@ -901,21 +1034,21 @@ fn opening_the_drawer_releases_focus() {
 fn tapping_outside_the_drawer_releases_focus() {
     let mut a = narrow();
     assert!(a.open_drawer());
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     assert!(a.pressed(&[hit_of(NodeId::ChatMessage, Some(Key::Id(1)))]));
     settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "閉じていない");
-    assert!(!a.chat.input_focused, "キーボードが閉じていない");
+    assert!(!composer_focused(&a), "キーボードが閉じていない");
 }
 
 /// Opening settings drops focus; the screen holds no text fields.
 #[test]
 fn opening_settings_releases_focus() {
     let mut a = app();
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     assert!(a.open_settings());
     assert!(a.settings.open, "開かなかった");
-    assert!(!a.chat.input_focused, "設定の裏にキーボードが残っている");
+    assert!(!composer_focused(&a), "設定の裏にキーボードが残っている");
 }
 
 /// Pressing a settings row drops focus too.
@@ -923,9 +1056,9 @@ fn opening_settings_releases_focus() {
 fn pressing_a_settings_row_releases_focus() {
     let mut a = app();
     assert!(a.open_settings());
-    a.chat.input_focused = true;
+    focus_composer(&mut a);
     assert!(press_menu(&mut a, 0));
-    assert!(!a.chat.input_focused, "キーボードが閉じていない");
+    assert!(!composer_focused(&a), "キーボードが閉じていない");
 }
 
 /// Escape closes the drawer and the sheet, after menus and settings.
@@ -993,6 +1126,10 @@ fn members_icon_exists() {
     assert!(
         gumicord_render::icon::lookup(BACK_ICON).is_some(),
         "戻る札の絵がない"
+    );
+    assert!(
+        gumicord_render::icon::lookup(SEND_ICON).is_some(),
+        "送信札の絵がない"
     );
 }
 
@@ -1410,7 +1547,7 @@ mod input_tests {
         let mut a = Gumicord::demo();
         assert!(a.focused_document().is_none());
 
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         assert!(a.focused_document().is_some());
     }
 
@@ -1418,7 +1555,7 @@ mod input_tests {
     #[test]
     fn a_composition_reaches_the_tree() {
         let mut a = Gumicord::demo();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
 
         let doc = a.focused_document().unwrap();
         doc.insert("送信: ");
@@ -1449,7 +1586,7 @@ mod input_tests {
     #[test]
     fn submitting_clears_the_field() {
         let mut a = Gumicord::demo();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         a.focused_document().unwrap().insert("こんにちは");
 
         assert!(a.submit());
@@ -1463,7 +1600,7 @@ mod input_tests {
     #[test]
     fn whitespace_is_not_submitted() {
         let mut a = Gumicord::demo();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         a.focused_document().unwrap().insert("   ");
         assert!(!a.submit());
     }
@@ -1473,9 +1610,9 @@ mod input_tests {
     #[test]
     fn escape_leaves_the_field() {
         let mut a = Gumicord::demo();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         assert!(a.cancel_input());
-        assert!(!a.chat.input_focused);
+        assert!(!composer_focused(&a));
         assert!(!a.cancel_input(), "既に外れていれば何も起きない");
     }
 
@@ -1483,10 +1620,10 @@ mod input_tests {
     #[test]
     fn shift_enter_inserts_a_newline_instead_of_sending() {
         let mut a = Gumicord::demo();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         a.focused_document().unwrap().insert("one");
         assert!(a.shift_enter());
-        assert_eq!(a.chat.input.text(), "one\n");
+        assert_eq!(composer_text(&a), "one\n");
         assert_eq!(a.chat.composing, Composing::New);
     }
 
@@ -1495,17 +1632,58 @@ mod input_tests {
     #[test]
     fn shift_enter_on_a_login_field_is_unhandled() {
         let mut a = Gumicord::demo();
-        a.login_view.field = Some(LoginField::Email);
-        a.chat.input_focused = true;
+        focus_login(&mut a, LoginField::Email);
         assert!(!a.shift_enter());
-        assert!(a.chat.input.text().is_empty());
+        assert!(composer_text(&a).is_empty());
+    }
+
+    /// The send button sends the draft and keeps the keyboard for the
+    /// next message.
+    #[test]
+    fn the_send_button_sends_and_keeps_focus() {
+        let mut a = narrow();
+        composer_input(&mut a, "hi");
+        let send = hit_of(
+            NodeId::PrimitiveButton,
+            Some(Key::Slot(crate::SEND_MESSAGE)),
+        );
+        assert!(a.pressed(std::slice::from_ref(&send)));
+        assert!(composer_text(&a).is_empty(), "送られていない");
+        assert!(composer_focused(&a), "キーボードが落ちた");
+    }
+
+    /// An empty draft sends nothing and reads as dim.
+    #[test]
+    fn the_send_button_dims_while_empty() {
+        let a = narrow();
+        assert!(!a.composer_send_ready(), "空なのに押せる表示");
+
+        let mut b = narrow();
+        composer_input(&mut b, "  ");
+        assert!(!b.composer_send_ready(), "空白なのに押せる表示");
+
+        composer_input(&mut b, "hi");
+        assert!(b.composer_send_ready(), "あるのに押せない表示");
+    }
+
+    /// The send button is mobile-only; desktops keep Enter. Its presence
+    /// is verified on device.
+    #[test]
+    fn the_send_button_is_mobile_only() {
+        let mut found = false;
+        narrow().build_tree(Panes::One).walk(&mut |n, _| {
+            found = found
+                || (n.id == NodeId::PrimitiveButton
+                    && n.key == Some(Key::Slot(crate::SEND_MESSAGE)));
+        });
+        assert!(!found, "机の上に送信札がある");
     }
 
     /// A multiline draft sends whole.
     #[test]
     fn a_multiline_draft_sends_whole() {
         let mut a = Gumicord::demo();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         a.focused_document().unwrap().insert("one\ntwo");
         assert!(a.submit());
         assert!(
@@ -1521,7 +1699,7 @@ mod input_tests {
     fn the_field_grows_with_its_lines() {
         fn height(text: &str) -> f32 {
             let mut a = Gumicord::demo();
-            a.chat.input_focused = true;
+            focus_composer(&mut a);
             a.focused_document().unwrap().insert(text);
             let cx = cx();
             let placed = gumicord_render::layout_for_test(&a.build(&cx), cx.viewport);
@@ -2369,7 +2547,7 @@ mod member_tests {
         let mut a = app(m);
         // The machine may hold a saved theme; spacing comes from the
         // bundled one under test.
-        a.theme = parse_theme_file(DEFAULT_THEME);
+        a.themes.theme = crate::themes::parse_theme_file(crate::themes::DEFAULT_THEME);
         let cx = gumicord_platform::FrameCx {
             viewport: gumicord_render::Size::new(900.0, 800.0),
             scale: 1.0,
@@ -2681,6 +2859,9 @@ mod channel_selection_tests {
     #[test]
     fn a_category_is_never_selected_by_default() {
         let mut a = Gumicord::demo();
+        // Inline lists (desktop width): the first channel stays selected.
+        // Behind the drawer the cleared channel waits for a tap instead.
+        a.match_ctx = MatchContext::new(1280.0);
         a.live
             .store_mut()
             .replace_guilds(vec![guild_with_category()]);
@@ -2690,6 +2871,96 @@ mod channel_selection_tests {
         a.sync_selection();
 
         assert_eq!(a.chat.selected_channel, 11, "カテゴリを開こうとしている");
+    }
+
+    /// Behind the drawer a cleared channel waits for an explicit tap
+    /// instead of jumping into the first chat.
+    #[test]
+    fn a_cleared_channel_waits_behind_the_drawer() {
+        let mut a = Gumicord::demo();
+        a.match_ctx = MatchContext::new(400.0);
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_category()]);
+        a.chat.selected_guild = 1;
+        a.chat.selected_channel = 0;
+
+        a.sync_selection();
+
+        assert_eq!(a.chat.selected_channel, 0, "勝手に開いた");
+    }
+
+    /// One guild with one channel, for drawer navigation.
+    fn guild_with_channel(id: u64, channel: u64) -> Guild {
+        Guild {
+            id: id.into(),
+            name: format!("g{id}"),
+            icon_hash: None,
+            unavailable: false,
+            channels: vec![Channel {
+                id: channel.into(),
+                kind: ChannelKind::GuildText,
+                name: Some("いっぱん".to_owned()),
+                guild_id: Some(id.into()),
+                parent_id: None,
+                position: 0,
+                topic: None,
+                nsfw: false,
+                recipients: Vec::new(),
+                last_message_id: None,
+            }],
+            roles: Vec::new(),
+        }
+    }
+
+    /// Switching guilds in the drawer stays there with no channel picked;
+    /// tapping a channel closes into its chat.
+    #[test]
+    fn switching_guilds_in_the_drawer_waits_for_a_channel_tap() {
+        let mut a = narrow();
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_channel(1, 11), guild_with_channel(2, 21)]);
+        a.chat.selected_guild = 1;
+        a.chat.selected_channel = 11;
+        assert!(a.open_drawer());
+
+        // Switching guilds clears the channel but keeps the drawer open:
+        // no auto-pick throws the user into an unchosen chat.
+        let drawer = hit_of(NodeId::OverlayDrawer, None);
+        let guild = hit_of(NodeId::NavGuildListItem, Some(Key::Id(2)));
+        assert!(a.pressed(&[drawer.clone(), guild]));
+        assert!(a.chat.drawer_open, "棚が閉じた");
+        assert_eq!(a.chat.selected_guild, 2);
+        assert_eq!(a.chat.selected_channel, 0, "勝手に開いた");
+
+        // Tapping a channel closes into its chat.
+        let channel = hit_of(NodeId::NavChannelListItem, Some(Key::Id(21)));
+        assert!(a.pressed(&[drawer, channel]));
+        assert_eq!(a.chat.selected_channel, 21);
+        settle_drawer(&mut a);
+        assert!(!a.chat.drawer_open, "閉じない");
+    }
+
+    /// Drafts follow the channel: switching never clobbers what was typed,
+    /// and sending clears only the current one.
+    #[test]
+    fn drafts_follow_the_channel() {
+        let mut a = narrow();
+        a.chat.selected_channel = 11;
+        composer_input(&mut a, "one");
+
+        a.chat.selected_channel = 21;
+        assert!(composer_text(&a).is_empty());
+        composer_input(&mut a, "two");
+
+        a.chat.selected_channel = 11;
+        assert_eq!(composer_text(&a), "one");
+        assert!(a.submit(), "送れない");
+        assert!(composer_text(&a).is_empty(), "送った欄が残っている");
+
+        a.chat.selected_channel = 21;
+        assert_eq!(composer_text(&a), "two", "他欄の下書きが消えた");
     }
 
     /// Categories still appear; not openable is not the same as not shown.

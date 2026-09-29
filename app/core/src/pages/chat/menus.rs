@@ -1,5 +1,5 @@
 //! Chat menus: field, message, channel, guild and user menus.
-use super::super::login::LoginField;
+use crate::inputs::{composer_addr, empty_doc};
 use gumicord_model::ChannelId;
 use gumicord_platform::TextDocument;
 
@@ -10,12 +10,12 @@ impl crate::Gumicord {
     ///
     /// [`focused_document`]: crate::Application::focused_document
     pub(crate) fn field_doc(&self) -> &TextDocument {
-        match self.login_view.field {
-            Some(LoginField::Email) => &self.login_view.email,
-            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => {
-                &self.login_view.input
+        match &self.focus {
+            Some(a) if *a == composer_addr() => {
+                self.inputs.doc(&self.draft_addr()).unwrap_or(empty_doc())
             }
-            None => &self.chat.input,
+            Some(a) => self.inputs.must(a),
+            None => self.inputs.doc(&self.draft_addr()).unwrap_or(empty_doc()),
         }
     }
 

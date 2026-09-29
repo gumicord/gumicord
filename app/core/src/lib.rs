@@ -35,12 +35,14 @@ pub mod a11y;
 pub mod account;
 pub mod assets;
 pub mod images;
+pub mod inputs;
 pub mod install;
 pub mod live;
 pub mod markdown;
 pub mod menu;
 pub mod pages;
 pub mod session;
+pub mod themes;
 pub mod time;
 
 use std::collections::{HashMap, VecDeque};
@@ -52,39 +54,18 @@ use gumicord_platform::{
 use gumicord_plugin::{ManagerEvent, PluginManager};
 use gumicord_render::Hit;
 
-use gumicord_theme::{MatchContext, Theme};
+use gumicord_theme::MatchContext;
 use gumicord_uitree::value::Color;
 use gumicord_uitree::{Anchor, DataKind, Key, NodeId, State, UiNode};
+use inputs::{InputAddr, InputKind, InputRegistry, composer_addr, composer_doc_addr};
 use live::Live;
 use pages::chat::Composing;
 use pages::chat::{ChannelRow, GuildRow, MessageRow};
-use pages::login::LoginField;
+use pages::login::{LoginField, login_addr, login_box};
 use session::Login;
-
-/// The default theme, embedded rather than loaded: the app has to run even
-/// when no theme file can be read.
-const DEFAULT_THEME: &str = include_str!("../../../examples/themes/midnight/theme.json");
-
-/// Swaps the theme file, for authors and CI. Wins over the saved selection;
-/// the settings screen manages everything else.
-const THEME_ENV: &str = "GUMICORD_THEME";
 
 /// How long a toast stays up, in seconds.
 const TOAST_SECS: i64 = 4;
-
-/// Which surface a closing sheet slide clears when it lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SheetCloser {
-    Member,
-    Menu,
-}
-
-/// How fast a sheet coasts open or shut, in milliseconds. Drawers use
-/// the same pace; surfaces should agree with each other.
-pub(crate) const SHEET_ANIM_MS: f32 = 220.0;
-
-/// Release speed deciding a sheet drag, in px/s. Same threshold as drawers.
-pub(crate) const SHEET_FLING_PX_S: f32 = 200.0;
 
 /// How many toasts stack; older ones drop off unread.
 const TOAST_MAX: usize = 3;
@@ -162,11 +143,15 @@ const MEMBERS_OPEN: &str = "members_open";
 /// Slot for the back button in the chat header; same use. Only built
 /// while the guild list is hidden.
 const BACK_OPEN: &str = "back_open";
+/// Slot for the mobile send button beside the composer; routes to submit.
+const SEND_MESSAGE: &str = "send_message";
 /// The member-list button's icon. Unknown names draw nothing, so the
 /// registry and this string are pinned together by a test below.
 const MEMBERS_ICON: &str = "members";
 /// The back button's icon; same guarantee.
 const BACK_ICON: &str = "back";
+/// The send button's icon; same guarantee.
+const SEND_ICON: &str = "send";
 /// A swipe starting this close to the left edge opens the drawer.
 const DRAWER_EDGE: f32 = 24.0;
 /// The gear's icon. Unknown names draw nothing, so the registry and this
@@ -263,34 +248,17 @@ impl Panes {
 
 /// The app state, and building the UITree from it.
 pub struct Gumicord {
-    theme: Option<Theme>,
-    /// The theme file being watched, if one was configured. The bundled
-    /// theme has no file, so there is nothing to watch for it.
-    theme_path: Option<std::path::PathBuf>,
-    /// Where the current theme came from. Decides which settings row shows
-    /// as active.
-    theme_source: ThemeSource,
-    /// Where installed themes live and the selection is saved. `None`
-    /// means nowhere: the bundled theme, always.
-    themes_dir: Option<std::path::PathBuf>,
-    /// What the watched file looked like when last loaded. Compared every
-    /// frame; the file itself is only read when this moves.
-    theme_mtime: Option<std::time::SystemTime>,
+    /// Which theme is showing: selection, watching, namespace. Owned
+    /// outright by [`themes`](crate::themes).
+    themes: crate::themes::ThemeState,
     /// Background images of the current theme, resolving.
     assets: crate::assets::ThemeAssets,
-    /// Which theme the backgrounds currently drawing belong to. Read by the
-    /// renderer every frame; the app sets it on every theme load.
-    theme_namespace: Option<String>,
     /// Dropping this stops everything running on it.
     runtime: Option<tokio::runtime::Runtime>,
     /// Wakes the event loop; handed to the gateway after login.
     waker: Option<Waker>,
     /// Login progress; decides which screen is shown.
     login: Login,
-    /// The captcha challenge awaiting a solution, kept on the app side so the
-    /// platform's modal can hand back a bare token while the challenge's own
-    /// `rqtoken`/`session_id` are still available to echo on the retry.
-    pending: Option<gumicord_rest::CaptchaChallenge>,
     /// Real data. Whether this is empty is what separates demo from live.
     live: Live,
     /// Scale factor, needed to size CDN requests.
@@ -314,19 +282,10 @@ pub struct Gumicord {
     /// items keep their target while the menu holds no focus (mobile
     /// dismisses the keyboard with the menu open); cleared with the menu.
     menu_field: Option<MenuField>,
-    /// A bottom sheet's slide progress, shared by the member sheet and a
-    /// menu shown as a sheet. Never both at once: opening a menu closes
-    /// the member sheet first. 0 shut, 1 open; dismissals coast like
-    /// drawers, selections vanish at once.
-    sheet_slide: f32,
-    sheet_target: f32,
-    sheet_anim_from: f32,
-    sheet_anim_start: Option<std::time::Instant>,
-    sheet_drag: bool,
-    sheet_drag_from: f32,
-    /// Which surface a closing slide clears on landing. Openings set
-    /// their own flag at once and need none.
-    sheet_closing: Option<SheetCloser>,
+    /// One 0..1 slide channel for bottom sheets, shared by the member sheet
+    /// and a menu shown as a sheet. Owned outright by
+    /// [`pages::overlays`](crate::pages::overlays).
+    sheet: crate::pages::overlays::SlideState,
     /// Transient notices; several share one node and none blocks input.
     toasts: VecDeque<crate::menu::Toast>,
     /// Whether the FPS meter shows. Session-local until settings persist.
@@ -335,6 +294,15 @@ pub struct Gumicord {
     /// platform layer, where the redraws happen; counting builds here reads
     /// idle sleeps as frames and makes a quiet settings screen look slow.
     frame_report: Option<gumicord_platform::FrameReport>,
+    /// Every input document, by address. Screens register their boxes;
+    /// routing looks documents up instead of matching per-screen fields.
+    inputs: InputRegistry,
+    /// Which input box holds focus, if any. One address for every
+    /// screen: login and composer never share it.
+    focus: Option<InputAddr>,
+    /// The message row a finger drives left, if any. At most one: the
+    /// touch layer is single-finger.
+    message_swipe: Option<crate::pages::chat::MessageSwipe>,
     /// The login screens: fields, forms, errors. Owned outright by
     /// [`pages::login`](crate::pages::login).
     login_view: crate::pages::login::LoginView,
@@ -432,7 +400,7 @@ impl Gumicord {
     }
 
     fn with(login: Login, live: Live, plugins: PluginManager) -> Self {
-        Self::with_themes(login, live, plugins, themes_dir())
+        Self::with_themes(login, live, plugins, crate::themes::themes_dir())
     }
 
     fn with_themes(
@@ -457,25 +425,30 @@ impl Gumicord {
         };
 
         let (account_switch_tx, account_switch_rx) = std::sync::mpsc::channel();
-        let (theme, theme_path, theme_source) = match &themes_dir {
-            Some(dir) => initial_theme_in(dir),
-            // Nowhere to install themes; the bundled one it is.
-            None => (parse_theme_file(DEFAULT_THEME), None, ThemeSource::Bundled),
-        };
-        let theme_mtime = theme_path.as_ref().and_then(|p| mtime_of(p));
+
+        // Every builtin box registers once; routing never matches
+        // per-screen fields to find a document.
+        let mut inputs = InputRegistry::new();
+        for field in [
+            LoginField::Email,
+            LoginField::Password,
+            LoginField::Totp,
+            LoginField::Token,
+        ] {
+            let (addr, kind) = login_box(field);
+            inputs.register(addr, kind);
+        }
+        // The composer marker holds focus identity and kind; each
+        // channel's draft lives at its own address (see draft_addr).
+        inputs.register(composer_addr(), InputKind::Text);
+        let themes = crate::themes::ThemeState::initial(themes_dir);
 
         let mut app = Gumicord {
-            theme,
-            theme_path,
-            theme_source,
-            themes_dir,
-            theme_mtime,
+            themes,
             assets: crate::assets::ThemeAssets::new(),
-            theme_namespace: None,
             runtime: None,
             waker: None,
             login,
-            pending: None,
             live,
             scale: 1.0,
             hovered: None,
@@ -484,13 +457,10 @@ impl Gumicord {
             match_ctx: MatchContext::new(0.0),
             floating: None,
             menu_field: None,
-            sheet_slide: 1.0,
-            sheet_target: 1.0,
-            sheet_anim_from: 1.0,
-            sheet_anim_start: None,
-            sheet_drag: false,
-            sheet_drag_from: 1.0,
-            sheet_closing: None,
+            inputs,
+            focus: None,
+            message_swipe: None,
+            sheet: crate::pages::overlays::SlideState::new(),
             toasts: VecDeque::new(),
             show_fps: false,
             frame_report: None,
@@ -509,7 +479,7 @@ impl Gumicord {
             settings: crate::pages::settings::SettingsView::default(),
             blocks_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         };
-        app.refresh_theme_assets();
+        app.themes.refresh_assets(&mut app.assets);
         app
     }
 
@@ -554,235 +524,35 @@ impl Default for Gumicord {
     }
 }
 
-/// Which theme is showing. One at a time: composing themes is M2
-/// (`EXT-019`), so the settings screen picks a single one or the bundled.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ThemeSource {
-    /// The embedded theme.
-    Bundled,
-    /// An installed theme, by manifest id.
-    Saved(String),
-    /// The file the environment pointed at. Not a listed row.
-    EnvFile,
-}
-
-/// An installed theme: one subdirectory of the themes folder holding a
-/// `theme.json`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InstalledTheme {
-    id: String,
-    name: String,
-    version: String,
-    path: std::path::PathBuf,
-}
-
-/// Parses a theme file, warning about rejected rules like startup does. A
-/// rejected rule never rejects the theme, but is never dropped silently.
-fn parse_theme_file(src: &str) -> Option<Theme> {
-    let result = Theme::parse(src);
-    for d in &result.diagnostics {
-        tracing::warn!("theme: {d}");
-    }
-    result.theme
-}
-
-/// Where installed themes live: one subdirectory per theme, each holding a
-/// `theme.json` next to its assets.
-fn themes_dir() -> Option<std::path::PathBuf> {
-    gumicord_platform::app_data_dir().map(|d| d.join("themes"))
-}
-
-/// The saved selection: `{"theme": "<manifest id>"}`. Missing or broken
-/// means the bundled theme.
-fn active_path_in(dir: &std::path::Path) -> std::path::PathBuf {
-    dir.join("active.json")
-}
-
-fn load_active_id_in(dir: &std::path::Path) -> Option<String> {
-    let src = std::fs::read_to_string(active_path_in(dir)).ok()?;
-    serde_json::from_str::<serde_json::Value>(&src)
-        .ok()?
-        .get("theme")?
-        .as_str()
-        .map(str::to_owned)
-}
-
-fn save_active_id_in(dir: &std::path::Path, id: Option<&str>) {
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let Ok(raw) = serde_json::to_string_pretty(&serde_json::json!({ "theme": id })) else {
-        return;
-    };
-    if let Err(e) = std::fs::write(active_path_in(dir), raw) {
-        tracing::warn!(%e, "could not save the theme selection");
-    }
-}
-
-/// Lists installed themes by manifest id. Broken ones are skipped with a
-/// warning: a half-written theme must not hide the working ones.
-fn scan_themes_in(dir: &std::path::Path) -> Vec<InstalledTheme> {
-    let mut dirs: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_dir())
-            .collect(),
-        Err(_) => return Vec::new(),
-    };
-    dirs.sort();
-    let mut out = Vec::new();
-    for dir in dirs {
-        let path = dir.join("theme.json");
-        let Ok(src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(theme) = parse_theme_file(&src) else {
-            tracing::warn!(?path, "skipping a theme that does not parse");
-            continue;
-        };
-        let manifest = &theme.manifest;
-        if out.iter().any(|t: &InstalledTheme| t.id == manifest.id) {
-            tracing::warn!(id = %manifest.id, ?path, "duplicate theme id; keeping the first");
-            continue;
-        }
-        out.push(InstalledTheme {
-            id: manifest.id.clone(),
-            name: manifest.name.clone(),
-            version: manifest.version.clone(),
-            path,
-        });
-    }
-    out
-}
-
-/// The theme to start with: the environment's file, the saved selection,
-/// then the bundled theme. A saved theme that no longer reads falls back
-/// to bundled.
-fn initial_theme_in(
-    dir: &std::path::Path,
-) -> (Option<Theme>, Option<std::path::PathBuf>, ThemeSource) {
-    if let Some(path) = theme_file() {
-        let src = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(?path, %e, "could not read the theme; using the bundled one");
-                DEFAULT_THEME.to_owned()
-            }
-        };
-        return (parse_theme_file(&src), Some(path), ThemeSource::EnvFile);
-    }
-    if let Some(id) = load_active_id_in(dir) {
-        match scan_themes_in(dir).into_iter().find(|t| t.id == id) {
-            Some(t) => match std::fs::read_to_string(&t.path) {
-                Ok(src) => match parse_theme_file(&src) {
-                    Some(theme) => return (Some(theme), Some(t.path), ThemeSource::Saved(id)),
-                    None => {
-                        tracing::warn!(id = %id, "saved theme no longer parses; using the bundled one");
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(id = %id, %e, "saved theme unreadable; using the bundled one");
-                }
-            },
-            None => {
-                tracing::warn!(id = %id, "saved theme not installed; using the bundled one");
-            }
-        }
-    }
-    (parse_theme_file(DEFAULT_THEME), None, ThemeSource::Bundled)
-}
-
-/// The configured theme file, if any. An empty or missing variable both
-/// mean the bundled theme.
-fn theme_file() -> Option<std::path::PathBuf> {
-    std::env::var(THEME_ENV).ok().map(std::path::PathBuf::from)
-}
-
-/// When a file was last written, if that is still known.
-fn mtime_of(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
 impl Gumicord {
-    /// Re-points the background resolver at the current theme.
-    fn refresh_theme_assets(&mut self) {
-        let Some(theme) = &self.theme else {
-            self.theme_namespace = None;
-            self.assets
-                .set_theme(String::new(), None, String::new(), Vec::new(), Vec::new());
-            return;
-        };
-        let dir = self
-            .theme_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(std::path::Path::to_path_buf);
-        let at = self
-            .theme_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "bundled".to_owned());
-        let namespace = format!("{}:{at}", theme.manifest.id);
-        self.theme_namespace = Some(namespace.clone());
-        self.assets.set_theme(
-            namespace,
-            dir,
-            theme.manifest.name.clone(),
-            theme.background_images(),
-            theme.manifest.remote_assets.clone(),
-        );
-    }
-
     /// Re-reads the theme file when it changed. Runs on the frame boundary,
     /// never mid-build. A file that cannot be read or parsed leaves the
     /// last good theme up: editors write broken JSON halfway through a save.
     fn maybe_reload_theme(&mut self) -> bool {
-        let path = match &self.theme_path {
-            Some(path) => path.clone(),
-            None => return false,
-        };
-        if mtime_of(&path) == self.theme_mtime {
-            return false;
-        }
-        if !self.apply_theme_file(&path) {
+        if !self.themes.maybe_reload(&mut self.assets) {
             return false;
         }
         self.notify_toast("テーマを再読み込みしました".to_owned());
-        tracing::info!(?path, "reloaded the theme");
-        true
-    }
-
-    /// Applies a theme file, watching it from now on. A file that cannot
-    /// be read or parsed leaves the current theme up.
-    fn apply_theme_file(&mut self, path: &std::path::Path) -> bool {
-        let Ok(src) = std::fs::read_to_string(path) else {
-            return false;
-        };
-        let Some(theme) = parse_theme_file(&src) else {
-            return false;
-        };
-        self.theme = Some(theme);
-        self.theme_path = Some(path.to_owned());
-        self.theme_mtime = mtime_of(path);
-        self.refresh_theme_assets();
         true
     }
 
     fn select_theme(&mut self, id: String) {
-        self.select_theme_in(id, self.themes_dir.clone());
+        self.select_theme_in(id, self.themes.dir.clone());
     }
 
     /// Applies an installed theme and remembers it. Tests pass their own
     /// folder so the machine's selection stays untouched.
     fn select_theme_in(&mut self, id: String, dir: Option<std::path::PathBuf>) {
+        use crate::themes::{ThemeSource, save_active_id_in};
+
         let Some(t) = self.settings.themes.iter().find(|t| t.id == id).cloned() else {
             return;
         };
-        if !self.apply_theme_file(&t.path) {
+        if !self.themes.apply_file(&mut self.assets, &t.path) {
             self.notify_toast(format!("「{}」は読み込めませんでした", t.name));
             return;
         }
-        self.theme_source = ThemeSource::Saved(id.clone());
+        self.themes.source = ThemeSource::Saved(id.clone());
         if let Some(dir) = &dir {
             save_active_id_in(dir, Some(&id));
         }
@@ -791,15 +561,13 @@ impl Gumicord {
     }
 
     fn use_bundled_theme(&mut self) {
-        self.use_bundled_theme_in(self.themes_dir.clone());
+        self.use_bundled_theme_in(self.themes.dir.clone());
     }
 
     fn use_bundled_theme_in(&mut self, dir: Option<std::path::PathBuf>) {
-        self.theme = parse_theme_file(DEFAULT_THEME);
-        self.theme_path = None;
-        self.theme_mtime = None;
-        self.theme_source = ThemeSource::Bundled;
-        self.refresh_theme_assets();
+        use crate::themes::save_active_id_in;
+
+        self.themes.use_bundled(&mut self.assets);
         if let Some(dir) = &dir {
             save_active_id_in(dir, None);
         }
@@ -871,7 +639,7 @@ impl Gumicord {
             kind,
             filename,
             data,
-            self.themes_dir.clone(),
+            self.themes.dir.clone(),
             gumicord_platform::app_data_dir().map(|d| d.join("plugins")),
         );
     }
@@ -927,9 +695,9 @@ impl Gumicord {
             Some(("overlay.modal", None))
         } else if matches!(self.floating, Some(crate::menu::Floating::Menu(_))) {
             Some(("overlay.menu", None))
-        } else if self.chat.input_focused {
+        } else if self.focus.as_ref() == Some(&composer_addr()) {
             Some(("chat.input.field", None))
-        } else if self.login_view.field.is_some() {
+        } else if self.focus.as_ref().is_some_and(|a| a.is_login()) {
             Some(("app.screen.login.field", None))
         } else if self.chat.drawer_open {
             Some(("overlay.drawer", None))
@@ -956,27 +724,21 @@ impl Gumicord {
     /// this: leaving focus behind keeps the keyboard over whatever opens
     /// next, and on narrow screens the drawer is the only way to move.
     fn release_text_focus(&mut self) -> bool {
-        let mut changed = false;
-        if self.chat.input_focused {
-            self.chat.input_focused = false;
-            changed = true;
+        if self.focus.is_none() {
+            return false;
         }
-        if self.login_view.field.is_some() {
-            self.login_view.field = None;
-            changed = true;
-        }
-        changed
+        self.focus = None;
+        true
     }
 
     /// The document a field menu lists items for: the menu's target
     /// while one opens, else the focused field.
     pub(crate) fn menu_field_doc(&self) -> &TextDocument {
+        use crate::inputs::empty_doc;
+
         match self.menu_field {
-            Some(MenuField::Composer) => &self.chat.input,
-            Some(MenuField::Login(f)) => match f {
-                crate::pages::login::LoginField::Email => &self.login_view.email,
-                _ => &self.login_view.input,
-            },
+            Some(MenuField::Composer) => self.inputs.doc(&self.draft_addr()).unwrap_or(empty_doc()),
+            Some(MenuField::Login(f)) => self.inputs.must(&login_addr(f)),
             None => self.field_doc(),
         }
     }
@@ -985,28 +747,29 @@ impl Gumicord {
     /// while one is open, else the focused field (shortcuts).
     fn menu_doc(&mut self) -> Option<&mut TextDocument> {
         match self.menu_field {
-            Some(MenuField::Composer) => Some(&mut self.chat.input),
-            Some(MenuField::Login(f)) => match f {
-                crate::pages::login::LoginField::Email => Some(&mut self.login_view.email),
-                _ => Some(&mut self.login_view.input),
-            },
+            Some(MenuField::Composer) => {
+                let addr = self.draft_addr();
+                Some(self.inputs.ensure(addr, InputKind::Text))
+            }
+            Some(MenuField::Login(f)) => Some(self.inputs.must_mut(&login_addr(f))),
             None => self.focused_document(),
         }
+    }
+
+    /// The current channel's draft address. Focus holds the generic
+    /// composer marker; documents fan out per channel so switching never
+    /// clobbers what was typed elsewhere.
+    fn draft_addr(&self) -> InputAddr {
+        composer_doc_addr(self.chat.selected_channel)
     }
 
     /// Focuses a menu's target field. Only pasting re-arms typing on
     /// mobile; every other menu action leaves the keyboard down.
     fn focus_menu_field(&mut self, target: MenuField) {
-        match target {
-            MenuField::Composer => {
-                self.chat.input_focused = true;
-                self.login_view.field = None;
-            }
-            MenuField::Login(f) => {
-                self.login_view.field = Some(f);
-                self.chat.input_focused = false;
-            }
-        }
+        self.focus = Some(match target {
+            MenuField::Composer => composer_addr(),
+            MenuField::Login(f) => login_addr(f),
+        });
     }
 
     /// One press against the hit arms. Returns what changed, if anything.
@@ -1071,6 +834,16 @@ impl Gumicord {
                 (NodeId::PrimitiveButton, Some(Key::Slot(BACK_OPEN))) => {
                     changed |= self.open_drawer();
                 }
+                // The mobile send button beside the composer.
+                (NodeId::PrimitiveButton, Some(Key::Slot(SEND_MESSAGE))) => {
+                    changed |= self.submit();
+                    // Sending never ends the typing flow: the keyboard
+                    // stays for the next message.
+                    if self.focus.as_ref() != Some(&composer_addr()) {
+                        self.focus = Some(composer_addr());
+                        changed = true;
+                    }
+                }
                 // A press anywhere else on the message still opens all of it:
                 // a single run is a small target.
                 (NodeId::ChatMessage, Some(Key::Id(id))) => {
@@ -1132,15 +905,18 @@ impl Gumicord {
         // Inside: only hits within a surface act, so a chat row behind the
         // drawer cannot fire through it.
         let inner: Vec<Hit> = hits.iter().filter(|h| inside(&h.rect)).cloned().collect();
-        let (guild, channel, settings_was, floating_was) = (
-            self.chat.selected_guild,
+        let (channel, settings_was, floating_was) = (
             self.chat.selected_channel,
             self.settings.open,
             self.floating.is_some(),
         );
         changed |= self.press_loop(&inner);
-        if self.chat.selected_guild != guild
-            || self.chat.selected_channel != channel
+        // A guild switch clears the channel back to 0; staying in the
+        // drawer lets the user pick the channel instead of landing in a
+        // chat nobody chose. Only a picked channel closes the drawer.
+        let channel_picked =
+            self.chat.selected_channel != channel && self.chat.selected_channel != 0;
+        if channel_picked
             || self.settings.open && !settings_was
             || self.floating.is_some() && !floating_was
         {
@@ -1225,7 +1001,7 @@ impl Application for Gumicord {
     }
 
     fn theme_namespace(&self) -> Option<&str> {
-        self.theme_namespace.as_deref()
+        self.themes.namespace()
     }
 
     /// A list scrolled; fetches more when it nears an end.
@@ -1288,11 +1064,7 @@ impl Application for Gumicord {
             .map(|s| std::time::Duration::from_secs(s.max(1) as u64));
         // A coasting drawer wakes the loop at display rate until it lands.
         // Sheets coast the same way.
-        if (self.chat.drawer_open
-            && !self.chat.drawer_drag
-            && (self.chat.drawer_slide - self.chat.drawer_target).abs() >= 0.001)
-            || (!self.sheet_drag && (self.sheet_slide - self.sheet_target).abs() >= 0.001)
-        {
+        if (self.chat.drawer_open && self.chat.drawer.coasting()) || self.sheet.coasting() {
             let tick = std::time::Duration::from_millis(16);
             return Some(match base {
                 Some(d) => d.min(tick),
@@ -1354,7 +1126,7 @@ impl Application for Gumicord {
     }
 
     fn drawer_slide(&self) -> f32 {
-        self.chat.drawer_slide
+        self.chat.drawer.slide
     }
 
     // The sheet slide, exposed the same way.
@@ -1375,7 +1147,26 @@ impl Application for Gumicord {
     }
 
     fn sheet_slide(&self) -> f32 {
-        self.sheet_slide
+        self.sheet.slide
+    }
+
+    // One driven message row, exposed the same way. The same-named
+    // inherent methods own the logic; inherent resolution picks those,
+    // so these delegate without recursing.
+    fn message_swipe_move(&mut self, id: u64, dx: f32) -> bool {
+        self.message_swipe_move(id, dx)
+    }
+
+    fn message_swipe_end(&mut self, id: u64, now: std::time::Instant) -> bool {
+        self.message_swipe_end(id, now)
+    }
+
+    fn poll_message_swipe(&mut self, now: std::time::Instant) -> bool {
+        self.poll_message_swipe(now)
+    }
+
+    fn message_swipe_offset(&self) -> Option<(u64, f32)> {
+        self.message_swipe_offset()
     }
 
     /// Drains background events. The only entry point for them.
@@ -1385,16 +1176,20 @@ impl Application for Gumicord {
         let mut changed = self.login.poll();
         // Arriving on the TOTP step focuses its field: the code goes
         // straight in with no extra tap. Only the transition: later wakes
-        // must not steal focus back after an outside press.
+        // must not steal focus back after an outside press. The code box
+        // starts empty; the password lives at its own address.
         if !was_totp && matches!(self.login.session(), crate::session::Session::PasswordTotp) {
-            self.login_view.field = Some(LoginField::Totp);
-            self.chat.input_focused = false;
+            self.inputs.must_mut(&login_addr(LoginField::Totp)).take();
+            self.focus = Some(login_addr(LoginField::Totp));
             changed = true;
         }
         // Signed in: the secret has done its job, and memory should not
-        // keep what the screen already hides.
+        // keep what the screen already hides. The email stays for the
+        // next attempt.
         if !was_logged_in && self.login.session().logged_in().is_some() {
-            self.login_view.input.take();
+            for field in [LoginField::Password, LoginField::Totp, LoginField::Token] {
+                self.inputs.must_mut(&login_addr(field)).take();
+            }
             changed = true;
         }
         if let Some(msg) = self.login.take_last_error() {
@@ -1452,8 +1247,12 @@ impl Application for Gumicord {
                     self.images.forget_everything();
                     self.floating = None;
                     self.chat.composing = Composing::New;
-                    self.chat.input.take();
-                    self.chat.input_focused = false;
+                    if let Some(doc) = self.inputs.doc_mut(&self.draft_addr()) {
+                        doc.take();
+                    }
+                    if self.focus.as_ref() == Some(&composer_addr()) {
+                        self.focus = None;
+                    }
                     self.chat.reveals = crate::markdown::Reveals::default();
                     self.login.set_logged_in(logged_in);
                 }
@@ -1597,39 +1396,25 @@ impl Application for Gumicord {
 
         let mut changed = false;
 
-        // Pressing outside the composer removes focus.
-        let on_input = hits.iter().any(|h| h.id == NodeId::ChatInputField);
-        if on_input != self.chat.input_focused {
-            self.chat.input_focused = on_input;
-            changed = true;
-        }
-
-        // A login-form field takes focus; the composer and the login form
-        // never share it.
-        if let Some(field) = hits.iter().find_map(|h| match (h.id, &h.key) {
+        // A press focuses the box it lands in, if any; anywhere else
+        // releases, or the keyboard stays up on phones with no other way
+        // to dismiss it. One address holds every screen's focus: login
+        // and composer never share the screen.
+        let boxed = hits.iter().find_map(|h| match (h.id, &h.key) {
+            (NodeId::ChatInputField, _) => Some(composer_addr()),
             (
                 NodeId::AppScreenLoginField,
                 Some(Key::Slot(s @ ("email" | "password" | "totp" | "token"))),
-            ) => Some(match *s {
+            ) => Some(login_addr(match *s {
                 "email" => LoginField::Email,
                 "password" => LoginField::Password,
                 "token" => LoginField::Token,
                 _ => LoginField::Totp,
-            }),
+            })),
             _ => None,
-        }) && (self.login_view.field != Some(field) || self.chat.input_focused)
-        {
-            self.login_view.field = Some(field);
-            self.chat.input_focused = false;
-            changed = true;
-        }
-
-        // A press outside every field releases focus; otherwise the keyboard
-        // stays up on phones with no other way to dismiss it.
-        if self.login_view.field.is_some()
-            && !hits.iter().any(|h| h.id == NodeId::AppScreenLoginField)
-        {
-            self.login_view.field = None;
+        });
+        if boxed != self.focus {
+            self.focus = boxed;
             changed = true;
         }
 
@@ -1719,9 +1504,7 @@ impl Application for Gumicord {
                     (NodeId::ChatMessage, Some(Key::Id(id))) => Some(*id),
                     _ => None,
                 }) {
-                    self.chat.composing = Composing::Reply(id);
-                    self.chat.input_focused = true;
-                    self.chat.a11y_message = Some(id);
+                    self.start_reply(id);
                     return true;
                 }
                 // Anywhere else closes the drawer.
@@ -1760,8 +1543,7 @@ impl Application for Gumicord {
                 if is_mobile() {
                     self.release_text_focus();
                 } else {
-                    self.chat.input_focused = true;
-                    self.login_view.field = None;
+                    self.focus = Some(composer_addr());
                 }
                 Some(self.field_menu())
             }
@@ -1780,8 +1562,7 @@ impl Application for Gumicord {
                 if is_mobile() {
                     self.release_text_focus();
                 } else {
-                    self.login_view.field = Some(field);
-                    self.chat.input_focused = false;
+                    self.focus = Some(login_addr(field));
                 }
                 Some(self.field_menu())
             }
@@ -1807,15 +1588,14 @@ impl Application for Gumicord {
         self.release_text_focus()
     }
 
-    /// Only a focused field receives input: a login-form field, or the
-    /// composer. Never more than one holds focus at once.
+    /// Only a focused box receives input, wherever it lives. At most one
+    /// address holds focus at once.
     fn focused_document(&mut self) -> Option<&mut TextDocument> {
-        match self.login_view.field {
-            Some(LoginField::Email) => Some(&mut self.login_view.email),
-            Some(LoginField::Password | LoginField::Totp | LoginField::Token) => {
-                Some(&mut self.login_view.input)
-            }
-            None => self.chat.input_focused.then_some(&mut self.chat.input),
+        let addr = self.focus.clone()?;
+        if addr == composer_addr() {
+            Some(self.inputs.ensure(self.draft_addr(), InputKind::Text))
+        } else {
+            self.inputs.doc_mut(&addr)
         }
     }
 
@@ -1824,7 +1604,11 @@ impl Application for Gumicord {
     fn insert_text(&mut self, text: &str) -> bool {
         use crate::pages::login::{TOTP_LEN, normalize_totp, totp_digit};
 
-        if !matches!(self.login_view.field, Some(LoginField::Totp)) {
+        let code = self
+            .focus
+            .as_ref()
+            .is_some_and(|a| self.inputs.kind(a) == Some(InputKind::Code));
+        if !code {
             return match self.focused_document() {
                 Some(doc) => {
                     doc.insert(text);
@@ -1854,39 +1638,30 @@ impl Application for Gumicord {
         true
     }
 
-    /// What the focused field wants from the soft keyboard (mobile only).
+    /// What the focused box wants from the soft keyboard (mobile only).
+    /// Login boxes are single-line; the composer is multiline.
     fn ime_field(&self) -> Option<gumicord_platform::ImeField> {
         use gumicord_platform::{ImeField, ImeKind};
-        match self.login_view.field {
-            Some(LoginField::Email) => Some(ImeField {
-                kind: ImeKind::Email,
-                multiline: false,
-            }),
-            Some(LoginField::Password) => Some(ImeField {
-                kind: ImeKind::Password,
-                multiline: false,
-            }),
-            Some(LoginField::Totp) => Some(ImeField {
-                kind: ImeKind::Number,
-                multiline: false,
-            }),
-            Some(LoginField::Token) => Some(ImeField {
-                kind: ImeKind::Text,
-                multiline: false,
-            }),
-            None => self.chat.input_focused.then_some(ImeField {
-                kind: ImeKind::Text,
-                multiline: true,
-            }),
-        }
+        let focus = self.focus.as_ref()?;
+        let kind = match self.inputs.kind(focus) {
+            Some(InputKind::Email) => ImeKind::Email,
+            Some(InputKind::Password) => ImeKind::Password,
+            Some(InputKind::Code) => ImeKind::Number,
+            Some(InputKind::Text) => ImeKind::Text,
+            None => return None,
+        };
+        Some(ImeField {
+            kind,
+            multiline: *focus == composer_addr(),
+        })
     }
 
     /// Email and password mirror into native fields on iOS so the password
     /// manager fills both at once. Read on every platform; only iOS acts.
     fn ime_proxy(&self) -> Option<gumicord_platform::ImeProxy> {
-        match self.login_view.field {
-            Some(LoginField::Email) => Some(gumicord_platform::ImeProxy::Username),
-            Some(LoginField::Password) => Some(gumicord_platform::ImeProxy::Password),
+        match self.focus.as_ref().and_then(|a| self.inputs.kind(a)) {
+            Some(InputKind::Email) => Some(gumicord_platform::ImeProxy::Username),
+            Some(InputKind::Password) => Some(gumicord_platform::ImeProxy::Password),
             _ => None,
         }
     }
@@ -1894,10 +1669,11 @@ impl Application for Gumicord {
     /// Writes polled native text into the named login field, wherever focus
     /// currently sits: a paired fill lands in both fields at once.
     fn proxy_text(&mut self, field: gumicord_platform::ImeProxy, text: String) -> bool {
-        let doc = match field {
-            gumicord_platform::ImeProxy::Username => &mut self.login_view.email,
-            gumicord_platform::ImeProxy::Password => &mut self.login_view.input,
+        let addr = match field {
+            gumicord_platform::ImeProxy::Username => login_addr(LoginField::Email),
+            gumicord_platform::ImeProxy::Password => login_addr(LoginField::Password),
         };
+        let doc = self.inputs.must_mut(&addr);
         if doc.text() == text {
             return false;
         }
@@ -1909,9 +1685,10 @@ impl Application for Gumicord {
     /// The IME committed a newline in a single-line field (mobile only):
     /// advance through the login form, or submit.
     fn ime_newline(&mut self) -> bool {
-        match self.login_view.field {
-            Some(LoginField::Email) => self.focus_neighbor(true),
-            _ => self.submit(),
+        if self.focus.as_ref() == Some(&login_addr(LoginField::Email)) {
+            self.focus_neighbor(true)
+        } else {
+            self.submit()
         }
     }
 
@@ -1919,10 +1696,11 @@ impl Application for Gumicord {
     /// Login fields stay single-line and report unhandled, so the caller
     /// falls through to submitting.
     fn shift_enter(&mut self) -> bool {
-        if self.login_view.field.is_some() || !self.chat.input_focused {
+        if self.focus.as_ref() != Some(&composer_addr()) {
             return false;
         }
-        self.chat.input.insert("\n");
+        let addr = self.draft_addr();
+        self.inputs.ensure(addr, InputKind::Text).insert("\n");
         true
     }
 
@@ -1933,20 +1711,30 @@ impl Application for Gumicord {
     /// password screen, or the TOTP code. Enter means the same thing in both
     /// places.
     fn submit(&mut self) -> bool {
-        if self.login_view.field.is_some() {
+        if self.focus.as_ref().is_some_and(|a| a.is_login()) {
             return self.submit_login();
         }
 
-        let body = self.chat.input.text().trim().to_owned();
+        // No channel chosen (drawer UI after a guild switch): nowhere to
+        // send. The draft stays for after the pick; without live data the
+        // draft still clears below, like today.
+        if self.chat.selected_channel == 0 && self.uses_live() {
+            return false;
+        }
+        // Emptying an edit is not a delete; Discord rejects it too. Clearing
+        // the field and pressing enter must not destroy the message.
+        let body = {
+            let doc = self.inputs.ensure(self.draft_addr(), InputKind::Text);
+            let body = doc.text().trim().to_owned();
+            if body.is_empty() {
+                return false;
+            }
+            doc.take();
+            body
+        };
         let mode = self.chat.composing;
         let reply_mention = self.chat.reply_mention;
 
-        // Emptying an edit is not a delete; Discord rejects it too. Clearing
-        // the field and pressing enter must not destroy the message.
-        if body.is_empty() {
-            return false;
-        }
-        self.chat.input.take();
         self.chat.composing = Composing::New;
 
         if self.uses_live() {
@@ -1986,8 +1774,8 @@ impl Application for Gumicord {
         if self.close_member_sheet() {
             return true;
         }
-        // Escape on a login field abandons the whole password login.
-        if self.login_view.field.is_some() {
+        // Escape on a login box abandons the whole password login.
+        if self.focus.as_ref().is_some_and(|a| a.is_login()) {
             self.leave_login_form();
             return true;
         }
@@ -1996,10 +1784,10 @@ impl Application for Gumicord {
         if self.stop_composing() {
             return true;
         }
-        if !self.chat.input_focused {
+        if self.focus.as_ref() != Some(&composer_addr()) {
             return false;
         }
-        self.chat.input_focused = false;
+        self.focus = None;
         true
     }
 
@@ -2026,8 +1814,10 @@ impl Application for Gumicord {
         if len == SEQUENCE.len() {
             self.login_view.hidden_code.clear();
             self.login.start_token();
+            // A fresh token box; the password lives at its own address.
+            self.inputs.must_mut(&login_addr(LoginField::Token)).take();
             self.login_view.form = Some(LoginField::Token);
-            self.login_view.field = Some(LoginField::Token);
+            self.focus = Some(login_addr(LoginField::Token));
         }
         true
     }
@@ -2042,7 +1832,7 @@ impl Application for Gumicord {
         let single_line = match self.menu_field {
             Some(MenuField::Login(_)) => true,
             Some(MenuField::Composer) => false,
-            None => self.login_view.field.is_some(),
+            None => self.focus.as_ref().is_some_and(|a| a.is_login()),
         };
         let Some(doc) = self.menu_doc() else {
             return false;
@@ -2097,13 +1887,13 @@ impl Application for Gumicord {
         };
         // Remember the challenge for the retry: the token comes back alone, but
         // `rqtoken` and `session_id` must be echoed alongside it.
-        self.pending = Some(pending);
+        self.login_view.pending = Some(pending);
         Some(platform)
     }
 
     /// The modal produced a token; retry the challenged login with it.
     fn captcha_solved(&mut self, solved: gumicord_platform::SolvedCaptcha) {
-        let Some(pending) = self.pending.take() else {
+        let Some(pending) = self.login_view.pending.take() else {
             tracing::error!("a captcha was solved but no challenge is pending");
             return;
         };
@@ -2116,11 +1906,12 @@ impl Application for Gumicord {
 
     /// The modal was cancelled; abandon the password login and go back.
     fn captcha_cancelled(&mut self) {
-        self.pending = None;
+        self.login_view.pending = None;
         self.login.cancel_password();
-        self.login_view.field = None;
-        self.chat.input_focused = false;
-        self.login_view.input.take();
+        self.focus = None;
+        self.inputs
+            .must_mut(&login_addr(LoginField::Password))
+            .take();
     }
 
     /// Pipeline stages [3] through [5]. The plugin pass runs between them.
@@ -2157,7 +1948,7 @@ impl Application for Gumicord {
         let mut tree = self.apply_plugins(tree);
 
         // [5] resolve the theme
-        match &self.theme {
+        match &self.themes.theme {
             Some(theme) => {
                 gumicord_theme::resolve(theme, &mut tree, &ctx);
             }
@@ -2190,7 +1981,11 @@ fn write_startup_diag(app: &Gumicord, tree: &UiNode, cx: &FrameCx, panes: Panes)
             cx.viewport.w,
             cx.viewport.h,
             cx.scale,
-            if app.theme.is_some() { "yes" } else { "none" },
+            if app.themes.theme.is_some() {
+                "yes"
+            } else {
+                "none"
+            },
             tree.count(),
         ),
     );
@@ -2470,18 +2265,14 @@ impl Gumicord {
             return self.close_menu();
         }
         self.chat.member_sheet_open = false;
-        self.sheet_closing = None;
-        self.sheet_drag = false;
+        self.sheet.clear_close();
         self.floating = Some(crate::menu::Floating::Menu(crate::menu::Menu { at, items }));
         if self.panes().present() == crate::menu::Present::Sheet {
             // Rise from the bottom rather than appearing.
-            self.sheet_slide = 0.0;
-            self.sheet_target = 1.0;
-            self.sheet_anim_from = 0.0;
-            self.sheet_anim_start = Some(std::time::Instant::now());
+            self.sheet.rise();
         } else {
             // No sheet on screen: park the channel so nothing wakes.
-            self.sheet_slide = self.sheet_target;
+            self.sheet.park();
         }
         true
     }
@@ -2500,11 +2291,8 @@ impl Gumicord {
         if self.floating.is_none() {
             return false;
         }
-        self.sheet_target = 0.0;
-        self.sheet_anim_from = self.sheet_slide;
-        self.sheet_anim_start = Some(std::time::Instant::now());
-        self.sheet_drag = false;
-        self.sheet_closing = Some(SheetCloser::Menu);
+        self.sheet
+            .start_close(crate::pages::overlays::SheetCloser::Menu);
         true
     }
 
@@ -2661,7 +2449,7 @@ impl Gumicord {
                 // Keeps the draft: the expectation is that it gains a
                 // recipient.
                 self.chat.composing = Composing::Reply(*id);
-                self.chat.input_focused = true;
+                self.focus = Some(composer_addr());
             }
             crate::menu::Action::Edit(id) => {
                 // The raw body; the parsed one would silently drop the
@@ -2669,10 +2457,11 @@ impl Gumicord {
                 let Some(text) = self.raw_body(*id) else {
                     return true;
                 };
-                self.chat.input.take();
-                self.chat.input.insert(&text);
+                let doc = self.inputs.ensure(self.draft_addr(), InputKind::Text);
+                doc.take();
+                doc.insert(&text);
                 self.chat.composing = Composing::Edit(*id);
-                self.chat.input_focused = true;
+                self.focus = Some(composer_addr());
             }
             crate::menu::Action::Delete(id) => {
                 // Only reached after the dialog confirmed.
@@ -2684,7 +2473,7 @@ impl Gumicord {
                 // Deleting what is being edited also cancels the edit.
                 if self.chat.composing.target() == Some(*id) {
                     self.chat.composing = Composing::New;
-                    self.chat.input.take();
+                    self.inputs.must_mut(&composer_addr()).take();
                 }
             }
             crate::menu::Action::SwitchAccount(key) => {
@@ -2869,8 +2658,12 @@ impl Gumicord {
         self.login_view.field_errors.clear();
         self.floating = None;
         self.chat.composing = Composing::New;
-        self.chat.input.take();
-        self.chat.input_focused = false;
+        if let Some(doc) = self.inputs.doc_mut(&self.draft_addr()) {
+            doc.take();
+        }
+        if self.focus.as_ref() == Some(&composer_addr()) {
+            self.focus = None;
+        }
         self.chat.reveals = crate::markdown::Reveals::default();
         true
     }
@@ -2908,13 +2701,11 @@ impl Gumicord {
         self.close_drawer();
         self.close_member_sheet();
         self.chat.composing = Composing::New;
-        self.chat.input.take();
-        self.chat.input_focused = false;
-        self.login_view.field = None;
+        self.focus = None;
+        self.message_swipe = None;
         // Secrets must not survive the account: the next person on this
         // machine starts from empty fields.
-        self.login_view.email.take();
-        self.login_view.input.take();
+        self.inputs.clear();
         self.chat.reveals = crate::markdown::Reveals::default();
         true
     }
@@ -3411,7 +3202,7 @@ impl Gumicord {
     /// The body, from blocks `message_rows` already parsed and cached.
     fn content_of(&self, m: &MessageRow) -> UiNode {
         let ink = crate::markdown::Ink::new(
-            self.theme.as_ref(),
+            self.themes.theme.as_ref(),
             self.match_ctx,
             &self.chat.reveals,
             m.id,
@@ -3533,7 +3324,12 @@ impl Gumicord {
         }
 
         let channels = self.openable_rows();
-        if !channels.iter().any(|c| c.id == self.chat.selected_channel)
+        // Behind the drawer (no guild pane) a cleared channel waits for an
+        // explicit tap instead of jumping into the first chat. Anywhere
+        // else the first channel stays selected, like before.
+        let await_pick = self.chat.selected_channel == 0 && !self.panes().guilds();
+        if !await_pick
+            && !channels.iter().any(|c| c.id == self.chat.selected_channel)
             && let Some(first) = channels.first()
         {
             self.chat.selected_channel = first.id;
@@ -4048,6 +3844,7 @@ mod plugin_tests {
 #[cfg(test)]
 mod theme_hot_reload_tests {
     use super::*;
+    use crate::themes::DEFAULT_THEME;
 
     fn theme_file(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("gumicord-theme-reload-{tag}"));
@@ -4058,8 +3855,8 @@ mod theme_hot_reload_tests {
 
     fn watching(path: std::path::PathBuf) -> Gumicord {
         let mut a = Gumicord::demo();
-        a.theme_path = Some(path);
-        a.theme_mtime = None;
+        a.themes.path = Some(path);
+        a.themes.mtime = None;
         a
     }
 
@@ -4070,7 +3867,7 @@ mod theme_hot_reload_tests {
         let mut a = watching(path);
 
         assert!(a.maybe_reload_theme());
-        assert!(a.theme.is_some());
+        assert!(a.themes.theme.is_some());
         assert!(!a.maybe_reload_theme(), "same file, no change");
     }
 
@@ -4081,16 +3878,19 @@ mod theme_hot_reload_tests {
         let mut a = watching(path);
         assert!(a.maybe_reload_theme());
 
-        std::fs::write(a.theme_path.as_ref().unwrap(), "{broken").unwrap();
-        a.theme_mtime = None;
+        std::fs::write(a.themes.path.as_ref().unwrap(), "{broken").unwrap();
+        a.themes.mtime = None;
         assert!(!a.maybe_reload_theme());
-        assert!(a.theme.is_some(), "the broken edit took the theme down");
+        assert!(
+            a.themes.theme.is_some(),
+            "the broken edit took the theme down"
+        );
     }
 
     #[test]
     fn without_a_theme_file_there_is_nothing_to_watch() {
         let mut a = Gumicord::demo();
-        a.theme_path = None;
+        a.themes.path = None;
         assert!(!a.maybe_reload_theme());
     }
 }

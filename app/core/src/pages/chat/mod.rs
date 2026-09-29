@@ -4,7 +4,9 @@
 //! the built subtree.
 
 use gumicord_model::ChannelId;
-use gumicord_platform::TextDocument;
+
+use super::overlays::{SheetCloser, SlideState};
+use crate::inputs::composer_addr;
 
 pub mod composer;
 pub mod lists;
@@ -121,10 +123,6 @@ pub(crate) struct ChatView {
     /// Whether a reply mentions its target. Discord's default is on.
     pub(crate) reply_mention: bool,
     pub(crate) selected_channel: u64,
-    /// Whether the composer has focus.
-    pub(crate) input_focused: bool,
-    /// The composer's contents.
-    pub(crate) input: TextDocument,
     /// A jump waiting for the next frame: the renderer knows where the
     /// message landed last frame, this layer only knows it was pressed.
     pub(crate) pending_reveal: Option<u64>,
@@ -139,21 +137,8 @@ pub(crate) struct ChatView {
     pub(crate) member_sheet_open: bool,
     /// The drawer's slide progress, 0 (shut) to 1 (open). The flag above
     /// owns the tree; this owns where it stands while opening, closing,
-    /// or following the finger.
-    pub(crate) drawer_slide: f32,
-    /// Where the slide is going. The flag flips only when a closing slide
-    /// lands, so the drawer coasts out instead of vanishing.
-    pub(crate) drawer_target: f32,
-    /// The progress an animation started from; a reversal continues from
-    /// what is on screen instead of jumping.
-    pub(crate) drawer_anim_from: f32,
-    /// When the current animation started. `None` while the finger drives.
-    pub(crate) drawer_anim_start: Option<std::time::Instant>,
-    /// Whether the finger drives the slide; time animation stays off.
-    pub(crate) drawer_drag: bool,
-    /// The progress a drag started from: shut for an opening drag, what is
-    /// on screen for a closing one.
-    pub(crate) drawer_drag_from: f32,
+    /// or following the finger. Same channel physics as the bottom sheet.
+    pub(crate) drawer: SlideState,
 }
 
 impl ChatView {
@@ -164,34 +149,14 @@ impl ChatView {
             composing: Composing::New,
             reply_mention: true,
             selected_channel: channel,
-            input_focused: false,
-            input: TextDocument::new(),
             pending_reveal: None,
             pending_jump: None,
             a11y_message: None,
             drawer_open: false,
             member_sheet_open: false,
-            drawer_slide: 1.0,
-            drawer_target: 1.0,
-            drawer_anim_from: 1.0,
-            drawer_anim_start: None,
-            drawer_drag: false,
-            drawer_drag_from: 0.0,
+            drawer: SlideState::new(),
         }
     }
-}
-
-/// How long the drawer takes to coast open or shut, in milliseconds.
-pub(crate) const DRAWER_ANIM_MS: f32 = 220.0;
-
-/// A sideways release fast enough to decide the drawer on its own.
-pub(crate) const DRAWER_FLING_PX_S: f32 = 200.0;
-
-/// Fast out, quiet in. Mirrors the renderer's motion curve, which lives
-/// in another crate; duplicating three lines beats coupling to it.
-fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t;
-    1.0 - inv * inv * inv
 }
 
 impl crate::Gumicord {
@@ -201,11 +166,8 @@ impl crate::Gumicord {
     pub(crate) fn open_drawer(&mut self) -> bool {
         if self.chat.drawer_open {
             // Reopening mid-close: swing back instead of refusing.
-            if self.chat.drawer_target == 0.0 {
-                self.chat.drawer_target = 1.0;
-                self.chat.drawer_anim_from = self.chat.drawer_slide;
-                self.chat.drawer_anim_start = Some(std::time::Instant::now());
-                self.chat.drawer_drag = false;
+            if self.chat.drawer.target == 0.0 {
+                self.chat.drawer.retarget(1.0);
                 return true;
             }
             return false;
@@ -218,11 +180,7 @@ impl crate::Gumicord {
         self.release_text_focus();
         self.chat.drawer_open = true;
         self.chat.member_sheet_open = false;
-        self.chat.drawer_slide = 0.0;
-        self.chat.drawer_target = 1.0;
-        self.chat.drawer_anim_from = 0.0;
-        self.chat.drawer_anim_start = Some(std::time::Instant::now());
-        self.chat.drawer_drag = false;
+        self.chat.drawer.rise();
         true
     }
 
@@ -232,10 +190,7 @@ impl crate::Gumicord {
         }
         // Slide out; the flag flips when the slide lands (see build()),
         // so the drawer coasts instead of vanishing.
-        self.chat.drawer_target = 0.0;
-        self.chat.drawer_anim_from = self.chat.drawer_slide;
-        self.chat.drawer_anim_start = Some(std::time::Instant::now());
-        self.chat.drawer_drag = false;
+        self.chat.drawer.retarget(0.0);
         true
     }
 
@@ -243,33 +198,18 @@ impl crate::Gumicord {
     /// still moving. A landed closing slide flips the flag, which is what
     /// finally removes the drawer from the tree.
     pub(crate) fn advance_drawer(&mut self, now: std::time::Instant) -> bool {
-        if !self.chat.drawer_open || self.chat.drawer_drag {
+        if !self.chat.drawer_open {
             return false;
         }
-        let target = self.chat.drawer_target;
-        if (self.chat.drawer_slide - target).abs() < 0.001 {
-            self.chat.drawer_slide = target;
-            if target == 0.0 {
-                self.chat.drawer_open = false;
-            }
-            return false;
+        let moving = self.chat.drawer.advance(now);
+        if !moving
+            && !self.chat.drawer.drag
+            && self.chat.drawer.slide == 0.0
+            && self.chat.drawer.target == 0.0
+        {
+            self.chat.drawer_open = false;
         }
-        let Some(start) = self.chat.drawer_anim_start else {
-            self.chat.drawer_slide = target;
-            return false;
-        };
-        let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / DRAWER_ANIM_MS)
-            .clamp(0.0, 1.0);
-        self.chat.drawer_slide =
-            self.chat.drawer_anim_from + (target - self.chat.drawer_anim_from) * ease_out_cubic(t);
-        if t >= 1.0 {
-            self.chat.drawer_slide = target;
-            if target == 0.0 {
-                self.chat.drawer_open = false;
-            }
-            return false;
-        }
-        true
+        moving
     }
 
     /// Whether a touch at x could start a drawer drag: narrow, closed,
@@ -290,11 +230,8 @@ impl crate::Gumicord {
         self.release_text_focus();
         self.chat.drawer_open = true;
         self.chat.member_sheet_open = false;
-        self.chat.drawer_slide = 0.0;
-        self.chat.drawer_target = 1.0;
-        self.chat.drawer_drag = true;
-        self.chat.drawer_drag_from = 0.0;
-        self.chat.drawer_anim_start = None;
+        self.chat.drawer.rise();
+        self.chat.drawer.drag_start();
         true
     }
 
@@ -304,9 +241,7 @@ impl crate::Gumicord {
         if !self.chat.drawer_open || self.panes().guilds() || !self.shows_main() {
             return false;
         }
-        self.chat.drawer_drag = true;
-        self.chat.drawer_drag_from = self.chat.drawer_slide;
-        self.chat.drawer_anim_start = None;
+        self.chat.drawer.drag_start();
         true
     }
 
@@ -317,38 +252,92 @@ impl crate::Gumicord {
     }
 
     /// Follows the finger: progress is the drag distance from the start
-    /// over the drawer width, falling from where the drag began. A stale
+    /// over the drawer width, rising from where the drag began. A stale
     /// width still opens; only the mapping stretches.
     pub(crate) fn drawer_drag_move(&mut self, dx: f32, width: f32) -> bool {
-        if !self.chat.drawer_drag {
-            return false;
-        }
-        let w = if width > 0.0 { width } else { 300.0 };
-        let next = (self.chat.drawer_drag_from + dx / w).clamp(0.0, 1.0);
-        if (next - self.chat.drawer_slide).abs() < 0.0005 {
-            return false;
-        }
-        self.chat.drawer_slide = next;
-        true
+        // Right-positive motion opens the drawer: opening-positive.
+        self.chat.drawer.drag_move(dx, width)
     }
 
     /// Lets go: a fast flick right finishes opening, a fast flick left
     /// falls back, and a slow release follows whichever half it is on.
     pub(crate) fn drawer_drag_end(&mut self, velocity: f32) -> bool {
-        if !self.chat.drawer_drag {
+        // The drawer opens to the right; it has no closer to land.
+        self.chat.drawer.drag_end(velocity, false, None)
+    }
+
+    /// A message swiped left starts a reply, like the menu does.
+    pub(crate) fn start_reply(&mut self, id: u64) {
+        self.chat.composing = Composing::Reply(id);
+        self.focus = Some(composer_addr());
+        self.chat.a11y_message = Some(id);
+    }
+
+    /// Drives one message row left with the finger. Gestures for anything
+    /// but the chat never reach here; overlays own their touches while
+    /// open. Only the matching row moves; anything else is ignored.
+    pub(crate) fn message_swipe_move(&mut self, id: u64, dx: f32) -> bool {
+        if self.chat.drawer_open
+            || self.chat.member_sheet_open
+            || self.floating.is_some()
+            || self.settings.open
+        {
             return false;
         }
-        self.chat.drawer_drag = false;
-        self.chat.drawer_target = if velocity > DRAWER_FLING_PX_S
-            || (velocity >= -DRAWER_FLING_PX_S && self.chat.drawer_slide > 0.5)
-        {
-            1.0
-        } else {
-            0.0
+        let dx = dx.clamp(SWIPE_REPLY_CLAMP, 0.0);
+        match &mut self.message_swipe {
+            // A fresh touch mid-return takes over where the row stands.
+            Some(swipe) if swipe.id == id => {
+                if (swipe.dx - dx).abs() < 0.5 {
+                    return false;
+                }
+                swipe.dx = dx;
+                swipe.from = dx;
+                swipe.start = None;
+                true
+            }
+            Some(_) => false,
+            None => {
+                self.message_swipe = Some(MessageSwipe::driving(id, dx));
+                true
+            }
+        }
+    }
+
+    /// The finger lifted off a driven row: past the threshold starts a
+    /// reply, otherwise the row springs back.
+    pub(crate) fn message_swipe_end(&mut self, id: u64, now: std::time::Instant) -> bool {
+        let reply = match &self.message_swipe {
+            Some(swipe) if swipe.id == id => swipe.dx <= SWIPE_REPLY_THRESHOLD,
+            _ => return false,
         };
-        self.chat.drawer_anim_from = self.chat.drawer_slide;
-        self.chat.drawer_anim_start = Some(std::time::Instant::now());
+        if reply {
+            self.start_reply(id);
+        }
+        if let Some(swipe) = self.message_swipe.as_mut().filter(|s| s.id == id) {
+            swipe.release(now);
+        }
         true
+    }
+
+    /// Advances a springing-back row. True while frames must keep coming.
+    pub(crate) fn poll_message_swipe(&mut self, now: std::time::Instant) -> bool {
+        let Some(swipe) = self.message_swipe.as_mut() else {
+            return false;
+        };
+        if !swipe.returning() {
+            return false;
+        }
+        if swipe.advance(now) {
+            return true;
+        }
+        self.message_swipe = None;
+        true
+    }
+
+    /// The row currently offset, if any. Pushed to the renderer every frame.
+    pub(crate) fn message_swipe_offset(&self) -> Option<(u64, f32)> {
+        self.message_swipe.as_ref().map(|s| (s.id, s.dx))
     }
 
     /// Opens the member list as a bottom sheet. Only where the member
@@ -363,12 +352,7 @@ impl crate::Gumicord {
         self.release_text_focus();
         self.chat.member_sheet_open = true;
         self.chat.drawer_open = false;
-        self.sheet_slide = 0.0;
-        self.sheet_target = 1.0;
-        self.sheet_anim_from = 0.0;
-        self.sheet_anim_start = Some(std::time::Instant::now());
-        self.sheet_drag = false;
-        self.sheet_closing = None;
+        self.sheet.rise();
         true
     }
 
@@ -378,11 +362,7 @@ impl crate::Gumicord {
         if !self.chat.member_sheet_open {
             return false;
         }
-        self.sheet_target = 0.0;
-        self.sheet_anim_from = self.sheet_slide;
-        self.sheet_anim_start = Some(std::time::Instant::now());
-        self.sheet_drag = false;
-        self.sheet_closing = Some(crate::SheetCloser::Member);
+        self.sheet.start_close(SheetCloser::Member);
         true
     }
 
@@ -390,49 +370,24 @@ impl crate::Gumicord {
     /// still moving. A landed closing slide clears whichever surface was
     /// closing, which finally removes the sheet from the tree.
     pub(crate) fn advance_sheet(&mut self, now: std::time::Instant) -> bool {
-        if self.sheet_drag {
-            return false;
+        let moving = self.sheet.advance(now);
+        if moving {
+            return true;
         }
-        let target = self.sheet_target;
-        if (self.sheet_slide - target).abs() < 0.001 {
-            self.sheet_slide = target;
-            if target == 0.0 {
-                self.land_sheet();
-            }
-            return false;
-        }
-        let Some(start) = self.sheet_anim_start else {
-            self.sheet_slide = target;
+        let Some(closer) = self.sheet.take_closer() else {
             return false;
         };
-        let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0
-            / crate::SHEET_ANIM_MS)
-            .clamp(0.0, 1.0);
-        self.sheet_slide =
-            self.sheet_anim_from + (target - self.sheet_anim_from) * ease_out_cubic(t);
-        if t >= 1.0 {
-            self.sheet_slide = target;
-            if target == 0.0 {
-                self.land_sheet();
-            }
-            return false;
-        }
-        true
-    }
-
-    /// Clears whichever surface a closing slide was hiding.
-    fn land_sheet(&mut self) {
-        match self.sheet_closing.take() {
-            Some(crate::SheetCloser::Member) => {
+        match closer {
+            SheetCloser::Member => {
                 self.chat.member_sheet_open = false;
             }
-            Some(crate::SheetCloser::Menu) => {
+            SheetCloser::Menu => {
                 if matches!(self.floating, Some(crate::menu::Floating::Menu(_))) {
                     self.floating = None;
                 }
             }
-            None => {}
         }
+        false
     }
 
     /// Whether a touch on the sheet handle could start a drag: a sheet
@@ -452,9 +407,7 @@ impl crate::Gumicord {
         if !self.sheet_drag_maybe() {
             return false;
         }
-        self.sheet_drag = true;
-        self.sheet_drag_from = self.sheet_slide;
-        self.sheet_anim_start = None;
+        self.sheet.drag_start();
         true
     }
 
@@ -462,41 +415,69 @@ impl crate::Gumicord {
     /// over the sheet height, falling from where the drag began. Down is
     /// positive on screen and closes the sheet.
     pub(crate) fn sheet_drag_move(&mut self, dy: f32, height: f32) -> bool {
-        if !self.sheet_drag {
-            return false;
-        }
-        let h = if height > 0.0 { height } else { 300.0 };
-        let next = (self.sheet_drag_from - dy / h).clamp(0.0, 1.0);
-        if (next - self.sheet_slide).abs() < 0.0005 {
-            return false;
-        }
-        self.sheet_slide = next;
-        true
+        // Down-positive screen motion shuts the sheet: opening-negative.
+        self.sheet.drag_move(-dy, height)
     }
 
     /// Lets go: a fast flick down finishes closing, a fast flick up swings
     /// back open, and a slow release follows whichever half it is on.
     pub(crate) fn sheet_drag_end(&mut self, velocity: f32) -> bool {
-        if !self.sheet_drag {
-            return false;
-        }
-        self.sheet_drag = false;
-        self.sheet_target = if velocity > crate::SHEET_FLING_PX_S
-            || (velocity >= -crate::SHEET_FLING_PX_S && self.sheet_slide < 0.5)
-        {
-            0.0
+        let fallback = if self.chat.member_sheet_open {
+            SheetCloser::Member
         } else {
-            1.0
+            SheetCloser::Menu
         };
-        self.sheet_anim_from = self.sheet_slide;
-        self.sheet_anim_start = Some(std::time::Instant::now());
-        if self.sheet_target == 0.0 && self.sheet_closing.is_none() {
-            self.sheet_closing = if self.chat.member_sheet_open {
-                Some(crate::SheetCloser::Member)
-            } else {
-                Some(crate::SheetCloser::Menu)
-            };
+        self.sheet.drag_end(velocity, true, Some(fallback))
+    }
+}
+
+/// How far left a message follows the finger before stopping.
+pub(crate) const SWIPE_REPLY_CLAMP: f32 = -96.0;
+
+/// Release past this starts a reply instead of springing back.
+pub(crate) const SWIPE_REPLY_THRESHOLD: f32 = -64.0;
+
+/// Spring-back duration, in milliseconds.
+pub(crate) const SWIPE_RETURN_MS: f32 = 180.0;
+
+/// One message row driven by a finger: it follows left, then either
+/// starts a reply or springs back. Single-finger only, like the rest
+/// of the touch layer.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MessageSwipe {
+    id: u64,
+    dx: f32,
+    from: f32,
+    start: Option<std::time::Instant>,
+}
+
+impl MessageSwipe {
+    fn driving(id: u64, dx: f32) -> Self {
+        MessageSwipe {
+            id,
+            dx,
+            from: dx,
+            start: None,
         }
-        true
+    }
+
+    fn release(&mut self, now: std::time::Instant) {
+        self.from = self.dx;
+        self.start = Some(now);
+    }
+
+    fn returning(&self) -> bool {
+        self.start.is_some()
+    }
+
+    /// Advances a return towards the anchor. Returns false once arrived.
+    fn advance(&mut self, now: std::time::Instant) -> bool {
+        let Some(start) = self.start else {
+            return false;
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / SWIPE_RETURN_MS)
+            .clamp(0.0, 1.0);
+        self.dx = self.from * (1.0 - super::overlays::ease_out_cubic(t));
+        t < 1.0
     }
 }

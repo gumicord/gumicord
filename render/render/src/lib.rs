@@ -144,6 +144,9 @@ pub struct Renderer {
     /// surface mid-gesture or mid-animation is listed; the layout treats a
     /// missing entry as open.
     slide: SlideState,
+    /// Finger offset per swiped message row, by message id. Set by the
+    /// platform every frame alongside the slides; cleared together.
+    message_offsets: layout::MessageOffsets,
     /// Images the last frame wanted and did not have. Only drawing reveals
     /// them, since visibility comes from layout and clipping.
     missing_images: Vec<String>,
@@ -185,6 +188,7 @@ impl Renderer {
             scrollbars: Vec::new(),
             keep_place: None,
             slide: SlideState::new(),
+            message_offsets: layout::MessageOffsets::new(),
             missing_images: Vec::new(),
             missing_backgrounds: Vec::new(),
             theme_namespace: None,
@@ -227,6 +231,7 @@ impl Renderer {
             scrollbars: Vec::new(),
             keep_place: None,
             slide: SlideState::new(),
+            message_offsets: layout::MessageOffsets::new(),
             missing_images: Vec::new(),
             missing_backgrounds: Vec::new(),
             theme_namespace: None,
@@ -377,6 +382,23 @@ impl Renderer {
         }
     }
 
+    /// Sets one swiped message row's finger offset, in logical px left.
+    /// Zero removes the entry; the platform pushes the app's value every
+    /// frame and clears the map first, so nothing goes stale.
+    pub fn set_message_offset(&mut self, id: u64, dx: f32) {
+        if dx == 0.0 {
+            self.message_offsets.remove(&id);
+        } else {
+            self.message_offsets.insert(id, dx);
+        }
+    }
+
+    /// Drops every message offset. The platform calls this every frame
+    /// before pushing the active one.
+    pub fn clear_message_offsets(&mut self) {
+        self.message_offsets.clear();
+    }
+
     /// Grabs a scrollbar.
     ///
     /// On the thumb it grabs in place; on the track it jumps the thumb's
@@ -451,6 +473,7 @@ impl Renderer {
             self.text.shaper(),
             &self.scroll,
             &self.slide,
+            &self.message_offsets,
         );
 
         // Hold the topmost visible row where it is across a prepend.
@@ -488,6 +511,7 @@ impl Renderer {
                         self.text.shaper(),
                         &self.scroll,
                         &self.slide,
+                        &self.message_offsets,
                     );
                 }
             }

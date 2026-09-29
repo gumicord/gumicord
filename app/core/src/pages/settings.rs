@@ -5,7 +5,7 @@
 
 use gumicord_uitree::{NodeId, UiNode};
 
-use super::super::{InstalledTheme, ThemeSource};
+use super::super::themes::{InstalledTheme, ThemeSource};
 
 /// Where the settings screen stands. Closed most of the time; while open it
 /// takes the screen's place under the title bar and owns every press below
@@ -68,9 +68,10 @@ impl crate::Gumicord {
     /// and after a switch — never per frame.
     pub(crate) fn refresh_theme_list(&mut self) {
         self.settings.themes = self
-            .themes_dir
+            .themes
+            .dir
             .as_deref()
-            .map(crate::scan_themes_in)
+            .map(crate::themes::scan_themes_in)
             .unwrap_or_default();
     }
 
@@ -166,7 +167,7 @@ impl crate::Gumicord {
             SettingsCategory::Theme => {
                 let mut items = vec![
                     Item::new(Action::UseBundledTheme, "標準のテーマ")
-                        .selected(self.theme_source == ThemeSource::Bundled),
+                        .selected(self.themes.source == ThemeSource::Bundled),
                 ];
                 items.extend(self.settings.themes.iter().map(|t| {
                     // Names and versions are data, not words, so one line
@@ -175,7 +176,7 @@ impl crate::Gumicord {
                         Action::SelectTheme(t.id.clone()),
                         format!("{} {}", t.name, t.version),
                     )
-                    .selected(self.theme_source == ThemeSource::Saved(t.id.clone()))
+                    .selected(self.themes.source == ThemeSource::Saved(t.id.clone()))
                 }));
                 // Last, so the existing rows keep their indices.
                 items.push(Item::new(
@@ -371,6 +372,10 @@ impl crate::Gumicord {
 mod tests {
     use super::*;
     use crate::pages::chat::tests::{app, hit_of, press_menu};
+    use crate::themes::{
+        DEFAULT_THEME, THEME_ENV, initial_theme_in, load_active_id_in, save_active_id_in,
+        scan_themes_in,
+    };
     use crate::*;
 
     fn themes_root(tag: &str) -> std::path::PathBuf {
@@ -420,24 +425,24 @@ mod tests {
 
         a.select_theme_in("dev.example.wall".to_owned(), Some(root.clone()));
         assert_eq!(
-            a.theme_source,
+            a.themes.source,
             ThemeSource::Saved("dev.example.wall".to_owned())
         );
         assert_eq!(
-            a.theme.as_ref().map(|t| t.manifest.id.as_str()),
+            a.themes.theme.as_ref().map(|t| t.manifest.id.as_str()),
             Some("dev.example.wall")
         );
-        assert!(a.theme_path.is_some(), "hot reload must follow the switch");
+        assert!(a.themes.path.is_some(), "hot reload must follow the switch");
         assert_eq!(
             load_active_id_in(&root).as_deref(),
             Some("dev.example.wall")
         );
 
         a.use_bundled_theme_in(Some(root.clone()));
-        assert_eq!(a.theme_source, ThemeSource::Bundled);
-        assert!(a.theme_path.is_none());
+        assert_eq!(a.themes.source, ThemeSource::Bundled);
+        assert!(a.themes.path.is_none());
         assert_eq!(
-            a.theme.as_ref().map(|t| t.manifest.id.as_str()),
+            a.themes.theme.as_ref().map(|t| t.manifest.id.as_str()),
             Some("dev.gumicord.midnight")
         );
         assert_eq!(load_active_id_in(&root), None);
@@ -458,7 +463,11 @@ mod tests {
         a.settings.themes = scan_themes_in(&root);
         std::fs::write(root.join("wall").join("theme.json"), "{broken").unwrap();
         a.select_theme_in("dev.example.wall".to_owned(), Some(root.clone()));
-        assert_eq!(a.theme_source, ThemeSource::Bundled, "broken theme applied");
+        assert_eq!(
+            a.themes.source,
+            ThemeSource::Bundled,
+            "broken theme applied"
+        );
         assert_eq!(load_active_id_in(&root), None, "broken theme remembered");
     }
 
@@ -501,7 +510,7 @@ mod tests {
         assert_eq!(selected(&a), [2, 4]);
         assert!(press(&mut a, 5));
         assert_eq!(
-            a.theme_source,
+            a.themes.source,
             ThemeSource::Saved("dev.example.wall".to_owned())
         );
         // Selecting rescans the folder, which is empty for this app;
@@ -509,7 +518,7 @@ mod tests {
         a.settings.themes = scan_themes_in(&root);
         assert_eq!(selected(&a), [2, 5], "active mark did not follow");
         assert!(press(&mut a, 4));
-        assert_eq!(a.theme_source, ThemeSource::Bundled);
+        assert_eq!(a.themes.source, ThemeSource::Bundled);
         assert_eq!(selected(&a), [2, 4]);
     }
 
@@ -868,7 +877,7 @@ mod tests {
         let dir = std::env::temp_dir().join("gumicord-install-ui-theme");
         let _ = std::fs::remove_dir_all(&dir);
         let mut a = with_settings();
-        a.themes_dir = Some(dir.clone());
+        a.themes.dir = Some(dir.clone());
         a.install_package_bytes_in(
             crate::install::InstallKind::Theme,
             "pack.zip",
@@ -964,7 +973,7 @@ mod tests {
     /// The bundled theme always parses; a broken one starts up black.
     #[test]
     fn the_bundled_theme_parses() {
-        let result = Theme::parse(DEFAULT_THEME);
+        let result = gumicord_theme::Theme::parse(DEFAULT_THEME);
         let errors: Vec<_> = result.errors().collect();
         assert!(errors.is_empty(), "同梱テーマに誤りがある: {errors:?}");
         assert!(result.is_applied());

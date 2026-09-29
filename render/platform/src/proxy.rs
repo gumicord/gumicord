@@ -160,8 +160,13 @@ impl Proxy {
                 self.active = None;
             } else {
                 // Up and untouchable from here: touches fall through to
-                // the app while fills still land programmatically.
-                field.setUserInteractionEnabled(false);
+                // the app while fills still land programmatically. Both
+                // twins: a touchable sibling parked over the other field
+                // eats its taps, so the app never sees them and focus
+                // looks stuck.
+                for field in [&self.user, &self.pass] {
+                    field.setUserInteractionEnabled(false);
+                }
                 self.last[idx(kind)] = text.to_owned();
                 // Snapshot the sibling too: a paired fill moves both, and
                 // the poll below must see whose text actually changed.

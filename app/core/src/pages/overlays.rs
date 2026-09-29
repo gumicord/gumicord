@@ -1,10 +1,220 @@
 //! Transient layers over every screen: menus, dialogs, toasts, drawer and
 //! sheets. Moved out of `super` in the pages split.
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Slide channel
+//
+//  One 0..1 channel per sliding surface: the bottom sheet (member sheet
+//  and menu-as-sheet share one; never both at once) and the navigation
+//  drawer. The physics is shared; polarity lives with the surface: a
+//  downward drag shuts a sheet, a rightward drag opens the drawer.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Which surface a closing sheet slide clears when it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SheetCloser {
+    Member,
+    Menu,
+}
+
+/// How fast a sheet coasts open or shut, in milliseconds. Drawers use
+/// the same pace; surfaces should agree with each other.
+pub(crate) const SHEET_ANIM_MS: f32 = 220.0;
+
+/// Release speed deciding a sheet drag, in px/s. Same threshold as drawers.
+const SHEET_FLING_PX_S: f32 = 200.0;
+
+/// Fast out, quiet in. Mirrors the renderer's motion curve, which lives
+/// in another crate; duplicating three lines beats coupling to it.
+pub(crate) fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t;
+    1.0 - inv * inv * inv
+}
+
+/// One 0..1 slide channel. 0 shut, 1 open; dismissals coast like sheets.
+/// Screens own their open flags and which surface a close clears; this
+/// owns only where the slide stands while opening, closing, or following
+/// the finger.
+#[derive(Debug)]
+pub(crate) struct SlideState {
+    pub(crate) slide: f32,
+    pub(crate) target: f32,
+    anim_from: f32,
+    anim_start: Option<std::time::Instant>,
+    pub(crate) drag: bool,
+    drag_from: f32,
+    closing: Option<SheetCloser>,
+}
+
+impl SlideState {
+    pub(crate) fn new() -> Self {
+        SlideState {
+            slide: 1.0,
+            target: 1.0,
+            anim_from: 1.0,
+            anim_start: None,
+            drag: false,
+            drag_from: 1.0,
+            closing: None,
+        }
+    }
+
+    /// Whether the slide still needs frames: wakes the loop at display
+    /// rate until it lands.
+    pub(crate) fn coasting(&self) -> bool {
+        !self.drag && (self.slide - self.target).abs() >= 0.001
+    }
+
+    /// Rises from the bottom rather than appearing.
+    pub(crate) fn rise(&mut self) {
+        self.slide = 0.0;
+        self.target = 1.0;
+        self.anim_from = 0.0;
+        self.anim_start = Some(std::time::Instant::now());
+        self.drag = false;
+        self.closing = None;
+    }
+
+    /// Parks the channel so nothing wakes: no sheet on screen.
+    pub(crate) fn park(&mut self) {
+        self.slide = self.target;
+    }
+
+    /// Forgets a pending close and lets go of the finger: a new surface
+    /// takes the channel.
+    pub(crate) fn clear_close(&mut self) {
+        self.closing = None;
+        self.drag = false;
+    }
+
+    /// Starts coasting shut; the closer lands when the slide arrives.
+    pub(crate) fn start_close(&mut self, closer: SheetCloser) {
+        self.target = 0.0;
+        self.anim_from = self.slide;
+        self.anim_start = Some(std::time::Instant::now());
+        self.drag = false;
+        self.closing = Some(closer);
+    }
+
+    /// Retargets mid-flight: swings towards the new target from where
+    /// the slide stands (reopening a closing drawer, shutting one).
+    pub(crate) fn retarget(&mut self, target: f32) {
+        self.target = target;
+        self.anim_from = self.slide;
+        self.anim_start = Some(std::time::Instant::now());
+        self.drag = false;
+    }
+
+    /// Advances towards the target. Returns whether still moving; a shut
+    /// arrival leaves its closer for [`Self::take_closer`].
+    pub(crate) fn advance(&mut self, now: std::time::Instant) -> bool {
+        if self.drag {
+            return false;
+        }
+        if (self.slide - self.target).abs() < 0.001 {
+            self.slide = self.target;
+            return false;
+        }
+        let Some(start) = self.anim_start else {
+            self.slide = self.target;
+            return false;
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / SHEET_ANIM_MS)
+            .clamp(0.0, 1.0);
+        self.slide = self.anim_from + (self.target - self.anim_from) * ease_out_cubic(t);
+        if t < 1.0 {
+            return true;
+        }
+        self.slide = self.target;
+        false
+    }
+
+    /// The closer of an arrived shut slide, if one was set. Never fires
+    /// mid-drag: falling through 0.0 on the finger is not arriving.
+    pub(crate) fn take_closer(&mut self) -> Option<SheetCloser> {
+        if self.drag || self.slide != 0.0 {
+            return None;
+        }
+        self.closing.take()
+    }
+
+    /// Starts a finger-driven close from where the slide stands.
+    pub(crate) fn drag_start(&mut self) {
+        self.drag = true;
+        self.drag_from = self.slide;
+        self.anim_start = None;
+    }
+
+    /// Follows the finger by a signed amount over the given extent.
+    /// Callers pass opening-positive deltas: sheets fall as the finger
+    /// goes down, so they pass `-dy`; the drawer opens to the right,
+    /// so it passes `dx`.
+    pub(crate) fn drag_move(&mut self, delta: f32, extent: f32) -> bool {
+        if !self.drag {
+            return false;
+        }
+        let extent = if extent > 0.0 { extent } else { 300.0 };
+        self.drag_follow(self.drag_from + delta / extent)
+    }
+
+    /// Applies an already-mapped finger position. Returns whether the
+    /// slide moved.
+    fn drag_follow(&mut self, next: f32) -> bool {
+        debug_assert!(self.drag);
+        let next = next.clamp(0.0, 1.0);
+        if (next - self.slide).abs() < 0.0005 {
+            return false;
+        }
+        self.slide = next;
+        true
+    }
+
+    /// Lets go: a fast flick towards the positive end finishes there, a
+    /// fast flick back swings to the other end, and a slow release follows
+    /// whichever half it is on. Sheets shut on positive (down); the drawer
+    /// opens on positive (right). Exactly halfway ties towards the far end
+    /// from positive, preserving each surface's old rule. The caller names
+    /// the fallback closer; the drag cannot know which surface opened the
+    /// sheet. Surfaces without a closer pass `None`.
+    pub(crate) fn drag_end(
+        &mut self,
+        velocity: f32,
+        shut_on_positive: bool,
+        fallback: Option<SheetCloser>,
+    ) -> bool {
+        if !self.drag {
+            return false;
+        }
+        self.drag = false;
+        let positive_end = if shut_on_positive { 0.0 } else { 1.0 };
+        self.target = if velocity > SHEET_FLING_PX_S {
+            positive_end
+        } else if velocity < -SHEET_FLING_PX_S {
+            1.0 - positive_end
+        } else if self.slide < 0.5 {
+            0.0
+        } else if self.slide > 0.5 {
+            1.0
+        } else {
+            1.0 - positive_end
+        };
+        self.anim_from = self.slide;
+        self.anim_start = Some(std::time::Instant::now());
+        if self.target == 0.0
+            && self.closing.is_none()
+            && let Some(fallback) = fallback
+        {
+            self.closing = Some(fallback);
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::pages::chat::tests::{
-        app, hit_at, hit_of, is_confirm, press_button, press_menu, settle_sheet, swipe, with_menu,
+        app, composer_focused, focus_composer, hit_at, hit_of, is_confirm, press_button,
+        press_menu, settle_sheet, swipe, with_menu,
     };
     use crate::*;
 
@@ -240,15 +450,15 @@ mod tests {
     #[test]
     fn esc_はメニューを先に閉じる() {
         let mut a = with_menu();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
 
         assert!(a.cancel_input(), "何も起きなかった");
         settle_sheet(&mut a);
         assert!(a.floating.is_none(), "メニューが閉じていない");
-        assert!(a.chat.input_focused, "入力欄のフォーカスまで外れた");
+        assert!(composer_focused(&a), "入力欄のフォーカスまで外れた");
 
         assert!(a.cancel_input(), "2 回目でフォーカスが外れていない");
-        assert!(!a.chat.input_focused);
+        assert!(!composer_focused(&a));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -289,10 +499,10 @@ mod tests {
     #[test]
     fn opening_a_dialog_releases_text_focus() {
         let mut a = with_delete_menu();
-        a.chat.input_focused = true;
+        focus_composer(&mut a);
         press_menu(&mut a, 0);
         assert!(is_confirm(&a), "確認の窓が出ていない");
-        assert!(!a.chat.input_focused, "窓が出たのにキーボードが残っている");
+        assert!(!composer_focused(&a), "窓が出たのにキーボードが残っている");
     }
 
     /// Cancelling does nothing and closes the dialog.

@@ -286,6 +286,30 @@ pub trait Application {
         1.0
     }
 
+    /// A finger drags one message row left with it. Only the row moves;
+    /// the app clamps the offset and owns the reply threshold.
+    fn message_swipe_move(&mut self, _id: u64, _dx: f32) -> bool {
+        false
+    }
+
+    /// The finger lifted off a driven row: past the threshold starts a
+    /// reply, otherwise the row springs back.
+    fn message_swipe_end(&mut self, _id: u64, _now: std::time::Instant) -> bool {
+        false
+    }
+
+    /// Advances a springing-back row. True while still moving, so frames
+    /// keep coming until it settles.
+    fn poll_message_swipe(&mut self, _now: std::time::Instant) -> bool {
+        false
+    }
+
+    /// The row currently offset, if any. Pushed to the renderer every
+    /// frame; the default offsets nothing.
+    fn message_swipe_offset(&self) -> Option<(u64, f32)> {
+        None
+    }
+
     fn title(&self) -> String;
 
     /// The document receiving input, if any. This layer has no notion of
@@ -548,6 +572,7 @@ fn run_loop(
         sheet_touch: None,
         sheet_drag: None,
         drawer_close_touch: None,
+        message_drive: None,
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
@@ -648,6 +673,15 @@ struct DrawerCloseTouch {
     dy: f32,
 }
 
+/// A finger driving one message row left. Touch verdicts stay off it:
+/// release ends the drive instead of tapping or swiping.
+#[derive(Debug, Clone, Copy)]
+struct MessageDrive {
+    id: u64,
+    msg: u64,
+    start_x: f32,
+}
+
 struct Host {
     app: Box<dyn Application>,
     /// Wakes the loop from another thread; handed to the renderer so system
@@ -726,6 +760,8 @@ struct Host {
     /// A touch inside the open drawer, still ordinary until a leftward
     /// drag past the slop converts it below.
     drawer_close_touch: Option<DrawerCloseTouch>,
+    /// The finger driving a message row, if any.
+    message_drive: Option<MessageDrive>,
     /// A title-bar control button armed on press; acted on on release.
     ///
     /// Acting on press lets Windows hand the release to whatever is now under
@@ -898,24 +934,18 @@ impl Host {
     /// Scrolls the frontmost scroll region under a point with a finger
     /// movement. Content follows the finger: dragging up reveals what
     /// is below, the opposite of dragging a scrollbar thumb. Returns
-    /// the region and the offset-space delta it moved.
-    fn scroll_touch(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> Option<(NodeId, f32)> {
+    /// the region when one was under the point.
+    fn scroll_touch(&mut self, x: f32, y: f32, dx: f32, dy: f32) -> Option<NodeId> {
         let hits = self.hits_at(x, y);
         let Some(r) = &mut self.renderer else {
             return None;
         };
         // The frontmost scroll region under the pointer.
-        let target = hits
+        let id = hits
             .iter()
             .find(|h| gumicord_render::intrinsic(h.id).scroll)
-            .map(|h| h.id);
-        let id = target?;
-        let delta = if gumicord_render::intrinsic(id).axis == gumicord_render::Axis::Row {
-            -dx
-        } else {
-            -dy
-        };
-        let moved = r.scroll_by(id, delta);
+            .map(|h| h.id)?;
+        let moved = Self::scroll_region(r, id, dx, dy);
         let (at, max) = r.scroll_place(id);
         // Reported even when nothing moved: scrolling further at the
         // top is the request for more history, and by then the
@@ -924,7 +954,32 @@ impl Host {
         if moved {
             self.request_redraw();
         }
-        Some((id, delta))
+        Some(id)
+    }
+
+    /// Scrolls an already-chosen region: the gesture's target stays put
+    /// even when the finger wanders onto another list mid-drag.
+    fn scroll_latched(&mut self, id: NodeId, dx: f32, dy: f32) {
+        let Some(r) = &mut self.renderer else {
+            return;
+        };
+        let moved = Self::scroll_region(r, id, dx, dy);
+        let (at, max) = r.scroll_place(id);
+        self.app.scrolled(id, at, max);
+        if moved {
+            self.request_redraw();
+        }
+    }
+
+    /// Applies one finger delta to one region. Pure scroll math; the
+    /// callers above own hit-testing and reporting.
+    fn scroll_region(r: &mut Renderer, id: NodeId, dx: f32, dy: f32) -> bool {
+        let delta = if gumicord_render::intrinsic(id).axis == gumicord_render::Axis::Row {
+            -dx
+        } else {
+            -dy
+        };
+        r.scroll_by(id, delta)
     }
 
     /// Forgets the touch scroll being measured for a fling.
@@ -1546,6 +1601,8 @@ impl Host {
         // Holds the scroll position for one frame after a prepend.
         let keep_place = self.app.keep_place();
         let reveal = self.app.take_reveal();
+        // Advances a springing-back row before pushing its offset below.
+        let swipe_moving = self.app.poll_message_swipe(std::time::Instant::now());
         let moving;
 
         let (stats, backend) = {
@@ -1554,6 +1611,10 @@ impl Host {
             r.set_theme_namespace(self.app.theme_namespace());
             r.set_slide(NodeId::OverlayDrawer, self.app.drawer_slide());
             r.set_slide(NodeId::OverlaySheet, self.app.sheet_slide());
+            r.clear_message_offsets();
+            if let Some((id, dx)) = self.app.message_swipe_offset() {
+                r.set_message_offset(id, dx);
+            }
             if let Some(id) = keep_place {
                 r.keep_place(id);
             }
@@ -1645,7 +1706,7 @@ impl Host {
         };
 
         // Only while something moves; once settled, stop asking and sleep.
-        if moving {
+        if moving || swipe_moving {
             self.request_redraw();
         }
 
@@ -2713,16 +2774,93 @@ impl ApplicationHandler<LoopEvent> for Host {
                                         });
                                     }
                                 }
-                                if !driving
-                                    && let Some((id, _)) =
-                                        self.scroll_touch(point.0, point.1, dx, dy)
-                                {
-                                    self.touch_scroll_id = Some(id);
-                                    // Phones dismiss the keyboard on
-                                    // scroll-start, like a tap outside.
-                                    // Desktop wheels never reach here.
-                                    if is_mobile() && self.app.scroll_started() {
-                                        self.request_redraw();
+                                if !driving {
+                                    // A driven row follows the finger; touch
+                                    // verdicts stay off it.
+                                    if let Some(drive) = self.message_drive
+                                        && drive.id == touch.id
+                                    {
+                                        if self
+                                            .app
+                                            .message_swipe_move(drive.msg, point.0 - drive.start_x)
+                                        {
+                                            self.request_redraw();
+                                        }
+                                    } else if self.touch_scroll_id.is_none()
+                                        && self.message_drive.is_none()
+                                        && self.touch_cum_x < -crate::touch::TAP_SLOP
+                                        && self.touch_cum_x.abs() > self.touch_cum_y.abs()
+                                    {
+                                        // A leftward drag past the slop on a
+                                        // message drives that row left;
+                                        // anything else keeps scrolling.
+                                        let origin = (
+                                            point.0 - self.touch_cum_x,
+                                            point.1 - self.touch_cum_y,
+                                        );
+                                        let row =
+                                            self.hits_at(origin.0, origin.1).iter().find_map(|h| {
+                                                match (h.id, &h.key) {
+                                                    (NodeId::ChatMessage, Some(Key::Id(id))) => {
+                                                        Some(*id)
+                                                    }
+                                                    _ => None,
+                                                }
+                                            });
+                                        if let Some(msg) = row {
+                                            if self
+                                                .long_press
+                                                .as_ref()
+                                                .is_some_and(|p| p.id == touch.id)
+                                            {
+                                                self.long_press = None;
+                                            }
+                                            if self.app.message_swipe_move(msg, point.0 - origin.0)
+                                            {
+                                                self.reset_touch_scroll();
+                                                self.message_drive = Some(MessageDrive {
+                                                    id: touch.id,
+                                                    msg,
+                                                    start_x: origin.0,
+                                                });
+                                                self.request_redraw();
+                                            } else if let Some(id) =
+                                                self.scroll_touch(point.0, point.1, dx, dy)
+                                            {
+                                                self.touch_scroll_id = Some(id);
+                                                if is_mobile() && self.app.scroll_started() {
+                                                    self.request_redraw();
+                                                }
+                                            }
+                                        } else if let Some(id) =
+                                            self.scroll_touch(point.0, point.1, dx, dy)
+                                        {
+                                            self.touch_scroll_id = Some(id);
+                                            // Phones dismiss the keyboard on
+                                            // scroll-start, like a tap outside.
+                                            // Desktop wheels never reach here.
+                                            if is_mobile() && self.app.scroll_started() {
+                                                self.request_redraw();
+                                            }
+                                        }
+                                    } else {
+                                        // Latched first: the gesture's target stays
+                                        // put even when the finger wanders onto
+                                        // another list mid-drag. Only an unlatched
+                                        // gesture hit-tests for its target.
+                                        if let Some(id) = self.touch_scroll_id {
+                                            self.scroll_latched(id, dx, dy);
+                                        } else if let Some(id) =
+                                            self.scroll_touch(point.0, point.1, dx, dy)
+                                        {
+                                            self.touch_scroll_id = Some(id);
+                                            // Phones dismiss the keyboard on
+                                            // scroll-start, like a tap outside.
+                                            // Desktop wheels never reach here.
+                                            if is_mobile() && self.app.scroll_started() {
+                                                self.request_redraw();
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2738,10 +2876,23 @@ impl ApplicationHandler<LoopEvent> for Host {
                         if self.drawer_close_touch.is_some_and(|c| c.id == touch.id) {
                             self.drawer_close_touch = None;
                         }
-                        // A finger that drove the drawer lets go: the release
-                        // velocity picks a side, and no tap, swipe or fling
-                        // follows.
-                        if let Some(drag) = self.drawer_drag
+                        // A finger that drove a message row lets go: past the
+                        // threshold starts a reply, otherwise the row springs
+                        // back. No tap, swipe or fling follows; the release
+                        // velocity dies with the scroll state.
+                        if let Some(drive) = self.message_drive
+                            && drive.id == touch.id
+                        {
+                            self.message_drive = None;
+                            self.reset_touch_scroll();
+                            self.touch.release(touch.id, point.0, point.1);
+                            if self
+                                .app
+                                .message_swipe_end(drive.msg, std::time::Instant::now())
+                            {
+                                self.request_redraw();
+                            }
+                        } else if let Some(drag) = self.drawer_drag
                             && drag.id == touch.id
                         {
                             let (vx, _) = self.touch_vel.velocity();

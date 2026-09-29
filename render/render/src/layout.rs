@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 
 use gumicord_uitree::value::Edges;
-use gumicord_uitree::{Content, NodeId, UiNode};
+use gumicord_uitree::{Content, Key, NodeId, UiNode};
 
 use crate::geom::{EdgesExt, Rect, Size};
 use crate::intrinsic::{Axis, Cross, Intrinsic, intrinsic, is_overlay};
@@ -37,6 +37,10 @@ pub type ScrollState = HashMap<NodeId, f32>;
 /// Slide progress per surface, 0 (shut) to 1 (open). Missing means open:
 /// only a surface mid-gesture or mid-animation is listed.
 pub type SlideState = HashMap<NodeId, f32>;
+
+/// Finger offsets per swiped message row, by message id. Only the driven
+/// row moves; siblings, scroll and hits follow its placed rect.
+pub type MessageOffsets = HashMap<u64, f32>;
 
 /// Below this the thumb cannot be grabbed.
 const MIN_THUMB: f32 = 24.0;
@@ -132,7 +136,14 @@ pub fn layout<'a>(
     text: &mut Shaper,
     scroll: &ScrollState,
 ) -> LayoutResult<'a> {
-    layout_slid(root, viewport, text, scroll, &SlideState::new())
+    layout_slid(
+        root,
+        viewport,
+        text,
+        scroll,
+        &SlideState::new(),
+        &MessageOffsets::new(),
+    )
 }
 
 /// Lays out the tree with sliding surfaces offset by their progress. A
@@ -144,11 +155,13 @@ pub fn layout_slid<'a>(
     text: &mut Shaper,
     scroll: &ScrollState,
     slide: &SlideState,
+    message: &MessageOffsets,
 ) -> LayoutResult<'a> {
     let mut cx = Cx {
         text,
         scroll,
         slide: Some(slide),
+        message,
         cache: HashMap::new(),
         in_vscroll: false,
         out: Vec::new(),
@@ -168,6 +181,8 @@ struct Cx<'a, 't, 's> {
     scroll: &'s ScrollState,
     /// Slide progress per surface; `None` lays out everything as open.
     slide: Option<&'s SlideState>,
+    /// Finger offset per swiped message row.
+    message: &'s MessageOffsets,
     /// (node address, constraint, scroll context) -> size
     cache: HashMap<(usize, u32, u32, bool), Size>,
     /// Inside a vertical scroll region's content. Stacked children hug
@@ -650,6 +665,8 @@ impl<'a> Cx<'a, '_, '_> {
 
             // A sliding surface stands off its edge while shut. Children
             // follow the parent rect, so shifting it moves them all.
+            // A swiped message row follows the finger the same way.
+            let child_rect = self.swipe_row(child, child_rect);
             let child_rect = self.slide_surface(child, child_rect);
             self.place(child, child_rect, clip);
         }
@@ -679,6 +696,22 @@ impl<'a> Cx<'a, '_, '_> {
         } else {
             Rect::new(rect.x, rect.y + (1.0 - p) * rect.h, rect.w, rect.h)
         }
+    }
+
+    /// Shifts one swiped message row by the finger's offset, leftwards.
+    /// Only the driven row moves; a missing entry sits at its anchor.
+    fn swipe_row(&self, child: &UiNode, rect: Rect) -> Rect {
+        let NodeId::ChatMessage = child.id else {
+            return rect;
+        };
+        let Some(Key::Id(id)) = &child.key else {
+            return rect;
+        };
+        let dx = self.message.get(id).copied().unwrap_or(0.0);
+        if dx == 0.0 {
+            return rect;
+        }
+        Rect::new(rect.x + dx, rect.y, rect.w, rect.h)
     }
 
     /// Places a scrollbar at the list's edge.
@@ -1427,6 +1460,7 @@ mod tests {
                 &mut shaper(),
                 &ScrollState::new(),
                 &slide,
+                &MessageOffsets::new(),
             );
             rect_of(&r, NodeId::OverlayDrawer)
         };
@@ -1436,6 +1470,53 @@ mod tests {
         assert_eq!((shut.x, shut.w), (-280.0, 280.0));
         let half = placed_at(&slide, 0.5);
         assert_eq!((half.x, half.w), (-140.0, 280.0));
+    }
+
+    /// A swiped message row follows the finger; only that row moves.
+    /// Siblings keep their places, and sizes never change, so measuring
+    /// matches drawing.
+    #[test]
+    fn a_swiped_message_row_follows_the_finger() {
+        use gumicord_uitree::Key;
+
+        let tree = UiNode::new(NodeId::AppRoot).child(
+            styled(NodeId::ChatMessageList, |s| s.height = Some(400.0))
+                .child(styled(NodeId::ChatMessage, |s| s.height = Some(44.0)).with_key(Key::Id(7)))
+                .child(styled(NodeId::ChatMessage, |s| s.height = Some(44.0)).with_key(Key::Id(8))),
+        );
+        let at = |r: &LayoutResult, id: u64| {
+            r.placed
+                .iter()
+                .find(|p| p.node.id == NodeId::ChatMessage && p.node.key == Some(Key::Id(id)))
+                .map(|p| p.rect)
+                .expect("row")
+        };
+        let place = |message: &MessageOffsets| {
+            layout_slid(
+                &tree,
+                Size::new(400.0, 800.0),
+                &mut shaper(),
+                &ScrollState::new(),
+                &SlideState::new(),
+                message,
+            )
+        };
+
+        let plain = place(&MessageOffsets::new());
+        let first = at(&plain, 7);
+        let second = at(&plain, 8);
+        assert_eq!(first.x, second.x);
+        assert_eq!(second.y - first.y, 44.0);
+
+        let mut swiped = MessageOffsets::new();
+        swiped.insert(7, -64.0);
+        let moved = place(&swiped);
+        let row = at(&moved, 7);
+        let sibling = at(&moved, 8);
+        assert_eq!(row.x, first.x - 64.0);
+        assert_eq!(row.y, first.y);
+        assert_eq!((row.w, row.h), (first.w, first.h));
+        assert_eq!((sibling.x, sibling.y), (second.x, second.y));
     }
 
     /// Text wraps, so a narrower wrap width means more height.

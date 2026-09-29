@@ -44,6 +44,7 @@ pub static ICONS: &[(&str, IconDef)] = &[
     ("gear", GEAR),
     ("members", MEMBERS),
     ("back", BACK),
+    ("send", SEND),
 ];
 
 /// Looks an icon up, returning the interned name alongside it so the atlas can
@@ -379,6 +380,15 @@ const MEMBERS: IconDef = IconDef {
 const BACK: IconDef = IconDef {
     strokes: &[&[(0.62, 0.24), (0.36, 0.50), (0.62, 0.76)]],
     width: 1.4 / 12.0,
+};
+
+/// A paper plane pointing right: sends what was typed.
+const SEND: IconDef = IconDef {
+    strokes: &[
+        &[(0.12, 0.42), (0.88, 0.26), (0.32, 0.76), (0.12, 0.42)],
+        &[(0.12, 0.42), (0.46, 0.52)],
+    ],
+    width: 1.1 / 12.0,
 };
 
 // ─────────────────────────────────────────────────────── Rasterising

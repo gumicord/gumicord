@@ -7,6 +7,7 @@ use gumicord_platform::Application;
 use gumicord_platform::{HiddenKey, TextDocument};
 use gumicord_uitree::{Content, Editable, Key, NodeId, State, UiNode};
 
+use super::super::inputs::{InputAddr, InputKind};
 use super::super::session::Session;
 
 /// Digits a TOTP code holds. Discord uses six half-width digits; anything
@@ -40,10 +41,10 @@ pub(crate) enum LoginField {
 }
 
 /// Login screen state. Everything here is used by login code only.
+/// Input documents live in the top-level registry by address; focus
+/// does too. This keeps which form is shown, and why it failed.
 #[derive(Debug)]
 pub(crate) struct LoginView {
-    /// Which login-form field has focus, if any.
-    pub(crate) field: Option<LoginField>,
     /// The form the user is on: it stays put while login runs or fails, so an
     /// error lands back on the same form instead of bouncing to the QR.
     pub(crate) form: Option<LoginField>,
@@ -53,24 +54,43 @@ pub(crate) struct LoginView {
     /// Per-field failures from the last attempt, as (dotted path, detail).
     /// Shown under each named input; cleared with the general error.
     pub(crate) field_errors: Vec<(String, String)>,
-    /// The login form's email contents. Kept across password retries.
-    pub(crate) email: TextDocument,
-    /// The login form's password or TOTP code, whichever step is shown.
-    pub(crate) input: TextDocument,
+    /// The captcha challenge awaiting a solution, kept on the app side so the
+    /// platform's modal can hand back a bare token while the challenge's own
+    /// `rqtoken`/`session_id` are still available to echo on the retry.
+    pub(crate) pending: Option<gumicord_rest::CaptchaChallenge>,
     /// The hidden code (konami) typed on the QR screen so far. Completed
     /// sequences open the bot-token form; anything else resets it.
     pub(crate) hidden_code: Vec<HiddenKey>,
 }
 
+/// The address and kind of one login box: the login field node plus
+/// the slot naming the box. The single place translating fields to
+/// addresses.
+pub(crate) fn login_box(field: LoginField) -> (InputAddr, InputKind) {
+    let (slot, kind) = match field {
+        LoginField::Email => ("email", InputKind::Email),
+        LoginField::Password => ("password", InputKind::Password),
+        LoginField::Totp => ("totp", InputKind::Code),
+        LoginField::Token => ("token", InputKind::Text),
+    };
+    (
+        InputAddr::of(NodeId::AppScreenLoginField, Some(Key::Slot(slot))),
+        kind,
+    )
+}
+
+/// The address of one login box. See [`login_box`].
+pub(crate) fn login_addr(field: LoginField) -> InputAddr {
+    login_box(field).0
+}
+
 impl LoginView {
     pub(crate) fn new() -> Self {
         LoginView {
-            field: None,
             form: None,
             error: None,
             field_errors: Vec::new(),
-            email: TextDocument::new(),
-            input: TextDocument::new(),
+            pending: None,
             hidden_code: Vec::new(),
         }
     }
@@ -81,14 +101,16 @@ impl crate::Gumicord {
     /// No neighbor forward (or anywhere without one) acts instead; back from
     /// the first field does nothing.
     pub(crate) fn focus_neighbor(&mut self, next: bool) -> bool {
-        let target = match (self.login_view.field, next) {
-            (Some(LoginField::Email), true) => Some(LoginField::Password),
-            (Some(LoginField::Password), false) => Some(LoginField::Email),
+        let email = login_addr(LoginField::Email);
+        let password = login_addr(LoginField::Password);
+        let target = match (&self.focus, next) {
+            (Some(a), true) if *a == email => Some(password),
+            (Some(a), false) if *a == password => Some(email),
             _ => None,
         };
         match target {
-            Some(field) => {
-                self.login_view.field = Some(field);
+            Some(addr) => {
+                self.focus = Some(addr);
                 true
             }
             None => next && self.submit(),
@@ -111,7 +133,11 @@ impl crate::Gumicord {
         // already `None` when this runs. The session names the TOTP and
         // token steps instead; anything else is the password form.
         if matches!(self.login.session(), Session::PasswordTotp) {
-            let raw = self.login_view.input.text().to_owned();
+            let raw = self
+                .inputs
+                .must(&login_addr(LoginField::Totp))
+                .text()
+                .to_owned();
             let code = normalize_totp(&raw);
             tracing::debug!(
                 raw_len = raw.chars().count(),
@@ -124,21 +150,35 @@ impl crate::Gumicord {
             }
             tracing::debug!("submitting a totp code");
             self.login.submit_totp(code);
-            self.login_view.input.take();
-            self.login_view.field = None;
+            self.inputs.must_mut(&login_addr(LoginField::Totp)).take();
+            self.focus = None;
             true
         } else if matches!(self.login.session(), Session::Token) {
-            let token = self.login_view.input.text().trim().to_owned();
+            let token = self
+                .inputs
+                .must(&login_addr(LoginField::Token))
+                .text()
+                .trim()
+                .to_owned();
             if token.is_empty() {
                 return false;
             }
             self.login.submit_bot_token(token);
-            self.login_view.input.take();
-            self.login_view.field = None;
+            self.inputs.must_mut(&login_addr(LoginField::Token)).take();
+            self.focus = None;
             true
         } else {
-            let email = self.login_view.email.text().trim().to_owned();
-            let password = self.login_view.input.text().to_owned();
+            let email = self
+                .inputs
+                .must(&login_addr(LoginField::Email))
+                .text()
+                .trim()
+                .to_owned();
+            let password = self
+                .inputs
+                .must(&login_addr(LoginField::Password))
+                .text()
+                .to_owned();
 
             if email.is_empty() || password.is_empty() {
                 tracing::debug!(
@@ -153,7 +193,7 @@ impl crate::Gumicord {
             // Keep both for a retry or a trip back from the TOTP step.
             // The secret is masked on screen, and signing out wipes the
             // documents.
-            self.login_view.field = None;
+            self.focus = None;
             true
         }
     }
@@ -162,7 +202,12 @@ impl crate::Gumicord {
     /// show the QR screen, so there it backs out to the password form.
     pub(crate) fn leave_login_form(&mut self) {
         self.login.cancel_password();
-        self.login_view.field = None;
+        // A typed code or token must not linger behind the form. The
+        // password keeps its own document, so a trip back from the TOTP
+        // step still finds it.
+        self.inputs.must_mut(&login_addr(LoginField::Totp)).take();
+        self.inputs.must_mut(&login_addr(LoginField::Token)).take();
+        self.focus = None;
         self.login_view.form = crate::is_mobile().then_some(LoginField::Password);
         self.login_view.error = None;
         self.login_view.field_errors.clear();
@@ -220,19 +265,23 @@ impl crate::Gumicord {
                         .child(self.login_field(
                             "email",
                             "メールアドレス",
-                            &self.login_view.email,
+                            self.inputs.must(&login_addr(LoginField::Email)),
                             false,
                         ))
                         .child_if(self.has_login_field_error(&["login"]), || {
                             self.login_field_error_node("login_error_email", &["login"])
                         })
                         .child(self.login_label("パスワード"))
-                        .child(self.login_field(
-                            "password",
-                            "パスワード",
-                            &self.login_view.input,
-                            true,
-                        ))
+                        .child(
+                            self.login_field(
+                                "password",
+                                "パスワード",
+                                self.inputs.must(&login_addr(LoginField::Password)),
+                                self.inputs
+                                    .kind(&login_addr(LoginField::Password))
+                                    .is_some_and(InputKind::secret),
+                            ),
+                        )
                         .child_if(self.has_login_field_error(&["password"]), || {
                             self.login_field_error_node("login_error_password", &["password"])
                         })
@@ -266,7 +315,7 @@ impl crate::Gumicord {
                         .child(self.login_field(
                             "totp",
                             "認証コード",
-                            &self.login_view.input,
+                            self.inputs.must(&login_addr(LoginField::Totp)),
                             false,
                         ))
                         .child_if(self.has_login_field_error(&["code"]), || {
@@ -287,7 +336,12 @@ impl crate::Gumicord {
                             "ボットトークンでログイン",
                         ))
                         .child(self.login_label("トークン"))
-                        .child(self.login_field("token", "トークン", &self.login_view.input, false))
+                        .child(self.login_field(
+                            "token",
+                            "トークン",
+                            self.inputs.must(&login_addr(LoginField::Token)),
+                            false,
+                        ))
                         .child_if(self.login_view.error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン", self.login_code_ready()))
                         .child(self.login_secondary("戻る", "login_back"))
@@ -437,32 +491,47 @@ impl crate::Gumicord {
         (text, map(doc.caret()), map(sel.start)..map(sel.end))
     }
 
-    /// Whether the given slot is the currently focused login field.
+    /// Whether the given slot is the currently focused login box.
     fn login_field_slot(&self, slot: &'static str) -> bool {
-        matches!(
-            (self.login_view.field, slot),
-            (Some(LoginField::Email), "email")
-                | (Some(LoginField::Password), "password")
-                | (Some(LoginField::Totp), "totp")
-                | (Some(LoginField::Token), "token")
-        )
+        let field = match slot {
+            "email" => LoginField::Email,
+            "password" => LoginField::Password,
+            "token" => LoginField::Token,
+            _ => LoginField::Totp,
+        };
+        self.focus.as_ref() == Some(&login_addr(field))
     }
 
     /// Whether the password form holds something to send. The button press
     /// clears focus first, so this reads the documents, not the focus.
     fn login_password_ready(&self) -> bool {
-        !self.login_view.email.text().trim().is_empty() && !self.login_view.input.text().is_empty()
+        !self
+            .inputs
+            .must(&login_addr(LoginField::Email))
+            .text()
+            .trim()
+            .is_empty()
+            && !self
+                .inputs
+                .must(&login_addr(LoginField::Password))
+                .text()
+                .is_empty()
     }
 
     /// Whether the TOTP box holds a sendable code: exactly six digits once
     /// narrowed. Anything else is refused at submit, so the button says so.
     fn login_totp_ready(&self) -> bool {
-        normalize_totp(self.login_view.input.text()).len() == TOTP_LEN
+        normalize_totp(self.inputs.must(&login_addr(LoginField::Totp)).text()).len() == TOTP_LEN
     }
 
-    /// Whether the single-box forms (TOTP code, bot token) hold something.
+    /// Whether the bot-token box holds something.
     fn login_code_ready(&self) -> bool {
-        !self.login_view.input.text().trim().is_empty()
+        !self
+            .inputs
+            .must(&login_addr(LoginField::Token))
+            .text()
+            .trim()
+            .is_empty()
     }
 
     /// The primary login form button (submit). Dimmed while an attempt
@@ -496,7 +565,7 @@ impl crate::Gumicord {
             // From the QR screen into the password form.
             "login_password" => {
                 self.login.start_password();
-                self.login_view.field = None;
+                self.focus = None;
                 self.login_view.form = Some(LoginField::Password);
                 true
             }
@@ -764,6 +833,21 @@ mod tests {
         assert!(login.session().qr().is_none());
     }
 
+    /// Writes text into one login box, by address.
+    fn login_input(a: &mut Gumicord, field: LoginField, text: &str) {
+        a.inputs.must_mut(&login_addr(field)).insert(text);
+    }
+
+    /// Reads one login box, by address.
+    fn login_text(a: &Gumicord, field: LoginField) -> String {
+        a.inputs.must(&login_addr(field)).text().to_owned()
+    }
+
+    /// Focuses one login box, by field.
+    fn focus_login(a: &mut Gumicord, field: LoginField) {
+        a.focus = Some(login_addr(field));
+    }
+
     /// A hit for the login form, where the node already carries its slot.
     fn login_hit_of(id: NodeId, key: Key) -> Hit {
         Hit {
@@ -849,7 +933,8 @@ mod tests {
 
     /// Arriving on the TOTP step focuses its field: the code goes straight
     /// in with no extra tap. Only the transition: later wakes must not
-    /// steal focus back after an outside press.
+    /// steal focus back after an outside press. The code box starts empty
+    /// while the kept password stays in its own document.
     #[test]
     fn arriving_on_the_totp_step_focuses_its_field() {
         let mut a = pending();
@@ -857,17 +942,58 @@ mod tests {
             NodeId::PrimitiveButton,
             Key::Slot("login_password"),
         )]);
-        assert!(a.login_view.field.is_none());
+        assert!(a.focus.is_none());
+        // A submitted password stays for a retry or a trip back.
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
         a.login.send_for_test(LoginEvent::TotpNeeded {
             email: "a@b.c".to_owned(),
             error: None,
         });
         assert!(a.wake());
-        assert_eq!(a.login_view.field, Some(LoginField::Totp));
+        assert_eq!(a.focus, Some(login_addr(LoginField::Totp)));
+        assert!(
+            login_text(&a, LoginField::Totp).is_empty(),
+            "コード欄にパスワードが残っている"
+        );
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
 
-        a.login_view.field = None;
+        a.focus = None;
         a.wake();
-        assert!(a.login_view.field.is_none(), "外し直した焦点が戻った");
+        assert!(a.focus.is_none(), "外し直した焦点が戻った");
+    }
+
+    /// The password never renders in the code box: each step owns its
+    /// document, so no transition can carry one into the other. Backing
+    /// out of the TOTP step still finds the password waiting.
+    #[test]
+    fn the_password_never_reaches_the_code_box() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::PrimitiveButton,
+            Key::Slot("login_password"),
+        )]);
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
+        a.login.send_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        assert!(a.wake());
+
+        let mut code = None;
+        a.build_tree(Panes::Three).walk(&mut |n, _| {
+            if n.id == NodeId::AppScreenLoginField && n.key == Some(Key::Slot("totp")) {
+                code = n.content.as_editable().map(|e| e.text.clone());
+            }
+        });
+        let code = code.expect("コード欄が無い");
+        assert!(code.is_empty(), "コード欄にパスワードが出ている: {code:?}");
+
+        a.leave_login_form();
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
+        assert!(login_text(&a, LoginField::Totp).is_empty());
     }
 
     /// Signing in wipes the password: memory should not keep what the
@@ -877,16 +1003,17 @@ mod tests {
         use crate::session::LoggedIn;
 
         let mut a = pending();
-        a.login_view.email.insert("a@b.c");
-        a.login_view.input.insert("secret");
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
         a.login.send_for_test(LoginEvent::Done(Box::new(LoggedIn {
             me: serde_json::from_str(r#"{"id":"1","username":"ねんねこ"}"#).unwrap(),
             client: gumicord_rest::RestClient::anonymous().unwrap(),
             token: gumicord_model::Token::new("t"),
         })));
         assert!(a.wake());
-        assert!(a.login_view.input.text().is_empty());
-        assert_eq!(a.login_view.email.text(), "a@b.c");
+        assert!(login_text(&a, LoginField::Password).is_empty());
+        assert!(login_text(&a, LoginField::Totp).is_empty());
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
     }
 
     /// A rejected TOTP code shows its reason on the code screen, so the
@@ -932,8 +1059,8 @@ mod tests {
         });
         // The button press left no focus behind, and the email box was
         // never filled on this path: a password login would refuse.
-        a.login_view.field = None;
-        a.login_view.input.insert("123456");
+        a.focus = None;
+        login_input(&mut a, LoginField::Totp, "123456");
         assert!(a.submit_login(), "TOTP 画面の送信が送られない");
         assert!(a.login.busy(), "送信後も処理中にならない");
     }
@@ -963,8 +1090,8 @@ mod tests {
             email: "a@b.c".to_owned(),
             error: None,
         });
-        a.login_view.field = None;
-        a.login_view.input.insert("１２３４５６");
+        a.focus = None;
+        login_input(&mut a, LoginField::Totp, "１２３４５６");
         assert!(a.submit_login(), "全角のコードが送られない");
         assert!(a.login.busy());
     }
@@ -982,8 +1109,8 @@ mod tests {
             email: "a@b.c".to_owned(),
             error: None,
         });
-        a.login_view.field = Some(LoginField::Totp);
-        a.login_view.input.insert("12345");
+        focus_login(&mut a, LoginField::Totp);
+        login_input(&mut a, LoginField::Totp, "12345");
         assert!(!a.submit_login(), "5桁のコードが送られてしまう");
         assert!(!a.login.busy(), "送っていないのに処理中になる");
         let tree = a.build_tree(Panes::Three);
@@ -1004,12 +1131,16 @@ mod tests {
     #[test]
     fn typed_totp_input_keeps_digits_only() {
         let mut a = pending();
-        a.login_view.field = Some(LoginField::Totp);
+        focus_login(&mut a, LoginField::Totp);
         assert!(a.insert_text("a1b2"));
-        assert_eq!(a.login_view.input.text(), "12");
+        assert_eq!(login_text(&a, LoginField::Totp), "12");
         assert!(!a.insert_text("xy"), "非数字が消費された");
         assert!(a.insert_text("3456789"));
-        assert_eq!(a.login_view.input.text(), "123456", "6桁で止まらない");
+        assert_eq!(
+            login_text(&a, LoginField::Totp),
+            "123456",
+            "6桁で止まらない"
+        );
     }
 
     /// The TOTP screen names whose code it asks for.
@@ -1090,10 +1221,10 @@ mod tests {
             NodeId::AppScreenLoginField,
             Key::Slot("email"),
         )]);
-        assert!(a.login_view.field.is_some());
+        assert!(a.focus.is_some());
 
         assert!(a.pressed(&[]));
-        assert_eq!(a.login_view.field, None, "欄外を押してもフォーカスが残る");
+        assert_eq!(a.focus, None, "欄外を押してもフォーカスが残る");
     }
 
     /// Clicking a login field focuses exactly that one, and typing lands in the
@@ -1110,19 +1241,23 @@ mod tests {
             NodeId::AppScreenLoginField,
             Key::Slot("email"),
         )]);
-        assert!(matches!(a.login_view.field, Some(LoginField::Email)));
+        assert_eq!(a.focus, Some(login_addr(LoginField::Email)));
         a.focused_document().unwrap().insert("a@b.c");
 
         a.pressed(&[login_hit_of(
             NodeId::AppScreenLoginField,
             Key::Slot("password"),
         )]);
-        assert!(matches!(a.login_view.field, Some(LoginField::Password)));
+        assert_eq!(a.focus, Some(login_addr(LoginField::Password)));
         a.focused_document().unwrap().insert("secret");
 
-        assert_eq!(a.login_view.email.text(), "a@b.c", "email 欄の内容が消えた");
         assert_eq!(
-            a.login_view.input.text(),
+            login_text(&a, LoginField::Email),
+            "a@b.c",
+            "email 欄の内容が消えた"
+        );
+        assert_eq!(
+            login_text(&a, LoginField::Password),
             "secret",
             "password 欄に書かれていない"
         );
@@ -1149,10 +1284,10 @@ mod tests {
         a.focused_document().unwrap().insert("secret");
 
         assert!(a.submit_login(), "パスワードログインが送信されなかった");
-        assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
+        assert_eq!(a.focus, None, "送信後もフォーカスが残っている");
         // A retry or a trip back from the TOTP step must not retype.
-        assert_eq!(a.login_view.email.text(), "a@b.c");
-        assert_eq!(a.login_view.input.text(), "secret");
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
     }
 
     /// Backing out of the password form keeps what was typed; only signing
@@ -1160,15 +1295,56 @@ mod tests {
     #[test]
     fn leaving_the_password_form_keeps_the_password() {
         let mut a = pending();
-        a.login_view.email.insert("a@b.c");
-        a.login_view.input.insert("secret");
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
         a.leave_login_form();
-        assert_eq!(a.login_view.email.text(), "a@b.c");
-        assert_eq!(a.login_view.input.text(), "secret");
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
 
         assert!(a.forget_account());
-        assert!(a.login_view.email.text().is_empty());
-        assert!(a.login_view.input.text().is_empty());
+        assert!(login_text(&a, LoginField::Email).is_empty());
+        assert!(login_text(&a, LoginField::Password).is_empty());
+    }
+
+    /// Backing out of the TOTP step drops the code while the password
+    /// waits in its own document for the trip back.
+    #[test]
+    fn leaving_the_totp_step_drops_the_code() {
+        let mut a = pending();
+        a.login.apply_for_test(LoginEvent::TotpNeeded {
+            email: "a@b.c".to_owned(),
+            error: None,
+        });
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
+        login_input(&mut a, LoginField::Totp, "123456");
+        a.leave_login_form();
+        assert!(login_text(&a, LoginField::Totp).is_empty());
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
+    }
+
+    /// Opening the bot-token form starts from an empty box while a kept
+    /// password stays in its own document.
+    #[test]
+    fn opening_the_token_form_drops_a_kept_password() {
+        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
+
+        let mut a = pending();
+        a.login
+            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
+        login_input(&mut a, LoginField::Password, "secret");
+
+        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
+            assert!(a.hidden_key(key), "QR 画面上のキーは消費されるはず");
+        }
+
+        assert!(matches!(a.login.session(), Session::Token));
+        assert!(
+            login_text(&a, LoginField::Totp).is_empty(),
+            "トークン欄にパスワードが残っている"
+        );
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
     }
 
     /// Email and password ask for native mirrors; nothing else does.
@@ -1178,14 +1354,14 @@ mod tests {
 
         let mut a = pending();
         assert_eq!(a.ime_proxy(), None);
-        a.login_view.field = Some(LoginField::Email);
+        focus_login(&mut a, LoginField::Email);
         assert_eq!(a.ime_proxy(), Some(ImeProxy::Username));
-        a.login_view.field = Some(LoginField::Password);
+        focus_login(&mut a, LoginField::Password);
         assert_eq!(a.ime_proxy(), Some(ImeProxy::Password));
-        a.login_view.field = Some(LoginField::Totp);
+        focus_login(&mut a, LoginField::Totp);
         assert_eq!(a.ime_proxy(), None);
-        a.login_view.field = None;
-        a.chat.input_focused = true;
+        a.focus = None;
+        a.focus = Some(inputs::composer_addr());
         assert_eq!(a.ime_proxy(), None);
     }
 
@@ -1196,13 +1372,13 @@ mod tests {
         use gumicord_platform::ImeProxy;
 
         let mut a = pending();
-        a.login_view.field = Some(LoginField::Email);
+        focus_login(&mut a, LoginField::Email);
         assert!(a.proxy_text(ImeProxy::Password, "secret".to_owned()));
-        assert_eq!(a.login_view.input.text(), "secret");
-        assert!(a.login_view.email.text().is_empty());
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
+        assert!(login_text(&a, LoginField::Email).is_empty());
         assert!(!a.proxy_text(ImeProxy::Password, "secret".to_owned()));
         assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
-        assert_eq!(a.login_view.email.text(), "a@b.c");
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
     }
 
     /// Field-menu items act on the menu's target while nothing holds
@@ -1210,13 +1386,16 @@ mod tests {
     #[test]
     fn menu_items_act_on_the_menu_target_without_focus() {
         let mut a = pending();
-        a.login_view.input.insert("secret");
-        a.login_view.field = None;
+        login_input(&mut a, LoginField::Password, "secret");
+        a.focus = None;
         a.menu_field = Some(crate::MenuField::Login(LoginField::Password));
         a.perform(crate::menu::Action::SelectAll);
-        assert_eq!(a.login_view.input.selection(), 0.."secret".len());
+        assert_eq!(
+            a.inputs.must(&login_addr(LoginField::Password)).selection(),
+            0.."secret".len()
+        );
         a.perform(crate::menu::Action::Paste);
-        assert_eq!(a.login_view.field, Some(LoginField::Password));
+        assert_eq!(a.focus, Some(login_addr(LoginField::Password)));
     }
 
     /// A paired fill reaches both documents before the single submit reads
@@ -1226,11 +1405,11 @@ mod tests {
         use gumicord_platform::ImeProxy;
 
         let mut a = pending();
-        a.login_view.field = Some(LoginField::Email);
+        focus_login(&mut a, LoginField::Email);
         assert!(a.proxy_text(ImeProxy::Username, "a@b.c".to_owned()));
         assert!(a.proxy_text(ImeProxy::Password, "secret".to_owned()));
-        assert_eq!(a.login_view.email.text(), "a@b.c");
-        assert_eq!(a.login_view.input.text(), "secret");
+        assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
+        assert_eq!(login_text(&a, LoginField::Password), "secret");
         assert!(a.submit_login(), "pair-filled form does not submit");
         assert!(a.login.busy());
     }
@@ -1289,8 +1468,8 @@ mod tests {
             NodeId::PrimitiveButton,
             Key::Slot("login_password"),
         )]);
-        a.login_view.email.insert("a@b.c");
-        a.login_view.input.insert("secret");
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
         let mut submit_state = None;
         a.build_tree(Panes::Three).walk(&mut |n, _| {
             if n.id == NodeId::PrimitiveButton && n.key == Some(Key::Slot("login_submit")) {
@@ -1299,9 +1478,9 @@ mod tests {
         });
         assert_eq!(submit_state, Some(false), "待機中なのに無効表示");
 
-        a.login_view.field = Some(LoginField::Password);
-        a.login_view.email.insert("a@b.c");
-        a.login_view.input.insert("secret");
+        focus_login(&mut a, LoginField::Password);
+        login_input(&mut a, LoginField::Email, "a@b.c");
+        login_input(&mut a, LoginField::Password, "secret");
         assert!(a.submit_login());
         let mut submit_state = None;
         a.build_tree(Panes::Three).walk(&mut |n, _| {
@@ -1336,10 +1515,10 @@ mod tests {
             Key::Slot("login_password"),
         )]);
         // Only the password arrived (e.g. a one-sided autofill).
-        a.login_view.input.insert("secret");
+        login_input(&mut a, LoginField::Password, "secret");
         assert_eq!(state_of(&a), Some(true), "片欄だけなのに押せる表示");
 
-        a.login_view.email.insert("a@b.c");
+        login_input(&mut a, LoginField::Email, "a@b.c");
         assert_eq!(state_of(&a), Some(false), "揃ったのに無効表示");
     }
 
@@ -1361,8 +1540,8 @@ mod tests {
             "コンバットコードでトークン画面に入っていない"
         );
         assert_eq!(
-            a.login_view.field,
-            Some(LoginField::Token),
+            a.focus,
+            Some(login_addr(LoginField::Token)),
             "入力欄にフォーカスが無い"
         );
     }
@@ -1382,7 +1561,7 @@ mod tests {
         }
 
         assert!(!matches!(a.login.session(), Session::Token));
-        assert_eq!(a.login_view.field, None);
+        assert_eq!(a.focus, None);
     }
 
     /// Off the QR screen the hidden code does nothing.
@@ -1397,7 +1576,7 @@ mod tests {
         }
 
         assert!(!matches!(a.login.session(), Session::Token));
-        assert_eq!(a.login_view.field, None);
+        assert_eq!(a.focus, None);
     }
 
     /// Submitting the token form hands the bot token to the background and
@@ -1415,7 +1594,7 @@ mod tests {
         }
         a.focused_document().unwrap().insert("bot-token");
         assert!(a.submit_login(), "トークンログインが送信されなかった");
-        assert_eq!(a.login_view.field, None, "送信後もフォーカスが残っている");
+        assert_eq!(a.focus, None, "送信後もフォーカスが残っている");
     }
 
     /// Right-clicking a login field focuses it and shows the input menu for
@@ -1439,7 +1618,7 @@ mod tests {
 
         let field = login_hit_of(NodeId::AppScreenLoginField, Key::Slot("email"));
         assert!(a.context_menu(&[field], (0.0, 0.0)));
-        assert!(matches!(a.login_view.field, Some(LoginField::Email)));
+        assert_eq!(a.focus, Some(login_addr(LoginField::Email)));
 
         let has = |want: &Action| {
             a.floating
@@ -1472,10 +1651,15 @@ mod tests {
         a.perform(crate::menu::Action::SelectAll);
 
         assert!(
-            a.login_view.input.has_selection(),
+            a.inputs
+                .must(&login_addr(LoginField::Password))
+                .has_selection(),
             "ログイン欄が選択されていない"
         );
-        assert!(!a.chat.input.has_selection(), "コンポーザーが触られた");
+        assert!(
+            !a.inputs.must(&inputs::composer_addr()).has_selection(),
+            "コンポーザーが触られた"
+        );
     }
 
     /// A captcha challenge is handed to the platform, and its solution comes
@@ -1507,6 +1691,9 @@ mod tests {
         a.captcha_solved(gumicord_platform::SolvedCaptcha {
             solution: "tok".to_owned(),
         });
-        assert!(a.pending.is_none(), "解けた captcha が残っている");
+        assert!(
+            a.login_view.pending.is_none(),
+            "解けた captcha が残っている"
+        );
     }
 }

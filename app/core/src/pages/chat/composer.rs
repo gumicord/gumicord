@@ -1,15 +1,22 @@
 //! Chat composer: input bar, status line and the assembled chat view.
 use super::Composing;
+use crate::inputs::{composer_addr, empty_doc};
 use gumicord_model::ChannelId;
 use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
 
 impl crate::Gumicord {
     pub(crate) fn chat_view(&self) -> UiNode {
         let channels = self.openable_rows();
-        let channel = channels
-            .iter()
-            .find(|c| c.id == self.chat.selected_channel)
-            .or(channels.first());
+        // No channel chosen (drawer UI after a guild switch): an empty
+        // header rather than the first channel's name over an empty body.
+        let channel = if self.chat.selected_channel == 0 {
+            None
+        } else {
+            channels
+                .iter()
+                .find(|c| c.id == self.chat.selected_channel)
+                .or(channels.first())
+        };
 
         let (id, name, icon, topic) = match channel {
             Some(c) => (c.id, c.name.clone(), c.icon, c.topic.clone()),
@@ -97,23 +104,63 @@ impl crate::Gumicord {
                         self.composing_bar()
                     })
                     .child(
-                        UiNode::editable(
-                            NodeId::ChatInputField,
-                            Editable {
-                                text: self.chat.input.text().to_owned(),
-                                caret: self.chat.input.caret(),
-                                selection: self.chat.input.selection(),
-                                composing: self.chat.input.composing(),
-                                placeholder: if name.is_empty() {
-                                    "メッセージを送信".to_owned()
-                                } else {
-                                    format!("#{name} へメッセージを送信")
-                                },
-                            },
-                        )
-                        .with_state_if(self.chat.input_focused, State::Focus),
+                        UiNode::new(NodeId::LayoutRow)
+                            .child(UiNode::new(NodeId::LayoutColumn).child({
+                                let doc =
+                                    self.inputs.doc(&self.draft_addr()).unwrap_or(empty_doc());
+                                UiNode::editable(
+                                    NodeId::ChatInputField,
+                                    Editable {
+                                        text: doc.text().to_owned(),
+                                        caret: doc.caret(),
+                                        selection: doc.selection(),
+                                        composing: doc.composing(),
+                                        placeholder: if name.is_empty() {
+                                            "メッセージを送信".to_owned()
+                                        } else {
+                                            format!("#{name} へメッセージを送信")
+                                        },
+                                    },
+                                )
+                                .with_state_if(
+                                    self.focus.as_ref() == Some(&composer_addr()),
+                                    State::Focus,
+                                )
+                            }))
+                            // Phones have no return key to lean on; the desk
+                            // keeps Enter.
+                            .child_if(crate::is_mobile(), || {
+                                UiNode::new(NodeId::ChatInputActions).child(self.send_button())
+                            }),
                     ),
             )
+    }
+
+    /// The mobile send button beside the composer. Dimmed while the draft
+    /// is empty, like the login submit.
+    fn send_button(&self) -> UiNode {
+        UiNode::new(NodeId::PrimitiveButton)
+            .with_key(Key::Slot(crate::SEND_MESSAGE))
+            .with_state_if(
+                self.is_hovered(
+                    NodeId::PrimitiveButton,
+                    Some(&Key::Slot(crate::SEND_MESSAGE)),
+                ),
+                State::Hover,
+            )
+            .with_state_if(!self.composer_send_ready(), State::Disabled)
+            .child(UiNode::icon(NodeId::PrimitiveIcon, crate::SEND_ICON))
+    }
+
+    /// Whether the composer holds something to send.
+    pub(crate) fn composer_send_ready(&self) -> bool {
+        !self
+            .inputs
+            .doc(&self.draft_addr())
+            .unwrap_or(empty_doc())
+            .text()
+            .trim()
+            .is_empty()
     }
 
     /// Cancels a reply or an edit.
@@ -131,7 +178,9 @@ impl crate::Gumicord {
             }
             Composing::Edit(_) => {
                 self.chat.composing = Composing::New;
-                self.chat.input.take();
+                if let Some(doc) = self.inputs.doc_mut(&self.draft_addr()) {
+                    doc.take();
+                }
                 true
             }
         }
