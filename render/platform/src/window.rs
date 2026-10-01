@@ -578,6 +578,8 @@ fn run_loop(
         ime_allowed: false,
         #[cfg(target_os = "ios")]
         proxy: None,
+        #[cfg(target_os = "ios")]
+        keyboard_held: false,
         frame_us: std::collections::VecDeque::new(),
         frame_times: std::collections::VecDeque::new(),
         first_frame: true,
@@ -785,6 +787,15 @@ struct Host {
     /// apart from stale layout (iOS only).
     #[cfg(target_os = "ios")]
     last_safe: (f32, f32, f32, f32),
+    /// Whether a native view has taken the keyboard since we last forced
+    /// it down (iOS only).
+    ///
+    /// Neither bridge can answer this on its own by the time we need it:
+    /// `sync_ime_proxy` runs first in every frame and tears the proxies
+    /// down the instant focus goes, so `is_active` is already false when
+    /// the teardown looks for whoever was holding.
+    #[cfg(target_os = "ios")]
+    keyboard_held: bool,
     /// Last frame times in microseconds, for the pacing log.
     frame_us: std::collections::VecDeque<u128>,
     /// Recent redraw timestamps, for the overlay's fps. Idle ticks count
@@ -1268,8 +1279,10 @@ impl Host {
             if self.android_text.is_live() {
                 self.android_text.blur();
             }
-            // The proxy already resigned in sync above, but a missing
-            // parent skips that path while the keyboard stays up.
+            // The proxy already resigned in sync above, which is why this
+            // cannot go by its liveness: the flag remembers that one held
+            // it, so the forced teardown still runs for the views left
+            // behind in the hierarchy.
             #[cfg(target_os = "ios")]
             self.ios_hide_keyboard();
             return;
@@ -1291,6 +1304,9 @@ impl Host {
                 // fight it for first responder.
                 if self.ios_text.is_live() {
                     self.ios_text.blur();
+                    // It may have held on, and the proxy's refusal below
+                    // would leave nobody to notice.
+                    self.keyboard_held = true;
                 }
                 false
             } else {
@@ -1305,6 +1321,7 @@ impl Host {
                         if !self.ios_text.ensure(parent, &field, doc, x, y) {
                             false
                         } else {
+                            self.keyboard_held = true;
                             let (changed, newline) = self.ios_text.poll(doc);
                             if changed {
                                 self.request_redraw();
@@ -1439,6 +1456,11 @@ impl Host {
             }
         }
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
+        // The proxy took the keyboard, or refused and detached. Either way
+        // the answer goes in the flag: `is_active` is only true here, and the
+        // teardown may not run until the next frame, by which time the proxy
+        // has already let go of the keyboard.
+        self.keyboard_held = proxy.is_active();
         let mut changed = false;
         let mut submitted = false;
         // A paired fill moves both fields. Drain the pair before submitting
@@ -1489,24 +1511,27 @@ impl Host {
     /// Drops the keyboard when the app holds no focus. Resigning our own
     /// views is not always enough: a stale view elsewhere in the hierarchy
     /// keeps the keyboard up while every resign reports success. Forcing
-    /// the hosting view to end editing also dethrones those. Only when
-    /// something was holding: every unfocused redraw would otherwise force
-    /// it (and its log line) again.
+    /// the hosting view to end editing also dethrones those.
+    ///
+    /// Asked once per focus change, not on every unfocused redraw, hence the
+    /// flag: the bridges can already be gone by the time this runs (see
+    /// [`Host::keyboard_held`]), so their liveness cannot decide it.
     #[cfg(target_os = "ios")]
     fn ios_hide_keyboard(&mut self) {
-        let mut held = false;
         if self.ios_text.is_live() {
             self.ios_text.blur();
-            held = true;
+            self.keyboard_held = true;
         }
         if let Some(proxy) = self.proxy.as_mut()
             && proxy.is_active()
         {
             proxy.blur();
-            held = true;
+            self.keyboard_held = true;
         }
-        if held
-            && let Some(w) = self.window.as_ref()
+        if !std::mem::take(&mut self.keyboard_held) {
+            return;
+        }
+        if let Some(w) = self.window.as_ref()
             && let Some(parent) = crate::ios_text::parent_view(w)
         {
             let ended = parent.endEditing(true);

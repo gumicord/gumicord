@@ -451,6 +451,51 @@ fn the_input_field_gets_the_input_menu() {
     );
 }
 
+/// Holding a field open its menu drops the keyboard on a phone: the menu
+/// covers the bottom of the screen, and there is no other way to put the
+/// keyboard away. On the desk focus stays up, because the mouse can click
+/// the next field without going through the OS keyboard.
+///
+/// This is the one behaviour that made the mobile half untestable: the
+/// answer was compile-time, so a menu that forgot it looked exactly like
+/// the desktop one.
+#[test]
+fn holding_the_composer_open_its_menu_drops_the_keyboard() {
+    let mut a = app();
+    focus_composer(&mut a);
+    composer_input(&mut a, "あいう");
+    a.inputs
+        .ensure(a.draft_addr(), InputKind::Text)
+        .select_all();
+    let hits = [hit_of(NodeId::ChatInputField, None)];
+
+    crate::assume_mobile(|| {
+        assert!(a.context_menu(&hits, (0.0, 0.0)), "メニューが開かない");
+    });
+    assert!(
+        matches!(a.floating, Some(crate::menu::Floating::Menu(_))),
+        "品物がない"
+    );
+    assert!(
+        !composer_focused(&a),
+        "メニューの上で入力欄がまだ focusing している"
+    );
+}
+
+/// The desk keeps focus: the menu is a popup over the window, not over
+/// the keyboard. Same press, opposite answer.
+#[test]
+fn the_menu_keeps_focus_on_the_desk() {
+    let mut a = app();
+    focus_composer(&mut a);
+    let hits = [hit_of(NodeId::ChatInputField, None)];
+
+    assert!(!crate::is_mobile(), "この試験は机の上の答えを固定する");
+    assert!(a.context_menu(&hits, (0.0, 0.0)));
+    assert!(composer_focused(&a), "机の上でフォーカスが落ちた");
+}
+
+/// The same for a login box, which reaches the menu by a different arm,
 /// Only what would do something.
 #[test]
 fn cut_and_copy_are_absent_without_a_selection() {

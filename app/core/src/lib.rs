@@ -197,10 +197,32 @@ pub enum Panes {
     One,
 }
 
+thread_local! {
+    /// Set by tests only, and thread-local so a leaked override cannot
+    /// reach another test: the suite runs tests in parallel and every
+    /// keyboard rule sits behind this one answer.
+    static FORCED_MOBILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Phones have no window to drag or minimize; the OS owns the chrome.
 /// By target, not width: a narrowed desktop window keeps its controls.
-const fn is_mobile() -> bool {
-    cfg!(target_os = "ios") || cfg!(target_os = "android")
+///
+/// Overridable so the mobile half is testable. The keyboard rules all
+/// live behind this one answer, and a compile-time one hid every one of
+/// them from the suite — a long-press menu that forgot to drop the
+/// keyboard looked exactly like the desktop one until someone held a
+/// phone. [`assume_mobile`] flips it, and nothing else may.
+fn is_mobile() -> bool {
+    FORCED_MOBILE.get() || cfg!(target_os = "ios") || cfg!(target_os = "android")
+}
+
+/// Runs `f` as if this were a phone. See [`is_mobile`].
+#[cfg(test)]
+fn assume_mobile<R>(f: impl FnOnce() -> R) -> R {
+    FORCED_MOBILE.with(|m| m.set(true));
+    let out = f();
+    FORCED_MOBILE.with(|m| m.set(false));
+    out
 }
 
 impl Panes {

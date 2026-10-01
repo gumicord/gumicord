@@ -1633,6 +1633,37 @@ mod tests {
         assert!(has(&Action::Paste), "貼り付けが出ていない");
     }
 
+    /// Holding a login box open its menu drops the keyboard on a phone:
+    /// the menu rises from the bottom over it, and there is no other way
+    /// to put the keyboard away. The desk keeps focus.
+    ///
+    /// The same answer is behind one compile-time question, so this arm
+    /// went unexamined until that question became a test hook.
+    #[test]
+    fn holding_a_login_box_open_its_menu_drops_the_keyboard() {
+        let mut a = pending();
+        a.pressed(&[login_hit_of(
+            NodeId::AppScreenLoginField,
+            Key::Slot("password"),
+        )]);
+        let field = login_hit_of(NodeId::AppScreenLoginField, Key::Slot("password"));
+
+        crate::assume_mobile(|| {
+            assert!(a.context_menu(&[field], (0.0, 0.0)), "メニューが開かない");
+        });
+        assert!(
+            a.focus.is_none(),
+            "メニューの上でログイン欄がまだ focusing している"
+        );
+        // The menu still knows which box it acts on, with no focus to
+        // borrow it from.
+        assert_eq!(
+            a.menu_field,
+            Some(crate::MenuField::Login(LoginField::Password))
+        );
+        assert!(a.menu_field_doc().text().is_empty(), "別の欄を指している");
+    }
+
     /// The "select all" menu item targets the focused login field, leaving
     /// the composer untouched.
     #[test]
