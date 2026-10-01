@@ -25,7 +25,8 @@ passing the Documents and Caches directories across lives in `app/core`.
   field. Keyboard height
   comes from `UIKeyboardWillShow/Hide` notices and shrinks the layout
   viewport (`PLT-040`).
-- **No signing.** `CODE_SIGNING_ALLOWED=NO`; CI zips the unsigned `.app` as `Payload/` into an `.ipa` for sideloading. Passing App Store review is unlikely anyway.
+- **No signing.** `CODE_SIGNING_ALLOWED=NO`; CI zips the unsigned `.app` as `Payload/` into an `.ipa` for sideloading. Passing App Store review is unlikely anyway. Entitlements only ride along in a signature, so anything that needs one has to be checked on a re-signed build: password AutoFill is the case that bites (see below).
+- **Password AutoFill needs a signature, and a domain we do not control.** Apple offers credentials for an app's *associated domain* only, read from the app's Associated Domains entitlement. `discord.com`'s `apple-app-site-association` lists only Discord's own bundle ids, so nothing can be added for us: the best available path is the key icon, where the user picks a saved credential by hand. Two more preconditions on the device: at least one password saved, and 設定 → パスワード → 自動入力 on. The two hidden `UITextField`s therefore stay touchable (`render/platform` `proxy`), parked in a one-pixel strip beside the field — AutoFill offers nothing to a field it cannot touch, and they draw nothing, so their frame is free to spend on staying out of a finger's way.
 - **Files-visible Documents.** `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`, so themes and logs get on and off the phone through the Files app. The message database and image files live in Caches instead: the sandbox forbids the `HOME/.cache` fallback, and history refetches.
 - **Logs are files.** `logs/gumicord.log` (plus `panic.log`) sits in Documents for the same reason: no Mac is needed to read a crash.
 - **Staticlib, not a framework.** One archive, linked with `-lgumicord_ios`; no module maps or umbrella headers to maintain.
@@ -38,6 +39,7 @@ passing the Documents and Caches directories across lives in `app/core`.
 | `accesskit_ios` | Still at 0.1.2; try it early, since its maturity is unknown |
 | Safe area | `PLT-041`. The surface spans the full view and the root content is inset by `safeAreaInsets`; keyboard tracking (`PLT-040`) is in |
 | First-device run | The Xcode project, lifecycle order and Metal backend have never run on hardware. Expect a shake-out pass |
+| Password AutoFill | The hidden fields are right, but the button only appears on a **signed** build with a saved password on the device; the domain-matched suggestions are out of reach (Discord's AASA). Verify on a re-signed build before believing a proxy bug |
 
 ## Building (macOS only)
 

@@ -3,10 +3,10 @@
 //! winit's view only speaks `UIKeyInput`, which the password manager cannot
 //! fill into. Two hidden `UITextField` siblings (username + password, so the
 //! manager pairs them) receive the fill; this layer polls their text into
-//! the app's documents. Visible editing stays in our rendered fields: the
-//! field holding the keyboard goes untouchable so its touches fall through
-//! to the app, and its sibling stands beside it rather than over anything
-//! (see [`Proxy::place`]).
+//! the app's documents. Visible editing stays in our rendered fields: these
+//! draw nothing (clear text, clear caret) and stand in a strip beside the
+//! field rather than over it, so they can stay touchable — which AutoFill
+//! requires — without standing in a finger's way (see [`Proxy::place`]).
 //!
 //! Polled, not delegated: a delegate class from Rust is a maintenance
 //! burden, and a frame of latency is invisible on a login form.
@@ -47,14 +47,14 @@ fn idx(kind: super::ImeProxy) -> usize {
 
 fn make_field() -> Retained<UITextField> {
     let field: Retained<UITextField> = unsafe { msg_send![class!(UITextField), new] };
-    // Off-screen, not untouchable: a view that takes no interaction may
-    // refuse first responder, and outside the parent bounds no touch lands.
+    // Off-screen until parked, never untouchable: a view that takes no
+    // interaction may refuse first responder, and AutoFill offers nothing
+    // to a field it cannot touch.
     field.setFrame(NSRect::new(NSPoint::new(-5.0, -5.0), NSSize::new(1.0, 1.0)));
     // Invisible but present: hidden and alpha-zero fields are ignored by
     // password autofill, so the password half of a paired fill never lands.
-    // No border, clear text and caret instead. Interaction stays on here:
-    // becoming first responder needs it, and it goes back off once the
-    // keyboard is up (see set_active) so touches fall through to the app.
+    // No border, and clear text and caret instead: the app draws those, so
+    // where these sit costs nothing (see `place`).
     field.setBorderStyle(UITextBorderStyle::None);
     field.setTextColor(Some(&UIColor::clearColor()));
     // Tints the caret: only MainThreadOnly is unsafe, and this runs there.
@@ -129,8 +129,8 @@ impl Proxy {
         for field in [&self.user, &self.pass] {
             field.resignFirstResponder();
             field.removeFromSuperview();
-            // Becoming first responder refuses without interaction; it
-            // goes back off below once the keyboard is up.
+            // Becoming first responder refuses without interaction, and it
+            // stays on: AutoFill offers nothing to a field it cannot touch.
             field.setUserInteractionEnabled(true);
         }
         self.active = kind;
@@ -160,12 +160,11 @@ impl Proxy {
                 }
                 self.active = None;
             } else {
-                // Up and untouchable from here: touches fall through to
-                // the app while this field's own fills still land
-                // programmatically. Only this one. The sibling has to keep
-                // taking interaction or the manager skips it, and a paired
-                // fill then lands its password half nowhere.
-                field.setUserInteractionEnabled(false);
+                // Both twins stay touchable. AutoFill offers nothing to a
+                // field it cannot touch, and the one holding the keyboard is
+                // exactly the field it has to offer to — so making it
+                // untouchable here is what makes the button never appear.
+                // The pair is parked out of the way instead (see `place`).
                 self.last[idx(kind)] = text.to_owned();
                 // Snapshot the sibling too: a paired fill moves both, and
                 // the poll below must see whose text actually changed.
@@ -178,30 +177,30 @@ impl Proxy {
         }
     }
 
-    /// Parks both fields beside the one the user is on.
+    /// Parks both fields in a strip beside the one the user is on.
     ///
-    /// The manager pairs a username field with a password field by
-    /// proximity and fills both, so the sibling has to be in the window,
-    /// has to be near, and has to keep taking interaction: a field with
-    /// interaction off is skipped and the password half never lands. But
-    /// parked over the *other* visible field it eats that field's taps,
-    /// and the app never hears them.
+    /// AutoFill offers credentials only to fields it can touch, and writes a
+    /// paired fill into both, so both twins stay in the window and stay
+    /// touchable — which is the whole reason they are not left covering a
+    /// visible login box and swallowing its taps.
     ///
-    /// So the active twin sits on the field — it goes untouchable once it
-    /// holds the keyboard — and the other takes a pixel-wide strip hard
-    /// against the field's far edge. Touching, so the two still pair, and
-    /// clear of every box a finger might mean.
+    /// Their frame is otherwise free: the text and the caret are clear, the
+    /// app draws those, and nothing here is ever seen. So they go where
+    /// they can do least harm — one pixel wide, hard against the focused
+    /// field's far edge, the two of them touching, which is as close as the
+    /// manager's pairing wants. That pixel is the only thing a finger can
+    /// land on.
     ///
-    /// `None` leaves them where they are (not laid out yet).
-    pub fn place(&mut self, active: super::ImeProxy, field: Option<(f64, f64, f64, f64)>) {
-        let Some((x, y, w, h)) = field else {
+    /// Inside the parent on purpose: off-screen, a field may refuse first
+    /// responder and the keyboard never comes, which is why the strip
+    /// flips to the field's other edge rather than leave the window.
+    ///
+    /// `rect` is that strip; `None` leaves both where they are.
+    pub fn place(&mut self, rect: Option<(f64, f64, f64, f64)>) {
+        let Some(rect) = rect else {
             return;
         };
-        // Points, like the hit boxes they come from.
-        let field = (x, y, w.max(1.0), h.max(1.0));
-        let strip = (field.0 + field.2, field.1, 1.0, field.3);
         for kind in [super::ImeProxy::Username, super::ImeProxy::Password] {
-            let rect = if kind == active { field } else { strip };
             if self.placed[idx(kind)] != rect {
                 let view = self.field(kind);
                 view.setFrame(NSRect::new(

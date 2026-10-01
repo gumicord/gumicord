@@ -1424,29 +1424,37 @@ impl Host {
         // responder, and without it the manager never pairs. Parking a
         // detached field only moves it, so doing this first is free.
         //
-        // Only the focused field's rectangle is wanted: both twins stand
-        // beside it (see `Proxy::place`), so neither has to wait for the
-        // other's and neither covers a box the user has to tap.
+        // One pixel wide, against the focused field's far edge and inside
+        // the window (see `Proxy::place`). The twins draw nothing, so this
+        // is about pairing and about staying out of a finger's way, not
+        // about looking like the field: only the focused rectangle is
+        // wanted, so neither twin has to wait for the other's.
         {
             let slot = match want {
                 ImeProxy::Username => "email",
                 ImeProxy::Password => "password",
             };
-            let rect = self.renderer.as_ref().and_then(|r| {
-                r.hit_boxes()
-                    .iter()
-                    .find(|h| h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(slot)))
-                    .map(|h| {
-                        (
-                            h.rect.x as f64,
-                            h.rect.y as f64,
-                            h.rect.w as f64,
-                            h.rect.h as f64,
-                        )
-                    })
-            });
-            match rect {
-                Some(rect) => proxy.place(want, Some(rect)),
+            let (field, inside) = match self.renderer.as_ref() {
+                Some(r) => {
+                    let field = r.hit_boxes().iter().find(|h| {
+                        h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(slot))
+                    });
+                    (field.map(|h| h.rect), r.viewport().w as f64)
+                }
+                None => (None, 0.0),
+            };
+            match field {
+                Some(field) => {
+                    let x = field.x as f64 + field.w as f64;
+                    let x = if x + 1.0 <= inside {
+                        x
+                    } else {
+                        // No room on that side; take the field's own last
+                        // pixel rather than leave the window.
+                        (x - 1.0).max(field.x as f64)
+                    };
+                    proxy.place(Some((x, field.y as f64, 1.0, field.h as f64)));
+                }
                 // Rects arrive within a tick or two; half-parked would fill
                 // the password half nowhere.
                 None => {
