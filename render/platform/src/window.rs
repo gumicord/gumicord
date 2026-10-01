@@ -1455,7 +1455,7 @@ impl Host {
                 }
             }
         }
-        proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
+        proxy.set_active(parent, Some(want), text.as_deref().unwrap_or(""));
         // The proxy took the keyboard, or refused and detached. Either way
         // the answer goes in the flag: `is_active` is only true here, and the
         // teardown may not run until the next frame, by which time the proxy
