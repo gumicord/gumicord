@@ -92,7 +92,7 @@ impl PluginHost {
         };
         host.inject(granted).map_err(|e| fail(e.to_string()))?;
         match source {
-            PluginSource::Js(code) => host.eval_source(&code).map_err(&fail)?,
+            PluginSource::Js(code) => host.eval_source(&code).map_err(fail)?,
             PluginSource::Bytecode(bytes) => host.eval_bytecode(bytes).map_err(fail)?,
         }
         Ok(host)
@@ -204,7 +204,7 @@ impl PluginHost {
         host.inject_with(granted, false)
             .map_err(|e| fail(e.to_string()))?;
         match source {
-            PluginSource::Js(code) => host.eval_source(&code).map_err(&fail)?,
+            PluginSource::Js(code) => host.eval_source(&code).map_err(fail)?,
             PluginSource::Bytecode(bytes) => host.eval_bytecode(bytes).map_err(fail)?,
         }
         host.context.with(|ctx| {
