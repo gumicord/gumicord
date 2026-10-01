@@ -5,6 +5,11 @@
 //! on the device stays on the device. Every platform answers from one row:
 //! Android opens the share sheet, desktop opens the logs folder, and iOS
 //! points at the Files app, where its documents already show.
+//!
+//! Android gets one extra door, because the share sheet only opens while
+//! the app does: a copy in `Download/gumicord/logs/`, kept current as the
+//! run goes (see [`mirror_crash_logs`]). A log that only appears when the
+//! process ends cannot be read while there is still something to read.
 
 use std::path::PathBuf;
 
@@ -30,12 +35,22 @@ pub fn share_log() -> Result<String, ShareError> {
 /// The file the logger is appending to, if it exists yet: the newest
 /// stamped run, falling back to the legacy fixed name.
 fn log_file() -> Option<PathBuf> {
-    let dir = std::env::var_os("GUMICORD_DATA_DIR").filter(|d| !d.is_empty())?;
-    let dir = PathBuf::from(dir).join("logs");
+    let dir = log_dir();
     newest_log(&dir, "gumicord-").or_else(|| {
         let legacy = dir.join("gumicord.log");
         legacy.is_file().then_some(legacy)
     })
+}
+
+/// Where this run's log files are written. Absent without a data
+/// directory: nothing has been written, so there is nothing to find.
+fn log_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("GUMICORD_DATA_DIR")
+            .filter(|d| !d.is_empty())
+            .unwrap_or_default(),
+    )
+    .join("logs")
 }
 
 /// Newest `prefix*.log` by name. Stamps sort chronologically, so no
@@ -96,7 +111,7 @@ mod imp {
             name.try_to_string(env)?
         };
         let authority = env.new_string(format!("{package}.fileprovider"))?;
-        let file_name = env.new_string(path.to_string_lossy().into_owned())?;
+        let file_name = env.new_string(path.to_string_lossy())?;
         let file = env.new_object(
             jni_str!("java/io/File"),
             jni_sig!("(Ljava/lang/String;)V"),
@@ -169,11 +184,13 @@ mod imp {
 
 /// Copies the crash logs where the Files app can see them (Android only).
 ///
-/// Runs at every exit, not only on crashes: if the app never opens, the
-/// settings row cannot run, and a quiet end would otherwise leave nothing
-/// behind. Fixed names bound the clutter to two files; an older pair is
-/// deleted first so Downloads never fills with corpses.
-/// Pre-29 has no Downloads collection and is skipped silently.
+/// Runs at every exit and, while the app lives, whenever the log grows
+/// (see [`mirror_crash_logs`]): a log written under the app's own
+/// directory needs a rooted phone to read, and whatever is being debugged
+/// is usually still in progress. Idempotent — an export overwrites the
+/// copy it made last time rather than adding another. Fixed names bound
+/// the clutter; older copies are deleted so Downloads never fills with
+/// corpses. Pre-29 has no Downloads collection and is skipped silently.
 #[cfg(target_os = "android")]
 pub fn export_crash_logs() -> Result<(), ShareError> {
     let ctx = ndk_context::android_context();
@@ -185,6 +202,31 @@ pub fn export_crash_logs() -> Result<(), ShareError> {
             unsafe { jni::objects::JObject::from_raw(env, ctx.context() as jni::sys::jobject) };
         export_with(env, &context)
     })
+}
+
+/// Mirrors the logs into Downloads when this run's file has grown.
+///
+/// Android only, and safe to call on every wake: until the file changes
+/// this is a `stat` and nothing else. Cheap enough to leave on a timer,
+/// which is what makes a log readable while the failure it records is
+/// still on screen.
+#[cfg(target_os = "android")]
+pub fn mirror_crash_logs() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    /// Size of the source the last mirror read; 0 means never.
+    static MIRRORED: AtomicU64 = AtomicU64::new(0);
+
+    let size = newest_log(&log_dir(), "gumicord-")
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    // Same length, same bytes: the logger only ever appends.
+    if size == 0 || size == MIRRORED.swap(size, Ordering::Relaxed) {
+        return;
+    }
+    if let Err(e) = export_crash_logs() {
+        tracing::debug!(?e, "could not mirror the log to Downloads");
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -221,6 +263,11 @@ fn export_with(
 #[cfg(target_os = "android")]
 const KEEP_EXPORTS: usize = 5;
 
+/// Where the copies live, in Downloads terms. A folder of its own so a
+/// user looking for the logs finds only logs.
+#[cfg(target_os = "android")]
+const EXPORT_DIR: &str = "Download/gumicord/logs/";
+
 #[cfg(target_os = "android")]
 fn export_one(
     env: &mut jni::Env<'_>,
@@ -231,11 +278,8 @@ fn export_one(
     use jni::objects::JValue;
     use jni::{jni_sig, jni_str};
 
-    let Some(dir) = std::env::var_os("GUMICORD_DATA_DIR").filter(|d| !d.is_empty()) else {
-        return Ok(());
-    };
     // A missing file is not an error: an early crash leaves nothing behind.
-    let Some(path) = newest_log(&std::path::PathBuf::from(dir).join("logs"), prefix) else {
+    let Some(path) = newest_log(&log_dir(), prefix) else {
         return Ok(());
     };
     let Ok(bytes) = std::fs::read(&path) else {
@@ -247,33 +291,46 @@ fn export_one(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("gumicord.log");
-    let values = env.new_object(
-        jni_str!("android/content/ContentValues"),
-        jni_sig!("()V"),
-        &[],
-    )?;
-    for (key, value) in [
-        ("_display_name", name),
-        ("mime_type", "text/plain"),
-        ("relative_path", "Download/gumicord/"),
-    ] {
-        let key = env.new_string(key)?;
-        let value = env.new_string(value)?;
-        env.call_method(
-            &values,
-            jni_str!("put"),
-            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
-            &[JValue::from(&key), JValue::from(&value)],
-        )?;
-    }
-    let uri = env
-        .call_method(
-            resolver,
-            jni_str!("insert"),
-            jni_sig!("(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;"),
-            &[JValue::from(downloads), JValue::from(&values)],
-        )?
-        .l()?;
+    // Mirroring runs repeatedly while the app lives, so a second copy under
+    // the same name would pile up on every pass. Overwrite the last one.
+    let uri = match exported_id(env, resolver, downloads, name)? {
+        Some(id) => env
+            .call_static_method(
+                jni_str!("android/content/ContentUris"),
+                jni_str!("withAppendedId"),
+                jni_sig!("(Landroid/net/Uri;J)Landroid/net/Uri;"),
+                &[JValue::from(downloads), JValue::Long(id)],
+            )?
+            .l()?,
+        None => {
+            let values = env.new_object(
+                jni_str!("android/content/ContentValues"),
+                jni_sig!("()V"),
+                &[],
+            )?;
+            for (key, value) in [
+                ("_display_name", name),
+                ("mime_type", "text/plain"),
+                ("relative_path", EXPORT_DIR),
+            ] {
+                let key = env.new_string(key)?;
+                let value = env.new_string(value)?;
+                env.call_method(
+                    &values,
+                    jni_str!("put"),
+                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
+                    &[JValue::from(&key), JValue::from(&value)],
+                )?;
+            }
+            env.call_method(
+                resolver,
+                jni_str!("insert"),
+                jni_sig!("(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;"),
+                &[JValue::from(downloads), JValue::from(&values)],
+            )?
+            .l()?
+        }
+    };
     let bytes = env.byte_array_from_slice(&bytes)?;
     let stream = env
         .call_method(
@@ -292,6 +349,65 @@ fn export_one(
     env.call_method(&stream, jni_str!("close"), jni_sig!("()V"), &[])?;
     trim_exports(env, resolver, downloads, prefix);
     Ok(())
+}
+
+/// The row id of an already-exported copy with this name, if there is one.
+/// Same folder and name: the newest run is stamped, so this only ever
+/// matches the copy of the run in progress.
+#[cfg(target_os = "android")]
+fn exported_id(
+    env: &mut jni::Env<'_>,
+    resolver: &jni::objects::JObject<'_>,
+    downloads: &jni::objects::JObject<'_>,
+    name: &str,
+) -> Result<Option<i64>, jni::errors::Error> {
+    use jni::objects::JValue;
+    use jni::{jni_sig, jni_str};
+
+    let string_class = env.find_class(jni_str!("java/lang/String"))?;
+    let projection = env.new_object_array(1, &string_class, jni::objects::JObject::null())?;
+    let id = env.new_string("_id")?;
+    projection.set_element(env, 0, &id)?;
+    let where_all = env.new_string("relative_path=? AND _display_name=?")?;
+    let args = env.new_object_array(2, &string_class, jni::objects::JObject::null())?;
+    let dir = env.new_string(EXPORT_DIR)?;
+    args.set_element(env, 0, &dir)?;
+    let name = env.new_string(name)?;
+    args.set_element(env, 1, &name)?;
+    let no_sort = jni::objects::JObject::null();
+    let cursor = env
+        .call_method(
+            resolver,
+            jni_str!("query"),
+            jni_sig!("(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;"),
+            &[
+                JValue::from(downloads),
+                JValue::from(&projection),
+                JValue::from(&where_all),
+                JValue::from(&args),
+                JValue::from(&no_sort),
+            ],
+        )?
+        .l()?;
+    let col = column_index(env, &cursor, "_id")?;
+    let found = if env
+        .call_method(&cursor, jni_str!("moveToFirst"), jni_sig!("()Z"), &[])?
+        .z()?
+    {
+        Some(
+            env.call_method(
+                &cursor,
+                jni_str!("getLong"),
+                jni_sig!("(I)J"),
+                &[JValue::Int(col)],
+            )?
+            .j()?,
+        )
+    } else {
+        None
+    };
+    let _ = env.call_method(&cursor, jni_str!("close"), jni_sig!("()V"), &[]);
+    Ok(found)
 }
 
 /// Deletes same-prefix copies past the newest few, so crash loops cannot
@@ -315,7 +431,7 @@ fn trim_exports(
         }
         let where_all = env.new_string("relative_path=?")?;
         let args = env.new_object_array(1, &string_class, jni::objects::JObject::null())?;
-        let one = env.new_string("Download/gumicord/")?;
+        let one = env.new_string(EXPORT_DIR)?;
         args.set_element(env, 0, &one)?;
         let no_sort = jni::objects::JObject::null();
         let cursor = env
@@ -368,7 +484,7 @@ fn trim_exports(
             rows.push((id, name.try_to_string(env)?, at));
         }
         let _ = env.call_method(&cursor, jni_str!("close"), jni_sig!("()V"), &[]);
-        rows.sort_by(|a, b| b.2.cmp(&a.2));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.2));
         for (id, name, _) in rows.into_iter().skip(KEEP_EXPORTS) {
             if !name.starts_with(prefix) {
                 continue;

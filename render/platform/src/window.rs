@@ -53,6 +53,12 @@ const fn is_mobile() -> bool {
 
 /// How long a touch holds still before it becomes a context menu.
 const LONG_PRESS_MS: u64 = 500;
+/// How often the log is mirrored into Downloads while the app lives
+/// (Android only). The mirror itself is a no-op until the file grows, so
+/// this paces the check rather than the copy. Short enough to land while
+/// the error being read is still on screen — a toast lives 4 seconds.
+#[cfg(target_os = "android")]
+const LOG_MIRROR_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 /// Touches starting this far left may drag the drawer in. Mirrors the
 /// app's drawer edge; the app still decides whether one can start.
 const DRAWER_EDGE: f32 = 24.0;
@@ -547,6 +553,8 @@ fn run_loop(
         android_text: crate::android_text::AndroidText::new(),
         #[cfg(any(target_os = "android", target_os = "ios"))]
         next_ime_poll: std::time::Instant::now(),
+        #[cfg(target_os = "android")]
+        next_log_mirror: std::time::Instant::now(),
         adapter: None,
         captcha: CaptchaHostImpl,
         cursor: (0.0, 0.0),
@@ -705,6 +713,11 @@ struct Host {
     /// Next paced IME poll while a field is focused (mobile only).
     #[cfg(any(target_os = "android", target_os = "ios"))]
     next_ime_poll: std::time::Instant,
+    /// When the log is next mirrored into Downloads (Android only). The
+    /// log lives where the Files app cannot see it, so a copy the user can
+    /// reach is the only one worth having while a run is in progress.
+    #[cfg(target_os = "android")]
+    next_log_mirror: std::time::Instant,
     /// Speaks to the OS screen reader. Created before the window first
     /// shows; without it Narrator never connects.
     adapter: Option<accesskit_winit::Adapter>,
@@ -2179,6 +2192,17 @@ impl ApplicationHandler<LoopEvent> for Host {
             } else {
                 soonest(at + WHEEL_END);
             }
+        }
+
+        // Android hides the app's own directory from the Files app, so the
+        // log written there needs a rooted phone to read. Mirror it into
+        // Downloads while the app lives: whatever is being debugged is
+        // usually still in progress, and ferrying it only at exit means
+        // there is nothing to read until there is nothing left to debug.
+        #[cfg(target_os = "android")]
+        if now >= self.next_log_mirror {
+            self.next_log_mirror = now + LOG_MIRROR_EVERY;
+            crate::share::mirror_crash_logs();
         }
 
         // A touch held still becomes the context menu: phones have no
