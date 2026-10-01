@@ -4,8 +4,9 @@
 //! fill into. Two hidden `UITextField` siblings (username + password, so the
 //! manager pairs them) receive the fill; this layer polls their text into
 //! the app's documents. Visible editing stays in our rendered fields: the
-//! proxies sit transparently over them and never take touches (user
-//! interaction is off).
+//! field holding the keyboard goes untouchable so its touches fall through
+//! to the app, and its sibling stands beside it rather than over anything
+//! (see [`Proxy::place`]).
 //!
 //! Polled, not delegated: a delegate class from Rust is a maintenance
 //! burden, and a frame of latency is invisible on a login form.
@@ -160,13 +161,11 @@ impl Proxy {
                 self.active = None;
             } else {
                 // Up and untouchable from here: touches fall through to
-                // the app while fills still land programmatically. Both
-                // twins: a touchable sibling parked over the other field
-                // eats its taps, so the app never sees them and focus
-                // looks stuck.
-                for field in [&self.user, &self.pass] {
-                    field.setUserInteractionEnabled(false);
-                }
+                // the app while this field's own fills still land
+                // programmatically. Only this one. The sibling has to keep
+                // taking interaction or the manager skips it, and a paired
+                // fill then lands its password half nowhere.
+                field.setUserInteractionEnabled(false);
                 self.last[idx(kind)] = text.to_owned();
                 // Snapshot the sibling too: a paired fill moves both, and
                 // the poll below must see whose text actually changed.
@@ -179,27 +178,33 @@ impl Proxy {
         }
     }
 
-    /// Parks both fields over the visible login fields. Interaction is off,
-    /// so this only feeds the password manager's pairing heuristics; typing
-    /// still routes through the polls.
-    /// `None` rects leave that field where it is (not laid out yet).
-    pub fn place(
-        &mut self,
-        user: Option<(f64, f64, f64, f64)>,
-        pass: Option<(f64, f64, f64, f64)>,
-    ) {
-        for (kind, rect) in [
-            (super::ImeProxy::Username, user),
-            (super::ImeProxy::Password, pass),
-        ] {
-            let Some((x, y, w, h)) = rect else {
-                continue;
-            };
-            // Points, like the hit boxes they come from.
-            let rect = (x, y, w.max(1.0), h.max(1.0));
+    /// Parks both fields beside the one the user is on.
+    ///
+    /// The manager pairs a username field with a password field by
+    /// proximity and fills both, so the sibling has to be in the window,
+    /// has to be near, and has to keep taking interaction: a field with
+    /// interaction off is skipped and the password half never lands. But
+    /// parked over the *other* visible field it eats that field's taps,
+    /// and the app never hears them.
+    ///
+    /// So the active twin sits on the field — it goes untouchable once it
+    /// holds the keyboard — and the other takes a pixel-wide strip hard
+    /// against the field's far edge. Touching, so the two still pair, and
+    /// clear of every box a finger might mean.
+    ///
+    /// `None` leaves them where they are (not laid out yet).
+    pub fn place(&mut self, active: super::ImeProxy, field: Option<(f64, f64, f64, f64)>) {
+        let Some((x, y, w, h)) = field else {
+            return;
+        };
+        // Points, like the hit boxes they come from.
+        let field = (x, y, w.max(1.0), h.max(1.0));
+        let strip = (field.0 + field.2, field.1, 1.0, field.3);
+        for kind in [super::ImeProxy::Username, super::ImeProxy::Password] {
+            let rect = if kind == active { field } else { strip };
             if self.placed[idx(kind)] != rect {
-                let field = self.field(kind);
-                field.setFrame(NSRect::new(
+                let view = self.field(kind);
+                view.setFrame(NSRect::new(
                     NSPoint::new(rect.0, rect.1),
                     NSSize::new(rect.2, rect.3),
                 ));

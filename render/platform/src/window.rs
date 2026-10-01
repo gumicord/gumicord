@@ -1403,15 +1403,14 @@ impl Host {
     /// redraws while focused; nothing here spins its own frames.
     #[cfg(target_os = "ios")]
     fn sync_ime_proxy(&mut self) -> bool {
-        let want = self.app.ime_proxy();
         // Gone before any view exists: drop the keyboard now rather than
         // waiting for a parent that may never come.
-        if want.is_none() {
+        let Some(want) = self.app.ime_proxy() else {
             if let Some(proxy) = self.proxy.as_mut() {
                 proxy.blur();
             }
             return false;
-        }
+        };
         let text = self.app.focused_document().map(|d| d.text().to_owned());
         let Some(parent) = self
             .window
@@ -1424,35 +1423,36 @@ impl Host {
         // Park before showing: an off-screen field may refuse first
         // responder, and without it the manager never pairs. Parking a
         // detached field only moves it, so doing this first is free.
+        //
+        // Only the focused field's rectangle is wanted: both twins stand
+        // beside it (see `Proxy::place`), so neither has to wait for the
+        // other's and neither covers a box the user has to tap.
         {
-            let boxes = self.renderer.as_ref().map(|r| r.hit_boxes());
-            let mut user = None;
-            let mut pass = None;
-            if let Some(boxes) = boxes {
-                for h in boxes {
-                    if h.id != NodeId::AppScreenLoginField {
-                        continue;
-                    }
-                    let rect = (
-                        h.rect.x as f64,
-                        h.rect.y as f64,
-                        h.rect.w as f64,
-                        h.rect.h as f64,
-                    );
-                    if h.key == Some(Key::Slot("email")) {
-                        user = Some(rect);
-                    } else if h.key == Some(Key::Slot("password")) {
-                        pass = Some(rect);
-                    }
+            let slot = match want {
+                ImeProxy::Username => "email",
+                ImeProxy::Password => "password",
+            };
+            let rect = self.renderer.as_ref().and_then(|r| {
+                r.hit_boxes()
+                    .iter()
+                    .find(|h| h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(slot)))
+                    .map(|h| {
+                        (
+                            h.rect.x as f64,
+                            h.rect.y as f64,
+                            h.rect.w as f64,
+                            h.rect.h as f64,
+                        )
+                    })
+            });
+            match rect {
+                Some(rect) => proxy.place(want, Some(rect)),
+                // Rects arrive within a tick or two; half-parked would fill
+                // the password half nowhere.
+                None => {
+                    tracing::debug!(slot, "proxy waiting for the field rect");
+                    return false;
                 }
-            }
-            proxy.place(user, pass);
-            // Pairing needs both twins parked: a lone parked field fills
-            // alone, so wait for the sibling's rect instead of going
-            // half-active. Parked rects arrive within a tick or two.
-            if user.is_none() || pass.is_none() {
-                tracing::debug!("proxy waiting for both field rects");
-                return false;
             }
         }
         proxy.set_active(parent, want, text.as_deref().unwrap_or(""));
