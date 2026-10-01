@@ -63,6 +63,11 @@ pub type NotificationSetting = (GuildId, u8, bool, Vec<(ChannelId, u8, bool)>);
 pub enum GatewayError {
     #[error("接続できない: {0}")]
     Connect(#[from] tokio_tungstenite::tungstenite::Error),
+    /// The socket was up and then failed. Separate from [`Self::Connect`] for
+    /// the same reason as `RemoteAuthError::Dropped`: the connect phase never
+    /// finished, so blaming it for a mid-session abort hides the real cause.
+    #[error("接続が切れた: {0}")]
+    Dropped(tokio_tungstenite::tungstenite::Error),
     #[error("解凍できない: {0}")]
     Decompress(#[from] std::io::Error),
     #[error("読めない応答: {0}")]
@@ -773,8 +778,10 @@ impl Connection {
     }
 
     async fn send(&mut self, value: serde_json::Value) -> Result<(), GatewayError> {
-        self.ws.send(Message::text(value.to_string())).await?;
-        Ok(())
+        self.ws
+            .send(Message::text(value.to_string()))
+            .await
+            .map_err(GatewayError::Dropped)
     }
 
     /// Schedules the first heartbeat after interval * jitter.
@@ -909,7 +916,7 @@ impl Connection {
             return Ok(None);
         };
 
-        let plain = match message? {
+        let plain = match message.map_err(GatewayError::Dropped)? {
             Message::Binary(bytes) => self.zstd.push(&bytes)?,
             // Unexpected given the compression request, but read it anyway.
             Message::Text(text) => text.as_bytes().to_vec(),
@@ -1067,6 +1074,7 @@ fn recoverable_session(error: &GatewayError) -> bool {
     match error {
         // A network problem; the session is still alive.
         GatewayError::Connect(_)
+        | GatewayError::Dropped(_)
         | GatewayError::Decompress(_)
         | GatewayError::Decode(_)
         | GatewayError::Timeout => true,
@@ -1194,6 +1202,18 @@ mod tests {
         assert!(recoverable_session(&closed(1006)));
         assert!(recoverable_session(&closed(CLOSE_NO_ACK)));
         assert!(recoverable_session(&closed(CLOSE_RECONNECT)));
+    }
+
+    /// A socket that dies after it was up is a network problem like any
+    /// other: the session is still alive, so it must be resumed. Guards the
+    /// `Dropped` split, which exists for the message and not the recovery.
+    #[test]
+    fn a_dropped_socket_is_resumed() {
+        let dropped = GatewayError::Dropped(tokio_tungstenite::tungstenite::Error::Io(
+            std::io::Error::from(std::io::ErrorKind::ConnectionAborted),
+        ));
+        assert_eq!(fatal_of(&dropped), None);
+        assert!(recoverable_session(&dropped));
     }
 
     /// A dead session means starting from identify.

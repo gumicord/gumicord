@@ -1,6 +1,6 @@
 # 次にやること
 
-最終更新: 2026-09-13。**終わったものはこの一覧から消すこと。**
+最終更新: 2026-10-02。**終わったものはこの一覧から消すこと。**
 
 これは仕様ではなく引き継ぎのメモである。版計画は
 [`spec/07-roadmap.md`](spec/07-roadmap.md) にある。
@@ -44,6 +44,23 @@
 
 - Android／iOS の殻と CI の初グリーン (Gradle・Xcode・pin 版の確定)
 - 実機の殻挙動 (Xcode のライフサイクル順・Metal・GameActivity)
+- Android の HTTPS 全面失敗 (2026-10-02): 0.7.0 では Android の
+  `CertPathValidator` が OCSP responder の無い Discord 証明を `Revoked` と
+  誤判定し、`https://discord.com` への要求が全て落ちていた
+  (上流 rustls-platform-verifier#221)。0.7.1 (android 0.2.0) が CRL 取得を
+  解禁して直す。**未実機確認**。QR が出て読み取り・承認まで進み、ログの
+  `rustls_platform_verifier` の 2 行 (`... was revoked` / `invalid peer
+  certificate: Revoked`) が出ないことを確認すること。Gradle の AAR 取得先が
+  crate 内同梱から GitHub の `maven-archive` に移ったため、Gradle 解決を
+  通すのは CI の nightly だけ
+- Android のセッション途中切断 (2026-10-02 新規): QR を表示してスキャン待ちの
+  idle の間に、remote-auth が `ECONNABORTED (os error 103)` で落ちる。
+  ログでは毎回 `onStop`/`saveState` が先に来ており、Activity の停止 →
+  再開 → GPU 再作成の往復が 2 回起きている。Android がバックグラウンドで
+  凍結したせいか自前起因なのかは **まだ決まっていない**。这次的ビルドは
+  `activity suspended` / `activity resumed` の情報ログと全行のタイムスタンプ
+  で切り分けられる。切断は `RemoteAuthError::Dropped` として報告される
+  (`Connect` ではない)。TLS は成功していた (`the QR is ready` は出ている)
 - 触って切り替える操作とセーフエリア、Android のクリップボード
 - 一員行の行き先 (プロフィール表示) は将来のまま。複数指は対象外
 - iPad Stage Manager の窓化時の上部余白: `safe area changed` ログで inset 実測値を取ること

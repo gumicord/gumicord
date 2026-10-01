@@ -64,6 +64,15 @@ pub enum RemoteAuthError {
     #[error("ゲートウェイに接続できない: {0}")]
     Connect(#[from] tokio_tungstenite::tungstenite::Error),
 
+    /// The socket was up and then failed. Kept apart from [`Self::Connect`]
+    /// because the two need different investigations: a connect failure is
+    /// DNS, TLS or a refusal, while this one means something tore down a
+    /// working connection mid-session (Android freezing a backgrounded
+    /// process does exactly that). Reporting it as a connect failure sent a
+    /// whole investigation down the DNS path, past `diagnose_connect`.
+    #[error("ゲートウェイとの接続が切れた: {0}")]
+    Dropped(tokio_tungstenite::tungstenite::Error),
+
     #[error("鍵ペアを作れない: {0}")]
     KeyGen(#[source] rsa::Error),
 
@@ -205,7 +214,7 @@ impl RemoteAuth {
                 Some(Ok(Message::Close(_))) | None => return Err(RemoteAuthError::Closed),
                 // Ping, pong and the like are ignored.
                 Some(Ok(_)) => continue,
-                Some(Err(e)) => return Err(RemoteAuthError::Connect(e)),
+                Some(Err(e)) => return Err(RemoteAuthError::Dropped(e)),
             };
 
             if let Some(event) = self.handle(&text).await? {
@@ -329,7 +338,7 @@ impl RemoteAuth {
         self.ws
             .send(Message::Text(value.to_string().into()))
             .await
-            .map_err(RemoteAuthError::Connect)
+            .map_err(RemoteAuthError::Dropped)
     }
 }
 

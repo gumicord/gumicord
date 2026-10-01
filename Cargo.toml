@@ -153,9 +153,15 @@ log = "0.4"
 # accesskit's Android backend only works on it (see app/android/README.md).
 # Android TLS: reqwest verifies against the system trust store, which needs
 # the JVM handed over at startup (see app/android).
+#
+# 0.7.1 is the floor, not a preference. Android's Trust Manager requires an
+# OCSP responder or a reachable CRL for the end-entity certificate; most CAs
+# now publish neither. The bundled Android component only learned to permit
+# the CRL fetch in 0.2.0, so on 0.7.0 a Discord certificate was rejected as
+# `Revoked` and every HTTPS request failed.
 jni = "0.22"
 ndk-context = "0.1"
-rustls-platform-verifier = "0.7"
+rustls-platform-verifier = "0.7.1"
 android_logger = "0.14"
 
 # What a build costs.

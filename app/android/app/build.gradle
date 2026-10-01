@@ -94,6 +94,39 @@ android {
     }
 }
 
+// rustls-platform-verifier is a Rust crate with a Kotlin component, and the
+// two must ship the same version or the JNI calls fail at runtime. Cargo.lock
+// already pins that component, so it is the single source of truth here;
+// reading it as a ValueSource keeps the configuration cache warm, unlike the
+// `cargo metadata` subprocess this replaces.
+def rustlsLockFile = rootProject.file('../../Cargo.lock')
+
+abstract class RustlsVersion implements ValueSource<String, RustlsVersion.Params> {
+    interface Params extends ValueSourceParameters {
+        RegularFileProperty getLockFile()
+    }
+
+    static final String CRATE_NAME = 'rustls-platform-verifier-android'
+
+    @Override
+    String obtain() {
+        def lockFile = parameters.lockFile.get().asFile
+        def lines = lockFile.readLines()
+        def idx = lines.findIndexOf { it.trim() == "name = \"$CRATE_NAME\"" }
+        def version = idx < 0 ? null : lines.drop(idx + 1)
+            .find { it.trim().startsWith('version = ') }
+            ?.find(/"([^"]*)"/) { match, v -> v }
+        if (!version) {
+            throw new GradleException("$CRATE_NAME not found in $lockFile")
+        }
+        return version
+    }
+}
+
+def rustlsPlatformVerifierVersion = providers.of(RustlsVersion) { spec ->
+    spec.parameters.lockFile.set(rustlsLockFile)
+}
+
 dependencies {
     // GameActivity itself, from Google Maven. The Rust side drives through
     // winit's android-game-activity feature; nothing here subclasses it.
@@ -103,14 +136,24 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     // rustls-platform-verifier checks HTTPS against the system trust store
     // through the JVM. Without this every HTTPS request fails on Android.
-    // The version follows the Rust crate via cargo metadata (see
-    // ../settings.gradle); cargo keeps the two in sync. The @aar suffix
-    // is required: the local maven repo is artifact-only, so Gradle
-    // ignores the POM packaging and would look for a .jar otherwise.
-    implementation "rustls:rustls-platform-verifier:${gradle.ext.rustlsPlatformVerifierVersion}@aar"
+    //
+    // No version on purpose: the Kotlin component must match the Rust crate
+    // exactly, and Cargo.lock already pins it. The version is forced in from
+    // there below rather than duplicated here. No `@aar` suffix either: the
+    // upstream maven repository publishes real POMs with `<packaging>aar</packaging>`.
+    implementation "org.rustls:rustls-platform-verifier"
 }
 
 configurations.all {
+    // The Kotlin component is declared without a version above; hand it the
+    // one Cargo.lock pins so the two can never drift.
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.rustls'
+                && details.requested.name == 'rustls-platform-verifier') {
+            details.useVersion(rustlsPlatformVerifierVersion.get())
+            details.because("must match the Rust crate's own Android component")
+        }
+    }
     // kotlin-stdlib 1.8+ already contains the jdk7/jdk8 classes; the old
     // split artifacts (via games-activity) only duplicate them.
     exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'

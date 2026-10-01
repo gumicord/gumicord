@@ -25,10 +25,32 @@ and passing native handles across lives in `app/core`.
   ([ADR-0015](../../spec/adr/0015-mobile-captcha-hosts.md)). Judgement stays
   in Rust; Kotlin only carries strings.
 - **TLS through the system store**: `reqwest` verifies against it via
-  `rustls-platform-verifier`, which needs its Kotlin helper on the classpath
-  (`settings.gradle` locates the AAR through `cargo metadata`, `app/build.gradle`
-  implements it). Without that helper every HTTPS request fails on Android.
+  `rustls-platform-verifier`, which needs its Kotlin helper on the classpath.
+  Without that helper every HTTPS request fails on Android.
   The JVM handover itself happens in `src/lib.rs` before the loop starts.
+  - **0.7.1 is the floor.** Android's Trust Manager wants an OCSP responder or
+    a reachable CRL for the end-entity certificate, and most CAs now publish
+    neither. The helper only learned to permit the CRL fetch in its own
+    0.2.0, so on 0.7.0 a Discord certificate came back as
+    `invalid peer certificate: Revoked` and every HTTPS request failed.
+    Upstream tracks this as rustls/rustls-platform-verifier#221.
+  - **The helper is fetched, not vendored.** Since 0.7.x the crate ships no
+    AAR and no local Maven repository; artifacts live on upstream's
+    `maven-archive` branch, which `settings.gradle` registers as an ordinary
+    remote repository. Its group id is `org.rustls`, not the old crate-local
+    `rustls`. `app/build.gradle` declares the dependency unversioned and
+    forces the version from `Cargo.lock`, which is the only source of truth:
+    the Kotlin part must match the Rust crate exactly or the JNI calls fail.
+  - That same repository publishes a real `maven-metadata.xml` and a POM with
+    `<packaging>aar</packaging>`, so the `@aar` suffix and the
+    `metadataSources { artifact() }` workaround the crate-local copy needed
+    are both gone.
+  - The helper also carries an Android manifest that the build merges into
+    ours; that merge is what allows the cleartext CRL fetch, so do not set
+    `usesCleartextTraffic` in `AndroidManifest.xml`.
+  - Should `minifyEnabled` ever turn on, Proguard needs
+    `-keep class org.rustls.platformverifier.** { *; }` or it strips the
+    verifier as unused (JNI is invisible to it).
 - **Runtime backend fallback**: Android cannot spawn the GPU probe's children, so a GLES setup failure (seen as `eglCreateWindowSurface: BadAlloc` on some drivers) rotates to the next candidate on the next event instead of retrying GLES forever. GLES-first order is kept; devices where GLES works never touch Vulkan.
 
 ## Still open

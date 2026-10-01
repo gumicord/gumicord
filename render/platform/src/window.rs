@@ -2241,7 +2241,12 @@ impl ApplicationHandler<LoopEvent> for Host {
         // not, stranding the new screen until the next input. Re-ask on a
         // deadline until served, bounded so a hidden window stops. Served
         // frames clear the debt in `redraw`.
-        if self.redraw_owed.get() {
+        //
+        // With no window there is nothing to serve it: asking again just
+        // burns the wakeup and writes a line per attempt. Android drops the
+        // window in `suspended`, which clears the debt there too, so this
+        // only guards the gap between the two.
+        if self.redraw_owed.get() && self.window.is_some() {
             const OWED_RETRY_MAX: u32 = 20;
             if self.redraw_retries.get() >= OWED_RETRY_MAX {
                 tracing::debug!("owed frame still unserved; giving up");
@@ -2298,6 +2303,12 @@ impl ApplicationHandler<LoopEvent> for Host {
             use winit::platform::android::ActiveEventLoopExtAndroid;
             self.android_app = Some(event_loop.android_app().clone());
         }
+        // Android stops and restarts the activity on its own (focus loss,
+        // a configuration change, the launcher); each one rebuilds the
+        // window and the GPU. Logged at info because a stop mid-session is
+        // what kills a socket, and only these two lines date it.
+        #[cfg(target_os = "android")]
+        tracing::info!(had_window = self.window.is_some(), "activity resumed");
         if self.window.is_some() {
             return;
         }
@@ -2347,6 +2358,12 @@ impl ApplicationHandler<LoopEvent> for Host {
         // the next resume rebuilds from scratch.
         self.renderer = None;
         self.window = None;
+        tracing::info!("activity suspended; window and renderer dropped");
+        // Whatever was owed can never be served now, and `create_window`
+        // asks for a fresh frame itself, so keeping the debt would only
+        // make the loop below re-ask 20 times against a window that does
+        // not exist. That was 600-odd log lines per backgrounding.
+        self.clear_redraw_debt();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

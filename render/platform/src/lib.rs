@@ -137,6 +137,27 @@ fn stamp_now() -> String {
     )
 }
 
+/// Wall clock for log lines (`HH:MM:SS.mmm`). Without it a mobile log cannot
+/// be read as a sequence: a session that died after two seconds and one that
+/// died after two minutes produce the same lines, and the only ordering
+/// available is the file position.
+fn time_now() -> String {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let local = (unix.as_secs() as i64)
+        .saturating_add(clock::local_utc_offset_minutes() as i64 * 60)
+        .max(0);
+    let secs = local.rem_euclid(86_400);
+    format!(
+        "{h:02}:{m:02}:{s:02}.{ms:03}",
+        h = secs / 3600,
+        m = secs % 3600 / 60,
+        s = secs % 60,
+        ms = unix.subsec_millis(),
+    )
+}
+
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -230,7 +251,8 @@ pub fn init_file_logging() {
         if let Ok(mut file) = file.lock() {
             let _ = writeln!(
                 file,
-                "[INFO] gumicord: version={version} commit={commit} channel={channel}"
+                "[{} INFO] gumicord: version={version} commit={commit} channel={channel}",
+                time_now()
             );
         }
     }
@@ -310,7 +332,8 @@ impl log::Log for BridgeLogger {
             use std::io::Write as _;
             let _ = writeln!(
                 file,
-                "[{}] {}: {}",
+                "[{} {}] {}: {}",
+                time_now(),
                 record.level(),
                 record.target(),
                 message
@@ -393,7 +416,14 @@ impl tracing::Subscriber for FileLogger {
         }
         if let Ok(mut file) = self.file.lock() {
             use std::io::Write as _;
-            let _ = writeln!(file, "[{}] {}{}", meta.level(), meta.target(), msg);
+            let _ = writeln!(
+                file,
+                "[{} {}] {}{}",
+                time_now(),
+                meta.level(),
+                meta.target(),
+                msg
+            );
         }
     }
 
@@ -537,6 +567,22 @@ mod tests {
         );
         drop(bridge);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[WARN] wgpu_hal: egl failed: 6"), "{text}");
+        // The stamp leads every line so a log can be read as a sequence;
+        // it is a wall clock, so only its shape is asserted here.
+        let line = text
+            .lines()
+            .find(|l| l.contains("wgpu_hal: egl failed: 6"))
+            .unwrap_or_else(|| panic!("no line for the bridged warning in {text:?}"));
+        assert!(line.starts_with('['), "no stamp in {line:?}");
+        let rest = &line[1..];
+        let (stamp, tail) = rest.split_once(' ').expect("no stamp/target split");
+        assert_eq!(stamp.len(), 12, "expected HH:MM:SS.mmm, got {stamp:?}");
+        assert!(
+            stamp
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == ':' || c == '.'),
+            "unexpected characters in the stamp {stamp:?}"
+        );
+        assert_eq!(tail, "WARN] wgpu_hal: egl failed: 6", "{line}");
     }
 }
