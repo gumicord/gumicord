@@ -404,6 +404,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # The scenes now come from the app itself, so building the tool links
+      # the platform layer: the Secret Service backend, the file dialog's
+      # WebKitGTK, and GTK. Nothing here opens a window or a dialog.
+      - name: Install D-Bus headers
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: screenshot

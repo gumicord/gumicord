@@ -30,6 +30,12 @@
 - 待ち: macOS／Linux 実機確認 (`VERIFY-v0.0.3.md` の 1〜4・6〜7)
 - 待ち: Linux blessed 画像の登録 (CI の `screenshot-ubuntu-*` 実像を目視してから)。
   macOS は GPU 付きランナが要るため CI 対象外のまま
+- 残: コンプライアンス画像が実際の app の木を描くようになったので、headless な
+  `tools/screenshot` が `gumicord-app` を辿って GTK と WebKitGTK をリンクする。
+  CI には apt を足して動かせているが、**取り除くなら** platform 層を
+  「状態と木の組み立て」と「窓・GTK・鍵束」に分ける作業が要る
+  (`Application` と `TextDocument` と `FrameCx` がまだ platform 側にあるため、
+  crates を割るだけで済むとは限らない)。 screenshot の job は apt で 100 秒ほど伸びる
 - 待ち: 署名・公証の実実行 (Apple Developer Program の参加と secrets 登録が要る)
 
 ---
