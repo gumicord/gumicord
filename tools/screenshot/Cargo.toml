@@ -13,7 +13,8 @@ name = "screenshot"
 path = "src/main.rs"
 
 [dependencies]
+gumicord-app.workspace = true
+gumicord-platform.workspace = true
 gumicord-render.workspace = true
-gumicord-theme.workspace = true
 gumicord-uitree.workspace = true
 png.workspace = true

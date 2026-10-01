@@ -207,6 +207,7 @@ define_node_ids! {
     ChatInput,                "chat.input",                      None,    Core,   "入力欄全体 (FR-024)";
     ChatInputField,           "chat.input.field",                None,    Core,   "テキスト入力そのもの (PLT-001)";
     ChatInputToolbar,         "chat.input.toolbar",              None,    Core,   "入力欄の上部";
+    ChatInputBody,            "chat.input.body",                 None,    Core,   "入力欄本体の一行。入力欄と横のボタン群を並べる";
     ChatInputActions,         "chat.input.actions",              None,    Core,   "送信・添付などのボタン群";
 
     // ─────────────────────────── overlay.* — floated above the flow

@@ -287,6 +287,7 @@ M1 で公開するフィールド。
 | `chat.input` | — | 入力欄全体 (FR-024) |
 | `chat.input.field` | — | テキスト入力そのもの (PLT-001) |
 | `chat.input.toolbar` | — | 入力欄の上部 |
+| `chat.input.body` | — | 入力欄本体の一行。入力欄と横のボタン群を並べる |
 | `chat.input.actions` | — | 送信・添付などのボタン群 |
 
 ### `overlay.*` — プラグインも生成できる
@@ -354,7 +355,7 @@ M1 で公開するフィールド。
 | `layout.scrollbar` | — | スクロール位置の表示と操作 |
 | `layout.scrollbar.thumb` | — | スクロールバーの摘み |
 
-**合計 123 個** (中核 78 / プラグインも生成可 45)。
+**合計 124 個** (中核 79 / プラグインも生成可 45)。
 
 <!-- END GENERATED: node-ids -->
 

@@ -987,6 +987,41 @@ mod tests {
         );
     }
 
+    /// A `grow` child of a grow-free parent takes everything the parent has
+    /// left, whatever the parent was going to be worth. The composer's row
+    /// was a bare `layout.row` inside the grow-free `chat.input` column, and
+    /// it took the whole chat view: the message list measured to nothing and
+    /// the visible field floated in the middle of the bar. A wrapper that
+    /// only means "put these side by side" needs a node that does not grow.
+    #[test]
+    fn a_grow_child_empties_a_grow_free_parent() {
+        let field = styled(NodeId::ChatInputField, |s| s.height = Some(54.0));
+        let bar = |row: NodeId| {
+            UiNode::new(NodeId::ChatView)
+                .child(UiNode::new(NodeId::ChatMessageList))
+                .child(UiNode::new(NodeId::ChatInput).child(UiNode::new(row).child(field.clone())))
+        };
+        let list_h = |row: NodeId| {
+            let tree = bar(row);
+            let r = layout(
+                &tree,
+                Size::new(400.0, 600.0),
+                &mut shaper(),
+                &ScrollState::new(),
+            );
+            rect_of(&r, NodeId::ChatMessageList).h
+        };
+
+        // `layout.row` grows, `chat.input.body` does not: both hold the same
+        // field and nothing else.
+        assert_eq!(list_h(NodeId::LayoutRow), 0.0, "伸びる行が画面を飲み込む");
+        assert_eq!(
+            list_h(NodeId::ChatInputBody),
+            546.0,
+            "入力欄だけが高さを持ち、一覧が余りを取る"
+        );
+    }
+
     /// A quote hugs its content: it must not grow to fill the leftover height
     /// of a tall message and drift the body text after it (regression).
     #[test]

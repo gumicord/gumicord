@@ -82,6 +82,7 @@ export type NodeId =
   | "chat.input"
   | "chat.input.field"
   | "chat.input.toolbar"
+  | "chat.input.body"
   | "chat.input.actions"
   | "overlay.layer"
   | "overlay.scrim"

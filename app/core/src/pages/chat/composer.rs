@@ -104,7 +104,7 @@ impl crate::Gumicord {
                         self.composing_bar()
                     })
                     .child(
-                        UiNode::new(NodeId::LayoutRow)
+                        UiNode::new(NodeId::ChatInputBody)
                             .child(UiNode::new(NodeId::LayoutColumn).child({
                                 let doc =
                                     self.inputs.doc(&self.draft_addr()).unwrap_or(empty_doc());

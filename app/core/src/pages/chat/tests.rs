@@ -190,6 +190,81 @@ fn the_cancel_icon_stays_inside_its_box() {
     );
 }
 
+/// This happened: the composer's row was a bare `layout.row`, and a
+/// `grow` child of the grow-free `chat.input` column is measured with the
+/// whole remaining height and pinned to it. The row took the entire chat
+/// view and the message list measured to nothing — no messages, nothing to
+/// tap, and the visible field floating in the middle of the bar. Reading
+/// the theme's numbers does not catch that; the laid-out rectangles do.
+#[test]
+fn the_composer_leaves_the_message_list_its_space() {
+    let rects = |a: &mut Gumicord, w: f32, h: f32| {
+        let cx = gumicord_platform::FrameCx {
+            viewport: gumicord_render::Size::new(w, h),
+            scale: 1.0,
+        };
+        let tree = a.build(&cx);
+        gumicord_render::layout_for_test(&tree, cx.viewport)
+    };
+    let find = |placed: &[(NodeId, gumicord_render::Rect)], id| {
+        placed
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("{id:?} が置かれていない"))
+    };
+
+    for (w, h) in [(1280.0, 800.0), (400.0, 800.0), (390.0, 844.0)] {
+        let mut a = Gumicord::scene(crate::Scene::Chat);
+        let placed = rects(&mut a, w, h);
+        let list = find(&placed, NodeId::ChatMessageList);
+        let view = find(&placed, NodeId::ChatView);
+        let input = find(&placed, NodeId::ChatInput);
+
+        assert!(
+            list.h > view.h / 2.0,
+            "{w}x{h}: 一覧の高さを入力欄が奪っている {list:?} {view:?}"
+        );
+        assert!(
+            (input.y + input.h - (view.y + view.h)).abs() < 1.0,
+            "{w}x{h}: 入力欄が画面下端に付いていない {input:?} {view:?}"
+        );
+        assert!(
+            input.h < 200.0,
+            "{w}x{h}: 入力欄が画面を食い潰している {input:?}"
+        );
+    }
+}
+
+/// The composer's row takes its own height and no more. A `grow` child of
+/// the grow-free `chat.input` column is measured with everything the column
+/// has left and pinned to it, so this is the invariant that broke.
+#[test]
+fn the_composer_row_hugs_its_field() {
+    let mut a = Gumicord::scene(crate::Scene::Chat);
+    let cx = gumicord_platform::FrameCx {
+        viewport: gumicord_render::Size::new(390.0, 844.0),
+        scale: 1.0,
+    };
+    let tree = a.build(&cx);
+    let placed = gumicord_render::layout_for_test(&tree, cx.viewport);
+    let find = |id| {
+        placed
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("{id:?} が置かれていない"))
+    };
+    let row = find(NodeId::ChatInputBody);
+    let field = find(NodeId::ChatInputField);
+
+    assert_eq!(
+        (row.y, row.h),
+        (field.y, field.h),
+        "入力欄の行が入力欄より背が高い {row:?} {field:?}"
+    );
+}
+
 /// Escape works too, but without a visible way out this looks like a
 /// state with no exit.
 #[test]

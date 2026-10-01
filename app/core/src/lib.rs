@@ -372,6 +372,40 @@ impl Gumicord {
         )
     }
 
+    /// An app posed at `scene`: the bundled theme, an empty store and
+    /// nothing else. Offscreen rendering uses it (`NFR-015`) so a
+    /// conformance image shows the tree the app really builds, and cannot
+    /// drift with the machine — no account, no installed theme, no
+    /// network, no clock.
+    #[doc(hidden)]
+    pub fn scene(scene: Scene) -> Self {
+        let login = match scene {
+            // The form has to be reachable: a skipped login would show the
+            // main screen instead, and an empty store keeps it there.
+            Scene::Login => {
+                let mut login = Login::posed();
+                login.start_password();
+                login
+            }
+            Scene::Chat => Login::skipped(),
+        };
+        let mut app = Gumicord::with_themes(
+            login,
+            Live::without_cache(),
+            PluginManager::disabled(),
+            None,
+        );
+        if let Scene::Chat = scene {
+            app.live.store_mut().replace_guilds(vec![scene_guild()]);
+            app.live
+                .store_mut()
+                .set_backlog(ChannelId::from(SCENE_CHANNEL), scene_messages());
+            app.chat.selected_guild = SCENE_GUILD;
+            app.chat.selected_channel = SCENE_CHANNEL;
+        }
+        app
+    }
+
     /// Empty store with no theme folder: settings tests must neither read
     /// the machine's selection nor write it.
     #[cfg(test)]
@@ -3357,6 +3391,93 @@ fn initial(name: &str) -> String {
 /// one; the theme decides how it looks.
 fn scrollbar_node() -> UiNode {
     UiNode::new(NodeId::LayoutScrollbar).child(UiNode::new(NodeId::LayoutScrollbarThumb))
+}
+
+/// A fixed state to render offscreen. See [`Gumicord::scene`].
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scene {
+    /// The password form, empty.
+    Login,
+    /// One guild, one channel, three messages.
+    Chat,
+}
+
+/// The guild and channel [`Scene::Chat`] shows. Fixed ids, so a scene is
+/// the same picture on every machine and every run.
+const SCENE_GUILD: u64 = 1;
+const SCENE_CHANNEL: u64 = 10;
+
+/// The one guild [`Scene::Chat`] shows, with a single text channel.
+fn scene_guild() -> gumicord_model::Guild {
+    gumicord_model::Guild {
+        id: GuildId::from(SCENE_GUILD),
+        name: "テスト".to_owned(),
+        icon_hash: None,
+        unavailable: false,
+        channels: vec![gumicord_model::Channel {
+            id: ChannelId::from(SCENE_CHANNEL),
+            kind: gumicord_model::ChannelKind::GuildText,
+            name: Some("いっぱん".to_owned()),
+            guild_id: Some(GuildId::from(SCENE_GUILD)),
+            parent_id: None,
+            position: 0,
+            topic: None,
+            nsfw: false,
+            recipients: Vec::new(),
+            last_message_id: None,
+        }],
+        roles: Vec::new(),
+    }
+}
+
+/// Three messages that exercise a shared header, a day divider and a body
+/// long enough to wrap.
+fn scene_messages() -> Vec<gumicord_model::Message> {
+    let author = |id: u64, name: &str| gumicord_model::User {
+        id: UserId::from(id),
+        username: name.to_owned(),
+        global_name: None,
+        discriminator: "0".to_owned(),
+        avatar_hash: None,
+        bot: false,
+    };
+    let message =
+        |id: u64, author: gumicord_model::User, at: &str, content: &str| gumicord_model::Message {
+            id: MessageId::from(id),
+            channel_id: ChannelId::from(SCENE_CHANNEL),
+            guild_id: None,
+            author,
+            content: content.to_owned(),
+            timestamp: at.to_owned(),
+            edited_timestamp: None,
+            pinned: false,
+            attachments: Vec::new(),
+            member: None,
+            referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
+        };
+    vec![
+        message(
+            1,
+            author(7, "ねんねこ"),
+            "2026-09-03T12:00:00+00:00",
+            "新しい詳細を配作了。 everyone で確認を。",
+        ),
+        message(
+            2,
+            author(8, "tetsuya"),
+            "2026-09-03T12:04:00+00:00",
+            "見た。細かいところが気にならないなら、これで十分だと思う。",
+        ),
+        message(
+            3,
+            author(7, "ねんねこ"),
+            "2026-09-03T12:06:00+00:00",
+            "**了解**。次はこのあたりを詰める。",
+        ),
+    ]
 }
 
 #[cfg(test)]

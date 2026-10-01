@@ -78,6 +78,7 @@
     "chat.input": "none",
     "chat.input.field": "none",
     "chat.input.toolbar": "none",
+    "chat.input.body": "none",
     "chat.input.actions": "none",
     "overlay.layer": "none",
     "overlay.scrim": "none",

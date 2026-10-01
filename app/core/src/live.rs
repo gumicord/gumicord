@@ -450,8 +450,9 @@ impl Live {
         &self.store
     }
 
-    /// For building state in tests.
-    #[cfg(test)]
+    /// For building state in tests, and for [`crate::Gumicord::scene`]:
+    /// an offscreen render poses its own.
+    #[doc(hidden)]
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
     }

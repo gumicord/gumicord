@@ -321,6 +321,10 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         AppScreenLoginField => Intrinsic::column().cross(Cross::Stretch),
         ChatInputToolbar => Intrinsic::row().cross(Cross::Center),
         ChatInputActions => Intrinsic::row().cross(Cross::Center),
+        // Content height, unlike `layout.row`: a `grow` child of the
+        // grow-free `chat.input` column is measured with the whole remaining
+        // height and pinned to it, which left the message list at nothing.
+        ChatInputBody => Intrinsic::row().cross(Cross::Center),
 
         // ── primitive.*
         PrimitiveDivider => Intrinsic::row().h(1.0).cross(Cross::Stretch),

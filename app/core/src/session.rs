@@ -214,6 +214,16 @@ impl Login {
         Self::fresh(true)
     }
 
+    /// Shows the login screens, with nothing signed in and no boot in
+    /// flight. `skipped` would show the main screen instead, so an
+    /// offscreen render needs this to reach the form at all.
+    #[doc(hidden)]
+    pub fn posed() -> Self {
+        let mut login = Self::fresh(false);
+        login.booting = false;
+        login
+    }
+
     fn fresh(skipped: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();

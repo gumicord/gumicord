@@ -1,9 +1,12 @@
 //! Offscreen conformance screenshots (`NFR-015`).
 //!
-//! Renders fixed scenes headlessly and compares them against blessed
+//! Renders fixed app states headlessly and compares them against blessed
 //! images with the spec tolerance (2/255 per channel, 0.1% of pixels
-//! over). Scenes use ASCII only with the bundled font, so no system
-//! font, image, or network can drift the result; remaining per-GPU
+//! over). The trees come from the app itself ([`gumicord_app::Gumicord::scene`]),
+//! not from a hand-built stand-in: a stand-in is a second truth, and it
+//! agreed with the app while the app was broken. Scenes use the bundled
+//! fonts, and the app is posed with an empty store, so no system font,
+//! image, account or network can drift the result; remaining per-GPU
 //! antialiasing differences live under the tolerance, and per-OS
 //! blessed directories absorb the rest.
 //!
@@ -20,144 +23,50 @@
 //! `target/screenshots/<os>/` and fails. Bless by inspecting those
 //! actuals, never blindly.
 
-use gumicord_uitree::{NodeId, UiNode};
+use gumicord_app::{Gumicord, Scene};
+use gumicord_platform::{Application, FrameCx};
+use gumicord_uitree::UiNode;
 
 /// Per-channel difference the spec still accepts.
 const CHANNEL_TOLERANCE: u8 = 2;
 /// Fraction of pixels allowed past it.
 const OVER_FRACTION: f64 = 0.001;
 
-struct Scene {
+struct Shot {
     name: &'static str,
     width: u32,
     height: u32,
     scale: f32,
-    build: fn() -> UiNode,
+    scene: Scene,
 }
 
-fn text(id: NodeId, s: &str) -> UiNode {
-    UiNode::text(id, s.to_owned())
+fn shot(name: &'static str, width: u32, height: u32, scale: f32, scene: Scene) -> Shot {
+    Shot {
+        name,
+        width,
+        height,
+        scale,
+        scene,
+    }
 }
 
-/// Login card: title, two fields, a button, a hint.
-fn login() -> UiNode {
-    let column = UiNode::new(NodeId::LayoutColumn)
-        .child(text(NodeId::AppScreenLoginTitle, "Log in to Discord"))
-        .child(text(NodeId::AppScreenLoginLabel, "Email"))
-        .child(text(NodeId::AppScreenLoginField, "user@example.com"))
-        .child(text(NodeId::AppScreenLoginLabel, "Password"))
-        .child(text(NodeId::AppScreenLoginField, "hunter2"))
-        .child(UiNode::new(NodeId::PrimitiveButton).child(text(NodeId::PrimitiveText, "Log in")))
-        .child(text(
-            NodeId::AppScreenLoginHint,
-            "Scan the code with your phone to log in.",
-        ));
-    UiNode::new(NodeId::AppRoot).child(
-        UiNode::new(NodeId::AppWindow)
-            .child(
-                UiNode::new(NodeId::ChromeTitlebar)
-                    .child(text(NodeId::ChromeTitlebarTitle, "Gumicord")),
-            )
-            .child(
-                UiNode::new(NodeId::AppScreen)
-                    .child(UiNode::new(NodeId::AppScreenLogin).child(column)),
-            ),
-    )
-}
-
-/// Three panes and a short chat: guilds, channels, header, divider,
-/// three messages, composer.
-fn chat() -> UiNode {
-    let message = |author: &str, time: &str, body: &str| {
-        UiNode::new(NodeId::ChatMessage)
-            .child(
-                UiNode::new(NodeId::ChatMessageHeader)
-                    .child(text(NodeId::ChatMessageHeaderAuthor, author))
-                    .child(text(NodeId::ChatMessageHeaderTime, time)),
-            )
-            .child(text(NodeId::ChatMessageContent, body))
-    };
-    UiNode::new(NodeId::AppRoot).child(
-        UiNode::new(NodeId::AppWindow)
-            .child(
-                UiNode::new(NodeId::ChromeTitlebar)
-                    .child(text(NodeId::ChromeTitlebarTitle, "Gumicord")),
-            )
-            .child(
-                UiNode::new(NodeId::AppScreen).child(
-                    UiNode::new(NodeId::AppScreenMain)
-                        .child(
-                            UiNode::new(NodeId::NavGuildList)
-                                .child(text(NodeId::NavGuildListHome, "DM"))
-                                .child(text(NodeId::NavGuildListItem, "Rust"))
-                                .child(text(NodeId::NavGuildListItem, "Games")),
-                        )
-                        .child(
-                            UiNode::new(NodeId::NavChannelList)
-                                .child(text(NodeId::NavChannelListHeader, "Rust"))
-                                .child(text(NodeId::NavChannelListItem, "general"))
-                                .child(text(NodeId::NavChannelListItem, "help")),
-                        )
-                        .child(
-                            UiNode::new(NodeId::ChatView)
-                                .child(
-                                    UiNode::new(NodeId::ChatHeader)
-                                        .child(text(NodeId::ChatHeaderTitle, "# general")),
-                                )
-                                .child(
-                                    UiNode::new(NodeId::ChatMessageList)
-                                        .child(text(
-                                            NodeId::ChatMessageListDayDivider,
-                                            "June 1, 2026",
-                                        ))
-                                        .child(message(
-                                            "alice",
-                                            "12:01",
-                                            "Hello! Has anyone tried the new release?",
-                                        ))
-                                        .child(message(
-                                            "bob",
-                                            "12:02",
-                                            "Yes, works fine on my machine. The quick brown fox jumps over the lazy dog.",
-                                        ))
-                                        .child(message("carol", "12:05", "Nice.")),
-                                )
-                                .child(
-                                    UiNode::new(NodeId::ChatInput).child(text(
-                                        NodeId::ChatInputField,
-                                        "Message #general",
-                                    )),
-                                ),
-                        ),
-                ),
-            ),
-    )
-}
-
-fn scenes() -> Vec<Scene> {
+fn scenes() -> Vec<Shot> {
     vec![
-        Scene {
-            name: "login",
-            width: 800,
-            height: 600,
-            scale: 1.0,
-            build: login,
-        },
-        Scene {
-            name: "chat",
-            width: 1280,
-            height: 800,
-            scale: 1.0,
-            build: chat,
-        },
-        Scene {
-            name: "chat-hidpi",
-            width: 2560,
-            height: 1600,
-            scale: 2.0,
-            build: chat,
-        },
+        shot("login", 800, 600, 1.0, Scene::Login),
+        shot("chat", 1280, 800, 1.0, Scene::Chat),
+        shot("chat-hidpi", 2560, 1600, 2.0, Scene::Chat),
     ]
+}
+
+/// The app's own tree for one frame, theme already resolved. Built per
+/// shot rather than kept in a closure list, so a scene is exactly what
+/// ships.
+fn tree_of(scene: Scene, width: u32, height: u32, scale: f32) -> UiNode {
+    let mut app = Gumicord::scene(scene);
+    app.build(&FrameCx {
+        viewport: gumicord_render::Size::new(width as f32 / scale, height as f32 / scale),
+        scale,
+    })
 }
 
 fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
@@ -206,10 +115,10 @@ fn compare(actual: &[u8], blessed: &[u8], mark: &mut [u8]) -> (usize, bool) {
     (over, over as f64 <= pixels as f64 * OVER_FRACTION)
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if gumicord_render::probe::run_probe(&args) {
-        return;
+        return std::process::ExitCode::SUCCESS;
     }
     let rebless = args.iter().any(|a| a == "--rebless");
     let os = std::env::consts::OS;
@@ -217,17 +126,12 @@ fn main() {
     let out_dir = format!("target/screenshots/{os}");
     std::fs::create_dir_all(&out_dir).expect("out dir");
 
-    let theme_src = include_str!("../../../examples/themes/midnight/theme.json");
-    let theme = gumicord_theme::Theme::parse(theme_src)
-        .theme
-        .expect("bundled theme parses");
-
     let mut failures = 0;
-    for scene in scenes() {
+    for shot in scenes() {
         let mut renderer = match gumicord_render::Renderer::headless(
-            scene.width,
-            scene.height,
-            scene.scale,
+            shot.width,
+            shot.height,
+            shot.scale,
             Box::new(|| {}),
             None,
             None,
@@ -235,68 +139,69 @@ fn main() {
             Ok(r) => r,
             Err(e) => {
                 // No GPU here (bare CI image, odd driver): loud skip, not red.
-                eprintln!("SKIP {}: no headless adapter ({e})", scene.name);
+                eprintln!("SKIP {}: no headless adapter ({e})", shot.name);
                 continue;
             }
         };
         eprintln!(
             "shot {} on {} ({:?})",
-            scene.name,
+            shot.name,
             renderer.adapter_name(),
             renderer.backend()
         );
-        let mut tree = (scene.build)();
-        let ctx = gumicord_theme::MatchContext::new(scene.width as f32 / scene.scale);
-        gumicord_theme::resolve(&theme, &mut tree, &ctx);
+        // The app resolves its own theme, from the bundled one: a scene must
+        // not follow whatever the machine happens to have installed.
+        let tree = tree_of(shot.scene, shot.width, shot.height, shot.scale);
         let _ = renderer.render(&tree);
         let Some(pixels) = renderer.read_pixels() else {
-            eprintln!("SKIP {}: nothing to read back", scene.name);
+            eprintln!("SKIP {}: nothing to read back", shot.name);
             continue;
         };
 
-        let blessed = format!("{blessed_dir}/{}.png", scene.name);
-        let actual_png = encode_png(scene.width, scene.height, &pixels);
+        let blessed = format!("{blessed_dir}/{}.png", shot.name);
+        let actual_png = encode_png(shot.width, shot.height, &pixels);
         if rebless {
             std::fs::create_dir_all(&blessed_dir).expect("blessed dir");
             std::fs::write(&blessed, &actual_png).expect("blessed writes");
-            eprintln!("BLESS {}", scene.name);
+            eprintln!("BLESS {}", shot.name);
             continue;
         }
         let Ok(blessed_png) = std::fs::read(&blessed) else {
             // First run on a new scene: record the actual for review.
-            std::fs::write(format!("{out_dir}/{}.png", scene.name), &actual_png)
+            std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png)
                 .expect("actual writes");
-            eprintln!("NEW {}: no blessed image yet, actual kept", scene.name);
+            eprintln!("NEW {}: no blessed image yet, actual kept", shot.name);
             continue;
         };
         let Some((bw, bh, blessed_pixels)) = decode_png(&blessed_png) else {
-            eprintln!("FAIL {}: blessed image unreadable", scene.name);
+            eprintln!("FAIL {}: blessed image unreadable", shot.name);
             failures += 1;
             continue;
         };
-        if (bw, bh) != (scene.width, scene.height) || blessed_pixels.len() != pixels.len() {
-            eprintln!("FAIL {}: size drift", scene.name);
+        if (bw, bh) != (shot.width, shot.height) || blessed_pixels.len() != pixels.len() {
+            eprintln!("FAIL {}: size drift", shot.name);
             failures += 1;
             continue;
         }
         let mut mark = blessed_pixels.clone();
         let (over, ok) = compare(&pixels, &blessed_pixels, &mut mark);
         if ok {
-            eprintln!("PASS {} ({} px over)", scene.name, over);
+            eprintln!("PASS {} ({} px over)", shot.name, over);
         } else {
-            std::fs::write(format!("{out_dir}/{}.png", scene.name), &actual_png)
+            std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png)
                 .expect("actual writes");
             std::fs::write(
-                format!("{out_dir}/{}-diff.png", scene.name),
-                encode_png(scene.width, scene.height, &mark),
+                format!("{out_dir}/{}-diff.png", shot.name),
+                encode_png(shot.width, shot.height, &mark),
             )
             .expect("diff writes");
-            eprintln!("FAIL {} ({} px over)", scene.name, over);
+            eprintln!("FAIL {} ({} px over)", shot.name, over);
             failures += 1;
         }
     }
     if failures > 0 {
         eprintln!("{failures} scene(s) differ; see target/screenshots/{os}/");
-        std::process::exit(1);
+        return std::process::ExitCode::FAILURE;
     }
+    std::process::ExitCode::SUCCESS
 }

@@ -2191,8 +2191,9 @@ dependencies = [
 name = "gumicord-screenshot"
 version = "0.0.3"
 dependencies = [
+ "gumicord-app",
+ "gumicord-platform",
  "gumicord-render",
- "gumicord-theme",
  "gumicord-uitree",
  "png",
 ]
