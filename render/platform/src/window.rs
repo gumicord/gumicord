@@ -695,6 +695,28 @@ struct DrawerCloseTouch {
     dy: f32,
 }
 
+/// Where the login email and password boxes landed in the last built frame.
+///
+/// A free function rather than a method on `Host`, and gated on iOS *or* a
+/// test build, so the host compiles and tests it while a host library build
+/// does not see it as dead. The iOS proxies are the only real caller, but
+/// nothing here is iOS, and being behind a bare `target_os` gate once let a
+/// `Key::Slot` lifetime slip through unnoticed.
+///
+/// `Key::Slot` stores its name, so the parameter is `&'static str`; a
+/// borrowed one does not outlive the key it goes into.
+#[cfg(any(target_os = "ios", test))]
+fn login_slot_rects(
+    hits: &[Hit],
+) -> (Option<gumicord_render::Rect>, Option<gumicord_render::Rect>) {
+    let field = |name: &'static str| {
+        hits.iter()
+            .find(|h| h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(name)))
+            .map(|h| h.rect)
+    };
+    (field("email"), field("password"))
+}
+
 /// A finger driving one message row left. Touch verdicts stay off it:
 /// release ends the drive instead of tapping or swiping.
 #[derive(Debug, Clone, Copy)]
@@ -1473,15 +1495,8 @@ impl Host {
         // what the manager fills, and each twin belongs beside its own field.
         let (email, password, viewport_w) = match self.renderer.as_ref() {
             Some(r) => {
-                let field = |name: &str| {
-                    r.hit_boxes()
-                        .iter()
-                        .find(|h| {
-                            h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(name))
-                        })
-                        .map(|h| h.rect)
-                };
-                (field("email"), field("password"), r.viewport().w)
+                let (email, password) = login_slot_rects(r.hit_boxes());
+                (email, password, r.viewport().w)
             }
             None => (None, None, 0.0),
         };
@@ -3225,5 +3240,63 @@ impl ApplicationHandler<LoopEvent> for Host {
 
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn login_field(slot: &'static str, y: f32) -> Hit {
+        Hit {
+            id: NodeId::AppScreenLoginField,
+            key: Some(Key::Slot(slot)),
+            rect: gumicord_render::Rect::new(20.0, y, 300.0, 44.0),
+            clip: None,
+        }
+    }
+
+    /// Both login boxes are found, and neither takes the other's rectangle.
+    ///
+    /// The iOS proxies are the only real caller and they are behind a
+    /// `target_os` gate, so without a test here nothing on the host would
+    /// notice this stop compiling.
+    #[test]
+    fn both_login_slots_are_found_apart() {
+        let hits = [login_field("email", 100.0), login_field("password", 200.0)];
+        let (email, password) = login_slot_rects(&hits);
+        assert_eq!(email.unwrap().y, 100.0);
+        assert_eq!(password.unwrap().y, 200.0);
+    }
+
+    /// One box missing is reported as missing, not as the other's.
+    #[test]
+    fn a_missing_slot_does_not_borrow_the_other_one() {
+        let hits = [login_field("email", 100.0)];
+        let (email, password) = login_slot_rects(&hits);
+        assert!(email.is_some());
+        assert!(password.is_none(), "パスワード欄がメール欄の矩形を返した");
+    }
+
+    /// An empty frame means neither twin is placed.
+    #[test]
+    fn an_empty_frame_places_nothing() {
+        let (email, password) = login_slot_rects(&[]);
+        assert!(email.is_none());
+        assert!(password.is_none());
+    }
+
+    /// Another screen's fields are not mistaken for the login ones.
+    #[test]
+    fn other_fields_are_not_login_slots() {
+        let hits = [Hit {
+            id: NodeId::ChatInputField,
+            key: Some(Key::Slot("email")),
+            rect: gumicord_render::Rect::new(0.0, 0.0, 10.0, 10.0),
+            clip: None,
+        }];
+        let (email, password) = login_slot_rects(&hits);
+        assert!(email.is_none());
+        assert!(password.is_none());
     }
 }
