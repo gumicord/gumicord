@@ -1,4 +1,4 @@
-//! Android text input through GameTextInput.
+﻿//! Android text input through GameTextInput.
 //!
 //! Design in ADR-0011. `winit` only shows and hides the soft keyboard; text
 //! never reaches `WindowEvent`. GameActivity already integrates
@@ -24,7 +24,7 @@ use winit::platform::android::activity::input::{
 };
 
 use crate::text_input::offsets::{bytes_to_utf16, utf16_to_bytes};
-use crate::text_input::{ImeField, ImeKind, TextDocument};
+use crate::text_input::{ImeField, ImeKind, ImeServing, TextDocument};
 
 /// A snapshot for change detection: text plus ordered byte offsets.
 type Snapshot = (String, usize, usize, Option<(usize, usize)>);
@@ -38,6 +38,9 @@ pub struct AndroidText {
     /// Last state seen, from either direction. Our own mirror updates it,
     /// so its echo never counts as a change.
     last_seen: Snapshot,
+    /// Which field the connection is serving; the rule lives in
+    /// [`ImeServing`] so it can be tested without an Android device.
+    serving: ImeServing,
 }
 
 impl Default for AndroidText {
@@ -52,6 +55,7 @@ impl AndroidText {
             live: false,
             multiline: false,
             last_seen: (String::new(), 0, 0, None),
+            serving: ImeServing::new(),
         }
     }
     pub fn is_live(&self) -> bool {
@@ -84,11 +88,26 @@ impl AndroidText {
         self.multiline = field.multiline;
         self.mirror(app, doc);
         self.live = true;
+        self.serving.mark_seeded();
     }
 
     /// Focus lost.
     pub fn blur(&mut self) {
         self.live = false;
+        self.serving.forget();
+    }
+
+    /// Serves this document, re-seeding the IME when the field changed.
+    ///
+    /// One IME connection serves every field, so moving from the email box to
+    /// the password box has to reset both the editor kind and the text. Doing
+    /// it only on the first focus left the second field typing into the
+    /// first one's text, and the poll below wrote that into the new document.
+    pub fn ensure(&mut self, app: &AndroidApp, field: &ImeField, doc: &TextDocument) {
+        if self.serving.seed_for(doc) {
+            tracing::debug!(input_type = ?field.kind, "ime field changed");
+            self.focus(app, field, doc);
+        }
     }
 
     /// Polls once. Returns whether the document changed (needs a redraw)
@@ -97,6 +116,12 @@ impl AndroidText {
     /// not thread-safe.
     pub fn poll(&mut self, app: &AndroidApp, doc: &mut TextDocument) -> (bool, bool) {
         if !self.live {
+            return (false, false);
+        }
+        // The tick that seeded a field is skipped. The IME applies our push
+        // asynchronously, so its state can still be the previous field's text
+        // here; reading it back would write that into the new document.
+        if self.serving.skips_this_tick() {
             return (false, false);
         }
         let mut changed = false;

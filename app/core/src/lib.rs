@@ -322,6 +322,13 @@ pub struct Gumicord {
     /// Which input box holds focus, if any. One address for every
     /// screen: login and composer never share it.
     focus: Option<InputAddr>,
+    /// The channel the previous session left open, waiting to be reopened.
+    ///
+    /// The cache can name it before the store can serve it, and on a phone
+    /// the cache itself may only open once the account is known, so the
+    /// restore is a decision [`sync_selection`](Self::sync_selection) applies
+    /// rather than a constructor's guess. `NFR-013`.
+    pending_restore: Option<ChannelId>,
     /// The message row a finger drives left, if any. At most one: the
     /// touch layer is single-finger.
     message_swipe: Option<crate::pages::chat::MessageSwipe>,
@@ -367,11 +374,32 @@ pub struct Gumicord {
 impl Gumicord {
     pub fn new() -> Self {
         let mut live = Live::without_cache();
-        if let Ok(store) = gumicord_platform::SecretStore::new()
-            && let Ok(idx) = crate::account::AccountsIndex::load(&store)
-            && let Some(active) = idx.active.or_else(|| idx.accounts.first().map(|a| a.key))
-        {
-            live.open_cache(active.is_bot, active.id);
+        // Whether the previous channel can be reopened at all comes down to
+        // the two calls below, and both fail silently. Say which one gave up:
+        // without this the restore just does not happen and there is nothing
+        // in the log to explain it.
+        match gumicord_platform::SecretStore::new() {
+            Ok(store) => match crate::account::AccountsIndex::load(&store) {
+                Ok(idx) => match idx.active.or_else(|| idx.accounts.first().map(|a| a.key)) {
+                    Some(active) => match live.open_cache(active.is_bot, active.id) {
+                        true => tracing::info!(
+                            is_bot = active.is_bot,
+                            id = active.id.get(),
+                            "opened the account cache before login"
+                        ),
+                        false => tracing::warn!(
+                            is_bot = active.is_bot,
+                            id = active.id.get(),
+                            "no usable account cache; the last channel will not be restored"
+                        ),
+                    },
+                    None => {
+                        tracing::warn!("no saved account; the last channel will not be restored")
+                    }
+                },
+                Err(e) => tracing::warn!(%e, "the account index is unreadable; no cache"),
+            },
+            Err(e) => tracing::warn!(%e, "the secure store is unavailable; no cache"),
         }
         let login = Login::new();
         let mut app = Gumicord::with(login, live, Self::start_plugins());
@@ -499,6 +527,9 @@ impl Gumicord {
         inputs.register(composer_addr(), InputKind::Text);
         let themes = crate::themes::ThemeState::initial(themes_dir);
 
+        // Read before the move into the struct below.
+        let pending_restore = live.last_channel();
+
         let mut app = Gumicord {
             themes,
             assets: crate::assets::ThemeAssets::new(),
@@ -515,6 +546,7 @@ impl Gumicord {
             menu_field: None,
             inputs,
             focus: None,
+            pending_restore,
             message_swipe: None,
             sheet: crate::pages::overlays::SlideState::new(),
             toasts: VecDeque::new(),
@@ -1082,11 +1114,21 @@ impl Application for Gumicord {
             }
             // Members grow downward, at the far end of the scroll. The
             // narrow sheet shows the same list under another id.
+            //
+            // A list with nothing in it overflows by zero, so the edge test
+            // below would never pass and the ask would be unreachable — which
+            // is how an empty member list stays empty. Widen it on sight
+            // instead: `extend_members` stops on its own once the asked range
+            // covers what is held, so repeating this costs nothing.
             NodeId::NavMemberList | NodeId::NavMemberListSheet => {
+                let guild = GuildId::from(self.chat.selected_guild);
+                if self.live.members(guild).is_none() {
+                    self.live.rewatch_members(guild);
+                    return;
+                }
                 if max <= 0.0 || at < max - REACH {
                     return;
                 }
-                let guild = GuildId::from(self.chat.selected_guild);
                 self.live.extend_members(guild);
             }
             _ => {}
@@ -1333,6 +1375,20 @@ impl Application for Gumicord {
             let key = crate::account::AccountKey::new(l.me.user.id, l.token.is_bot());
             self.live.open_cache(key.is_bot, key.id);
 
+            // The cache can open here rather than at startup: the account
+            // index is only readable once the secure store answers, and
+            // `new` skips it entirely when it does not. Adopt whatever it
+            // named so the restore is not lost for this run.
+            if self.pending_restore.is_none()
+                && let Some(channel) = self.live.last_channel()
+            {
+                tracing::debug!(
+                    channel = channel.get(),
+                    "the cache named a channel to reopen"
+                );
+                self.pending_restore = Some(channel);
+            }
+
             // Set before READY, so our own typing is filtered from the start.
             let me = l.me.user.id;
             self.live.start(
@@ -1510,7 +1566,7 @@ impl Application for Gumicord {
         true
     }
 
-    fn swiped(&mut self, hits: &[Hit], swipe: Swipe) -> bool {
+    fn swiped(&mut self, hits: &[Hit], swipe: Swipe, scrolled: Option<NodeId>) -> bool {
         let Swipe::Point { dir, x, .. } = swipe;
         // An open surface owns gestures starting inside it; anything else
         // dismisses it instead of reaching the chat behind, like presses.
@@ -1524,10 +1580,14 @@ impl Application for Gumicord {
             }
             // A downward drag inside the drawer scrolls its lists; closing
             // on it would make scrolling down impossible, so only sideways
-            // flicks close there. The sheet below keeps its down-to-close:
-            // it paints above the drawer where they overlap.
+            // flicks close there. The sheet below keeps its down-to-close on
+            // the handle, where there is no list to scroll.
             if in_sheet {
                 return match dir {
+                    // The member sheet is the list on a phone, so a down drag
+                    // over it is a scroll. It closes only where there was
+                    // nothing to scroll.
+                    SwipeDir::Down if scrolled.is_some() => false,
                     // Flicking a surface away dismisses it; flicking up scrolls
                     // the list inside instead.
                     SwipeDir::Left | SwipeDir::Right | SwipeDir::Down => {
@@ -1556,10 +1616,17 @@ impl Application for Gumicord {
         match dir {
             SwipeDir::Left => {
                 // A message swiped left starts a reply, like the menu does.
-                if let Some(id) = hits.iter().find_map(|h| match (h.id, &h.key) {
-                    (NodeId::ChatMessage, Some(Key::Id(id))) => Some(*id),
-                    _ => None,
-                }) {
+                //
+                // The swipe reads the net offset from the press point, so a
+                // long scroll that settles near where it started comes out
+                // sideways. If this finger was scrolling, the scroll is what
+                // happened; the row keeps its place.
+                if scrolled.is_none()
+                    && let Some(id) = hits.iter().find_map(|h| match (h.id, &h.key) {
+                        (NodeId::ChatMessage, Some(Key::Id(id))) => Some(*id),
+                        _ => None,
+                    })
+                {
                     self.start_reply(id);
                     return true;
                 }
@@ -3368,6 +3435,15 @@ impl Gumicord {
         }
         let mut changed = false;
 
+        // Reopen what the previous session left open, before anything is
+        // repaired: the repair picks the first guild and channel it finds,
+        // which would overwrite a restore that is merely waiting for its rows
+        // to arrive. Applied ahead of the `await_pick` rule too, since a
+        // restored channel is an explicit choice and not a cleared selection.
+        if self.apply_pending_restore() {
+            return true;
+        }
+
         let guilds = self.guild_rows();
         if !guilds.iter().any(|g| g.id == self.chat.selected_guild) {
             let Some(first) = guilds.first() else {
@@ -3400,6 +3476,45 @@ impl Gumicord {
             );
         }
         changed
+    }
+
+    /// Selects the channel the previous session left open, once the store can
+    /// serve it. False while it is still waiting, so the caller falls through
+    /// to the ordinary repair.
+    ///
+    /// The store answers rather than the row builders: those list the
+    /// *selected* guild, which is exactly what is not known yet. The guild must
+    /// also be in the sidebar — one inside a folded folder is not listed, and
+    /// selecting a channel the reader cannot navigate to would leave the lists
+    /// and the body disagreeing.
+    fn apply_pending_restore(&mut self) -> bool {
+        let Some(channel) = self.pending_restore else {
+            return false;
+        };
+        let store = self.live.store();
+        let Some(guild) = store.channel(channel).and_then(|c| c.guild_id) else {
+            return false;
+        };
+        // Categories are headings; the store leaves them out of this.
+        if !store.channels_of(guild).any(|c| c.id == channel) {
+            return false;
+        }
+        if !self.guild_rows().iter().any(|g| g.id == guild.get()) {
+            return false;
+        }
+        tracing::debug!(
+            channel = channel.get(),
+            guild = guild.get(),
+            "restoring the last channel"
+        );
+        self.pending_restore = None;
+        let already =
+            self.chat.selected_guild == guild.get() && self.chat.selected_channel == channel.get();
+        self.chat.selected_guild = guild.get();
+        self.chat.selected_channel = channel.get();
+        // Always ask: the fetch is the point, and the screen may not move.
+        self.live.open_channel(guild, channel);
+        !already
     }
 }
 

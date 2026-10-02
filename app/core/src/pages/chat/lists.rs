@@ -180,6 +180,8 @@ impl crate::Gumicord {
         let guild = GuildId::from(self.chat.selected_guild);
         let list = self.live.members(guild)?;
 
+        // Once per list, so a hundred rows do not repeat it.
+        let member_tint_logged = std::cell::Cell::new(false);
         let mut out = Vec::new();
         for row in list.rows() {
             match row {
@@ -218,11 +220,27 @@ impl crate::Gumicord {
 
                     // The topmost coloured role wins; where it lands is the
                     // theme's call.
-                    let tint = self
-                        .live
-                        .store()
+                    let store = self.live.store();
+                    let tint = store
                         .member_tint(guild, &m.member.roles)
                         .map(Color::from_rgb);
+                    // A name with roles and no colour is the whole of the
+                    // "role colours stopped" report, and it has two causes
+                    // that look identical on screen: the guild's role table
+                    // never arrived, or it arrived and holds nothing coloured
+                    // for this person. Say which, once per list rather than
+                    // once per row.
+                    if tint.is_none()
+                        && !m.member.roles.is_empty()
+                        && !member_tint_logged.replace(true)
+                    {
+                        tracing::debug!(
+                            %guild,
+                            roles = m.member.roles.len(),
+                            known = store.role_table_size(guild),
+                            "a member has roles but no colour for their name"
+                        );
+                    }
 
                     out.push(
                         UiNode::new(NodeId::NavMemberListItem)

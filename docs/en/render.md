@@ -130,9 +130,13 @@ yet.
 
 ### `src/proxy.rs` — Invisible iOS login fields for password autofill
 (iOS only). winit only speaks `UIKeyInput`, so hidden username+password
-`UITextField` twins receive the fill and poll it back into documents.
-Key items: `Proxy`, `ProxyEvent`, `set_active()`, `poll()`. Visible
-editing stays in our own fields.
+`UITextField` twins receive the fill and poll it back into documents. Each
+twin parks beside its own field, because the password manager pairs the pair
+by proximity. Key items: `Proxy`, `ProxyEvent`, `place()`, `set_active()`,
+`poll()`, `blur()`. Visible editing stays in our own fields.
+
+### `src/ime_parking.rs` — Where those twins park. One pixel beside each login
+field, inside the window. Ungated so the geometry is checkable without a Mac.
 
 ### `src/clock.rs` — OS time. Key items: `local_utc_offset_minutes()`,
 `now_unix()`, `caret_blink_interval()`.

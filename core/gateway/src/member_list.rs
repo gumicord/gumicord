@@ -266,6 +266,21 @@ fn op(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<List
 }
 
 fn row(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<MemberRow> {
+    let row = row_inner(raw, counts);
+    if row.is_none() {
+        // Silent loss here is what makes a list look broken rather than
+        // missing: a whole SYNC can turn into zero rows and the app has only
+        // its loading state to show. Always say how many did not make it.
+        tracing::debug!(
+            has_group = raw.get("group").is_some(),
+            has_member = raw.get("member").is_some(),
+            "a member list row was unreadable"
+        );
+    }
+    row
+}
+
+fn row_inner(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<MemberRow> {
     if let Some(group) = raw.get("group") {
         let id = group.get("id")?.as_str()?;
         // Prefer the top-level count, from the same event.
@@ -280,8 +295,18 @@ fn row(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<Mem
     }
 
     let raw = raw.get("member")?;
-    let member: Member = serde_json::from_value(raw.clone()).ok()?;
+    // Say why: a shape we cannot read is a bug here, and "one member has no
+    // user" is not the same failure as "the member object did not parse".
+    let member: Member = serde_json::from_value(raw.clone())
+        .map_err(|e| {
+            tracing::debug!(error = %e, "could not read a member list member");
+            e
+        })
+        .ok()?;
     // Rows for nobody are dropped.
+    if member.user.is_none() {
+        tracing::debug!("a member list row carried no user");
+    }
     member.user.as_ref()?;
 
     // No presence means offline; Discord omits it for offline members.

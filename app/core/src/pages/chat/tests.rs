@@ -526,10 +526,40 @@ fn cut_and_copy_are_absent_without_a_selection() {
 fn swipe_left_on_a_message_starts_a_reply() {
     let mut a = app();
     let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
-    assert!(a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
+    assert!(a.swiped(&hits, swipe(SwipeDir::Left, 300.0), None));
     assert_eq!(a.chat.composing, Composing::Reply(7));
     assert!(composer_focused(&a), "入力欄に焦点がない");
     assert_eq!(a.chat.a11y_message, Some(7));
+}
+
+/// A swipe that was scrolling the message list stays a scroll. The swipe
+/// verdict reads the net offset, so a long flick that settles near where it
+/// started comes out sideways; replying there is a misfire.
+#[test]
+fn a_swipe_that_was_scrolling_does_not_reply() {
+    let mut a = app();
+    let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
+    assert!(!a.swiped(
+        &hits,
+        swipe(SwipeDir::Left, 300.0),
+        Some(NodeId::ChatMessageList)
+    ));
+    assert_eq!(a.chat.composing, Composing::New);
+    assert!(!composer_focused(&a), "スクロールから返信が始まった");
+}
+
+/// Scrolling some other list does not license a reply either: the gesture was
+/// still a scroll, whatever it moved.
+#[test]
+fn a_swipe_over_another_list_does_not_reply() {
+    let mut a = app();
+    let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
+    assert!(!a.swiped(
+        &hits,
+        swipe(SwipeDir::Left, 300.0),
+        Some(NodeId::NavMemberList)
+    ));
+    assert_eq!(a.chat.composing, Composing::New);
 }
 
 /// A driven row follows the finger, clamped; anything else is ignored.
@@ -613,12 +643,20 @@ fn flicking_the_drawer_away_closes_it() {
     let mut a = narrow();
     assert!(a.open_drawer());
     let drawer = hit_at(NodeId::OverlayDrawer, None, 0.0, 0.0, 280.0, 800.0);
-    assert!(a.swiped(std::slice::from_ref(&drawer), swipe(SwipeDir::Left, 100.0)));
+    assert!(a.swiped(
+        std::slice::from_ref(&drawer),
+        swipe(SwipeDir::Left, 100.0),
+        None
+    ));
     settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "閉じない");
 
     assert!(a.open_drawer());
-    assert!(!a.swiped(std::slice::from_ref(&drawer), swipe(SwipeDir::Up, 100.0)));
+    assert!(!a.swiped(
+        std::slice::from_ref(&drawer),
+        swipe(SwipeDir::Up, 100.0),
+        None
+    ));
     assert!(a.chat.drawer_open, "上の払いで閉じた");
 }
 
@@ -629,7 +667,11 @@ fn scrolling_the_drawer_down_keeps_it_open() {
     let mut a = narrow();
     assert!(a.open_drawer());
     let drawer = hit_at(NodeId::OverlayDrawer, None, 0.0, 0.0, 280.0, 800.0);
-    assert!(!a.swiped(std::slice::from_ref(&drawer), swipe(SwipeDir::Down, 100.0)));
+    assert!(!a.swiped(
+        std::slice::from_ref(&drawer),
+        swipe(SwipeDir::Down, 100.0),
+        None
+    ));
     assert!(a.chat.drawer_open, "下スクロールで棚が閉じた");
 }
 
@@ -668,7 +710,7 @@ fn a_swipe_behind_the_drawer_dismisses_without_replying() {
         80.0,
         50.0,
     );
-    assert!(a.swiped(&[behind], swipe(SwipeDir::Left, 320.0)));
+    assert!(a.swiped(&[behind], swipe(SwipeDir::Left, 320.0), None));
     settle_drawer(&mut a);
     assert!(!a.chat.drawer_open, "閉じていない");
     assert_eq!(a.chat.composing, Composing::New, "裏へ返信した");
@@ -680,14 +722,54 @@ fn flicking_the_member_sheet_away_closes_it() {
     let mut a = narrow();
     assert!(a.open_member_sheet());
     let sheet = hit_at(NodeId::OverlaySheet, None, 0.0, 400.0, 400.0, 400.0);
-    assert!(a.swiped(std::slice::from_ref(&sheet), swipe(SwipeDir::Down, 200.0)));
+    assert!(a.swiped(
+        std::slice::from_ref(&sheet),
+        swipe(SwipeDir::Down, 200.0),
+        None
+    ));
     assert!(a.chat.member_sheet_open, "払った瞬間に消えた");
     settle_sheet(&mut a);
     assert!(!a.chat.member_sheet_open, "閉じない");
 
     assert!(a.open_member_sheet());
-    assert!(!a.swiped(std::slice::from_ref(&sheet), swipe(SwipeDir::Up, 200.0)));
+    assert!(!a.swiped(
+        std::slice::from_ref(&sheet),
+        swipe(SwipeDir::Up, 200.0),
+        None
+    ));
     assert!(a.chat.member_sheet_open, "上の払いで閉じた");
+}
+
+/// On a phone the member sheet *is* the list, so a down drag over it scrolls
+/// and must not dismiss it. The handle, where there is no list, still closes.
+#[test]
+fn scrolling_the_member_sheet_down_keeps_it_open() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let sheet = hit_at(NodeId::OverlaySheet, None, 0.0, 400.0, 400.0, 400.0);
+    assert!(!a.swiped(
+        std::slice::from_ref(&sheet),
+        swipe(SwipeDir::Down, 200.0),
+        Some(NodeId::NavMemberListSheet),
+    ));
+    assert!(a.chat.member_sheet_open, "下スクロールで面が閉じた");
+    settle_sheet(&mut a);
+    assert!(a.chat.member_sheet_open, "時間経過で閉じた");
+}
+
+/// A down drag over the handle has no list under it, so it still closes.
+#[test]
+fn a_down_drag_on_the_handle_still_closes_the_member_sheet() {
+    let mut a = narrow();
+    assert!(a.open_member_sheet());
+    let sheet = hit_at(NodeId::OverlaySheet, None, 0.0, 400.0, 400.0, 400.0);
+    assert!(a.swiped(
+        std::slice::from_ref(&sheet),
+        swipe(SwipeDir::Down, 200.0),
+        None,
+    ));
+    settle_sheet(&mut a);
+    assert!(!a.chat.member_sheet_open, "柄を払って閉じない");
 }
 
 /// Opening starts the drawer shut and coasts it in over time.
@@ -971,16 +1053,16 @@ fn opening_a_menu_closes_the_member_sheet() {
 #[test]
 fn edge_swipe_opens_the_drawer_when_narrow() {
     let mut a = narrow();
-    assert!(a.swiped(&[], swipe(SwipeDir::Right, 10.0)));
+    assert!(a.swiped(&[], swipe(SwipeDir::Right, 10.0), None));
     assert!(a.chat.drawer_open, "棚が開かない");
 
     let mut wide = app();
     wide.match_ctx = MatchContext::new(1400.0);
-    assert!(!wide.swiped(&[], swipe(SwipeDir::Right, 10.0)));
+    assert!(!wide.swiped(&[], swipe(SwipeDir::Right, 10.0), None));
     assert!(!wide.chat.drawer_open, "広いのに開いた");
 
     let mut mid = narrow();
-    assert!(!mid.swiped(&[], swipe(SwipeDir::Right, 300.0)));
+    assert!(!mid.swiped(&[], swipe(SwipeDir::Right, 300.0), None));
     assert!(!mid.chat.drawer_open, "端でないのに開いた");
 }
 
@@ -2740,6 +2822,7 @@ mod member_tests {
 mod member_list_tests {
     use super::*;
     use gumicord_gateway::member_list;
+    use gumicord_model::{Role, RoleId};
     use serde_json::json;
 
     /// A guild with one role, and a channel open in it.
@@ -2805,6 +2888,75 @@ mod member_list_tests {
             }
         });
         out
+    }
+
+    /// An empty list overflows by zero, so the edge test never passes and
+    /// nothing would ever widen the ask. The scroll path re-asks instead.
+    #[test]
+    fn scrolling_an_empty_member_list_re_asks_for_it() {
+        use gumicord_gateway::Request;
+
+        let mut a = app();
+        let guild = GuildId::from(1u64);
+        let mut gateway = a.live.attach_gateway_for_test(ChannelId::from(10u64));
+        assert!(a.live.members(guild).is_none(), "始めから空ではない");
+
+        let before = std::time::Instant::now();
+        // `max` is zero because the list has nothing in it.
+        a.scrolled(NodeId::NavMemberListSheet, 0.0, 0.0);
+        assert!(
+            a.live.rewatched_since(guild, before),
+            "空の一覧が再要求されなかった"
+        );
+
+        let mut asked = false;
+        for r in gateway.take_requests() {
+            if let Request::Watch(g, _, _) = r
+                && g == guild
+            {
+                asked = true;
+            }
+        }
+        assert!(asked, "再要求が線に届いていない");
+    }
+
+    /// A list with rows in it still pages at the far end, and never re-asks:
+    /// widening the range is the right answer there.
+    #[test]
+    fn a_filled_member_list_pages_at_its_end() {
+        let mut a = app();
+        sync(&mut a, vec![person("7", "ねんねこ")]);
+        let mut gateway = a.live.attach_gateway_for_test(ChannelId::from(10u64));
+        let guild = GuildId::from(1u64);
+        let before = a.live.member_rows_for_test(guild);
+        a.scrolled(NodeId::NavMemberList, 900.0, 1000.0);
+        assert!(
+            a.live.member_rows_for_test(guild) > before,
+            "続きが聞かれなかった"
+        );
+        assert!(
+            !gateway
+                .take_requests()
+                .iter()
+                .any(|r| matches!(r, gumicord_gateway::Request::Forget(_))),
+            "詰めではなく延長には再要求が要らない"
+        );
+    }
+
+    /// Near the top of a filled list there is nothing to page yet.
+    #[test]
+    fn a_filled_member_list_waits_until_it_is_scrolled_to_the_end() {
+        let mut a = app();
+        sync(&mut a, vec![person("7", "ねんねこ")]);
+        let _gateway = a.live.attach_gateway_for_test(ChannelId::from(10u64));
+        let guild = GuildId::from(1u64);
+        let before = a.live.member_rows_for_test(guild);
+        a.scrolled(NodeId::NavMemberList, 0.0, 1000.0);
+        assert_eq!(
+            a.live.member_rows_for_test(guild),
+            before,
+            "上端で次を聞いた"
+        );
     }
 
     /// Growing the column later would reflow the body under the reader.
@@ -2912,6 +3064,85 @@ mod member_list_tests {
             .find(|n| n.id == NodeId::NavMemberListItemName)
             .expect("名前がある");
         assert_eq!(name.tint, None);
+    }
+
+    fn name_tint(a: &Gumicord) -> Option<Color> {
+        a.member_list()
+            .children
+            .iter()
+            .flat_map(|c| c.children.iter())
+            .find(|n| n.id == NodeId::NavMemberListItemName)
+            .and_then(|n| n.tint)
+    }
+
+    /// A role colour changed while the app sat in the guild. `GUILD_CREATE`
+    /// carries the table once; these three events are the only way a later
+    /// change reaches the screen, and none of them were wired.
+    #[test]
+    fn a_role_colour_change_arrives_while_the_app_is_open() {
+        let mut a = app();
+        sync(
+            &mut a,
+            vec![json!({ "member": {
+                "user": { "id": "7", "username": "ねんねこ" },
+                "roles": ["55"],
+                "presence": { "status": "online" },
+            }})],
+        );
+        assert_eq!(name_tint(&a), Some(Color::from_rgb(0x00e0_5260)));
+
+        let guild = GuildId::from(1u64);
+        // The admin role was recoloured.
+        a.live.apply_for_test(live::LiveEvent::Roles(
+            guild,
+            live::RoleChange::Replace(vec![Role {
+                id: RoleId::from(55u64),
+                name: "管理者".to_owned(),
+                position: 3,
+                hoist: true,
+                color: Some(0x00ff_00ff),
+            }]),
+        ));
+
+        assert_eq!(
+            name_tint(&a),
+            Some(Color::from_rgb(0x00ff_00ff)),
+            "変わった色が届いていない"
+        );
+    }
+
+    /// One role added, one removed, without waiting for a whole table.
+    #[test]
+    fn one_role_arriving_or_leaving_moves_the_colour() {
+        let mut a = app();
+        sync(
+            &mut a,
+            vec![json!({ "member": {
+                "user": { "id": "7", "username": "ねんねこ" },
+                "roles": ["70"],
+                "presence": { "status": "online" },
+            }})],
+        );
+        let guild = GuildId::from(1u64);
+        assert_eq!(name_tint(&a), None, "まだ知らない役職");
+
+        a.live.apply_for_test(live::LiveEvent::Roles(
+            guild,
+            live::RoleChange::Upsert(Box::new(Role {
+                id: RoleId::from(70u64),
+                name: "新しい役".to_owned(),
+                position: 1,
+                hoist: false,
+                color: Some(0x0000_ff00),
+            })),
+        ));
+        assert_eq!(name_tint(&a), Some(Color::from_rgb(0x0000_ff00)));
+
+        a.live.apply_for_test(live::LiveEvent::Roles(
+            guild,
+            live::RoleChange::Remove(RoleId::from(70u64)),
+        ));
+        assert_eq!(name_tint(&a), None, "削除した役職が残っている");
     }
 
     /// The member list folds before chat does.
@@ -3031,6 +3262,137 @@ mod channel_selection_tests {
             }],
             roles: Vec::new(),
         }
+    }
+
+    /// Two channels in one guild, so "not the first one" is meaningful.
+    fn guild_with_two_channels(id: u64, first: u64, second: u64) -> Guild {
+        let mut g = guild_with_channel(id, first);
+        g.channels.push(Channel {
+            id: second.into(),
+            kind: ChannelKind::GuildText,
+            name: Some("ふたつめ".to_owned()),
+            guild_id: Some(id.into()),
+            parent_id: None,
+            position: 1,
+            topic: None,
+            nsfw: false,
+            recipients: Vec::new(),
+            last_message_id: None,
+        });
+        g
+    }
+
+    /// The channel the previous session left open is reopened, not the first
+    /// one the repair would have picked.
+    #[test]
+    fn the_last_channel_is_reopened() {
+        let mut a = app();
+        a.match_ctx = MatchContext::new(1280.0);
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_two_channels(1, 11, 12)]);
+        a.chat.selected_guild = 0;
+        a.chat.selected_channel = 0;
+        a.pending_restore = Some(ChannelId::from(12u64));
+
+        assert!(a.sync_selection());
+
+        assert_eq!(a.chat.selected_guild, 1, "guild が戻っていない");
+        assert_eq!(a.chat.selected_channel, 12, "最初のチャンネルを開いた");
+        assert_eq!(a.pending_restore, None, "復元が消費されていない");
+    }
+
+    /// A phone has no guild pane, so a cleared channel waits for a tap. The
+    /// restore is an explicit choice and must not wait with it.
+    #[test]
+    fn the_last_channel_is_reopened_behind_the_drawer() {
+        let mut a = narrow();
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_two_channels(1, 11, 12)]);
+        a.chat.selected_guild = 0;
+        a.chat.selected_channel = 0;
+        a.pending_restore = Some(ChannelId::from(12u64));
+
+        a.sync_selection();
+
+        assert_eq!(a.chat.selected_channel, 12, "復元しなかった");
+    }
+
+    /// A channel the cache named but the store no longer has is not restored;
+    /// the ordinary repair takes over instead of waiting forever.
+    #[test]
+    fn a_vanished_channel_falls_back_to_the_first_one() {
+        let mut a = app();
+        a.match_ctx = MatchContext::new(1280.0);
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_two_channels(1, 11, 12)]);
+        a.chat.selected_guild = 0;
+        a.chat.selected_channel = 0;
+        a.pending_restore = Some(ChannelId::from(999u64));
+
+        a.sync_selection();
+
+        assert_eq!(a.chat.selected_channel, 11, "無いチャンネルを開いた");
+    }
+
+    /// Waiting for the rows to arrive must not block the repair: the store is
+    /// empty on the first pass.
+    #[test]
+    fn the_restore_waits_for_the_store_and_then_lands() {
+        let mut a = app();
+        a.match_ctx = MatchContext::new(1280.0);
+        a.chat.selected_guild = 0;
+        a.chat.selected_channel = 0;
+        a.pending_restore = Some(ChannelId::from(12u64));
+
+        // Nothing has arrived: the repair selects nothing either.
+        assert!(!a.sync_selection());
+        assert_eq!(a.chat.selected_channel, 0);
+        assert_eq!(a.pending_restore, Some(ChannelId::from(12u64)), "諦めた");
+
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_two_channels(1, 11, 12)]);
+
+        assert!(a.sync_selection());
+        assert_eq!(a.chat.selected_channel, 12);
+    }
+
+    /// Without a cache to restore, nothing changes.
+    #[test]
+    fn no_restore_leaves_the_repair_alone() {
+        let mut a = app();
+        a.match_ctx = MatchContext::new(1280.0);
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_two_channels(1, 11, 12)]);
+        a.chat.selected_guild = 0;
+        a.chat.selected_channel = 0;
+        a.pending_restore = None;
+
+        a.sync_selection();
+
+        assert_eq!(a.chat.selected_channel, 11);
+    }
+
+    /// Restoring into the same place is not a screen change, but the channel
+    /// still has to be opened.
+    #[test]
+    fn restoring_where_we_already_are_still_opens_it() {
+        let mut a = app();
+        a.match_ctx = MatchContext::new(1280.0);
+        a.live
+            .store_mut()
+            .replace_guilds(vec![guild_with_two_channels(1, 11, 12)]);
+        a.chat.selected_guild = 1;
+        a.chat.selected_channel = 12;
+        a.pending_restore = Some(ChannelId::from(12u64));
+
+        assert!(!a.sync_selection(), "画面は変わっていないのに changed");
+
+        assert_eq!(a.pending_restore, None, "復元が残っている");
     }
 
     /// Switching guilds in the drawer stays there with no channel picked;

@@ -127,6 +127,31 @@ impl Role {
     }
 }
 
+/// A guild's whole role table, as `GUILD_ROLES_UPDATE` sends it.
+///
+/// The only way a colour change reaches a client that has been sitting in the
+/// same guild for hours.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildRolesUpdate {
+    pub guild_id: GuildId,
+    #[serde(default, deserialize_with = "crate::de::lenient_vec")]
+    pub roles: Vec<Role>,
+}
+
+/// One new role, as `GUILD_ROLE_CREATE` sends it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildRoleCreate {
+    pub guild_id: GuildId,
+    pub role: Role,
+}
+
+/// One removed role, as `GUILD_ROLE_DELETE` sends it. Only the ids arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildRoleDelete {
+    pub guild_id: GuildId,
+    pub role_id: RoleId,
+}
+
 /// A member of a guild.
 ///
 /// The same person has a different name and face per guild. Only the
@@ -744,6 +769,62 @@ mod role_tests {
         let raw = r#"{ "id": "55", "name": "管理者", "color": 14688352 }"#;
         let role: Role = serde_json::from_str(raw).expect("unreadable");
         assert_eq!(role.tint(), Some(14_688_352));
+    }
+
+    /// The whole table, as GUILD_ROLES_UPDATE sends it.
+    #[test]
+    fn a_whole_role_table_reads() {
+        let raw = r#"{
+            "guild_id": "1",
+            "roles": [
+                { "id": "55", "name": "管理者", "color": 14688352, "position": 3 },
+                { "id": "56", "name": "みんな", "color": 0, "position": 0 }
+            ]
+        }"#;
+        let update: GuildRolesUpdate = serde_json::from_str(raw).expect("unreadable");
+        assert_eq!(update.guild_id, GuildId::from(1u64));
+        assert_eq!(update.roles.len(), 2);
+        assert_eq!(update.roles[0].tint(), Some(14_688_352));
+        assert_eq!(update.roles[1].tint(), None);
+    }
+
+    /// One unreadable role must not lose the table: the rest is still the
+    /// truth, and a table that arrived thin must not look like a wipe.
+    #[test]
+    fn one_unreadable_role_does_not_lose_the_role_table() {
+        let raw = r#"{
+            "guild_id": "1",
+            "roles": [
+                { "id": "55", "name": "管理者", "color": 100 },
+                { "id": "not an id at all", "name": "壊れている" }
+            ]
+        }"#;
+        let update: GuildRolesUpdate = serde_json::from_str(raw).expect("unreadable");
+        assert_eq!(update.roles.len(), 1);
+        assert_eq!(update.roles[0].name, "管理者");
+    }
+
+    /// An absent roles list reads as empty rather than failing the event.
+    #[test]
+    fn a_role_update_without_a_list_reads_as_empty() {
+        let update: GuildRolesUpdate =
+            serde_json::from_str(r#"{ "guild_id": "1" }"#).expect("unreadable");
+        assert!(update.roles.is_empty());
+    }
+
+    #[test]
+    fn one_created_and_one_deleted_role_read() {
+        let created: GuildRoleCreate = serde_json::from_str(
+            r#"{ "guild_id": "1", "role": { "id": "55", "name": "管理者", "color": 100 } }"#,
+        )
+        .expect("unreadable");
+        assert_eq!(created.guild_id, GuildId::from(1u64));
+        assert_eq!(created.role.name, "管理者");
+
+        let deleted: GuildRoleDelete =
+            serde_json::from_str(r#"{ "guild_id": "1", "role_id": "55" }"#).expect("unreadable");
+        assert_eq!(deleted.guild_id, GuildId::from(1u64));
+        assert_eq!(deleted.role_id, RoleId::from(55u64));
     }
 
     #[test]

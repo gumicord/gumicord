@@ -33,15 +33,23 @@ pub struct Proxy {
     active: Option<super::ImeProxy>,
     last: [String; 2],
     parent: Option<std::ptr::NonNull<std::ffi::c_void>>,
-    /// Where the fields were last parked; setting the same frame every
-    /// tick churns layout for no reason.
-    placed: [(f64, f64, f64, f64); 2],
+    /// Where each field sits, and whether it sits anywhere yet. The rule and
+    /// its bookkeeping live in [`crate::ime_parking`] so they can be checked
+    /// without a Mac; this layer only moves the views.
+    parking: crate::ime_parking::Parking,
 }
 
 fn idx(kind: super::ImeProxy) -> usize {
     match kind {
         super::ImeProxy::Username => 0,
         super::ImeProxy::Password => 1,
+    }
+}
+
+fn slot(kind: super::ImeProxy) -> crate::ime_parking::Slot {
+    match kind {
+        super::ImeProxy::Username => crate::ime_parking::Slot::Username,
+        super::ImeProxy::Password => crate::ime_parking::Slot::Password,
     }
 }
 
@@ -100,7 +108,7 @@ impl Proxy {
             active: None,
             last: [String::new(), String::new()],
             parent: None,
-            placed: [(-5.0, -5.0, 1.0, 1.0), (-5.0, -5.0, 1.0, 1.0)],
+            parking: crate::ime_parking::Parking::new(),
         }
     }
 
@@ -151,7 +159,13 @@ impl Proxy {
             // Either the call took it or it already holds it; anything
             // else means no keyboard from here.
             let became = field.becomeFirstResponder() || field.isFirstResponder();
-            tracing::debug!(?kind, became, placed = ?self.placed, "proxy field shown");
+            tracing::debug!(
+                ?kind,
+                became,
+                user = ?self.parking.rect(crate::ime_parking::Slot::Username),
+                pass = ?self.parking.rect(crate::ime_parking::Slot::Password),
+                "proxy field shown"
+            );
             // A refused responder means no keyboard from here; detach
             // instead of sitting focused with no keyboard.
             if !became {
@@ -168,57 +182,88 @@ impl Proxy {
                 self.last[idx(kind)] = text.to_owned();
                 // Snapshot the sibling too: a paired fill moves both, and
                 // the poll below must see whose text actually changed.
+                //
+                // Only a placed sibling. An unplaced one is skipped by the
+                // poll, so a fill sitting in it has not been banked yet —
+                // re-baselining here would swallow exactly the half of the
+                // pair that has not landed in a document yet.
                 let other = match kind {
                     super::ImeProxy::Username => super::ImeProxy::Password,
                     super::ImeProxy::Password => super::ImeProxy::Username,
                 };
-                self.last[idx(other)] = field_text(self.field(other));
+                if self.placed_now(other) {
+                    self.last[idx(other)] = field_text(self.field(other));
+                }
             }
         }
     }
 
-    /// Parks both fields in a strip beside the one the user is on.
+    /// Parks both fields in a strip beside their own login field.
     ///
     /// AutoFill offers credentials only to fields it can touch, and writes a
     /// paired fill into both, so both twins stay in the window and stay
     /// touchable — which is the whole reason they are not left covering a
     /// visible login box and swallowing its taps.
     ///
-    /// Their frame is otherwise free: the text and the caret are clear, the
-    /// app draws those, and nothing here is ever seen. So they go where
-    /// they can do least harm — one pixel wide, hard against the focused
-    /// field's far edge, the two of them touching, which is as close as the
-    /// manager's pairing wants. That pixel is the only thing a finger can
-    /// land on.
+    /// Each twin gets **its own** field's strip. The manager pairs a username
+    /// field with a password field by proximity, so one frame for both is the
+    /// one arrangement that cannot pair: the two sit on the same pixel with the
+    /// password field in front. The arithmetic and its edge cases live in
+    /// [`crate::ime_parking`] so they can be checked without a Mac.
     ///
     /// Inside the parent on purpose: off-screen, a field may refuse first
     /// responder and the keyboard never comes, which is why the strip
-    /// flips to the field's other edge rather than leave the window.
+    /// clamps to the window rather than leaving it.
     ///
-    /// `rect` is that strip; `None` leaves both where they are.
-    pub fn place(&mut self, rect: Option<(f64, f64, f64, f64)>) {
-        let Some(rect) = rect else {
-            return;
-        };
-        for kind in [super::ImeProxy::Username, super::ImeProxy::Password] {
-            if self.placed[idx(kind)] != rect {
-                let view = self.field(kind);
-                view.setFrame(NSRect::new(
-                    NSPoint::new(rect.0, rect.1),
-                    NSSize::new(rect.2, rect.3),
-                ));
-                self.placed[idx(kind)] = rect;
+    /// `None` for a kind leaves that twin where it is and marks it unplaced,
+    /// so [`poll`](Self::poll) skips it: half a paired fill beats a stale one
+    /// replayed into the wrong document.
+    pub fn place(
+        &mut self,
+        username: Option<gumicord_render::Rect>,
+        password: Option<gumicord_render::Rect>,
+        viewport_w: f32,
+    ) {
+        let strips = crate::ime_parking::login_parking(username, password, viewport_w);
+        for (kind, rect) in [
+            (super::ImeProxy::Username, strips.0),
+            (super::ImeProxy::Password, strips.1),
+        ] {
+            // `set` answers whether the frame moved, so a repeat stays silent
+            // and a withdrawn rectangle unplaces the slot.
+            if !self.parking.set(slot(kind), rect) {
+                continue;
             }
+            let Some(rect) = rect else { continue };
+            let view = self.field(kind);
+            view.setFrame(NSRect::new(
+                NSPoint::new(rect.x as f64, rect.y as f64),
+                NSSize::new(rect.w as f64, rect.h as f64),
+            ));
         }
+    }
+
+    /// Whether this twin has a rectangle. An unplaced twin is left out of the
+    /// poll: its document would otherwise be judged against a baseline taken
+    /// before the layout settled.
+    fn placed_now(&self, kind: super::ImeProxy) -> bool {
+        self.parking.placed(slot(kind))
     }
 
     /// Reads both fields. The manager fills username and password as a
     /// pair, so the idle sibling moves too; watching only the focused
     /// one drops the other half of the fill. One event per call; the
     /// caller polls every frame while up.
+    ///
+    /// A twin with no rectangle yet is skipped: its layout has not settled,
+    /// so the fill that lands there would be judged against a baseline from
+    /// before it.
     pub fn poll(&mut self) -> Option<(super::ImeProxy, ProxyEvent)> {
         self.active?;
         for kind in [super::ImeProxy::Username, super::ImeProxy::Password] {
+            if !self.placed_now(kind) {
+                continue;
+            }
             let current = field_text(self.field(kind));
             if current == self.last[idx(kind)] {
                 continue;

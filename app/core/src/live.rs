@@ -20,7 +20,10 @@ use gumicord_gateway::{
     member_list::{ListOp, MemberEntry, MemberRow},
     status::{Status, from_settings_proto},
 };
-use gumicord_model::{ChannelId, Guild, GuildId, Message, MessageId, RoleId, Token, UserId};
+use gumicord_model::{
+    ChannelId, Guild, GuildId, GuildRoleCreate, GuildRoleDelete, GuildRolesUpdate, Message,
+    MessageId, RoleId, Token, UserId,
+};
 use gumicord_platform::Waker;
 use gumicord_rest::{RestClient, RestError};
 use gumicord_store::{Db, GuildRow, Store};
@@ -93,6 +96,20 @@ impl Link {
     }
 }
 
+/// How a guild's role table moved.
+///
+/// Three events, three shapes. Merge them here rather than making the store
+/// carry a union it has no use for.
+#[derive(Debug)]
+pub enum RoleChange {
+    /// The whole table, as `GUILD_ROLES_UPDATE` sends it.
+    Replace(Vec<gumicord_model::Role>),
+    /// One role added or changed.
+    Upsert(Box<gumicord_model::Role>),
+    /// One role gone.
+    Remove(gumicord_model::RoleId),
+}
+
 /// What the background reports to the main thread.
 #[derive(Debug)]
 pub enum LiveEvent {
@@ -132,6 +149,8 @@ pub enum LiveEvent {
     },
     /// A member list diff.
     Members(Box<gumicord_gateway::member_list::MemberListUpdate>),
+    /// A guild's role table moved.
+    Roles(GuildId, RoleChange),
     /// Members we asked for by name.
     ///
     /// REST messages carry no member, so this is the only source for them.
@@ -461,6 +480,36 @@ impl Live {
     #[cfg(test)]
     pub fn apply_for_test(&mut self, event: LiveEvent) -> bool {
         self.apply(event)
+    }
+
+    /// How many member rows have been asked for in a guild. Widenings are
+    /// visible here; a re-ask of the same rows is not.
+    #[cfg(test)]
+    pub fn member_rows_for_test(&self, guild: GuildId) -> usize {
+        self.member_rows.get(&guild).map_or(0, Vec::len)
+    }
+
+    /// Whether this guild's member list was re-asked since the given instant.
+    /// The re-ask itself is a gateway write with no local trace, so the stamp
+    /// it leaves is what the scroll path can be checked against.
+    #[cfg(test)]
+    pub fn rewatched_since(&self, guild: GuildId, at: std::time::Instant) -> bool {
+        self.member_rewatch
+            .get(&guild)
+            .is_some_and(|asked| *asked > at)
+    }
+
+    /// Attaches a gateway that answers nothing, and marks a channel watched.
+    ///
+    /// `without_cache` leaves no connection, so every ask is a no-op and the
+    /// paging paths cannot be reached from an app-level test. The gateway
+    /// keeps the requests instead of sending them, so the test can read them.
+    #[cfg(test)]
+    pub fn attach_gateway_for_test(&mut self, channel: ChannelId) -> gumicord_gateway::Gateway {
+        let (gateway, subs) = gumicord_gateway::Gateway::new(gumicord_model::Token::new("t"));
+        self.subs = Some(subs);
+        self.watching = Some(channel);
+        gateway
     }
 
     /// The channel to reopen at startup.
@@ -844,7 +893,14 @@ impl Live {
     /// identical tuple the gateway swallows as a duplicate, and an empty
     /// list never scrolls to ask again — so without this the list stays
     /// empty until something changes the ranges.
-    fn rewatch_members(&mut self, guild: GuildId) {
+    ///
+    /// This is a gateway write, so the cooldown always applies: a scroll
+    /// reports itself on every move, and an empty list keeps reporting. What
+    /// was wrong before was not the rate but the reachability — see
+    /// [`Gumicord::scrolled`](crate::Gumicord), which calls this for a list it
+    /// holds nothing for, so the retry keeps coming instead of being needed
+    /// once and lost.
+    pub(crate) fn rewatch_members(&mut self, guild: GuildId) {
         let Some(channel) = self.watching else { return };
         if self.store.channel(channel).and_then(|c| c.guild_id) != Some(guild) {
             return;
@@ -854,6 +910,7 @@ impl Live {
             .get(&guild)
             .is_some_and(|at| at.elapsed() < MEMBER_REWATCH_COOLDOWN)
         {
+            tracing::debug!(%guild, "the wiped member list is still in cooldown");
             return;
         }
         let Some(subs) = &self.subs else { return };
@@ -862,7 +919,11 @@ impl Live {
             .entry(guild)
             .or_insert_with(|| MEMBER_ROWS.to_vec())
             .clone();
-        tracing::debug!(%guild, "re-asking the wiped member list");
+        tracing::debug!(
+            %guild,
+            held = self.members.get(&guild).map_or(0, |m| m.rows().len()),
+            "re-asking the wiped member list"
+        );
         subs.forget(guild);
         subs.watch(guild, channel, visible_rows(self.members_visible, &rows));
         self.member_rewatch.insert(guild, std::time::Instant::now());
@@ -1358,6 +1419,28 @@ impl Live {
                 }
                 changed
             }
+            LiveEvent::Roles(guild, change) => match change {
+                RoleChange::Replace(roles) => {
+                    let len = |t: Option<&[gumicord_model::Role]>| {
+                        t.map_or(0, <[gumicord_model::Role]>::len)
+                    };
+                    let before = len(self.store.guild_roles(guild));
+                    self.store.set_roles(guild, roles);
+                    before != len(self.store.guild_roles(guild))
+                }
+                RoleChange::Upsert(role) => {
+                    self.store.upsert_role(guild, *role);
+                    true
+                }
+                RoleChange::Remove(id) => {
+                    let had = self
+                        .store
+                        .guild_roles(guild)
+                        .is_some_and(|t| t.iter().any(|r| r.id == id));
+                    self.store.remove_role(guild, id);
+                    had
+                }
+            },
             LiveEvent::MemberChunk {
                 guild,
                 members,
@@ -1530,6 +1613,30 @@ async fn pump(mut gateway: Gateway, tx: Sender<LiveEvent>, waker: Waker) {
                     Ok(g) => send(LiveEvent::GuildChanged(Box::new(g))),
                     Err(e) => tracing::warn!(%e, "could not read {kind}"),
                 },
+                // The role table is the only source of a member name's
+                // colour, and none of these arrived before: a colour changed
+                // while the app sat in the guild never reached it.
+                "GUILD_ROLES_UPDATE" => {
+                    match serde_json::from_value::<GuildRolesUpdate>(data) {
+                        Ok(u) => send(LiveEvent::Roles(u.guild_id, RoleChange::Replace(u.roles))),
+                        Err(e) => tracing::warn!(%e, "could not read GUILD_ROLES_UPDATE"),
+                    };
+                }
+                "GUILD_ROLE_CREATE" => {
+                    match serde_json::from_value::<GuildRoleCreate>(data) {
+                        Ok(c) => send(LiveEvent::Roles(
+                            c.guild_id,
+                            RoleChange::Upsert(Box::new(c.role)),
+                        )),
+                        Err(e) => tracing::warn!(%e, "could not read GUILD_ROLE_CREATE"),
+                    };
+                }
+                "GUILD_ROLE_DELETE" => {
+                    match serde_json::from_value::<GuildRoleDelete>(data) {
+                        Ok(d) => send(LiveEvent::Roles(d.guild_id, RoleChange::Remove(d.role_id))),
+                        Err(e) => tracing::warn!(%e, "could not read GUILD_ROLE_DELETE"),
+                    };
+                }
                 // Only arrives once the subscription has been sent.
                 "GUILD_MEMBER_LIST_UPDATE" => match gumicord_gateway::member_list::parse(&data) {
                     Some(u) => send(LiveEvent::Members(Box::new(u))),
@@ -2698,6 +2805,75 @@ mod tests {
 
         live.extend_members(GuildId::from(9u64));
         assert!(live.member_rows.is_empty(), "asked for someone else");
+    }
+
+    /// The re-ask is reachable from the outside, so an empty list keeps
+    /// retrying instead of depending on one invalidate that arrived inside
+    /// the cooldown. This is what the scroll path calls.
+    #[test]
+    fn the_re_ask_is_reachable_from_outside() {
+        use gumicord_gateway::Request;
+        use gumicord_model::{Channel, ChannelKind};
+
+        let guild = GuildId::from(7u64);
+        let mut live = live();
+        let (mut gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.watching = Some(ch());
+        live.store.upsert_guild(Guild {
+            id: guild,
+            name: "テスト".to_owned(),
+            icon_hash: None,
+            unavailable: false,
+            channels: vec![Channel {
+                id: ch(),
+                kind: ChannelKind::GuildText,
+                name: Some("一般".to_owned()),
+                guild_id: Some(guild),
+                parent_id: None,
+                position: 0,
+                topic: None,
+                nsfw: false,
+                recipients: Vec::new(),
+                last_message_id: None,
+            }],
+            roles: Vec::new(),
+        });
+        live.member_rows.insert(guild, vec![[0, 99]]);
+        // Nothing held: the shape the report describes.
+        assert!(live.members(guild).is_none());
+
+        live.rewatch_members(guild);
+        let mut asked = false;
+        for r in gateway.take_requests() {
+            if let Request::Watch(g, c, rows) = r
+                && g == guild
+                && c == ch()
+                && rows == vec![[0u32, 99]]
+            {
+                asked = true;
+            }
+        }
+        assert!(asked, "空の一覧が再要求されなかった");
+
+        // Still rate-limited: a scroll reports on every move.
+        live.rewatch_members(guild);
+        assert!(
+            gateway.take_requests().is_empty(),
+            "the cooldown stopped holding"
+        );
+    }
+
+    /// The re-ask only applies to the guild being watched.
+    #[test]
+    fn the_re_ask_ignores_another_guild() {
+        let mut live = live();
+        let (mut gateway, subs) = Gateway::new(Token::new("t"));
+        live.subs = Some(subs);
+        live.watching = Some(ch());
+
+        live.rewatch_members(GuildId::from(9u64));
+        assert!(gateway.take_requests().is_empty(), "asked for someone else");
     }
 
     /// Asked past held with members still out there means a page is on

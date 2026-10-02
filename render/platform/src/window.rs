@@ -167,7 +167,19 @@ pub trait Application {
 
     /// A swipe ended over the client area, with what lay under its start.
     /// Taps already arrive as presses; only true swipes come here.
-    fn swiped(&mut self, _hits: &[Hit], _swipe: crate::touch::Swipe) -> bool {
+    ///
+    /// `scrolled` is the region this same finger was scrolling, if any. A
+    /// drag past the slop reports `Scroll` on every move *and* may still come
+    /// out of [`touch::Tracker::release`] as a swipe, because the swipe reads
+    /// the net offset from the press point. The app has to pick one: acting on
+    /// a gesture that was scrolling is what turns a vertical flick into a
+    /// reply.
+    fn swiped(
+        &mut self,
+        _hits: &[Hit],
+        _swipe: crate::touch::Swipe,
+        _scrolled: Option<NodeId>,
+    ) -> bool {
         false
     }
 
@@ -1364,9 +1376,7 @@ impl Host {
             let field = self.app.ime_field().unwrap_or_default();
             if let (Some(app), Some(doc)) = (self.android_app.clone(), self.app.focused_document())
             {
-                if !self.android_text.is_live() {
-                    self.android_text.focus(&app, &field, doc);
-                }
+                self.android_text.ensure(&app, &field, doc);
                 let (changed, newline) = self.android_text.poll(&app, doc);
                 if changed {
                     self.request_redraw();
@@ -1433,59 +1443,67 @@ impl Host {
             return false;
         };
         let proxy = self.proxy.get_or_insert_with(crate::proxy::Proxy::new);
+        // Drain before anything else. `set_active` re-baselines the idle sibling
+        // from whatever the native view currently holds, so a paired fill that
+        // landed since the last tick would be swallowed there. Bank it first.
+        let mut changed = false;
+        let mut submitted = false;
+        while let Some((kind, event)) = proxy.poll() {
+            match event {
+                crate::proxy::ProxyEvent::Text(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                }
+                crate::proxy::ProxyEvent::Submitted(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                    submitted = true;
+                }
+            }
+        }
+
         // Park before showing: an off-screen field may refuse first
         // responder, and without it the manager never pairs. Parking a
         // detached field only moves it, so doing this first is free.
         //
-        // One pixel wide, against the focused field's far edge and inside
-        // the window (see `Proxy::place`). The twins draw nothing, so this
-        // is about pairing and about staying out of a finger's way, not
-        // about looking like the field: only the focused rectangle is
-        // wanted, so neither twin has to wait for the other's.
-        {
+        // One pixel wide, against each login field's own far edge and inside
+        // the window (see `Proxy::place` and `ime_parking`). The twins draw
+        // nothing, so this is about pairing and about staying out of a
+        // finger's way, not about looking like the field.
+        //
+        // Both slots are looked up, not just the focused one: the pair is
+        // what the manager fills, and each twin belongs beside its own field.
+        let (email, password, viewport_w) = match self.renderer.as_ref() {
+            Some(r) => {
+                let field = |name: &str| {
+                    r.hit_boxes()
+                        .iter()
+                        .find(|h| {
+                            h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(name))
+                        })
+                        .map(|h| h.rect)
+                };
+                (field("email"), field("password"), r.viewport().w)
+            }
+            None => (None, None, 0.0),
+        };
+        if email.is_none() && password.is_none() {
+            // Rects arrive within a tick or two; half-parked would fill the
+            // password half nowhere.
             let slot = match want {
                 ImeProxy::Username => "email",
                 ImeProxy::Password => "password",
             };
-            let (field, inside) = match self.renderer.as_ref() {
-                Some(r) => {
-                    let field = r.hit_boxes().iter().find(|h| {
-                        h.id == NodeId::AppScreenLoginField && h.key == Some(Key::Slot(slot))
-                    });
-                    (field.map(|h| h.rect), r.viewport().w as f64)
-                }
-                None => (None, 0.0),
-            };
-            match field {
-                Some(field) => {
-                    let x = field.x as f64 + field.w as f64;
-                    let x = if x + 1.0 <= inside {
-                        x
-                    } else {
-                        // No room on that side; take the field's own last
-                        // pixel rather than leave the window.
-                        (x - 1.0).max(field.x as f64)
-                    };
-                    proxy.place(Some((x, field.y as f64, 1.0, field.h as f64)));
-                }
-                // Rects arrive within a tick or two; half-parked would fill
-                // the password half nowhere.
-                None => {
-                    tracing::debug!(slot, "proxy waiting for the field rect");
-                    return false;
-                }
-            }
+            tracing::debug!(slot, "proxy waiting for the field rects");
+            return changed;
         }
+        proxy.place(email, password, viewport_w);
+
         proxy.set_active(parent, Some(want), text.as_deref().unwrap_or(""));
         // The proxy took the keyboard, or refused and detached. Either way
         // the answer goes in the flag: `is_active` is only true here, and the
         // teardown may not run until the next frame, by which time the proxy
         // has already let go of the keyboard.
         self.keyboard_held = proxy.is_active();
-        let mut changed = false;
-        let mut submitted = false;
-        // A paired fill moves both fields. Drain the pair before submitting
-        // so the submit never races the sibling's half of the fill.
+        // Anything that arrived while the fields were re-attached.
         while let Some((kind, event)) = proxy.poll() {
             match event {
                 crate::proxy::ProxyEvent::Text(text) => {
@@ -3003,7 +3021,11 @@ impl ApplicationHandler<LoopEvent> for Host {
                             // The window's slope decides; one wild pair cannot.
                             // Offset moves opposite the finger, so negate to coast along the drag.
                             let (vx, vy) = self.touch_vel.velocity();
-                            let (vel, net) = match self.touch_scroll_id {
+                            // Read before the reset clears it: the swipe verdict
+                            // below needs to know whether this same finger was
+                            // scrolling, and that is the only record of it.
+                            let scrolled = self.touch_scroll_id;
+                            let (vel, net) = match scrolled {
                                 Some(id)
                                     if gumicord_render::intrinsic(id).axis
                                         == gumicord_render::Axis::Row =>
@@ -3016,13 +3038,13 @@ impl ApplicationHandler<LoopEvent> for Host {
                             tracing::debug!(
                                 velocity = vel,
                                 net,
-                                region = ?self.touch_scroll_id,
+                                region = ?scrolled,
                                 "touch released"
                             );
                             // Mobile only: desktop leaves inertia to the OS
                             // (ADR-0014 B0), so a release ends the drag.
                             if is_mobile()
-                                && let Some(id) = self.touch_scroll_id
+                                && let Some(id) = scrolled
                                 && let Some(fling) = crate::touch::Fling::new_release(vel, net)
                             {
                                 tracing::debug!(region = ?id, velocity = fling.velocity(), "fling started");
@@ -3035,7 +3057,7 @@ impl ApplicationHandler<LoopEvent> for Host {
                                 });
                                 self.request_redraw();
                             } else {
-                                tracing::debug!(region = ?self.touch_scroll_id, "fling refused");
+                                tracing::debug!(region = ?scrolled, "fling refused");
                             }
                             self.reset_touch_scroll();
                             match self.touch.release(touch.id, point.0, point.1) {
@@ -3049,10 +3071,10 @@ impl ApplicationHandler<LoopEvent> for Host {
                                     }
                                 }
                                 Some(crate::touch::TouchAction::Swipe(swipe)) => {
-                                    tracing::debug!(?swipe, "release verdict: swipe");
+                                    tracing::debug!(?swipe, region = ?scrolled, "release verdict: swipe");
                                     let crate::touch::Swipe::Point { x, y, .. } = swipe;
                                     let hits = self.hits_at(x, y);
-                                    if self.app.swiped(&hits, swipe) {
+                                    if self.app.swiped(&hits, swipe, scrolled) {
                                         self.request_redraw();
                                     }
                                 }
@@ -3097,6 +3119,21 @@ impl ApplicationHandler<LoopEvent> for Host {
                         }
                         if self.drawer_close_touch.is_some_and(|c| c.id == touch.id) {
                             self.drawer_close_touch = None;
+                        }
+                        // A cancelled touch never reaches the release branch, so
+                        // its drive would survive and the next finger would pick
+                        // up the previous gesture's anchor.
+                        if let Some(drive) = self.message_drive
+                            && drive.id == touch.id
+                        {
+                            self.message_drive = None;
+                            // The row follows nobody now; let it spring back.
+                            if self
+                                .app
+                                .message_swipe_end(drive.msg, std::time::Instant::now())
+                            {
+                                self.request_redraw();
+                            }
                         }
                         self.touch.cancel(touch.id);
                         self.reset_touch_scroll();

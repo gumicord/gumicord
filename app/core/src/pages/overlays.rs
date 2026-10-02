@@ -385,7 +385,7 @@ mod tests {
     fn swipes_are_ignored_under_overlays() {
         let mut a = with_menu();
         let hits = [hit_of(NodeId::ChatMessage, Some(Key::Id(7)))];
-        assert!(!a.swiped(&hits, swipe(SwipeDir::Left, 300.0)));
+        assert!(!a.swiped(&hits, swipe(SwipeDir::Left, 300.0), None));
         assert_eq!(a.chat.composing, Composing::New);
     }
 
@@ -395,7 +395,7 @@ mod tests {
     fn flicking_a_menu_sheet_down_dismisses_it() {
         let mut a = with_menu();
         let sheet = hit_at(NodeId::OverlaySheet, None, 0.0, 400.0, 400.0, 400.0);
-        assert!(a.swiped(&[sheet], swipe(SwipeDir::Down, 200.0)));
+        assert!(a.swiped(&[sheet], swipe(SwipeDir::Down, 200.0), None));
         assert!(a.floating.is_some(), "払った瞬間に消えた");
         settle_sheet(&mut a);
         assert!(a.floating.is_none(), "閉じていない");

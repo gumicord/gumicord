@@ -21,6 +21,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod dirs;
 pub mod file_dialog;
+pub mod ime_parking;
 #[cfg(target_os = "ios")]
 pub mod ios_text;
 #[cfg(target_os = "ios")]

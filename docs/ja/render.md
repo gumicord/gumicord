@@ -57,7 +57,9 @@
 
 ### `src/secret.rs` — OS の安全な保管庫。暗号化できない場所には平文で書かず、未対応環境は `Unsupported` で毎回ログインに戻す。Key items: `SecretStore`、`SecretError`、`store()`、`load()`、`clear()`。Windows は DPAPI、Linux/macOS は keyring、Android/iOS は未実装。
 
-### `src/proxy.rs` — iOS パスワード自動入力用の不可視ログインフィールド (iOS のみ)。winit 側は `UIKeyInput` しか話さないため、username＋password の隠し `UITextField` 双子に fill を受け、ポーリングで文書へ戻す。Key items: `Proxy`、`ProxyEvent`、`set_active()`、`poll()`。表示編集は自前描画欄に残す。
+### `src/proxy.rs` — iOS パスワード自動入力用の不可視ログインフィールド (iOS のみ)。winit 側は `UIKeyInput` しか話さないため、username＋password の隠し `UITextField` 双子に fill を受け、ポーリングで文書へ戻す。ペアは近接で結ばれるので、双子はそれぞれの欄の隣に置く。Key items: `Proxy`、`ProxyEvent`、`place()`、`set_active()`、`poll()`、`blur()`。表示編集は自前描画欄に残す。
+
+### `src/ime_parking.rs` — 双子を停める位置。ログイン欄の隣の1px、窓の内側。gate を外してあるので Mac なしでも計算を試せる。
 
 ### `src/clock.rs` — OS からの時刻情報。Key items: `local_utc_offset_minutes()`、`now_unix()`、`caret_blink_interval()`。
 

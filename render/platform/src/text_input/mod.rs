@@ -53,6 +53,122 @@ impl Default for ImeField {
     }
 }
 
+/// Which document the platform's single IME connection is currently serving.
+///
+/// Every mobile OS gives the app one text connection, so moving from one field
+/// to another has to reset both the editor kind and the text. A bridge that
+/// only seeds on the first focus leaves the second field holding the first
+/// one's content type and content, and the next poll writes that into the new
+/// document. Tracking the identity here keeps that decision in one place and
+/// testable without either OS.
+#[derive(Debug, Default)]
+pub struct ImeServing {
+    doc: Option<*const ()>,
+    /// A field was just seeded, so the next poll must not read the IME: the
+    /// push we just made has not been applied yet, and the reported state can
+    /// still be the previous field's.
+    fresh: bool,
+}
+
+impl ImeServing {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the IME must be seeded afresh for this document, and records it.
+    pub fn seed_for(&mut self, doc: &TextDocument) -> bool {
+        let key = std::ptr::from_ref(doc).cast::<()>();
+        let changed = self.doc != Some(key);
+        self.doc = Some(key);
+        changed
+    }
+
+    /// Whether this tick must not read the IME. One-shot.
+    pub fn skips_this_tick(&mut self) -> bool {
+        std::mem::take(&mut self.fresh)
+    }
+
+    /// Marks the connection as just seeded.
+    pub fn mark_seeded(&mut self) {
+        self.fresh = true;
+    }
+
+    /// Forgets the field, so the next one starts clean.
+    pub fn forget(&mut self) {
+        self.doc = None;
+    }
+}
+
+#[cfg(test)]
+mod text_input_tests {
+    use super::*;
+
+    #[test]
+    fn enter_and_escape_are_left_to_the_caller() {
+        let mut d = TextDocument::new();
+        d.insert("あ");
+        assert!(!EditKey::Enter.apply(&mut d, false));
+        assert!(!EditKey::Escape.apply(&mut d, false));
+        assert_eq!(d.text(), "あ", "文書は変わらない");
+    }
+
+    #[test]
+    fn shift_extends_the_selection() {
+        let mut d = TextDocument::new();
+        d.insert("あいう");
+        assert!(EditKey::Left.apply(&mut d, true));
+        assert!(d.has_selection());
+    }
+}
+
+#[cfg(test)]
+mod ime_serving_tests {
+    use super::*;
+
+    /// The first field seeds; the next frame on it must not.
+    #[test]
+    fn only_a_field_change_seeds_again() {
+        let mut s = ImeServing::new();
+        let email = TextDocument::new();
+        assert!(s.seed_for(&email), "最初の欄は種を蒔く");
+        assert!(!s.seed_for(&email), "同じ欄を種蒔きした");
+    }
+
+    /// Moving between the login fields seeds again. This is the whole point:
+    /// one connection, two fields.
+    #[test]
+    fn moving_between_login_fields_seeds_again() {
+        let mut s = ImeServing::new();
+        let email = TextDocument::new();
+        let password = TextDocument::new();
+        assert!(s.seed_for(&email));
+        assert!(
+            s.seed_for(&password),
+            "パスワード欄がメール欄の IME 状態を引き継いだ"
+        );
+    }
+
+    /// Losing focus forgets the field.
+    #[test]
+    fn forgetting_makes_the_next_field_seed() {
+        let mut s = ImeServing::new();
+        let email = TextDocument::new();
+        s.seed_for(&email);
+        s.forget();
+        assert!(s.seed_for(&email));
+    }
+
+    /// The skip after a seed is one-shot, or the field would never sync.
+    #[test]
+    fn the_skip_after_seeding_is_one_shot() {
+        let mut s = ImeServing::new();
+        assert!(!s.skips_this_tick());
+        s.mark_seeded();
+        assert!(s.skips_this_tick());
+        assert!(!s.skips_this_tick());
+    }
+}
+
 /// Where text input goes.
 ///
 /// Input reaches one focused document. Which one is the app's choice; the

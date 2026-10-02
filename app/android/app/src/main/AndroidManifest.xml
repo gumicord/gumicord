@@ -20,7 +20,15 @@
             android:exported="true"
             android:launchMode="singleInstance"
             android:configChanges="keyboard|keyboardHidden|mcc|mnc|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|density|fontScale|fontWeightAdjustment|layoutDirection|locale"
-            android:screenOrientation="unspecified">
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize">
+            <!-- PLT-040. Without this the window keeps its full height and
+                 the keyboard simply covers the lower half, so the login
+                 button and the composer sit under it and their taps reach
+                 the IME instead of the app. `configChanges` above keeps the
+                 activity alive across the resize, so the smaller window
+                 arrives as a plain surface change and winit turns it into a
+                 `Resized`. -->
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="main" />

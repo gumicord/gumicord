@@ -266,6 +266,51 @@ impl Store {
         self.roles.get(&guild).map(Vec::as_slice)
     }
 
+    /// Replaces a guild's whole role table.
+    ///
+    /// An empty table is a legitimate answer — a guild always has at least the
+    /// `@everyone` role, but never store emptiness over a role table that
+    /// already has names in it, or a thin event would drop every heading.
+    pub fn set_roles(&mut self, guild: GuildId, roles: Vec<Role>) {
+        if roles.is_empty() && self.roles.get(&guild).is_some_and(|r| !r.is_empty()) {
+            tracing::debug!(%guild, "ignoring an empty role table");
+            return;
+        }
+        // Counts only: ids and names would reveal which guilds the user is in.
+        tracing::debug!(
+            %guild,
+            roles = roles.len(),
+            colored = roles.iter().filter(|r| r.tint().is_some()).count(),
+            "役職を受け取った"
+        );
+        self.roles.insert(guild, roles);
+    }
+
+    /// Adds or replaces one role, keeping the rest.
+    pub fn upsert_role(&mut self, guild: GuildId, role: Role) {
+        let table = self.roles.entry(guild).or_default();
+        match table.iter_mut().find(|r| r.id == role.id) {
+            Some(existing) => *existing = role,
+            None => table.push(role),
+        }
+    }
+
+    /// Forgets one role. Unknown ids are not an error: a delete can arrive
+    /// for a role a thin `GUILD_CREATE` never carried.
+    pub fn remove_role(&mut self, guild: GuildId, id: RoleId) {
+        if let Some(table) = self.roles.get_mut(&guild) {
+            table.retain(|r| r.id != id);
+        }
+    }
+
+    /// Whether a guild's role table is known at all, and how much of it.
+    ///
+    /// Not logged on its own: a member list is built row by row, so this is
+    /// called often and an answer per call would drown the log.
+    pub fn role_table_size(&self, guild: GuildId) -> usize {
+        self.roles.get(&guild).map_or(0, Vec::len)
+    }
+
     /// A role's name, if known. Never the id: an 18-digit number as a heading
     /// tells the reader nothing.
     pub fn role_name(&self, guild: GuildId, role: RoleId) -> Option<&str> {
@@ -560,14 +605,7 @@ impl Store {
 
         // Same for roles, or the member list headings fall back to ids.
         if !guild.roles.is_empty() {
-            // Counts only: ids and names would reveal which guilds the user
-            // is in.
-            tracing::debug!(
-                roles = guild.roles.len(),
-                colored = guild.roles.iter().filter(|r| r.tint().is_some()).count(),
-                "役職を受け取った"
-            );
-            self.roles.insert(id, guild.roles);
+            self.set_roles(id, guild.roles);
         }
 
         // Arrival order, which anything unplaced falls back to.
@@ -1272,6 +1310,97 @@ mod tint_tests {
         assert_eq!(s.folder_tint(100), Some(0x007c_6cf0));
         assert_eq!(s.folder_tint(200), None);
         assert_eq!(s.folder_tint(999), None);
+    }
+
+    /// A role colour changed while the app sat in the guild. Nothing else
+    /// carries it: `GUILD_ROLES_UPDATE` is the only event that can.
+    #[test]
+    fn a_replaced_role_table_changes_the_colour() {
+        let mut s = store(vec![role(10, 1, 0x0000_ff00)]);
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(10u64)]),
+            Some(0x0000_ff00)
+        );
+
+        s.set_roles(1u64.into(), vec![role(10, 1, 0x00ff_0000)]);
+
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(10u64)]),
+            Some(0x00ff_0000)
+        );
+    }
+
+    /// An empty replacement must not wipe a table that has names in it: a
+    /// thin event would take every heading with it.
+    #[test]
+    fn an_empty_role_table_does_not_wipe_a_known_one() {
+        let mut s = store(vec![role(10, 1, 0x0000_ff00)]);
+        s.set_roles(1u64.into(), Vec::new());
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(10u64)]),
+            Some(0x0000_ff00),
+            "空の表が既知の表を消した"
+        );
+    }
+
+    /// One role added, the rest kept.
+    #[test]
+    fn a_new_role_joins_the_table() {
+        let mut s = store(vec![role(10, 1, 0x0000_ff00)]);
+        s.upsert_role(1u64.into(), role(30, 2, 0x0000_00ff));
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(30u64)]),
+            Some(0x0000_00ff)
+        );
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(10u64)]),
+            Some(0x0000_ff00),
+            "既存の役職が、消えた"
+        );
+        assert_eq!(s.role_table_size(1u64.into()), 2);
+    }
+
+    /// An upsert of an existing id replaces it rather than duplicating.
+    #[test]
+    fn re_adding_a_role_replaces_it() {
+        let mut s = store(vec![role(10, 1, 0x0000_ff00)]);
+        s.upsert_role(1u64.into(), role(10, 1, 0x00ff_0000));
+        assert_eq!(s.role_table_size(1u64.into()), 1);
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(10u64)]),
+            Some(0x00ff_0000)
+        );
+    }
+
+    /// A deleted role stops colouring names. An unknown id is not an error:
+    /// a delete can arrive for a role a thin `GUILD_CREATE` never carried.
+    #[test]
+    fn a_deleted_role_stops_colouring() {
+        let mut s = store(vec![role(10, 1, 0x0000_ff00), role(20, 2, 0x0000_00ff)]);
+        s.remove_role(1u64.into(), RoleId::from(10u64));
+        assert_eq!(s.member_tint(1u64.into(), &[RoleId::from(10u64)]), None);
+        assert_eq!(
+            s.member_tint(1u64.into(), &[RoleId::from(20u64)]),
+            Some(0x0000_00ff),
+            "削除で残りの役職まで消えた"
+        );
+
+        s.remove_role(1u64.into(), RoleId::from(999u64));
+        s.remove_role(9u64.into(), RoleId::from(10u64));
+        assert_eq!(s.role_table_size(1u64.into()), 1);
+    }
+
+    /// The diagnostic's two cases must be distinguishable, or the log says
+    /// nothing.
+    #[test]
+    fn a_known_but_uncoloured_role_differs_from_an_unknown_table() {
+        let s = store(vec![role(10, 1, 0)]);
+        assert_eq!(s.member_tint(1u64.into(), &[RoleId::from(10u64)]), None);
+        assert_eq!(s.role_table_size(1u64.into()), 1, "表は届いている");
+
+        let empty = Store::new();
+        assert_eq!(empty.member_tint(1u64.into(), &[RoleId::from(10u64)]), None);
+        assert_eq!(empty.role_table_size(1u64.into()), 0, "表が届いていない");
     }
 }
 

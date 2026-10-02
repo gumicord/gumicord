@@ -94,7 +94,12 @@ impl Tracker {
     }
 
     pub fn release(&mut self, id: u64, x: f32, y: f32) -> Option<TouchAction> {
-        let a = self.active.take().filter(|a| a.id == id)?;
+        // Filter before taking: a release for a finger we are not tracking is
+        // not this touch's end, and taking would drop the one we are.
+        if !self.active.as_ref().is_some_and(|a| a.id == id) {
+            return None;
+        }
+        let a = self.active.take()?;
         if !a.moved && (x - a.x0).abs() <= TAP_SLOP && (y - a.y0).abs() <= TAP_SLOP {
             return Some(TouchAction::Tap { x, y });
         }
@@ -367,6 +372,95 @@ mod tests {
             Some(TouchAction::Tap { x: 0.0, y: 0.0 })
         );
         t.cancel(2);
+    }
+
+    /// A vertical drag that ends near where it started reads as sideways.
+    ///
+    /// The verdict is the net offset, so the travel in between does not count.
+    /// This is the shape behind a scroll misread as a reply; the recogniser
+    /// cannot tell, which is why the caller decides using the scroll it also
+    /// ran. Pinning it so nobody "fixes" the ratio without the caller.
+    #[test]
+    fn a_scroll_that_settles_near_its_start_reads_as_sideways() {
+        let mut t = Tracker::default();
+        t.press(1, 100.0, 100.0);
+        // Down the list, then back up to almost where it began, drifting left.
+        assert!(matches!(
+            t.mov(1, 100.0, 600.0),
+            Some(TouchAction::Scroll { .. })
+        ));
+        assert!(matches!(
+            t.mov(1, 60.0, 300.0),
+            Some(TouchAction::Scroll { .. })
+        ));
+        // Net 40 across against 10 down: past the 2:1 dominance, so sideways.
+        let verdict = t.release(1, 60.0, 110.0);
+        assert!(
+            matches!(
+                verdict,
+                Some(TouchAction::Swipe(Swipe::Point {
+                    dir: SwipeDir::Left,
+                    ..
+                }))
+            ),
+            "net 40 left against 10 down should read as a left swipe: {verdict:?}"
+        );
+    }
+
+    /// A drag that ends back on its own starting point is neither a tap nor a
+    /// swipe: it scrolled, and released where it began.
+    #[test]
+    fn a_scroll_that_returns_to_its_start_is_nothing() {
+        let mut t = Tracker::default();
+        t.press(1, 100.0, 100.0);
+        assert!(matches!(
+            t.mov(1, 100.0, 600.0),
+            Some(TouchAction::Scroll { .. })
+        ));
+        assert!(matches!(
+            t.mov(1, 100.0, 400.0),
+            Some(TouchAction::Scroll { .. })
+        ));
+        // `moved` keeps it from being a tap; a zero net leaves no direction.
+        assert_eq!(t.release(1, 100.0, 100.0), None);
+    }
+
+    /// Moving never yields a swipe; only a release can.
+    #[test]
+    fn moving_never_produces_a_swipe() {
+        let mut t = Tracker::default();
+        t.press(1, 100.0, 100.0);
+        // The first sample stays inside the slop, so it is not a move yet.
+        assert_eq!(t.mov(1, 100.0, 108.0), None);
+        for y in [140.0, 300.0, 600.0] {
+            let action = t.mov(1, 100.0, y);
+            assert!(
+                matches!(action, Some(TouchAction::Scroll { .. })),
+                "{action:?}"
+            );
+        }
+    }
+
+    /// A release for a finger nobody is tracking is not this touch's end, and
+    /// must leave the tracked one alone.
+    #[test]
+    fn a_foreign_release_leaves_the_tracked_finger_alone() {
+        let mut t = Tracker::default();
+        t.press(1, 100.0, 100.0);
+        assert_eq!(t.release(9, 200.0, 200.0), None);
+        // The real finger is still live and can still scroll.
+        assert!(matches!(
+            t.mov(1, 100.0, 160.0),
+            Some(TouchAction::Scroll { .. })
+        ));
+        assert_eq!(
+            t.release(1, 100.0, 170.0),
+            Some(TouchAction::Swipe(Swipe::Point {
+                dir: SwipeDir::Down,
+                x: 100.0,
+                y: 100.0
+            }))
+        );
     }
 
     /// Too slow to see never starts; NaN never starts either.
