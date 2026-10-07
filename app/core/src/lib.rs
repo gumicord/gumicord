@@ -1789,6 +1789,19 @@ impl Application for Gumicord {
         }
     }
 
+    fn proxy_focus(&mut self, field: gumicord_platform::ImeProxy) -> bool {
+        let field = match field {
+            gumicord_platform::ImeProxy::Username => LoginField::Email,
+            gumicord_platform::ImeProxy::Password => LoginField::Password,
+        };
+        let focus = login_addr(field);
+        if self.focus.as_ref() == Some(&focus) {
+            return false;
+        }
+        self.focus = Some(focus);
+        true
+    }
+
     /// Writes polled native text into the named login field, wherever focus
     /// currently sits: a paired fill lands in both fields at once.
     fn proxy_text(&mut self, field: gumicord_platform::ImeProxy, text: String) -> bool {

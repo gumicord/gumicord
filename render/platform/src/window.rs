@@ -348,6 +348,12 @@ pub trait Application {
         false
     }
 
+    /// Updates the visible login focus after a native AutoFill proxy receives
+    /// a tap directly, bypassing the rendered view's hit testing.
+    fn proxy_focus(&mut self, _field: ImeProxy) -> bool {
+        false
+    }
+
     /// The login field an iOS proxy should mirror, if any. Only iOS reads
     /// this; elsewhere the value is ignored.
     fn ime_proxy(&self) -> Option<ImeProxy> {
@@ -1450,13 +1456,12 @@ impl Host {
     fn sync_ime_proxy(&mut self) -> bool {
         // Gone before any view exists: drop the keyboard now rather than
         // waiting for a parent that may never come.
-        let Some(want) = self.app.ime_proxy() else {
+        let Some(mut want) = self.app.ime_proxy() else {
             if let Some(proxy) = self.proxy.as_mut() {
                 proxy.blur();
             }
             return false;
         };
-        let text = self.app.focused_document().map(|d| d.text().to_owned());
         let Some(parent) = self
             .window
             .as_ref()
@@ -1482,17 +1487,21 @@ impl Host {
             }
         }
 
-        // Park before showing: an off-screen field may refuse first
-        // responder, and without it the manager never pairs. Parking a
-        // detached field only moves it, so doing this first is free.
-        //
-        // One pixel wide, against each login field's own far edge and inside
-        // the window (see `Proxy::place` and `ime_parking`). The twins draw
-        // nothing, so this is about pairing and about staying out of a
-        // finger's way, not about looking like the field.
-        //
-        // Both slots are looked up, not just the focused one: the pair is
-        // what the manager fills, and each twin belongs beside its own field.
+        // A tap on a full-size native proxy goes to UIKit instead of the
+        // rendered hit target. Adopt that responder only when UIKit changed
+        // it independently of an app-side focus change.
+        if let Some(focused) = proxy.focused()
+            && Some(focused) != proxy.active_kind()
+            && self.app.proxy_focus(focused)
+        {
+            tracing::debug!(?focused, "native proxy focus adopted");
+            want = self.app.ime_proxy().unwrap_or(want);
+            changed = true;
+        }
+        let text = self.app.focused_document().map(|d| d.text().to_owned());
+
+        // Keep both twins at their corresponding rendered controls so the
+        // credential provider can recognize the pair.
         let (email, password) = match self.renderer.as_ref() {
             Some(r) => {
                 let (email, password) = login_slot_rects(r.hit_boxes());

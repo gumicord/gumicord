@@ -4,9 +4,8 @@
 //! fill into. Two hidden `UITextField` siblings (username + password, so the
 //! manager pairs them) receive the fill; this layer polls their text into
 //! the app's documents. Visible editing stays in our rendered fields: these
-//! draw nothing (clear text, clear caret) and stand in a strip beside the
-//! field rather than over it, so they can stay touchable — which AutoFill
-//! requires — without standing in a finger's way (see [`Proxy::place`]).
+//! draw nothing (clear text, clear caret) and sit over the corresponding
+//! visible field so AutoFill can recognize the pair (see [`Proxy::place`]).
 //!
 //! Polled, not delegated: a delegate class from Rust is a maintenance
 //! burden, and a frame of latency is invisible on a login form.
@@ -216,8 +215,7 @@ impl Proxy {
         password: Option<gumicord_render::Rect>,
     ) {
         // Keep the native twins over the real fields while validating iOS
-        // AutoFill. The parking-strip workaround made only the focused
-        // control eligible for credential fill on some iOS versions.
+        // AutoFill; the earlier parking placement only exposed one field.
         for (kind, rect) in [
             (super::ImeProxy::Username, username),
             (super::ImeProxy::Password, password),
@@ -279,6 +277,21 @@ impl Proxy {
 
     pub fn is_active(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn active_kind(&self) -> Option<super::ImeProxy> {
+        self.active
+    }
+
+    /// The field UIKit currently owns after a tap on an overlapping proxy.
+    pub fn focused(&self) -> Option<super::ImeProxy> {
+        if self.user.isFirstResponder() {
+            Some(super::ImeProxy::Username)
+        } else if self.pass.isFirstResponder() {
+            Some(super::ImeProxy::Password)
+        } else {
+            None
+        }
     }
 
     /// Drops focus immediately, without needing the parent view. Used

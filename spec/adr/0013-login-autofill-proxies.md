@@ -61,6 +61,11 @@
 結果が出るまでは恒久的な配置方針を決めない。実機で両欄が埋まるか確認後、
 この差分を戻すか、新しい配置決定として ADR を起こす。
 
+実機では、全面サイズのプロキシが可視欄のタップを受けると、UIKit の first responder
+だけが切り替わり、描画側のフォーカス表示が古い欄に残る問題も確認された。
+`sync_ime_proxy` は、アプリからの欄切替と独立してネイティブ欄が切り替わった場合に、
+UIKit の first responder を描画フォーカスへ反映する。
+
 ## 参考
 
 - `render/platform/src/proxy.rs`、`render/platform/src/window.rs` の `sync_ime_proxy`
