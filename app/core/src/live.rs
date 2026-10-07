@@ -465,6 +465,11 @@ impl Live {
         &self.link
     }
 
+    /// Whether the current session has supplied authoritative account data.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.link == Link::Up
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }

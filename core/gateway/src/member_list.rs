@@ -242,8 +242,8 @@ fn op(raw: &Value, counts: &std::collections::HashMap<&str, u32>) -> Option<List
                 .get("items")?
                 .as_array()?
                 .iter()
-                .filter_map(|r| row(r, counts))
-                .collect();
+                .map(|r| row(r, counts))
+                .collect::<Option<Vec<_>>>()?;
             Some(ListOp::Sync { start, rows })
         }
         "INSERT" => Some(ListOp::Insert {

@@ -15,8 +15,15 @@ let caches = NSSearchPathForDirectoriesInDomains(
     .userDomainMask,
     true
 ).first ?? ""
+let support = NSSearchPathForDirectoriesInDomains(
+    .applicationSupportDirectory,
+    .userDomainMask,
+    true
+).first ?? ""
 docs.withCString { docsPtr in
     caches.withCString { cachesPtr in
-        gumicord_ios_main(docsPtr, cachesPtr)
+        support.withCString { supportPtr in
+            gumicord_ios_main(docsPtr, cachesPtr, supportPtr)
+        }
     }
 }

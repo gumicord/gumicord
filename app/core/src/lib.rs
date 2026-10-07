@@ -3444,6 +3444,20 @@ impl Gumicord {
             return true;
         }
 
+        // A missing last-channel id must not leave mobile startup on an
+        // empty screen forever. READY is the first point at which we know
+        // whether the cached restore target exists; fall back to the first
+        // available channel if it does not.
+        let restore_failed = self.pending_restore.is_some() && self.live.is_ready();
+        if restore_failed {
+            tracing::warn!(
+                channel = self.pending_restore.map_or(0, ChannelId::get),
+                "last channel is unavailable; selecting a fallback"
+            );
+            self.pending_restore = None;
+            self.chat.selected_channel = 0;
+        }
+
         let guilds = self.guild_rows();
         if !guilds.iter().any(|g| g.id == self.chat.selected_guild) {
             let Some(first) = guilds.first() else {
@@ -3459,7 +3473,8 @@ impl Gumicord {
         // Behind the drawer (no guild pane) a cleared channel waits for an
         // explicit tap instead of jumping into the first chat. Anywhere
         // else the first channel stays selected, like before.
-        let await_pick = self.chat.selected_channel == 0 && !self.panes().guilds();
+        let await_pick =
+            self.chat.selected_channel == 0 && !self.panes().guilds() && !restore_failed;
         if !await_pick
             && !channels.iter().any(|c| c.id == self.chat.selected_channel)
             && let Some(first) = channels.first()

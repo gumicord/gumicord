@@ -616,43 +616,55 @@ impl<'a> Cx<'a, '_, '_> {
             let ci = intrinsic(child.id);
             let size = sizes[i];
 
-            let child_rect = if let Some(a) = child.anchor {
-                // Anchored children follow neither the flow nor the stack's
-                // centring; they start at the point and flip on overflow.
-                let s = Self::stack_size(child, &ci, size, inner);
-                anchored(a, s, inner, m)
-            } else if it.axis == Axis::Stack {
-                let s = Self::stack_size(child, &ci, size, inner);
-                if child.id == NodeId::OverlaySheet {
-                    // Bottom sheets span the width and rise to ~70% of the
-                    // window; taller content scrolls inside. Centring a
-                    // capped sheet would strand it mid-screen.
-                    let h = s.h.min(inner.h * SHEET_MAX_H);
+            let child_rect =
+                if node.id == NodeId::OverlaySheet && child.id == NodeId::NavMemberListSheet {
+                    // The sheet is capped by the window, but this scroll child
+                    // otherwise hugs its full member content and has no overflow.
+                    // Give it the remaining viewport below the fixed handle.
+                    let handle_h = sizes.first().map_or(0.0, |s| s.h);
                     Rect::new(
                         inner.x + m.left,
-                        inner.y + inner.h - h - m.bottom,
+                        inner.y + handle_h + m.top,
                         inner.w - m.horizontal(),
-                        h,
+                        (inner.h - handle_h - m.vertical()).max(0.0),
                     )
+                } else if let Some(a) = child.anchor {
+                    // Anchored children follow neither the flow nor the stack's
+                    // centring; they start at the point and flip on overflow.
+                    let s = Self::stack_size(child, &ci, size, inner);
+                    anchored(a, s, inner, m)
+                } else if it.axis == Axis::Stack {
+                    let s = Self::stack_size(child, &ci, size, inner);
+                    if child.id == NodeId::OverlaySheet {
+                        // Bottom sheets span the width and rise to ~70% of the
+                        // window; taller content scrolls inside. Centring a
+                        // capped sheet would strand it mid-screen.
+                        let h = s.h.min(inner.h * SHEET_MAX_H);
+                        Rect::new(
+                            inner.x + m.left,
+                            inner.y + inner.h - h - m.bottom,
+                            inner.w - m.horizontal(),
+                            h,
+                        )
+                    } else {
+                        Rect::new(
+                            inner.x + m.left + (inner.w - m.horizontal() - s.w).max(0.0) * 0.5,
+                            inner.y + m.top + (inner.h - m.vertical() - s.h).max(0.0) * 0.5,
+                            s.w,
+                            s.h,
+                        )
+                    }
+                } else if horizontal {
+                    let avail = inner.h - m.vertical();
+                    let h = Self::cross_size(child, &ci, size.h, avail, it.cross, false);
+                    let y = inner.y + m.top + Self::cross_offset(it.cross, avail, h);
+                    Rect::new(cursor + m.left, y, size.w, h)
                 } else {
-                    Rect::new(
-                        inner.x + m.left + (inner.w - m.horizontal() - s.w).max(0.0) * 0.5,
-                        inner.y + m.top + (inner.h - m.vertical() - s.h).max(0.0) * 0.5,
-                        s.w,
-                        s.h,
-                    )
-                }
-            } else if horizontal {
-                let avail = inner.h - m.vertical();
-                let h = Self::cross_size(child, &ci, size.h, avail, it.cross, false);
-                let y = inner.y + m.top + Self::cross_offset(it.cross, avail, h);
-                Rect::new(cursor + m.left, y, size.w, h)
-            } else {
-                let avail = inner.w - m.horizontal();
-                let w = Self::cross_size(child, &ci, size.w, avail, it.cross, true);
-                let x = inner.x + m.left + Self::cross_offset(it.cross, avail, w);
-                Rect::new(x, cursor + m.top, w, size.h)
-            };
+                    let avail = inner.w - m.horizontal();
+                    let w = Self::cross_size(child, &ci, size.w, avail, it.cross, true);
+                    let x = inner.x + m.left + Self::cross_offset(it.cross, avail, w);
+                    Rect::new(x, cursor + m.top, w, size.h)
+                };
 
             // Anchored children do not advance the cursor.
             if it.axis != Axis::Stack && child.anchor.is_none() {

@@ -1,13 +1,13 @@
 # iOS entry point
 
 The Xcode wrapper, and nothing else. Everything beyond lifecycle and
-passing the Documents and Caches directories across lives in `app/core`.
+passing the Documents, Caches, and Application Support directories across lives in `app/core`.
 
 ## Layout
 
 | | |
 |---|---|
-| `Cargo.toml` / `src/lib.rs` | The `gumicord-ios` staticlib. `gumicord_ios_main(documents_dir, caches_dir)` runs the shared loop; the pointers are copied before returning |
+| `Cargo.toml` / `src/lib.rs` | The `gumicord-ios` staticlib. `gumicord_ios_main(documents_dir, caches_dir, support_dir)` runs the shared loop; the pointers are copied before returning |
 | `Gumicord/` | Swift entry (`main.swift`), bridging header, `Info.plist` |
 | `Gumicord.xcodeproj/` | Hand-written minimal project. No Xcodegen, no CocoaPods, no SPM |
 | `lib/` | Staging for `libgumicord_ios.a`, copied here by CI. Git-ignored |
@@ -15,7 +15,7 @@ passing the Documents and Caches directories across lives in `app/core`.
 ## Decisions
 
 - **winit owns the lifecycle.** Swift is only `main.swift` handing over the
-  Documents and Caches directories; `EventLoop::run` calls `UIApplicationMain` itself. A
+  Documents, Caches, and Application Support directories; `EventLoop::run` calls `UIApplicationMain` itself. A
   Swift `@main` entry calls it first and makes winit abort at startup.
   LiveContainer also jumps to the guest's main, so this suits both.
 - **Text input through a hidden `UITextInput` editor** (`render/platform`

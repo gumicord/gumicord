@@ -1493,12 +1493,12 @@ impl Host {
         //
         // Both slots are looked up, not just the focused one: the pair is
         // what the manager fills, and each twin belongs beside its own field.
-        let (email, password, viewport_w) = match self.renderer.as_ref() {
+        let (email, password) = match self.renderer.as_ref() {
             Some(r) => {
                 let (email, password) = login_slot_rects(r.hit_boxes());
-                (email, password, r.viewport().w)
+                (email, password)
             }
-            None => (None, None, 0.0),
+            None => (None, None),
         };
         if email.is_none() && password.is_none() {
             // Rects arrive within a tick or two; half-parked would fill the
@@ -1510,7 +1510,7 @@ impl Host {
             tracing::debug!(slot, "proxy waiting for the field rects");
             return changed;
         }
-        proxy.place(email, password, viewport_w);
+        proxy.place(email, password);
 
         proxy.set_active(parent, Some(want), text.as_deref().unwrap_or(""));
         // The proxy took the keyboard, or refused and detached. Either way
@@ -2661,7 +2661,8 @@ impl ApplicationHandler<LoopEvent> for Host {
                                         dx: 0.0,
                                         dy: 0.0,
                                     });
-                                } else if hits.iter().any(|h| h.id == NodeId::OverlayDrawer)
+                                } else if (hits.iter().any(|h| h.id == NodeId::OverlayDrawer)
+                                    || hits.iter().any(|h| h.id == NodeId::OverlayScrim))
                                     && self.app.drawer_close_drag_maybe()
                                 {
                                     self.drawer_close_touch = Some(DrawerCloseTouch {

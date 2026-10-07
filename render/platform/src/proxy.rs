@@ -198,22 +198,14 @@ impl Proxy {
         }
     }
 
-    /// Parks both fields in a strip beside their own login field.
+    /// Places both native fields at the login controls' normal frames.
     ///
     /// AutoFill offers credentials only to fields it can touch, and writes a
-    /// paired fill into both, so both twins stay in the window and stay
-    /// touchable — which is the whole reason they are not left covering a
-    /// visible login box and swallowing its taps.
+    /// paired fill into both. This experiment places the twins over the
+    /// corresponding controls to verify whether normal frames restore pairing.
     ///
-    /// Each twin gets **its own** field's strip. The manager pairs a username
-    /// field with a password field by proximity, so one frame for both is the
-    /// one arrangement that cannot pair: the two sit on the same pixel with the
-    /// password field in front. The arithmetic and its edge cases live in
-    /// [`crate::ime_parking`] so they can be checked without a Mac.
-    ///
-    /// Inside the parent on purpose: off-screen, a field may refuse first
-    /// responder and the keyboard never comes, which is why the strip
-    /// clamps to the window rather than leaving it.
+    /// This normal-size and normal-position placement is a device-validation
+    /// experiment for the pairing issue recorded in ADR-0013.
     ///
     /// `None` for a kind leaves that twin where it is and marks it unplaced,
     /// so [`poll`](Self::poll) skips it: half a paired fill beats a stale one
@@ -222,12 +214,13 @@ impl Proxy {
         &mut self,
         username: Option<gumicord_render::Rect>,
         password: Option<gumicord_render::Rect>,
-        viewport_w: f32,
     ) {
-        let strips = crate::ime_parking::login_parking(username, password, viewport_w);
+        // Keep the native twins over the real fields while validating iOS
+        // AutoFill. The parking-strip workaround made only the focused
+        // control eligible for credential fill on some iOS versions.
         for (kind, rect) in [
-            (super::ImeProxy::Username, strips.0),
-            (super::ImeProxy::Password, strips.1),
+            (super::ImeProxy::Username, username),
+            (super::ImeProxy::Password, password),
         ] {
             // `set` answers whether the frame moved, so a repeat stays silent
             // and a withdrawn rectangle unplaces the slot.
