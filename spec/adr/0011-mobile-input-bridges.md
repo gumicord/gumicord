@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| ステータス | **承認**（ログイン欄のプロキシ廃止のみ [ADR-0013](0013-login-autofill-proxies.md) が置換） |
+| ステータス | **承認**（ログイン欄のプロキシ廃止のみ [ADR-0013](0013-login-autofill-proxies.md) が置換、Java/Kotlin 制約は [ADR-0016](0016-kotlin-receiving-points.md) が置換、Android のログイン 2 欄は [ADR-0017](0017-android-login-autofill.md) が差し替え） |
 | 起票日 | 2026-09-11 |
 | 決定日 | 2026-09-11 |
 | 関連要件 | `PLT-001`, `PLT-002`, `PLT-040` |
@@ -46,7 +46,7 @@ GameActivity は GameTextInput を内蔵している (`onCreateInputConnection` 
 
 フォーカス中は 16ms のタイマーで起こしてポーリングする (`NFR-006`)。打鍵は `winit` のイベントを起こさないため、待ちだけではエコーが遅れる。
 
-「Java 自前なし」の制約は維持する。`games-activity` は 4.x 系に pin したまま (`android-activity` 0.6 が話せる相手)。
+「Java 自前なし」の制約は [ADR-0016](0016-kotlin-receiving-points.md) で廃止された (足し方は同 ADR の受け口の形)。`games-activity` は 4.x 系に pin したまま (`android-activity` 0.6 が話せる相手)。
 
 ### I2: `UITextInput` を `objc2` で実装する
 
@@ -73,7 +73,7 @@ GameActivity は GameTextInput を内蔵している (`onCreateInputConnection` 
 
 ## 見直し条件
 
-- GameTextInput では変換が成立しないと分かったとき → 生 JNI の `InputConnection` へ (Java 自前なしの制約ごと再検討)
+- GameTextInput では変換が成立しないと分かったとき → 生 JNI の `InputConnection` へ (受け口を足すなら [ADR-0016](0016-kotlin-receiving-points.md) の形で)
 - `UITextInput` の実装が不可能と分かったとき → [ADR-0001](0001-native-rust-renderer.md) ごと再検討する (仕様書の条件どおり)
 
 ## 参考

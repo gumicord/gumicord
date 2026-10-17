@@ -17,6 +17,7 @@
 // Android's system bars, compiled everywhere so their JNI calls are
 // type-checked off-device; only Android has bars to move.
 pub mod android_bars;
+pub mod android_proxy;
 #[cfg(target_os = "android")]
 pub mod android_text;
 pub mod captcha;

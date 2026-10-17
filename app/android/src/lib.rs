@@ -31,6 +31,9 @@ fn data_dir(app: &winit::platform::android::activity::AndroidApp) -> std::path::
 #[unsafe(no_mangle)]
 fn android_on_create(state: &winit::platform::android::activity::OnCreateState) {
     gumicord_platform::android_bars::prepare(state.vm_as_ptr(), state.activity_as_ptr());
+    // The login twins (ADR-0017) may only be built where a view may only be
+    // built: this thread, with the content view already installed.
+    gumicord_platform::android_proxy::install(state.vm_as_ptr(), state.activity_as_ptr());
 }
 
 /// GameActivity calls this on its own loop thread, separate from the Java

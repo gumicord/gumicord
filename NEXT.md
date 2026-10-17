@@ -150,6 +150,28 @@
   (2) 機器にパスワードが 1 件以上保存されていて、設定の自動入力が on
   (3) 埋められない部分: `discord.com` の AASA に `dev.gumicord.app` は無い。
       追加できないので、使えるのは鍵アイコンから手で選ぶ経路だけ
+- Android のパスワード自動入力 (2026-10-17、[ADR-0017](spec/adr/0017-android-login-autofill.md)):
+  GameActivity の `InputEnabledSurfaceView` は `AUTOFILL_TYPE_NONE` を返すので、
+  ここには候補も保存も出ない。ログイン 2 欄の上に `EditText` 双子
+  (`LoginEditor.kt`、判断は `render/platform/src/android_proxy.rs`) を置き、
+  欄がアクティブな間だけフォーカスとキーボードを移す。テキストは 16ms の
+  ポーリングで文書へ渡す。**未実機確認**。確認するのは次:
+  (1) 候補ドロップダウンが双子の場所 (可視のログイン欄に重なった位置) に
+      出ること、ペア補完が両欄を埋めること。機器に保存済みのログイン情報が
+      1 件以上要る
+  (2) ログイン後に「パスワードを保存」が出ること、次回は保存分で埋まること
+  (3) 双子→GameTextInput の付け替え: ログイン後のチャット入力と二段階認証の
+      コード欄でキーボードが戻って打てるか。**ここが壊れると打てなくなる**。
+      `setSoftKeyboardActive(true)` が `setFocusableInTouchMode` から始める
+      ので戻る見込みだが、実機で確かめること
+  (4) 候補が出ない機器では `focused` / `place` のログで双子が呼ばれているかを
+      見ること (Android は実機で NDK が無く target 付きの型検査が通らないので、
+      CI の nightly と実機が唯一の確認手段)
+- captcha の Android版の未確認点 (2026-10-17 追記): `captcha/android.rs` の
+  WebView 生成が UI thread ではない Rust スレッドから走っている
+  (`runOnUiThread` 経由でない)。WebView はその場で作れない可能性があり、
+  **未実機なので動くかどうかは未確認**。動かなくなったら ADR-0016 の受け口を
+  WebView にも足すこと (LoginEditor と同じ形)。
 - 長押しメニューとキーボード (2026-10-01): 入力欄を長押ししてメニューを開くと
   キーボードが下がらなかった。app 側 (`context_menu` が `release_text_focus`) は正しく、
   落とすのは platform 層側だった。1 フレームの中で `sync_ime_proxy` が先に proxy を片づけ、

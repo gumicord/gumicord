@@ -39,6 +39,8 @@
 | [0013](adr/0013-login-autofill-proxies.md) | ログインの自動入力のため不可視プロキシを残す | 承認 |
 | [0014](adr/0014-mobile-gestures-and-splash.md) | モバイルのフリング緩和・スクロールバー常時表示・起動スプラッシュ | 承認 |
 | [0015](adr/0015-mobile-captcha-hosts.md) | 残りの captcha ホスト (macOS / Linux / iOS / Android) と Android の Kotlin 受け口 | 承認 |
+| [0016](adr/0016-kotlin-receiving-points.md) | 自前の Kotlin 受け口は増やせる (「Java 自前なし」制約の廃止) | 承認 |
+| [0017](adr/0017-android-login-autofill.md) | Android のログイン自動入力は双子 `EditText` で出す | 承認 |
 ## ルール
 
 ### 1. 仕様が先

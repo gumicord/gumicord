@@ -602,7 +602,7 @@ fn run_loop(
         control_pending: None,
         modifiers: ModifiersState::empty(),
         ime_allowed: false,
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         proxy: None,
         #[cfg(target_os = "ios")]
         keyboard_held: false,
@@ -703,15 +703,15 @@ struct DrawerCloseTouch {
 
 /// Where the login email and password boxes landed in the last built frame.
 ///
-/// A free function rather than a method on `Host`, and gated on iOS *or* a
-/// test build, so the host compiles and tests it while a host library build
-/// does not see it as dead. The iOS proxies are the only real caller, but
-/// nothing here is iOS, and being behind a bare `target_os` gate once let a
-/// `Key::Slot` lifetime slip through unnoticed.
+/// A free function rather than a method on `Host`, and gated on iOS, Android
+/// *or* a test build, so the host compiles and tests it while a host library
+/// build does not see it as dead. The login twins are the only real callers,
+/// but nothing here is iOS or Android, and being behind a bare `target_os`
+/// gate once let a `Key::Slot` lifetime slip through unnoticed.
 ///
 /// `Key::Slot` stores its name, so the parameter is `&'static str`; a
 /// borrowed one does not outlive the key it goes into.
-#[cfg(any(target_os = "ios", test))]
+#[cfg(any(target_os = "ios", target_os = "android", test))]
 fn login_slot_rects(
     hits: &[Hit],
 ) -> (Option<gumicord_render::Rect>, Option<gumicord_render::Rect>) {
@@ -833,6 +833,9 @@ struct Host {
     /// Native login-field mirrors for iOS password autofill.
     #[cfg(target_os = "ios")]
     proxy: Option<crate::proxy::Proxy>,
+    /// The Kotlin login twins for Android password autofill (ADR-0017).
+    #[cfg(target_os = "android")]
+    proxy: Option<crate::android_proxy::AndroidProxy>,
     /// Hidden UITextInput editor state (iOS only).
     #[cfg(target_os = "ios")]
     ios_text: crate::ios_text::IosText,
@@ -1303,9 +1306,9 @@ impl Host {
         // winit's key-only view would fight it for first responder.
         // Polled on the tick while focused, never spun: spinning redraws
         // every frame while a field is up.
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         let proxy_changed = self.sync_ime_proxy();
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         let proxy_changed = false;
         if proxy_changed {
             self.request_redraw();
@@ -1317,6 +1320,15 @@ impl Host {
         let focused = self.app.focused_document().is_some();
         // winit's key-only view would fight a native editor for first
         // responder, so it stays off while either owns the keyboard.
+        //
+        // Android is the exception: the twins hold their own keyboard
+        // through the receiving point, and toggling here would race them —
+        // the hide reaches the Java main thread after their show and takes
+        // the keyboard straight back. The GameTextInput poll below is
+        // gated on `proxy_active` instead.
+        #[cfg(target_os = "android")]
+        let has_input = focused;
+        #[cfg(not(target_os = "android"))]
         let has_input = focused && !self.proxy_active() && !self.editor_active();
 
         // No IME events arrive until this is allowed; winit defaults to off.
@@ -1399,26 +1411,35 @@ impl Host {
         // Android drives text through GameTextInput (see android_text):
         // reconcile the IME state into the document. winit never delivers
         // either text or actions.
+        //
+        // Not while a twin owns the keyboard: the SurfaceView is no longer
+        // the served view, and seeding it now would leave half a keystroke
+        // in the wrong document. The login twins' own poll ran above.
         #[cfg(target_os = "android")]
         let acted = {
-            let field = self.app.ime_field().unwrap_or_default();
-            if let (Some(app), Some(doc)) = (self.android_app.clone(), self.app.focused_document())
-            {
-                self.android_text.ensure(&app, &field, doc);
-                let (changed, newline) = self.android_text.poll(&app, doc);
-                if changed {
-                    self.request_redraw();
-                }
-                let submitted = newline && self.app.ime_newline();
-                // A submit cleared focus: drop the connection on this tick
-                // instead of the next redraw, or the keyboard lingers over
-                // what comes next.
-                if submitted && self.app.focused_document().is_none() {
-                    self.android_text.blur();
-                }
-                submitted
-            } else {
+            if self.proxy_active() {
                 false
+            } else {
+                let field = self.app.ime_field().unwrap_or_default();
+                if let (Some(app), Some(doc)) =
+                    (self.android_app.clone(), self.app.focused_document())
+                {
+                    self.android_text.ensure(&app, &field, doc);
+                    let (changed, newline) = self.android_text.poll(&app, doc);
+                    if changed {
+                        self.request_redraw();
+                    }
+                    let submitted = newline && self.app.ime_newline();
+                    // A submit cleared focus: drop the connection on this
+                    // tick instead of the next redraw, or the keyboard
+                    // lingers over what comes next.
+                    if submitted && self.app.focused_document().is_none() {
+                        self.android_text.blur();
+                    }
+                    submitted
+                } else {
+                    false
+                }
             }
         };
 
@@ -1550,12 +1571,125 @@ impl Host {
         changed
     }
 
-    #[cfg(target_os = "ios")]
+    /// Mirrors the login fields into the Kotlin twins and polls their text
+    /// back. True when the tree needs another look. Rides the paced redraws
+    /// while focused; nothing here spins its own frames.
+    ///
+    /// The iOS shape, minus the parent: `android_on_create` already put the
+    /// twins in the window's content view, so there is nothing to wait for
+    /// and nothing to re-attach. What iOS does with first responder is done
+    /// here by a focus poll (see [`crate::android_proxy::AndroidProxy::focused`]).
+    #[cfg(target_os = "android")]
+    fn sync_ime_proxy(&mut self) -> bool {
+        // Gone before any view exists: drop the keyboard now rather than
+        // waiting for a parent that may never come.
+        let Some(mut want) = self.app.ime_proxy() else {
+            if let Some(proxy) = self.proxy.as_mut() {
+                proxy.blur();
+            }
+            return false;
+        };
+        // Without the receiving point the login fields fall back to
+        // GameTextInput: typing still works, autofill does not.
+        if !crate::android_proxy::available() {
+            return false;
+        }
+        let proxy = self
+            .proxy
+            .get_or_insert_with(crate::android_proxy::AndroidProxy::new);
+        // Drain before anything else. `set_active` re-baselines the idle
+        // sibling from whatever the twin currently holds, so a paired fill
+        // that landed since the last tick would be swallowed there. Bank it
+        // first.
+        let mut changed = false;
+        let mut submitted = false;
+        while let Some((kind, event)) = proxy.poll() {
+            match event {
+                crate::android_proxy::EditorEvent::Text(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                }
+                crate::android_proxy::EditorEvent::Submitted(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                    submitted = true;
+                }
+            }
+        }
+        // A tap on a twin goes to the EditText instead of the rendered hit
+        // target. Adopt that focus only when the twin moved it on its own.
+        if let Some(focused) = proxy.focused()
+            && Some(focused) != proxy.active_kind()
+            && self.app.proxy_focus(focused)
+        {
+            tracing::debug!(?focused, "native twin focus adopted");
+            want = self.app.ime_proxy().unwrap_or(want);
+            changed = true;
+        }
+        // The IME's action button queues as an index; a newline inside a
+        // single-line twin means the same thing. Both reach the app as a
+        // newline, which advances the email half and submits on the rest.
+        submitted |= proxy.poll_action().is_some();
+        if submitted && self.app.ime_newline() {
+            tracing::debug!("twin action moved the focus");
+            changed = true;
+            match self.app.ime_proxy() {
+                Some(next) => want = next,
+                // Submit closed the screen: let go now rather than showing
+                // a twin for a field that no longer exists.
+                None => {
+                    proxy.blur();
+                    return changed;
+                }
+            }
+        }
+        let text = self.app.focused_document().map(|d| d.text().to_owned());
+
+        // Both twins sit over their rendered control, so the provider sees
+        // the pair where the user expects it.
+        let (email, password) = match self.renderer.as_ref() {
+            Some(r) => login_slot_rects(r.hit_boxes()),
+            None => (None, None),
+        };
+        if email.is_none() && password.is_none() {
+            // Rects arrive within a tick or two; half-placed would fill the
+            // password half nowhere.
+            let slot = match want {
+                ImeProxy::Username => "email",
+                ImeProxy::Password => "password",
+            };
+            tracing::debug!(slot, "twin waiting for the field rects");
+            return changed;
+        }
+        proxy.place(email, password);
+        proxy.set_active(Some(want), text.as_deref().unwrap_or(""));
+        // Anything that arrived while the twin was taking the keyboard.
+        while let Some((kind, event)) = proxy.poll() {
+            match event {
+                crate::android_proxy::EditorEvent::Text(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                }
+                crate::android_proxy::EditorEvent::Submitted(text) => {
+                    changed |= self.app.proxy_text(kind, text);
+                    submitted = true;
+                }
+            }
+        }
+        if submitted {
+            changed |= self.app.ime_newline();
+        }
+        // A submit cleared focus: let go on this tick instead of the next
+        // redraw, or the keyboard lingers over what comes next.
+        if self.app.ime_proxy().is_none() {
+            proxy.blur();
+        }
+        changed
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     fn proxy_active(&self) -> bool {
         self.proxy.as_ref().is_some_and(|p| p.is_active())
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     fn proxy_active(&self) -> bool {
         false
     }
@@ -1566,7 +1700,9 @@ impl Host {
         self.ios_text.is_live()
     }
 
-    #[cfg(not(target_os = "ios"))]
+    // Android has no hidden editor (its twins are `proxy_active`), and
+    // asking for it there would leave the answer unused.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     fn editor_active(&self) -> bool {
         false
     }

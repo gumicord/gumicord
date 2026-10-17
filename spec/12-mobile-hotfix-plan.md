@@ -248,8 +248,10 @@ drawer / sheet に `OverlayLayer` / `OverlayScrim` がなく hit 吸収が無い
   （黙って許さない）。携帯では選び口が無い旨を toast で言う
 - 未着手：Android の SAF・iOS の文書選び。どちらも OS との往復が要る
   （Android は activity の返し、iOS は選びの委任）ため、Rust のみでの
-  穴埋めはしない。Android は「自前の Java/Kotlin を持たない」決定を
-  覆すことになるため、やるなら ADR を起票して決める。
+  穴埋めはしない。Android は activity の返しが要るぶん、受け口を足すことで
+  カバーできる ([ADR-0016](adr/0016-kotlin-receiving-points.md)。同 ADR で
+  「自前の Java/Kotlin を持たない」は廃止済み)。止むのは往復の設計になるため、
+  やるなら ADR を起票して決める。
   穴が埋まれば、bytes を渡す口はすでに共通のため UI 側の手直しは要らない
 - 形式の置き場所は将来 `04-theme.md` §5.4 と `05-plugin-api.md` §4.2 に
   移す。registry（`EXT-044`）と一緒に決める

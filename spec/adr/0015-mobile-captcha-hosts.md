@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| ステータス | **承認** |
+| ステータス | **承認**（受け口の扱いは [ADR-0016](0016-kotlin-receiving-points.md) が一般化） |
 | 起票日 | 2026-09-26 |
 | 関連要件 | `FR-001`, `FR-002`, `SEC-002`, `PLT-008` |
 | 前提となる決定 | [ADR-0007](0007-login-paths-and-captcha.md) (captcha は OS の webview に出す)、`app/android/README.md` (自前の Java/Kotlin を持たない) |

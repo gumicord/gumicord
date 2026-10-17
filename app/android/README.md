@@ -20,10 +20,29 @@ and passing native handles across lives in `app/core`.
 - **Logs are files, shared out.** `logs/gumicord-<stamp>.log` (plus `panic-<stamp>.log`) sits next to the data; the settings screen's support page hands the newest to the share sheet through a FileProvider (`logs/` only).
   - **Mirrored into `Download/gumicord/logs/` while the app lives**, not only at exit. The app's own directory is unreachable without a rooted phone, and a log ferried only when the process ends is no help while a failure is still on screen. The copy is rewritten in place every few seconds, and only when the source has grown; at most five of each prefix survive, so a crash loop cannot fill Downloads. `logcat` works too, but nothing requires `adb`.
 
-- **Almost no Java/Kotlin of our own**: the manifest points at `GameActivity` directly.
-  The one exception is `CaptchaBridge.kt`, the captcha page's answer object
-  ([ADR-0015](../../spec/adr/0015-mobile-captcha-hosts.md)). Judgement stays
-  in Rust; Kotlin only carries strings.
+- **Thin Kotlin receiving points, judgement stays in Rust**: the old
+  "almost no Java/Kotlin of our own" rule is gone
+  ([ADR-0016](../../spec/adr/0016-kotlin-receiving-points.md)). Rust may add
+  a Kotlin declaration that hides the framework APIs it would otherwise reach
+  over raw JNI; decisions and state stay in Rust. Raw JNI that already works
+  (system bars, Keystore) is left alone. Today's list:
+  - `CaptchaBridge.kt`: the captcha page's answer object
+    ([ADR-0015](../../spec/adr/0015-mobile-captcha-hosts.md)); it only
+    carries strings.
+  - `LoginEditor.kt`: the two login autofill twins
+    ([ADR-0017](../../spec/adr/0017-android-login-autofill.md)); it creates
+    two `EditText` siblings over the rendered login fields, moves them,
+    takes and drops the keyboard, and reads their text back. The game's
+    `SurfaceView` cannot be autofilled, so the credential provider has
+    nothing to fill without these. Rust decides when each twin takes the
+    keyboard (`render/platform/src/android_proxy.rs`) and what its text
+    means; the file adds no rules of its own. Built once in
+    `android_on_create` (the Java main thread, the only thread allowed to
+    touch views), kept for the process.
+    - Should `minifyEnabled` ever turn on, this needs the same
+      `-keep class dev.gumicord.app.** { *; }` treatment as the verifier:
+      R8 cannot see JNI, and stripping the class turns password autofill
+      off silently.
 - **TLS through the system store**: `reqwest` verifies against it via
   `rustls-platform-verifier`, which needs its Kotlin helper on the classpath.
   Without that helper every HTTPS request fails on Android.
