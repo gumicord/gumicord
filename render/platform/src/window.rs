@@ -559,7 +559,7 @@ fn run_loop(
         app: Box::new(app),
         #[cfg(target_os = "ios")]
         ios_text: crate::ios_text::IosText::new(waker.clone()),
-        #[cfg(target_os = "ios")]
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         last_safe: (0.0, 0.0, 0.0, 0.0),
         waker,
         window: None,
@@ -837,8 +837,8 @@ struct Host {
     #[cfg(target_os = "ios")]
     ios_text: crate::ios_text::IosText,
     /// Last logged safe-area insets, so windowing changes can be told
-    /// apart from stale layout (iOS only).
-    #[cfg(target_os = "ios")]
+    /// apart from stale layout (mobile only).
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     last_safe: (f32, f32, f32, f32),
     /// Whether a native view has taken the keyboard since we last forced
     /// it down (iOS only).
@@ -1727,15 +1727,20 @@ impl Host {
                 viewport.h = (viewport.h - keyboard).max(0.0);
                 viewport
             };
-            // PLT-041: the Metal layer spans the whole view, so the
-            // content is inset here. Only queried on iOS; elsewhere
-            // there is no safe area to respect.
+            // Android resizes the window for the keyboard itself, so no
+            // height is left to take off here.
+            #[cfg(target_os = "android")]
+            let keyboard = 0.0;
+            // The surface spans the whole screen on both phones, so the
+            // content is inset here; elsewhere there is no safe area.
             #[cfg(target_os = "ios")]
             let safe = self
                 .window
                 .as_ref()
                 .map(|w| crate::ios_text::safe_insets(w))
                 .unwrap_or((0.0, 0.0, 0.0, 0.0));
+            #[cfg(target_os = "android")]
+            let safe = crate::android_bars::safe_insets();
             let cx = FrameCx {
                 viewport,
                 scale: r.scale(),
@@ -1747,7 +1752,7 @@ impl Host {
             // clears the status bar, the rounded corners and the home
             // bar. The keyboard already covers the bottom when up, so
             // it owns that inset instead.
-            #[cfg(target_os = "ios")]
+            #[cfg(any(target_os = "ios", target_os = "android"))]
             {
                 let (top, right, bottom, left) = safe;
                 // Log changes only: a windowed iPad keeps reporting the

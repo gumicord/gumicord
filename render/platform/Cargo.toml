@@ -17,6 +17,11 @@ unicode-segmentation.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 log.workspace = true
+# Not gated to Android on purpose: the machine that writes the JNI calls
+# has no NDK, so compiling them here is the only check they get before CI.
+# None of it runs elsewhere.
+jni.workspace = true
+ndk-context.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
@@ -53,6 +58,4 @@ keyring.workspace = true
 # GameActivity backend for the Android shell. Desktop builds never see it.
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { workspace = true, features = ["android-game-activity"] }
-jni.workspace = true
-ndk-context.workspace = true
 android_logger.workspace = true

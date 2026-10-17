@@ -10,7 +10,7 @@
 //! | Windows | DPAPI (`CryptProtectData`) | done |
 //! | Linux | Secret Service, cached in-session (`keyring`) | done |
 //! | macOS | Keychain (`keyring`) | done |
-//! | Android | Keystore | to come |
+//! | Android | Keystore (AES-GCM over JNI, [`keystore`]) | done |
 //! | iOS | Keychain (`keyring`) | done |
 //!
 //! DPAPI keeps another user account out: the key derives from the Windows
@@ -23,11 +23,18 @@
 
 use std::path::PathBuf;
 
+mod blob;
+mod keystore;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
     /// No backend here yet; never falls back to plaintext.
     #[error("このプラットフォームにセキュアストレージの実装がない")]
     Unsupported,
+    /// The OS key store refused, or what was on disk is not ours. The
+    /// caller logs in again; nothing here is worth showing.
+    #[error("OS の鍵束に届かなかった")]
+    Keystore,
     #[error("保存場所を決められない: {0}")]
     NoHome(&'static str),
     #[error("読み書きに失敗した: {0}")]
@@ -39,6 +46,14 @@ pub enum SecretError {
     /// The value is not text; the keyring holds strings.
     #[error("保存できない値だった")]
     NotText,
+}
+
+impl From<jni::errors::Error> for SecretError {
+    fn from(_: jni::errors::Error) -> Self {
+        // A Java exception carries no detail worth a user's attention, and
+        // its message would name our internals rather than their problem.
+        SecretError::Keystore
+    }
 }
 
 /// What the OS secure store holds, by name. Only the token for now.
@@ -58,8 +73,12 @@ impl SecretStore {
     pub fn new() -> Result<Self, SecretError> {
         Self::in_dir(base_dir()?.join("secrets"))
     }
+}
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+/// The stores that keep their sealed bytes in a file. What differs between
+/// them is the seal, not the place.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+impl SecretStore {
     fn path(&self, name: &str) -> PathBuf {
         // Only our own constants reach this, but never let one traverse.
         let safe: String = name
@@ -69,40 +88,106 @@ impl SecretStore {
         self.dir.join(format!("{safe}.bin"))
     }
 
-    /// Stores, replacing anything already there.
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
-    pub fn store(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
-        let blob = protect(secret)?;
-        // Written then renamed, so a crash leaves no half-written secret.
+    /// Written then renamed, so a crash leaves no half-written secret.
+    fn write_blob(&self, name: &str, blob: &[u8]) -> Result<(), SecretError> {
         let tmp = self.path(name).with_extension("tmp");
-        std::fs::write(&tmp, &blob)?;
+        std::fs::write(&tmp, blob)?;
         std::fs::rename(&tmp, self.path(name))?;
         Ok(())
+    }
+
+    /// Absent is `Ok(None)`; anything else that cannot be read is an error.
+    fn read_blob(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
+        match std::fs::read(self.path(name)) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Absent still succeeds: this runs when a token is rejected, and
+    /// failing on "not there" makes that path awkward.
+    fn remove_blob(&self, name: &str) -> Result<(), SecretError> {
+        match std::fs::remove_file(self.path(name)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
+impl SecretStore {
+    /// Stores, replacing anything already there.
+    pub fn store(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
+        self.write_blob(name, &protect(secret)?)
     }
 
     /// Reads one back; absent is `Ok(None)`, unreadable is an error.
     ///
     /// Unreadable happens normally — a different Windows user, a rebuilt
     /// profile — and the caller should discard it and log in again.
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     pub fn load(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
-        let blob = match std::fs::read(self.path(name)) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let Some(blob) = self.read_blob(name)? else {
+            return Ok(None);
         };
         unprotect(&blob).map(Some)
     }
 
     /// Discards one. Absent still succeeds: this runs when a token is
     /// rejected, and failing on "not there" makes that path awkward.
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     pub fn clear(&self, name: &str) -> Result<(), SecretError> {
-        match std::fs::remove_file(self.path(name)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        self.remove_blob(name)
+    }
+}
+
+/// Android keeps the same file, sealed by a key that lives in the Keystore
+/// ([`keystore`]) and cannot be read out of the device.
+#[cfg(target_os = "android")]
+impl SecretStore {
+    /// Stores, replacing anything already there.
+    pub fn store(&self, name: &str, secret: &[u8]) -> Result<(), SecretError> {
+        let sealed = keystore::encrypt(&alias_for(&self.dir), secret)?;
+        self.write_blob(name, &sealed)
+    }
+
+    /// Reads one back; absent is `Ok(None)`, unreadable is an error.
+    ///
+    /// Unreadable is ordinary when the key is gone — a backup restored
+    /// onto another device — and the caller should log in again.
+    pub fn load(&self, name: &str) -> Result<Option<Vec<u8>>, SecretError> {
+        let Some(sealed) = self.read_blob(name)? else {
+            return Ok(None);
+        };
+        keystore::decrypt(&alias_for(&self.dir), &sealed).map(Some)
+    }
+
+    /// Discards one. Absent still succeeds: this runs when a token is
+    /// rejected, and failing on "not there" makes that path awkward.
+    pub fn clear(&self, name: &str) -> Result<(), SecretError> {
+        self.remove_blob(name)
+    }
+}
+
+/// The production Keystore alias. One key seals the whole store: the files
+/// are already told apart by name.
+#[cfg(target_os = "android")]
+const KEY_ALIAS: &str = "dev.gumicord.secrets";
+
+/// The alias for a directory. Only the production directory maps to the
+/// real key; scratch directories get their own, so a test run never seals
+/// anything against the user's key.
+#[cfg(target_os = "android")]
+fn alias_for(dir: &std::path::Path) -> String {
+    match dir.file_name().and_then(|s| s.to_str()) {
+        Some("secrets") => KEY_ALIAS.to_owned(),
+        Some(other) => format!("{KEY_ALIAS}.test.{other}"),
+        None => format!("{KEY_ALIAS}.test"),
     }
 }
 
@@ -284,12 +369,24 @@ fn last_error() -> u32 {
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")))]
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
 fn protect(_secret: &[u8]) -> Result<Vec<u8>, SecretError> {
     Err(SecretError::Unsupported)
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")))]
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
 fn unprotect(_blob: &[u8]) -> Result<Vec<u8>, SecretError> {
     Err(SecretError::Unsupported)
 }
@@ -314,7 +411,13 @@ mod tests {
     }
 
     /// What went in comes back.
-    #[cfg(any(windows, target_os = "linux", target_os = "macos", target_os = "ios"))]
+    #[cfg(any(
+        windows,
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "android"
+    ))]
     #[test]
     fn what_goes_in_comes_back_out() {
         let s = scratch("roundtrip");

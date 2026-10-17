@@ -23,8 +23,19 @@ fn data_dir(app: &winit::platform::android::activity::AndroidApp) -> std::path::
         .unwrap_or_else(|| std::path::PathBuf::from("/data/local/tmp/gumicord"))
 }
 
-/// GameActivity calls this on the main thread. winit takes the activity
-/// from here; the shared loop runs from `return` until the activity dies.
+/// android-activity's onCreate hook: the Java main thread, with the
+/// activity already constructed and its window still being set up. The
+/// system bars are moved from here and nowhere else — `android_main` runs
+/// on another thread, and the view hierarchy rejects work from it.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_on_create(state: &winit::platform::android::activity::OnCreateState) {
+    gumicord_platform::android_bars::prepare(state.vm_as_ptr(), state.activity_as_ptr());
+}
+
+/// GameActivity calls this on its own loop thread, separate from the Java
+/// main thread. winit takes the activity from here; the shared loop runs
+/// from `return` until the activity dies.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {

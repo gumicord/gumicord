@@ -6,5 +6,13 @@
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowFullscreen">false</item>
+        <!-- The window reaches behind both bars, so neither may paint
+             over it. The navigation bar is then hidden at startup; the
+             colour is what covers the moments before and after a swipe
+             brings it back. AppCompat's dark theme keeps the status bar
+             icons light, which is what a dark background needs. -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 </resources>
