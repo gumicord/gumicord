@@ -66,7 +66,7 @@ class LoginEditor(private val activity: Activity) {
         // password autofill, and the app draws the text and the caret.
         field.setTextColor(Color.TRANSPARENT)
         field.setHintTextColor(Color.TRANSPARENT)
-        field.cursorVisible = false
+        field.isCursorVisible = false
         field.background = null
         field.setPadding(0, 0, 0, 0)
         field.imeOptions = action or EditorInfo.IME_FLAG_NO_FULLSCREEN
