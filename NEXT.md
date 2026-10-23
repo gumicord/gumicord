@@ -1,6 +1,6 @@
 # 次にやること
 
-最終更新: 2026-10-17。**終わったものはこの一覧から消すこと。**
+最終更新: 2026-10-23。**終わったものはこの一覧から消すこと。**
 
 これは仕様ではなく引き継ぎのメモである。版計画は
 [`spec/07-roadmap.md`](spec/07-roadmap.md) にある。
@@ -28,8 +28,10 @@
 - 済: Windows blessed 画像の登録 (`render/tests/screenshots/windows/`)。CI 照合が実ゲート化
 - 済: Linux の `desktop-file-validate` と AppImage 展開検査の CI 化
 - 待ち: macOS／Linux 実機確認 (`VERIFY-v0.0.3.md` の 1〜4・6〜7)
-- 待ち: Linux blessed 画像の登録 (CI の `screenshot-ubuntu-*` 実像を目視してから)。
-  macOS は GPU 付きランナが要るため CI 対象外のまま
+- 済: Linux blessed 画像の登録 (`render/tests/screenshots/linux/`)。CI 実像を
+  Windows blessed とピクセル比較し、差は時刻表記とアンチエイリアスのみと
+  確認してから登録 (2026-10-23)。macOS は GPU 付きランナが要るため
+  CI 対象外のまま
 - 残: コンプライアンス画像が実際の app の木を描くようになったので、headless な
   `tools/screenshot` が `gumicord-app` を辿って GTK と WebKitGTK をリンクする。
   CI には apt を足して動かせているが、**取り除くなら** platform 層を

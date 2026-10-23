@@ -93,7 +93,15 @@ v0.0.2 世代は、箇条書きを 2 つ以上含む発言が見えると起動�
 - [x] Linux の実像 (CI 成果物 `screenshot-ubuntu-*`) を目視し、
   差が意図どおりなら祝福画像として登録する
 
-結果:
+結果 (2026-10-23、CI run 39980423122 / `07208b1`):
+Linux 実像 3 点を取得し Windows blessed とピクセル比較した。
+差は 1 チャネル 2 超の画素で login 0 (予算 480)、chat 269
+(予算 1024)、chat-hidpi 818 (予算 4096)。chat の差は時刻表記の
+桁 (Linux は `clock.rs` が非 Windows を 0 にし UTC 表示、Windows は
+実機のオフセットで +9) とその周囲の文字のアンチエイリアスだけ。
+レイアウト・色・文字列のずれは無い。
+`render/tests/screenshots/linux/` に 3 点を登録し、以降の ubuntu
+screenshot ジョブは照合する (それまで `NEW` で素通りだった)。
 
 ## 対象外
 
