@@ -45,7 +45,7 @@
 
 ## Files
 
-### `Cargo.toml` — `gumicord-screenshot` (バイナリ `screenshot`) の定義。`gumicord-render/theme/uitree`・`png` に依存する。
+### `Cargo.toml` — `gumicord-screenshot` (バイナリ `screenshot`) の定義。`gumicord-app`・`gumicord-platform`・`gumicord-render/uitree`・`png` に依存する。場面は app の状態と UITree から組むため app を借りるが、窓も鍵束も開かないので `webview`/`keychain` は `default-features = false` で切り落とす。`wry`/`gtk`/`keyring` が外れるため、GTK・WebKitGTK・D-Bus のヘッダは不要 (captcha は `CaptchaError::Unsupported`、鍵束は保存せず毎回ログイン)。
 
 ### `src/main.rs` — 比較器本体。`login`/`chat`/`chat-hidpi` の 3 場面を ASCII・同梱フォントのみで描き、`--rebless` で祝福更新、不一致は実像と差分を残す。GPU 無しは成功扱いの skip。祝福画像は `render/tests/screenshots/<os>/`。
 

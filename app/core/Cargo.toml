@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["webview", "keychain"]
+# Forwarded to `gumicord-platform`. A consumer that only reads the app's
+# state and builds its tree — a scene renderer, say — can turn both off
+# and drop the webview and OS-key-store backends out of its link.
+webview = ["gumicord-platform/webview"]
+keychain = ["gumicord-platform/keychain"]
+
 [dependencies]
 accesskit.workspace = true
 gumicord-model.workspace = true
@@ -18,7 +26,7 @@ gumicord-markdown.workspace = true
 gumicord-theme.workspace = true
 gumicord-plugin.workspace = true
 gumicord-render.workspace = true
-gumicord-platform.workspace = true
+gumicord-platform = { workspace = true, default-features = false }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

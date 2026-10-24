@@ -13,8 +13,12 @@ name = "screenshot"
 path = "src/main.rs"
 
 [dependencies]
-gumicord-app.workspace = true
-gumicord-platform.workspace = true
+# The scenes come from the app, but nothing here opens a window, a
+# dialog, a webview, or the OS key store — so the two features that pull
+# in `wry`, `gtk` and `keyring` stay off, and the build needs no GTK,
+# WebKitGTK or D-Bus headers.
+gumicord-app = { workspace = true, default-features = false }
+gumicord-platform = { workspace = true, default-features = false }
 gumicord-render.workspace = true
 gumicord-uitree.workspace = true
 png.workspace = true

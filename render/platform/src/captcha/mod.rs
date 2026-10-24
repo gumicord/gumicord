@@ -5,14 +5,22 @@
 //! Linux uses WebKitGTK through `wry`, and Android owns a `WebView`
 //! with a small Kotlin answer object. The challenge page ([`page`]) is
 //! shared; only the way back to Rust differs per OS.
+//!
+//! The `webview` feature selects the real hosts. With it off — a headless
+//! tool rendering scenes, for instance — [`Host`] is the placeholder below
+//! and a challenge reports [`CaptchaError::Unsupported`] rather than guess
+//! at a window it cannot open.
 
 mod page;
 
-#[cfg(target_os = "android")]
+#[cfg(all(feature = "webview", target_os = "android"))]
 mod android;
-#[cfg(windows)]
+#[cfg(all(feature = "webview", windows))]
 mod webview2;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+#[cfg(all(
+    feature = "webview",
+    any(target_os = "macos", target_os = "linux", target_os = "ios")
+))]
 mod wry_host;
 
 /// What a captcha challenge needs to be solved.
@@ -60,36 +68,51 @@ pub trait CaptchaHost {
     ) -> Result<SolvedCaptcha, CaptchaError>;
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(feature = "webview", target_os = "android"))]
 pub use self::android::AndroidCaptcha;
-#[cfg(windows)]
+#[cfg(all(feature = "webview", windows))]
 pub use self::webview2::WebView2Captcha;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+#[cfg(all(
+    feature = "webview",
+    any(target_os = "macos", target_os = "linux", target_os = "ios")
+))]
 pub use self::wry_host::WryCaptcha;
 
-#[cfg(target_os = "android")]
-pub use self::android::AndroidCaptcha as Host;
-#[cfg(not(any(
-    windows,
-    target_os = "macos",
-    target_os = "linux",
-    target_os = "ios",
-    target_os = "android"
-)))]
-pub use self::unsupported::UnsupportedCaptcha as Host;
 /// The concrete captcha host for this platform. The window layer owns one
 /// without knowing which OS it runs on.
-#[cfg(windows)]
+#[cfg(all(feature = "webview", target_os = "android"))]
+pub use self::android::AndroidCaptcha as Host;
+#[cfg(all(feature = "webview", windows))]
 pub use self::webview2::WebView2Captcha as Host;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+#[cfg(all(
+    feature = "webview",
+    any(target_os = "macos", target_os = "linux", target_os = "ios")
+))]
 pub use self::wry_host::WryCaptcha as Host;
 
-#[cfg(not(any(
-    windows,
-    target_os = "macos",
-    target_os = "linux",
-    target_os = "ios",
-    target_os = "android"
+/// Where no host is compiled — an unsupported OS, or a build that left the
+/// `webview` feature off.
+#[cfg(not(all(
+    feature = "webview",
+    any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "ios",
+        target_os = "android"
+    )
+)))]
+pub use self::unsupported::UnsupportedCaptcha as Host;
+
+#[cfg(not(all(
+    feature = "webview",
+    any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "ios",
+        target_os = "android"
+    )
 )))]
 mod unsupported {
     use winit::window::Window;

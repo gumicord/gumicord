@@ -13,6 +13,11 @@
 //! | Android | Keystore (AES-GCM over JNI, [`keystore`]) | done |
 //! | iOS | Keychain (`keyring`) | done |
 //!
+//! The `keychain` feature selects the `keyring`-backed rows. With it off —
+//! a headless tool that never logs in, for instance — Linux, macOS and iOS
+//! behave like any other platform without a secure store: `store` reports
+//! [`SecretError::Unsupported`] and nothing is written.
+//!
 //! DPAPI keeps another user account out: the key derives from the Windows
 //! logon credentials, so pulling the disk out is not enough. It does not keep
 //! out a program running as the same user — the extra entropy is in this
@@ -193,13 +198,19 @@ fn alias_for(dir: &std::path::Path) -> String {
 
 /// Keyring service. Production uses it plainly; anything else is a test
 /// or an isolated instance and is namespaced away from real credentials.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(all(
+    feature = "keychain",
+    any(target_os = "linux", target_os = "macos", target_os = "ios")
+))]
 const SERVICE: &str = "dev.gumicord";
 
 /// The namespace for this store. Only the production directory maps to
 /// the real service; test and scratch directories get their own, so a
 /// test run never touches the user's credentials.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(all(
+    feature = "keychain",
+    any(target_os = "linux", target_os = "macos", target_os = "ios")
+))]
 fn service_for(dir: &std::path::Path) -> String {
     match dir.file_name().and_then(|s| s.to_str()) {
         Some("secrets") => SERVICE.to_owned(),
@@ -208,7 +219,10 @@ fn service_for(dir: &std::path::Path) -> String {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(all(
+    feature = "keychain",
+    any(target_os = "linux", target_os = "macos", target_os = "ios")
+))]
 impl SecretStore {
     fn entry(&self, name: &str) -> Option<keyring::Entry> {
         keyring::Entry::new(&service_for(&self.dir), name).ok()
@@ -244,6 +258,32 @@ impl SecretStore {
         if let Some(entry) = self.entry(name) {
             let _ = entry.delete_credential();
         }
+        Ok(())
+    }
+}
+
+/// Without the `keychain` backend there is nothing encrypted to write to,
+/// so nothing is written. Same line as a platform with no secure store at
+/// all: the caller logs in again each start.
+#[cfg(all(
+    not(feature = "keychain"),
+    any(target_os = "linux", target_os = "macos", target_os = "ios")
+))]
+impl SecretStore {
+    /// Stores, replacing anything already there. Refused: there is nowhere
+    /// encrypted to put it.
+    pub fn store(&self, _name: &str, _secret: &[u8]) -> Result<(), SecretError> {
+        Err(SecretError::Unsupported)
+    }
+
+    /// Reads one back; nothing was ever stored, so nothing is there.
+    pub fn load(&self, _name: &str) -> Result<Option<Vec<u8>>, SecretError> {
+        Ok(None)
+    }
+
+    /// Discards one. Absent still succeeds: this runs when a token is
+    /// rejected, and failing on "not there" makes that path awkward.
+    pub fn clear(&self, _name: &str) -> Result<(), SecretError> {
         Ok(())
     }
 }

@@ -37,11 +37,14 @@ pub mod touch;
 pub mod url;
 pub mod window;
 
-#[cfg(target_os = "android")]
+#[cfg(all(feature = "webview", target_os = "android"))]
 pub use captcha::AndroidCaptcha;
-#[cfg(windows)]
+#[cfg(all(feature = "webview", windows))]
 pub use captcha::WebView2Captcha;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))]
+#[cfg(all(
+    feature = "webview",
+    any(target_os = "macos", target_os = "linux", target_os = "ios")
+))]
 pub use captcha::WryCaptcha;
 pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, Host, SolvedCaptcha};
 pub use clipboard::ClipboardError;

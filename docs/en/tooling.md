@@ -66,7 +66,13 @@ self-contained IIFE.
 ## Files
 
 ### `Cargo.toml` — `gumicord-screenshot` (binary `screenshot`).
-`gumicord-render/theme/uitree` plus `png`.
+`gumicord-app`, `gumicord-platform`, `gumicord-render/uitree` plus `png`.
+The scenes are built from the app's state and UITree, so the app is
+borrowed — but nothing here opens a window or the keychain, so
+`webview`/`keychain` are dropped via `default-features = false`. That
+removes `wry`, `gtk` and `keyring`, so no GTK, WebKitGTK or D-Bus headers
+are needed (captcha reports `CaptchaError::Unsupported`, and no secret is
+stored).
 
 ### `src/main.rs` — The comparer. Three scenes (`login`/`chat`/`chat-hidpi`)
 in ASCII with bundled fonts only; `--rebless` refreshes blessed images;

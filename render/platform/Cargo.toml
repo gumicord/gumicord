@@ -7,6 +7,19 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["webview", "keychain"]
+# The parts that link a real webview to present a captcha: WebView2 on
+# Windows, WKWebView on macOS and iOS, WebKitGTK on Linux — all through
+# `wry`, and Linux also needs `gtk` to pump the WebKitGTK loop. Off, the
+# captcha host is the unsupported placeholder, so a challenge reports
+# `CaptchaError::Unsupported` and the login flow moves on.
+webview = ["dep:wry", "dep:gtk"]
+# The OS secure store: Keychain on macOS and iOS, the Secret Service on
+# Linux, all through `keyring`. Off, nothing is stored and the user logs
+# in again each start — the same line as a platform with no secure store.
+keychain = ["dep:keyring"]
+
 [dependencies]
 gumicord-render.workspace = true
 gumicord-uitree.workspace = true
@@ -25,21 +38,21 @@ ndk-context.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
-wry.workspace = true
+wry = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))'.dependencies]
-wry.workspace = true
+wry = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk.workspace = true
+gtk = { workspace = true, optional = true }
 raw-window-handle.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 arboard.workspace = true
-keyring.workspace = true
+keyring = { workspace = true, optional = true }
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 rfd.workspace = true
@@ -53,7 +66,7 @@ block2.workspace = true
 png.workspace = true
 raw-window-handle.workspace = true
 # iOS Keychain through the same keyring backend as macOS.
-keyring.workspace = true
+keyring = { workspace = true, optional = true }
 
 # GameActivity backend for the Android shell. Desktop builds never see it.
 [target.'cfg(target_os = "android")'.dependencies]
