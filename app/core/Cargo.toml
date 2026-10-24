@@ -26,7 +26,11 @@ gumicord-markdown.workspace = true
 gumicord-theme.workspace = true
 gumicord-plugin.workspace = true
 gumicord-render.workspace = true
-gumicord-platform = { workspace = true, default-features = false }
+# Not `workspace = true`: inheriting also carries the workspace's own
+# default-features, and a member may not override them — MSRV 1.97
+# rejects the manifest outright. The two features above are the only
+# switch on these backends, so the override has to stay.
+gumicord-platform = { path = "../../render/platform", default-features = false }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
