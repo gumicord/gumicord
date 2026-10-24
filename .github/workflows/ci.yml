@@ -330,6 +330,34 @@ jobs:
           path: Gumicord-*.AppImage
           retention-days: 14
 
+      # Build .deb package for Debian/Ubuntu
+      - name: Build .deb
+        if: matrix.kind == 'desktop' && matrix.os == 'ubuntu-latest'
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          DEB_ROOT="deb-build"
+          rm -rf "$DEB_ROOT"
+          mkdir -p "$DEB_ROOT/DEBIAN" "$DEB_ROOT/usr/bin" "$DEB_ROOT/usr/share/applications" "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps"
+          # Binary
+          cp "target/$PROFILE/gumicord" "$DEB_ROOT/usr/bin/"
+          # Desktop entry
+          cp packaging/debian/usr/share/applications/gumicord.desktop "$DEB_ROOT/usr/share/applications/"
+          # Icon
+          cp packaging/icons/gumicord.png "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps/gumicord.png"
+          # Control file with version
+          sed "s/{{VERSION}}/$VERSION/" packaging/debian/DEBIAN/control > "$DEB_ROOT/DEBIAN/control"
+          # Build
+          dpkg-deb --build "$DEB_ROOT" "gumicord-${VERSION}-amd64.deb"
+          ls -l "gumicord-${VERSION}-amd64.deb"
+
+      - name: Upload .deb
+        if: matrix.kind == 'desktop' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gumicord-deb-${{ github.sha }}
+          path: gumicord-*.deb
+          retention-days: 14
+
       # The entry rides inside the AppImage; a typo here ships a
       # launcher that never appears. Extracting also proves the
       # AppImage is not truncated.
@@ -468,6 +496,7 @@ jobs:
           mv "dist/gumicord-android-$SHA/app-nightly-debug.apk" "dist/gumicord-$TAG.apk"
           mv "dist/gumicord-ios-$SHA/Gumicord-unsigned.ipa" "dist/gumicord-$TAG.ipa"
           mv "dist/gumicord-appimage-$SHA/"*.AppImage "dist/gumicord-$TAG-linux.AppImage"
+          mv "dist/gumicord-deb-$SHA/"*.deb "dist/gumicord-$TAG-linux.deb"
           mv "dist/gumicord-dmg-$SHA/"*.dmg "dist/gumicord-$TAG-macos.dmg"
           for entry in windows-latest ubuntu-latest macos-latest; do
             case "$entry" in
@@ -516,6 +545,7 @@ jobs:
             dist/*.ipa
             dist/*.zip
             dist/*.AppImage
+            dist/*.deb
             dist/*.dmg
             dist/apps-nightly.json
           fail_on_unmatched_files: true
@@ -524,7 +554,7 @@ jobs:
 
             ${{ github.event.head_commit.message }}
 
-            - Desktop builds (Windows / Linux / macOS), Linux AppImage, unsigned macOS dmg,
+            - Desktop builds (Windows / Linux / macOS), Linux AppImage, Linux .deb, unsigned macOS dmg,
               debug APK (arm64 + x86_64) and unsigned IPA for sideloading.
             - Debug builds: slower, larger, logging enabled. No signing identity exists yet.
             - AltStore source: https://gumicord.github.io/gumicord-sources/apps-nightly.json
@@ -543,7 +573,7 @@ jobs:
           names=$(gh release view "$TAG" --repo gumicord/gumicord-nightly --json assets --jq '.assets[].name')
           echo "$names"
           missing=0
-          for suffix in .apk .ipa -windows.zip -linux.zip -macos.zip -linux.AppImage -macos.dmg; do
+          for suffix in .apk .ipa -windows.zip -linux.zip -macos.zip -linux.AppImage -linux.deb -macos.dmg; do
             if ! echo "$names" | grep -qF -- "$suffix"; then
               echo "missing asset ending in $suffix"
               missing=1

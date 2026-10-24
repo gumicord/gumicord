@@ -228,6 +228,28 @@ jobs:
           ./Gumicord-*.AppImage --appimage-extract >/dev/null
           test -x squashfs-root/AppRun
 
+      # Build .deb package for Debian/Ubuntu
+      - name: Build .deb
+        if: matrix.os == 'ubuntu-latest' && matrix.label == 'linux'
+        run: |
+          VERSION="${{ inputs.tag }}"
+          # strip leading 'v'
+          VERSION="${VERSION#v}"
+          DEB_ROOT="deb-build"
+          rm -rf "$DEB_ROOT"
+          mkdir -p "$DEB_ROOT/DEBIAN" "$DEB_ROOT/usr/bin" "$DEB_ROOT/usr/share/applications" "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps"
+          # Binary
+          cp "target/dist/gumicord" "$DEB_ROOT/usr/bin/"
+          # Desktop entry
+          cp packaging/debian/usr/share/applications/gumicord.desktop "$DEB_ROOT/usr/share/applications/"
+          # Icon
+          cp packaging/icons/gumicord.png "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps/gumicord.png"
+          # Control file with version
+          sed "s/{{VERSION}}/$VERSION/" packaging/debian/DEBIAN/control > "$DEB_ROOT/DEBIAN/control"
+          # Build
+          dpkg-deb --build "$DEB_ROOT" "gumicord-${VERSION}-amd64.deb"
+          ls -l "gumicord-${VERSION}-amd64.deb"
+
       - name: Build app bundle
         if: matrix.os == 'macos-latest' && matrix.label == 'macos'
         run: |
@@ -316,6 +338,7 @@ jobs:
           path: |
             dist/
             Gumicord-*.AppImage
+            gumicord-*.deb
             Gumicord.dmg
           retention-days: 14
 
@@ -363,6 +386,7 @@ jobs:
           TAG="${{ inputs.tag }}"
           mv dist/release-$TAG-linux/Gumicord-*.AppImage dist/gumicord-$TAG-linux.AppImage
           chmod +x "dist/gumicord-$TAG-linux.AppImage"
+          mv dist/release-$TAG-linux/gumicord-*.deb dist/gumicord-$TAG-linux.deb
           mv dist/release-$TAG-macos/Gumicord.dmg dist/gumicord-$TAG-macos.dmg
           mv dist/release-$TAG-ios/Gumicord-unsigned.ipa dist/gumicord-$TAG.ipa
           mv dist/release-$TAG-android/app-stable-release-unsigned.apk dist/gumicord-$TAG.apk
@@ -405,20 +429,21 @@ jobs:
           files: |
             dist/*.zip
             dist/*.AppImage
+            dist/*.deb
             dist/*.dmg
             dist/*.apk
             dist/*.ipa
             dist/apps-stable.json
           fail_on_unmatched_files: true
           body: |
-            Gumicord ${{ inputs.tag }}: Windows / Linux / macOS, unsigned release APK and IPA for sideloading.
+            Gumicord ${{ inputs.tag }}: Windows / Linux / macOS, Linux .deb, unsigned release APK and IPA for sideloading.
             Built from https://github.com/${{ github.repository }}/commit/${{ needs.guard.outputs.sha }}.
             Unsigned unless the signing secrets are configured: see
             packaging/README.md for what turns signatures on.
             AltStore source: https://gumicord.github.io/gumicord-sources/apps-stable.json
 
             WARNING: connecting to Discord with a third-party client breaks
-            their terms of service and can cost you your account.
+              their terms of service and can cost you your account.
 
       # The AltStore source lives in its own repository, served over
       # Pages; this job pushes the file the step above just wrote.
