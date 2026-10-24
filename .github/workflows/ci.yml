@@ -344,8 +344,24 @@ jobs:
           cp packaging/debian/usr/share/applications/gumicord.desktop "$DEB_ROOT/usr/share/applications/"
           # Icon
           cp packaging/icons/gumicord.png "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps/gumicord.png"
-          # Control file with version
-          sed "s/{{VERSION}}/$VERSION/" packaging/debian/DEBIAN/control > "$DEB_ROOT/DEBIAN/control"
+          # Control file (generated inline to avoid git encoding issues)
+          cat > "$DEB_ROOT/DEBIAN/control" <<EOF
+Package: gumicord
+Version: $VERSION
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: gumicord <https://github.com/gumicord/gumicord>
+Depends: libdbus-1-3, libgtk-3-0, libwebkit2gtk-4.1-0, libayatana-appindicator3-1
+Description: Third-party Discord client
+ Gumicord is a third-party Discord client written in Rust with a custom
+ renderer (wgpu). It supports QR code login, multiple accounts, themes,
+ and plugins.
+ .
+ WARNING: Connecting to Discord with a third-party client breaks their
+ Terms of Service and can cost you your account.
+Homepage: https://github.com/gumicord/gumicord
+EOF
           # Build
           dpkg-deb --build "$DEB_ROOT" "gumicord-${VERSION}-amd64.deb"
           ls -l "gumicord-${VERSION}-amd64.deb"
