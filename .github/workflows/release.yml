@@ -245,7 +245,7 @@ jobs:
           # Icon
           cp packaging/icons/gumicord.png "$DEB_ROOT/usr/share/icons/hicolor/512x512/apps/gumicord.png"
           # Control file (generated inline to avoid git encoding issues)
-          cat > "$DEB_ROOT/DEBIAN/control" <<'EOF'
+          cat > "$DEB_ROOT/DEBIAN/control" <<EOF
           Package: gumicord
           Version: $VERSION
           Section: net
