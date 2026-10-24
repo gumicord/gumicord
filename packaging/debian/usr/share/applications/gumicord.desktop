@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Gumicord
+Comment=Third-party Discord client
+Exec=gumicord
+Icon=gumicord
+Type=Application
+Categories=Network;Chat;
+Terminal=false
+StartupWMClass=gumicord
