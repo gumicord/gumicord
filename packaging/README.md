@@ -16,6 +16,10 @@ with the stock OS tooling.
 Every build validates `gumicord.desktop` with `desktop-file-validate` and
 extracts the AppImage once to prove it is not truncated.
 
+The AppImage must remain executable (`chmod +x`) for desktop environments
+to launch it; the CI preserves the bit, but downloads that strip it need
+restoring by hand.
+
 ## macOS signing and notarization (opt-in)
 
 Without secrets everything builds unsigned, like the mobile builds. The

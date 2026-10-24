@@ -27,6 +27,7 @@
 - 済: 署名・公証の secrets 対応 (未設定なら未署名のまま)。`packaging/README.md` に手順
 - 済: Windows blessed 画像の登録 (`render/tests/screenshots/windows/`)。CI 照合が実ゲート化
 - 済: Linux の `desktop-file-validate` と AppImage 展開検査の CI 化
+- 済 (2026-10-24): `FR-007` (`ADR-0018`) — セキュアストレージ拒否時のトースト通知。仕様・コード・テスト完了、コミット済み (`ecc70f5`)
 - 待ち: macOS／Linux 実機確認 (`VERIFY-v0.0.3.md` の 1〜4・6〜7)
 - 済: Linux blessed 画像の登録 (`render/tests/screenshots/linux/`)。CI 実像を
   Windows blessed とピクセル比較し、差は時刻表記とアンチエイリアスのみと

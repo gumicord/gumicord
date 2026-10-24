@@ -362,6 +362,7 @@ jobs:
         run: |
           TAG="${{ inputs.tag }}"
           mv dist/release-$TAG-linux/Gumicord-*.AppImage dist/gumicord-$TAG-linux.AppImage
+          chmod +x "dist/gumicord-$TAG-linux.AppImage"
           mv dist/release-$TAG-macos/Gumicord.dmg dist/gumicord-$TAG-macos.dmg
           mv dist/release-$TAG-ios/Gumicord-unsigned.ipa dist/gumicord-$TAG.ipa
           mv dist/release-$TAG-android/app-stable-release-unsigned.apk dist/gumicord-$TAG.apk

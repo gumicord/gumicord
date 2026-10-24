@@ -319,6 +319,7 @@ jobs:
           ./linuxdeploy --appdir AppDir -e "target/$PROFILE/gumicord" \
             -d packaging/linux/gumicord.desktop -i packaging/icons/gumicord.png \
             --output appimage
+          chmod +x Gumicord-*.AppImage
           ls -l Gumicord-*.AppImage
 
       - name: Upload AppImage

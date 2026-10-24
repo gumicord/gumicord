@@ -5,5 +5,6 @@ Exec=gumicord
 Icon=gumicord
 Type=Application
 Categories=Network;Chat;
+MimeType=application/x-appimage;
 Terminal=false
 StartupWMClass=gumicord
