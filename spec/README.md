@@ -41,6 +41,7 @@
 | [0015](adr/0015-mobile-captcha-hosts.md) | 残りの captcha ホスト (macOS / Linux / iOS / Android) と Android の Kotlin 受け口 | 承認 |
 | [0016](adr/0016-kotlin-receiving-points.md) | 自前の Kotlin 受け口は増やせる (「Java 自前なし」制約の廃止) | 承認 |
 | [0017](adr/0017-android-login-autofill.md) | Android のログイン自動入力は双子 `EditText` で出す | 承認 |
+| [0018](adr/0018-storage-failure-toast.md) | セキュアストレージが使えないことをトーストで伝える (`FR-007`) | 承認 |
 ## ルール
 
 ### 1. 仕様が先

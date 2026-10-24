@@ -13,7 +13,9 @@
 //! On start a stored token is tried first, and discarded the moment it fails
 //! — keeping it means repeating the same failure on every later start before
 //! falling back to the QR anyway. Where the OS cannot encrypt it, nothing is
-//! stored: asking each time beats a plaintext token on disk.
+//! stored: asking each time beats a plaintext token on disk. Which of those
+//! happened is said out loud (`FR-007`): a store that will not keep the token
+//! has to say so, or the user is left to wonder why nothing was remembered.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
@@ -27,7 +29,18 @@ use crate::account::{AccountKey, AccountsIndex, LEGACY_BOT_TOKEN_KEY, LEGACY_USE
 const TOKEN_KEY: &str = LEGACY_USER_TOKEN_KEY;
 const BOT_TOKEN_KEY: &str = LEGACY_BOT_TOKEN_KEY;
 
-fn remember_account(store: Option<&SecretStore>, me: &CurrentUser, token: &Token) {
+/// Remembers the account, and tells the app when the store refuses it.
+///
+/// The sign-in has already succeeded by the time this runs, so a refusal is
+/// reported beside [`LoginEvent::Done`] rather than in place of it (`FR-007`).
+/// The store being absent altogether is not repeated here: `start` already
+/// said so, and one cause needs saying once.
+fn remember_account(
+    store: Option<&SecretStore>,
+    me: &CurrentUser,
+    token: &Token,
+    tx: &Sender<LoginEvent>,
+) {
     let Some(store) = store else {
         return;
     };
@@ -35,6 +48,7 @@ fn remember_account(store: Option<&SecretStore>, me: &CurrentUser, token: &Token
     let key = AccountKey::new(me.user.id, token.is_bot());
     if let Err(e) = index.remember(store, key, me.user.display_name().to_owned(), token) {
         tracing::warn!(%e, "could not store the account credentials; next start will ask again");
+        let _ = tx.send(LoginEvent::StorageFailed);
     }
 }
 
@@ -121,6 +135,10 @@ pub enum LoginEvent {
     /// Approved; fetching the token.
     Approved,
     Done(Box<LoggedIn>),
+    /// The secure store refused the token, so this sign-in will not be
+    /// remembered. Sent beside [`LoginEvent::Done`], never instead of it: the
+    /// login itself worked. The app turns this into a notice (`FR-007`).
+    StorageFailed,
     Failed(String),
     /// Per-field failures from the same attempt, as (dotted path, detail).
     /// Shown under each named input; the `Failed` message still carries the
@@ -189,6 +207,11 @@ pub struct Login {
     /// session state: the screen changes on the app side, which drops the
     /// cache.
     ended: bool,
+    /// The secure store refused the token, or had no room to write it to.
+    /// A state, unlike the events above: `Done` deliberately leaves it
+    /// standing, since a working sign-in speaks for the login and not for
+    /// the store. Drained by [`Login::take_storage_failed`] (`FR-007`).
+    storage_failed: bool,
     /// A captcha awaiting a solution, if the API challenged a login. The app
     /// hands it to the platform, which shows the modal, then reads it back as
     /// the solved token.
@@ -237,6 +260,7 @@ impl Login {
             last_error: None,
             field_errors: Vec::new(),
             ended: false,
+            storage_failed: false,
             pending: None,
             totp_email: None,
             busy: false,
@@ -264,6 +288,12 @@ impl Login {
     /// Whether the session ended on its own since the last call.
     pub fn take_ended(&mut self) -> bool {
         std::mem::take(&mut self.ended)
+    }
+
+    /// Whether the secure store has refused or lacked room for the token
+    /// since the last call. The app shows it as a notice (`FR-007`).
+    pub fn take_storage_failed(&mut self) -> bool {
+        std::mem::take(&mut self.storage_failed)
     }
 
     /// Whether the first answer has arrived yet. While true the splash
@@ -297,6 +327,9 @@ impl Login {
             Ok(s) => Some(s),
             Err(e) => {
                 tracing::warn!(%e, "no keychain; the token will not be stored");
+                // Said before the user signs in, not after they find the
+                // session gone on the next start (`FR-007`).
+                self.storage_failed = true;
                 None
             }
         };
@@ -419,6 +452,14 @@ impl Login {
                 self.field_errors.clear();
                 self.busy = false;
                 Session::LoggedIn(l)
+            }
+            // Only the store declined; the sign-in on the way to the screen
+            // still stands, and the session it carries arrives with `Done`.
+            // Setting the flag here is the whole of it — the event says what
+            // happened, and `Done` must not clear it behind our back.
+            LoginEvent::StorageFailed => {
+                self.storage_failed = true;
+                self.session.clone()
             }
             LoginEvent::Failed(e) => {
                 tracing::debug!(error = %e, "login failed");
@@ -781,7 +822,7 @@ async fn run_password(
             match rest.authenticate(tok.clone()).await {
                 Ok((client, me)) => {
                     tracing::info!(user = %me.user.display_name(), "signed in with password");
-                    remember_account(store, &me, &tok);
+                    remember_account(store, &me, &tok, tx);
                     let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn {
                         me,
                         client,
@@ -827,7 +868,7 @@ async fn run_bot_token(
     match rest.authenticate(token.clone()).await {
         Ok((client, me)) => {
             tracing::info!(user = %me.user.display_name(), "signed in with a bot token");
-            remember_account(store, &me, &token);
+            remember_account(store, &me, &token, tx);
             let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
             waker.wake();
             true
@@ -1054,7 +1095,7 @@ async fn attempt(
                     .await
                     .map_err(|e| e.to_string())?;
                 tracing::info!(user = %me.user.display_name(), "signed in");
-                remember_account(store.as_ref(), &me, &token);
+                remember_account(store.as_ref(), &me, &token, &tx);
 
                 let _ = tx.send(LoginEvent::Done(Box::new(LoggedIn { me, client, token })));
                 waker.wake();
@@ -1214,6 +1255,48 @@ mod tests {
             vec![("login".to_owned(), "bad".to_owned())]
         );
         assert!(login.take_field_errors().is_empty());
+    }
+
+    /// `FR-007`: a store that refuses the token has to be heard, and heard
+    /// once. It changes nothing about the session — the sign-in that follows
+    /// still stands.
+    #[test]
+    fn a_refused_store_is_heard_once_and_changes_nothing() {
+        let mut login = Login::fresh(false);
+        login.apply(LoginEvent::StorageFailed);
+
+        assert!(
+            login.take_storage_failed(),
+            "the refusal never reached anyone"
+        );
+        assert!(
+            !login.take_storage_failed(),
+            "the same refusal was announced twice"
+        );
+        assert!(
+            matches!(login.session(), Session::Connecting),
+            "a refused store changed the session"
+        );
+    }
+
+    /// `FR-007`: `Done` clears what the last session left behind, but not this
+    /// one. It speaks for the login, not for the store — clearing it here
+    /// would leave the user signing in again each start with no explanation.
+    #[test]
+    fn a_refused_store_outlives_the_sign_in_that_follows() {
+        let mut login = Login::fresh(false);
+        login.apply(LoginEvent::StorageFailed);
+        login.apply(LoginEvent::Done(Box::new(LoggedIn {
+            me: serde_json::from_str(r#"{"id":"1","username":"ねんねこ"}"#).unwrap(),
+            client: RestClient::anonymous().unwrap(),
+            token: Token::new("t"),
+        })));
+
+        assert!(matches!(login.session(), Session::LoggedIn(_)));
+        assert!(
+            login.take_storage_failed(),
+            "`Done` swallowed the refusal; the sign-in looked clean"
+        );
     }
 
     #[test]

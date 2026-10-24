@@ -162,6 +162,10 @@ const SETTINGS_GEAR: &str = "gear";
 /// to the QR reads as a crash.
 const DEAD_SESSION_NOTICE: &str = "セッションが無効になったため、ログアウトしました";
 
+/// Says that the token could not be kept, so the next start asks again
+/// (`FR-007`). One string, never assembled from parts (`ADR-0010`).
+const STORAGE_FAILED_NOTICE: &str = "ログイン情報を保存できないため、次回もログインが要ります";
+
 const INTERACTIVE: &[NodeId] = &[
     NodeId::NavGuildListHome,
     NodeId::NavGuildListItem,
@@ -1299,6 +1303,13 @@ impl Application for Gumicord {
             self.login_view.field_errors = fields;
             changed = true;
         }
+        // The store will not keep the token. Reached at startup, where the
+        // form is about to come up, and again right after a sign-in that
+        // worked: either way the next start asks again (`FR-007`).
+        if self.login.take_storage_failed() {
+            self.notify_toast(STORAGE_FAILED_NOTICE.to_owned());
+            changed = true;
+        }
         changed |= self.live.poll();
         // An arrived image counts as a change, or it never gets drawn.
         changed |= self.images.poll();
@@ -2361,8 +2372,9 @@ impl Gumicord {
         )
     }
 
-    /// Shows a transient notice. User-initiated outcomes only: anything else
-    /// would chatter while the user reads.
+    /// Shows a transient notice. Outcomes of what the user just did, plus
+    /// the store refusing the token at most once per launch or sign-in
+    /// (`FR-007`): anything else would chatter while the user reads.
     fn notify_toast(&mut self, text: String) {
         self.toasts.push_back(crate::menu::Toast {
             text,
