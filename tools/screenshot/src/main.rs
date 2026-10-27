@@ -160,6 +160,11 @@ fn main() -> std::process::ExitCode {
 
         let blessed = format!("{blessed_dir}/{}.png", shot.name);
         let actual_png = encode_png(shot.width, shot.height, &pixels);
+
+        // Always write the actual output for artifact upload.
+        std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png)
+            .expect("actual writes");
+
         if rebless {
             std::fs::create_dir_all(&blessed_dir).expect("blessed dir");
             std::fs::write(&blessed, &actual_png).expect("blessed writes");
@@ -167,10 +172,7 @@ fn main() -> std::process::ExitCode {
             continue;
         }
         let Ok(blessed_png) = std::fs::read(&blessed) else {
-            // First run on a new scene: record the actual for review.
-            std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png)
-                .expect("actual writes");
-            eprintln!("NEW {}: no blessed image yet, actual kept", shot.name);
+            eprintln!("NEW {}: no blessed image yet", shot.name);
             continue;
         };
         let Some((bw, bh, blessed_pixels)) = decode_png(&blessed_png) else {
@@ -188,8 +190,7 @@ fn main() -> std::process::ExitCode {
         if ok {
             eprintln!("PASS {} ({} px over)", shot.name, over);
         } else {
-            std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png)
-                .expect("actual writes");
+            // Actual already written above; write only the diff.
             std::fs::write(
                 format!("{out_dir}/{}-diff.png", shot.name),
                 encode_png(shot.width, shot.height, &mark),

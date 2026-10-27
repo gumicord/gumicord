@@ -451,7 +451,12 @@ jobs:
 
       - name: Install mesa for software rendering
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libglx-mesa0 libglvnd-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+          # Point to lavapipe (Mesa's software Vulkan driver)
+          export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -460,10 +465,9 @@ jobs:
       - name: Render and compare
         shell: bash
         env:
-          # Software rasterizer where no GPU exists.
-          LIBGL_ALWAYS_SOFTWARE: 1
+          # Linux: force Vulkan with lavapipe (software Vulkan)
           # Windows: force DX12 (WARP) for headless rendering
-          WGPU_BACKEND: ${{ matrix.os == 'windows-latest' && 'dx12' || '' }}
+          WGPU_BACKEND: ${{ matrix.os == 'windows-latest' && 'dx12' || matrix.os == 'ubuntu-latest' && 'vulkan' || '' }}
         run: cargo run -p gumicord-screenshot
 
       - name: Upload shots
