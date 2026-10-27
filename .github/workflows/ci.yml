@@ -443,7 +443,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -483,6 +483,7 @@ jobs:
         env:
           # Linux: force Vulkan with lavapipe (software Vulkan)
           # Windows: force DX12 (WARP) for headless rendering
+          # macOS: uses Metal (default on macOS runners with GPU)
           WGPU_BACKEND: ${{ matrix.os == 'windows-latest' && 'dx12' || matrix.os == 'ubuntu-latest' && 'vulkan' || '' }}
           LIBGL_ALWAYS_SOFTWARE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
         run: |
@@ -499,8 +500,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: screenshot-${{ matrix.os }}-${{ github.sha }}
-          # std::env::consts::OS returns "linux" on Ubuntu, "windows" on Windows
-          path: target/screenshots/${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || matrix.os }}/
+          # std::env::consts::OS returns "linux" on Ubuntu, "windows" on Windows, "macos" on macOS
+          path: target/screenshots/${{ matrix.os == 'ubuntu-latest' && 'linux' || matrix.os == 'windows-latest' && 'windows' || matrix.os == 'macos-latest' && 'macos' || matrix.os }}/
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
