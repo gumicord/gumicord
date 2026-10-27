@@ -8,13 +8,15 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["webview", "keychain"]
+default = ["keychain"]
 # The parts that link a real webview to present a captcha: WebView2 on
-# Windows, WKWebView on macOS and iOS, WebKitGTK on Linux — all through
-# `wry`, and Linux also needs `gtk` to pump the WebKitGTK loop. Off, the
+# Windows, WKWebView on macOS and iOS — all through `wry`. Off, the
 # captcha host is the unsupported placeholder, so a challenge reports
 # `CaptchaError::Unsupported` and the login flow moves on.
-webview = ["dep:wry", "dep:gtk"]
+webview = ["dep:wry"]
+# Enable WebKitGTK captcha on Linux. This requires the libwebkit2gtk system
+# library. Disabled by default so the app can run on Linux without it.
+webview-linux = ["dep:wry", "dep:gtk"]
 # The OS secure store: Keychain on macOS and iOS, the Secret Service on
 # Linux, all through `keyring`. Off, nothing is stored and the user logs
 # in again each start — the same line as a platform with no secure store.
@@ -40,7 +42,7 @@ ndk-context.workspace = true
 windows-sys.workspace = true
 wry = { workspace = true, optional = true }
 
-[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 wry = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -49,6 +51,7 @@ objc2-foundation.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { workspace = true, optional = true }
 raw-window-handle.workspace = true
+wry = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 arboard.workspace = true

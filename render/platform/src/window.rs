@@ -428,6 +428,10 @@ pub trait Application {
     /// The captcha was cancelled; drop the pending login and go back.
     fn captcha_cancelled(&mut self) {}
 
+    /// Captcha is required but no provider is available on this platform.
+    /// The app should notify the user (e.g., show a toast).
+    fn on_captcha_unsupported(&mut self) {}
+
     /// Called once before the window opens; background work starts here. The
     /// [`Waker`] is the only way another thread can wake the loop.
     fn start(&mut self, _waker: Waker) {}
@@ -2085,7 +2089,7 @@ impl Host {
             // it rather than leave a stuck form, and let the app go back.
             Err(e) => {
                 if !matches!(e, CaptchaError::Cancelled) {
-                    tracing::error!(%e, "captcha could not be solved");
+                    self.app.on_captcha_unsupported();
                 }
                 self.app.captcha_cancelled();
             }

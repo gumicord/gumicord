@@ -2061,6 +2061,13 @@ impl Application for Gumicord {
             .take();
     }
 
+    /// Captcha is required but no provider is available on this platform,
+    /// or the webview failed to open (e.g. WebView2 not installed on Windows).
+    /// Show a toast notification to inform the user.
+    fn on_captcha_unsupported(&mut self) {
+        self.notify_toast("CAPTCHAを表示できません（WebViewが利用できません）".to_owned());
+    }
+
     /// Pipeline stages [3] through [5]. The plugin pass runs between them.
     fn build(&mut self, cx: &FrameCx) -> UiNode {
         // Image sizes depend on it, so capture before building.

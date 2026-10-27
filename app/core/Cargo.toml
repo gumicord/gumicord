@@ -8,11 +8,12 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["webview", "keychain"]
+default = ["keychain"]
 # Forwarded to `gumicord-platform`. A consumer that only reads the app's
 # state and builds its tree — a scene renderer, say — can turn both off
 # and drop the webview and OS-key-store backends out of its link.
 webview = ["gumicord-platform/webview"]
+webview-linux = ["gumicord-platform/webview-linux"]
 keychain = ["gumicord-platform/keychain"]
 
 [dependencies]

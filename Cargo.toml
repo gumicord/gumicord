@@ -50,6 +50,9 @@ wgpu = "30"
 winit = "0.30"# In-window webview for hCaptcha (ADR-0007); only used to show a third-party
 # challenge, never to render our own UI.
 wry = "0.56"
+wry-windows = { version = "0.56", package = "wry" }
+wry-apple = { version = "0.56", package = "wry" }
+wry-linux = { version = "0.56", package = "wry" }
 cosmic-text = "0.19"
 # Needed to do font fallback ourselves, around Han unification.
 unicode-script = "0.5"

@@ -19,7 +19,12 @@ mod android;
 mod webview2;
 #[cfg(all(
     feature = "webview",
-    any(target_os = "macos", target_os = "linux", target_os = "ios")
+    any(target_os = "macos", target_os = "ios")
+))]
+mod wry_host;
+#[cfg(all(
+    feature = "webview-linux",
+    target_os = "linux"
 ))]
 mod wry_host;
 
@@ -74,7 +79,12 @@ pub use self::android::AndroidCaptcha;
 pub use self::webview2::WebView2Captcha;
 #[cfg(all(
     feature = "webview",
-    any(target_os = "macos", target_os = "linux", target_os = "ios")
+    any(target_os = "macos", target_os = "ios")
+))]
+pub use self::wry_host::WryCaptcha;
+#[cfg(all(
+    feature = "webview-linux",
+    target_os = "linux"
 ))]
 pub use self::wry_host::WryCaptcha;
 
@@ -86,33 +96,26 @@ pub use self::android::AndroidCaptcha as Host;
 pub use self::webview2::WebView2Captcha as Host;
 #[cfg(all(
     feature = "webview",
-    any(target_os = "macos", target_os = "linux", target_os = "ios")
+    any(target_os = "macos", target_os = "ios")
+))]
+pub use self::wry_host::WryCaptcha as Host;
+#[cfg(all(
+    feature = "webview-linux",
+    target_os = "linux"
 ))]
 pub use self::wry_host::WryCaptcha as Host;
 
 /// Where no host is compiled — an unsupported OS, or a build that left the
-/// `webview` feature off.
-#[cfg(not(all(
-    feature = "webview",
-    any(
-        windows,
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "ios",
-        target_os = "android"
-    )
+/// `webview` / `webview-linux` feature off.
+#[cfg(not(any(
+    all(feature = "webview", any(windows, target_os = "macos", target_os = "ios", target_os = "android")),
+    all(feature = "webview-linux", target_os = "linux"),
 )))]
 pub use self::unsupported::UnsupportedCaptcha as Host;
 
-#[cfg(not(all(
-    feature = "webview",
-    any(
-        windows,
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "ios",
-        target_os = "android"
-    )
+#[cfg(not(any(
+    all(feature = "webview", any(windows, target_os = "macos", target_os = "ios", target_os = "android")),
+    all(feature = "webview-linux", target_os = "linux"),
 )))]
 mod unsupported {
     use winit::window::Window;

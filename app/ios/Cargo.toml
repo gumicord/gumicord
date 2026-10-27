@@ -13,5 +13,5 @@ crate-type = ["staticlib"]
 
 [dependencies]
 gumicord-app.workspace = true
-gumicord-platform.workspace = true
+gumicord-platform = { workspace = true, features = ["webview", "keychain"] }
 tracing.workspace = true

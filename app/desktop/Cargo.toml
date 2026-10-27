@@ -13,10 +13,18 @@ path = "src/main.rs"
 
 [dependencies]
 gumicord-app.workspace = true
-gumicord-platform.workspace = true
 gumicord-render.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# Windows and macOS: enable webview for captcha support (WebView2, WKWebView)
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+gumicord-platform = { workspace = true, features = ["webview", "keychain"] }
+
+# Linux: disable webview-linux by default so the app runs without libwebkit2gtk.
+# Users can enable it with `--features gumicord-platform/webview-linux` if they have the system dependencies.
+[target.'cfg(target_os = "linux")'.dependencies]
+gumicord-platform = { workspace = true, default-features = false, features = ["keychain"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true
