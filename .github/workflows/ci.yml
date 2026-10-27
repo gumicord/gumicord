@@ -109,6 +109,21 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+      # Compile mobile targets to catch build regressions early.
+      # Only check --lib for Android/iOS since full APK/.app builds are in dist job.
+      - name: Check Android target
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo check -p gumicord-android --target aarch64-linux-android
+          cargo check -p gumicord-android --target x86_64-linux-android
+
+      - name: Check iOS target
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo check -p gumicord-ios --target aarch64-apple-ios
+
   # ────────────────────────────────────────────────────────────
   # Builds something runnable every time, on every platform.
   #
