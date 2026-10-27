@@ -449,6 +449,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install mesa for software rendering
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers mesa-libgl libglvnd-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: screenshot
