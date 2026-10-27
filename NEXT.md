@@ -87,14 +87,7 @@
   certificate: Revoked`) が出ないことを確認すること。Gradle の AAR 取得先が
   crate 内同梱から GitHub の `maven-archive` に移ったため、Gradle 解決を
   通すのは CI の nightly だけ
-- Android のセッション途中切断 (2026-10-02 新規): QR を表示してスキャン待ちの
-  idle の間に、remote-auth が `ECONNABORTED (os error 103)` で落ちる。
-  ログでは毎回 `onStop`/`saveState` が先に来ており、Activity の停止 →
-  再開 → GPU 再作成の往復が 2 回起きている。Android がバックグラウンドで
-  凍結したせいか自前起因なのかは **まだ決まっていない**。这次的ビルドは
-  `activity suspended` / `activity resumed` の情報ログと全行のタイムスタンプ
-  で切り分けられる。切断は `RemoteAuthError::Dropped` として報告される
-  (`Connect` ではない)。TLS は成功していた (`the QR is ready` は出ている)
+- Android のセッション途中切断 (2026-10-02 新規): **実機で再現せず・要因不明のまま解消**。QR 表示中の idle 中に `ECONNABORTED (os error 103)` で落ちる報告があったが、後のビルド (adjustResize + configChanges 適用後) で実機確認時に再現せず。`RemoteAuthError::Dropped` 扱いは session.rs で未分離のままだが、現状再現しないため保留。
 - 触って切り替える操作とセーフエリア、Android のクリップボード
 - 一員行の行き先 (プロフィール表示) は将来のまま。複数指は対象外
 - iPad Stage Manager の窓化時の上部余白: `safe area changed` ログで inset 実測値を取ること

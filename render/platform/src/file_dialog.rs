@@ -83,7 +83,237 @@ fn check(options: &PickOptions) -> Result<(), FileDialogError> {
     Ok(())
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "android")]
+mod imp {
+    use super::{FileDialogError, PathBuf, PickOptions};
+    use jni::objects::{JObject, JString, JValue};
+    use jni::sys::jint;
+    use jni::JNIEnv;
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+    static PICKER_HELPER: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
+    static PICKER_RESULT: OnceLock<Arc<(Mutex<Option<PickerResult>>, Condvar)>> = OnceLock::new();
+
+    #[derive(Debug)]
+    enum PickerResult {
+        File(PathBuf),
+        Files(Vec<PathBuf>),
+        Folder(PathBuf),
+        Save(PathBuf),
+        Cancelled,
+        Failed(String),
+    }
+
+    /// Initializes the file picker helper. Called once from the shell on startup.
+    pub fn init(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
+        if vm.is_null() || activity.is_null() {
+            return;
+        }
+        let vm = unsafe { jni::JavaVM::from_raw(vm.cast()) };
+        let _ = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
+            let activity = unsafe { jni::objects::JObject::from_raw(env, activity.cast()) };
+            let helper = env.new_object(
+                "dev/gumicord/app/FilePickerHelper",
+                "(Landroid/app/Activity;)V",
+                &[JValue::from(&activity)],
+            )?;
+            let global = env.new_global_ref(helper)?;
+            let _ = PICKER_HELPER.set(global);
+            let _ = PICKER_RESULT.set(Arc::new((Mutex::new(None), Condvar::new())));
+            Ok(())
+        });
+    }
+
+    fn with_helper<T, F>(f: F) -> Result<T, FileDialogError>
+    where
+        F: FnOnce(&mut JNIEnv<'_>, &jni::objects::JObject<'_>) -> Result<T, jni::errors::Error>,
+    {
+        let Some(helper) = PICKER_HELPER.get() else {
+            return Err(FileDialogError::Unsupported);
+        };
+        let ctx = ndk_context::android_context();
+        if ctx.vm().is_null() {
+            return Err(FileDialogError::Unsupported);
+        }
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+        vm.attach_current_thread(|env| f(env, helper.as_obj()))
+            .map_err(|e| {
+                tracing::warn!(%e, "file picker JNI call failed");
+                FileDialogError::Failed("JNI call failed")
+            })
+    }
+
+    fn convert_extensions(filter: &PickOptions) -> Result<(jni::objects::JObjectArray, jni::objects::JObjectArray), FileDialogError> {
+        let ctx = ndk_context::android_context();
+        if ctx.vm().is_null() {
+            return Err(FileDialogError::Unsupported);
+        }
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+        vm.attach_current_thread(|env| {
+            let mime_types = if filter.extensions.is_empty() {
+                let mime = env.new_string("*/*")?;
+                env.new_object_array(1, "java/lang/String", mime)?
+            } else {
+                let array = env.new_object_array(filter.len() as jint, "java/lang/String", JObject::null())?;
+                for (i, ext) in filter.iter().enumerate() {
+                    let mime = match ext.as_str() {
+                        "png" => "image/png",
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        "pdf" => "application/pdf",
+                        "txt" => "text/plain",
+                        _ => "*/*",
+                    };
+                    let mime_str = env.new_string(mime)?;
+                    env.set_object_array_element(array, i as jint, mime_str)?;
+                }
+                array
+            };
+            let extensions = env.new_object_array(filter.len() as jint, "java/lang/String", JObject::null())?;
+            for (i, ext) in filter.iter().enumerate() {
+                let ext_str = env.new_string(ext)?;
+                env.set_object_array_element(extensions, i as jint, ext_str)?;
+            }
+            Ok((mime_types, extensions))
+        }).map_err(|e| {
+            tracing::warn!(%e, "failed to convert extensions");
+            FileDialogError::Failed("JNI conversion failed")
+        })
+    }
+
+    fn pick_async(
+        options: &PickOptions,
+        method: &str,
+        multi: bool,
+        directory: bool,
+        save: bool,
+    ) -> Result<PickerResult, FileDialogError> {
+        let (mime_types, extensions) = convert_extensions(&options.filters)?;
+
+        let title = options.title.as_deref().unwrap_or("");
+        let start_dir = options.starting_dir.as_deref().and_then(|p| p.to_str()).unwrap_or("");
+        let file_name = options.file_name.as_deref().unwrap_or("");
+
+        with_helper(|env, helper| {
+            let title = env.new_string(title)?;
+            let start_dir = env.new_string(start_dir)?;
+            let file_name = env.new_string(file_name)?;
+
+            env.call_method(
+                helper,
+                method,
+                "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZZ)V",
+                &[
+                    JValue::from(&title),
+                    JValue::from(&mime_types),
+                    JValue::from(&extensions),
+                    JValue::from(&start_dir),
+                    JValue::from(&file_name),
+                    JValue::Bool(multi),
+                    JValue::Bool(directory),
+                    JValue::Bool(save),
+                ],
+            )?.v()?;
+            Ok(())
+        })?;
+
+        // Wait for result
+        let result_arc = PICKER_RESULT.get().ok_or(FileDialogError::Unsupported)?;
+        let (lock, cvar) = &*result_arc;
+        let mut result = lock.lock().unwrap();
+        while result.is_none() {
+            result = cvar.wait(result).unwrap();
+        }
+        Ok(result.take().unwrap())
+    }
+
+    pub fn pick_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        let result = pick_async(options, "pickFile", false, false, false)?;
+        Ok(match result {
+            PickerResult::File(p) => Some(p),
+            PickerResult::Cancelled => None,
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => None,
+        })
+    }
+
+    pub fn pick_files(options: &PickOptions) -> Result<Vec<PathBuf>, FileDialogError> {
+        let result = pick_async(options, "pickFiles", true, false, false)?;
+        Ok(match result {
+            PickerResult::Files(v) => v,
+            PickerResult::Cancelled => Vec::new(),
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => Vec::new(),
+        })
+    }
+
+    pub fn pick_folder(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        let result = pick_async(options, "pickFolder", false, true, false)?;
+        Ok(match result {
+            PickerResult::Folder(p) => Some(p),
+            PickerResult::Cancelled => None,
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => None,
+        })
+    }
+
+    pub fn save_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        let result = pick_async(options, "saveFile", false, false, true)?;
+        Ok(match result {
+            PickerResult::Save(p) => Some(p),
+            PickerResult::Cancelled => None,
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => None,
+        })
+    }
+
+    /// Called from Kotlin via JNI when the picker returns a result
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_gumicord_app_FilePickerHelper_onResult(
+        env: JNIEnv,
+        _: JObject,
+        kind: jint,
+        path: JString,
+        paths: jni::objects::JObjectArray,
+    ) {
+        let result = match kind {
+            0 => { // File
+                let path = env.get_string(&path).map(|s| s.into()).ok();
+                PickerResult::File(path.map(PathBuf::from).unwrap_or_default())
+            }
+            1 => { // Files
+                let len = env.get_array_length(&paths).unwrap_or(0);
+                let mut files = Vec::new();
+                for i in 0..len {
+                    if let Ok(obj) = env.get_object_array_element(&paths, i) {
+                        let s = env.get_string(&obj.into()).map(|s| s.into());
+                        if let Some(p) = s {
+                            files.push(PathBuf::from(p));
+                        }
+                    }
+                }
+                PickerResult::Files(files)
+            }
+            2 => { // Folder
+                let path = env.get_string(&path).map(|s| s.into()).ok();
+                PickerResult::Folder(path.map(PathBuf::from).unwrap_or_default())
+            }
+            3 => { // Save
+                let path = env.get_string(&path).map(|s| s.into()).ok();
+                PickerResult::Save(path.map(PathBuf::from).unwrap_or_default())
+            }
+            4 => PickerResult::Cancelled, // Cancelled
+            _ => PickerResult::Failed("unknown kind".into()),
+        };
+        let result_arc = PICKER_RESULT.get().unwrap();
+        let (lock, cvar) = &*result_arc;
+        *lock.lock().unwrap() = Some(result);
+        cvar.notify_one();
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "android")))]
 mod imp {
     use super::{FileDialogError, PathBuf, PickOptions};
 
