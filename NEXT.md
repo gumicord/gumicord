@@ -89,6 +89,7 @@
   通すのは CI の nightly だけ
 - Android のセッション途中切断 (2026-10-02 新規): **実機で再現せず・要因不明のまま解消**。QR 表示中の idle 中に `ECONNABORTED (os error 103)` で落ちる報告があったが、後のビルド (adjustResize + configChanges 適用後) で実機確認時に再現せず。`RemoteAuthError::Dropped` 扱いは session.rs で未分離のままだが、現状再現しないため保留。
 - 触って切り替える操作とセーフエリア、Android のクリップボード
+- D4: Android ファイル選択 (Storage Access Framework) **完了** — `FilePickerHelper.kt` 実装済み、JNI 経由で単体/複数/フォルダ/保存に対応。Linux/macOS は rfd 経由で実装済み（D4 残り: iOS のみ未対応、要 UIDocumentPicker）
 - 一員行の行き先 (プロフィール表示) は将来のまま。複数指は対象外
 - iPad Stage Manager の窓化時の上部余白: `safe area changed` ログで inset 実測値を取ること
   (Y=0 で窓がメニューバーと重なる場合の PLT-041 適用か、winit の値の問題かの切分けが要る)
