@@ -42,7 +42,7 @@ gumicord-uitree = { path = "core/uitree" }
 gumicord-theme = { path = "core/theme" }
 gumicord-plugin = { path = "core/plugin" }
 gumicord-render = { path = "render/render" }
-gumicord-platform = { path = "render/platform" }
+gumicord-platform = { path = "render/platform", default-features = false }
 gumicord-app = { path = "app/core" }
 
 # Drawing

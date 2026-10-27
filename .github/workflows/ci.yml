@@ -465,7 +465,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: screenshot-${{ matrix.os }}-${{ github.sha }}
-          path: target/screenshots/
+          path: target/screenshots/${{ matrix.os }}/
           retention-days: 14
 
   # ────────────────────────────────────────────────────────────
