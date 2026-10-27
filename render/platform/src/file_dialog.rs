@@ -334,6 +334,196 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "ios")]
+mod imp {
+    use super::{FileDialogError, PathBuf, PickOptions};
+    use objc2::rc::Retained;
+    use objc2::{class, msg_send, sel};
+    use objc2_foundation::{NSArray, NSURL, NSString};
+    use objc2_ui_kit::{UIDocumentPickerViewController, UIDocumentPickerMode, UIViewController, UIApplication, UIWindowScene, UIScene, UIDocumentPickerDelegate};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::time::Duration;
+
+    static PICKER_RESULT: OnceLock<Arc<(Mutex<Option<PickerResult>>, Condvar)>> = OnceLock::new();
+
+    #[derive(Debug)]
+    enum PickerResult {
+        File(PathBuf),
+        Files(Vec<PathBuf>),
+        Folder(PathBuf),
+        Save(PathBuf),
+        Cancelled,
+        Failed(String),
+    }
+
+    // UIDocumentPickerDelegate implementation
+    #[allow(non_camel_case_types)]
+    #[derive(Debug)]
+    struct DocumentPickerDelegate {
+        result: Arc<(Mutex<Option<PickerResult>>, Condvar)>,
+        mode: UIDocumentPickerMode,
+    }
+
+    impl DocumentPickerDelegate {
+        fn new(result: Arc<(Mutex<Option<PickerResult>>, Condvar)>, mode: UIDocumentPickerMode) -> Self {
+            Self { result, mode }
+        }
+    }
+
+    unsafe impl UIDocumentPickerDelegate for DocumentPickerDelegate {
+        #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
+        fn documentPicker_didPickDocumentsAtURLs(
+            &self,
+            _controller: &UIDocumentPickerViewController,
+            urls: &NSArray<NSURL>,
+        ) {
+            let (lock, cvar) = &*self.result;
+            let mut result = lock.lock().unwrap();
+            let count = urls.count();
+            if count == 0 {
+                *lock.lock().unwrap() = Some(PickerResult::Cancelled);
+                cvar.notify_one();
+                return;
+            }
+
+            let mut paths = Vec::new();
+            for i in 0..count {
+                if let Some(url) = urls.objectAtIndex(i) {
+                    if let Ok(path) = url.filePath() {
+                        paths.push(PathBuf::from(path));
+                    }
+                }
+            }
+
+            let result = match self.mode {
+                UIDocumentPickerMode::Import if paths.len() > 1 => PickerResult::Files(paths),
+                UIDocumentPickerMode::Import => PickerResult::File(paths.into_iter().next().unwrap()),
+                UIDocumentPickerMode::Open => PickerResult::File(paths.into_iter().next().unwrap()),
+                UIDocumentPickerMode::ExportToService => PickerResult::Save(paths.into_iter().next().unwrap()),
+                _ => PickerResult::File(paths.into_iter().next().unwrap()),
+            };
+            *lock.lock().unwrap() = Some(result);
+            cvar.notify_one();
+        }
+
+        #[unsafe(method(documentPickerWasCancelled:))]
+        fn documentPickerWasCancelled(&self, _controller: &UIDocumentPickerViewController) {
+            let (lock, cvar) = &*self.result;
+            *lock.lock().unwrap() = Some(PickerResult::Cancelled);
+            cvar.notify_one();
+        }
+    }
+
+    pub fn init(_vm: *mut std::ffi::c_void, _activity: *mut std::ffi::c_void) {
+        // iOS doesn't need initialization
+    }
+
+    fn run_picker(
+        options: &PickOptions,
+        mode: UIDocumentPickerMode,
+        multi: bool,
+    ) -> Result<PickerResult, FileDialogError> {
+        let result_arc = Arc::new((Mutex::new(None), Condvar::new()));
+        let delegate = DocumentPickerDelegate::new(result_arc.clone(), mode);
+
+        // Create the picker on the main thread
+        let picker = {
+            let doc_types = options.filters.iter().flat_map(|f| {
+                f.extensions.iter().map(|ext| format!("public.{}", ext))
+            }).collect::<Vec<_>>();
+
+            if doc_types.is_empty() {
+                UIDocumentPickerViewController::initWithDocumentTypes_inMode(
+                    UIDocumentPickerViewController::alloc(),
+                    &NSArray::from_vec(&["public.content"]),
+                    mode,
+                )
+            } else {
+                let types_array = NSArray::from_vec(doc_types);
+                UIDocumentPickerViewController::initWithDocumentTypes_inMode(
+                    UIDocumentPickerViewController::alloc(),
+                    &types_array,
+                    mode,
+                )
+            }
+        };
+
+        // Configure the picker on the main thread
+        let delegate_ptr = Box::leak(Box::new(delegate));
+        let result_arc_clone = result_arc.clone();
+        unsafe {
+            // Must run on main thread
+            let picker_ref = &picker;
+            let delegate_ref = delegate_ptr;
+            
+            // Configure picker
+            picker_ref.setAllowsMultipleSelection(multi);
+            picker_ref.setDelegate(Some(delegate_ptr));
+            
+            // Present the picker
+            if let Some(window_scene) = unsafe { 
+                UIApplication::sharedApplication().connectedScenes()
+            }.firstObject() {
+                if let Some(window_scene) = window_scene.downcast::<UIWindowScene>() {
+                    if let Some(root_vc) = window_scene.windows().firstObject()?.rootViewController() {
+                        let _: () = msg_send![root_vc, presentViewController:picker_ref animated:YES completion:nil];
+                    }
+                }
+            }
+        }
+
+        // Wait for result
+        let (lock, cvar) = &*result_arc;
+        let mut result = lock.lock().unwrap();
+        while result.is_none() {
+            result = cvar.wait_timeout(result, Duration::from_secs(30)).unwrap().0;
+        }
+        Ok(result.take().unwrap())
+    }
+
+    pub fn pick_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        let result = run_picker(options, UIDocumentPickerMode::Import, false)?;
+        Ok(match result {
+            PickerResult::File(p) => Some(p),
+            PickerResult::Cancelled => None,
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => None,
+        })
+    }
+
+    pub fn pick_files(options: &PickOptions) -> Result<Vec<PathBuf>, FileDialogError> {
+        let result = run_picker(options, UIDocumentPickerMode::Import, true)?;
+        Ok(match result {
+            PickerResult::Files(v) => v,
+            PickerResult::Cancelled => Vec::new(),
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => Vec::new(),
+        })
+    }
+
+    pub fn pick_folder(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        let result = run_picker(options, UIDocumentPickerMode::Open, false)?;
+        Ok(match result {
+            PickerResult::Folder(p) => Some(p),
+            PickerResult::File(p) => Some(p),
+            PickerResult::Cancelled => None,
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => None,
+        })
+    }
+
+    pub fn save_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        let result = run_picker(options, UIDocumentPickerMode::ExportToService, false)?;
+        Ok(match result {
+            PickerResult::Save(p) => Some(p),
+            PickerResult::File(p) => Some(p),
+            PickerResult::Cancelled => None,
+            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            _ => None,
+        })
+    }
+}
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod imp {
     use super::{FileDialogError, PathBuf, PickOptions};
@@ -370,6 +560,27 @@ mod imp {
 
     pub fn save_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
         Ok(dialog(options).save_file())
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios", target_os = "android")))]
+mod imp {
+    use super::{FileDialogError, PathBuf, PickOptions};
+
+    pub fn pick_file(_options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        Err(FileDialogError::Unsupported)
+    }
+
+    pub fn pick_files(_options: &PickOptions) -> Result<Vec<PathBuf>, FileDialogError> {
+        Err(FileDialogError::Unsupported)
+    }
+
+    pub fn pick_folder(_options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        Err(FileDialogError::Unsupported)
+    }
+
+    pub fn save_file(_options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        Err(FileDialogError::Unsupported)
     }
 }
 
