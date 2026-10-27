@@ -162,8 +162,7 @@ fn main() -> std::process::ExitCode {
         let actual_png = encode_png(shot.width, shot.height, &pixels);
 
         // Always write the actual output for artifact upload.
-        std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png)
-            .expect("actual writes");
+        std::fs::write(format!("{out_dir}/{}.png", shot.name), &actual_png).expect("actual writes");
 
         if rebless {
             std::fs::create_dir_all(&blessed_dir).expect("blessed dir");
