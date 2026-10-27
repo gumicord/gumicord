@@ -462,6 +462,8 @@ jobs:
         env:
           # Software rasterizer where no GPU exists.
           LIBGL_ALWAYS_SOFTWARE: 1
+          # Windows: force DX12 (WARP) for headless rendering
+          WGPU_BACKEND: ${{ matrix.os == 'windows-latest' && 'dx12' || '' }}
         run: cargo run -p gumicord-screenshot
 
       - name: Upload shots
