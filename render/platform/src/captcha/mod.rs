@@ -17,15 +17,9 @@ mod page;
 mod android;
 #[cfg(all(feature = "webview", windows))]
 mod webview2;
-#[cfg(all(
-    feature = "webview",
-    any(target_os = "macos", target_os = "ios")
-))]
+#[cfg(all(feature = "webview", any(target_os = "macos", target_os = "ios")))]
 mod wry_host;
-#[cfg(all(
-    feature = "webview-linux",
-    target_os = "linux"
-))]
+#[cfg(all(feature = "webview-linux", target_os = "linux"))]
 mod wry_host;
 
 /// What a captcha challenge needs to be solved.
@@ -77,15 +71,9 @@ pub trait CaptchaHost {
 pub use self::android::AndroidCaptcha;
 #[cfg(all(feature = "webview", windows))]
 pub use self::webview2::WebView2Captcha;
-#[cfg(all(
-    feature = "webview",
-    any(target_os = "macos", target_os = "ios")
-))]
+#[cfg(all(feature = "webview", any(target_os = "macos", target_os = "ios")))]
 pub use self::wry_host::WryCaptcha;
-#[cfg(all(
-    feature = "webview-linux",
-    target_os = "linux"
-))]
+#[cfg(all(feature = "webview-linux", target_os = "linux"))]
 pub use self::wry_host::WryCaptcha;
 
 /// The concrete captcha host for this platform. The window layer owns one
@@ -94,27 +82,27 @@ pub use self::wry_host::WryCaptcha;
 pub use self::android::AndroidCaptcha as Host;
 #[cfg(all(feature = "webview", windows))]
 pub use self::webview2::WebView2Captcha as Host;
-#[cfg(all(
-    feature = "webview",
-    any(target_os = "macos", target_os = "ios")
-))]
+#[cfg(all(feature = "webview", any(target_os = "macos", target_os = "ios")))]
 pub use self::wry_host::WryCaptcha as Host;
-#[cfg(all(
-    feature = "webview-linux",
-    target_os = "linux"
-))]
+#[cfg(all(feature = "webview-linux", target_os = "linux"))]
 pub use self::wry_host::WryCaptcha as Host;
 
 /// Where no host is compiled — an unsupported OS, or a build that left the
 /// `webview` / `webview-linux` feature off.
 #[cfg(not(any(
-    all(feature = "webview", any(windows, target_os = "macos", target_os = "ios", target_os = "android")),
+    all(
+        feature = "webview",
+        any(windows, target_os = "macos", target_os = "ios", target_os = "android")
+    ),
     all(feature = "webview-linux", target_os = "linux"),
 )))]
 pub use self::unsupported::UnsupportedCaptcha as Host;
 
 #[cfg(not(any(
-    all(feature = "webview", any(windows, target_os = "macos", target_os = "ios", target_os = "android")),
+    all(
+        feature = "webview",
+        any(windows, target_os = "macos", target_os = "ios", target_os = "android")
+    ),
     all(feature = "webview-linux", target_os = "linux"),
 )))]
 mod unsupported {

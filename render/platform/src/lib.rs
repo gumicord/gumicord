@@ -41,15 +41,9 @@ pub mod window;
 pub use captcha::AndroidCaptcha;
 #[cfg(all(feature = "webview", windows))]
 pub use captcha::WebView2Captcha;
-#[cfg(all(
-    feature = "webview",
-    any(target_os = "macos", target_os = "ios")
-))]
+#[cfg(all(feature = "webview", any(target_os = "macos", target_os = "ios")))]
 pub use captcha::WryCaptcha;
-#[cfg(all(
-    feature = "webview-linux",
-    target_os = "linux"
-))]
+#[cfg(all(feature = "webview-linux", target_os = "linux"))]
 pub use captcha::WryCaptcha;
 pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, Host, SolvedCaptcha};
 pub use clipboard::ClipboardError;
