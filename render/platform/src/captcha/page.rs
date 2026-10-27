@@ -10,20 +10,26 @@ use super::CaptchaChallenge;
 
 /// How the page hands its answer back to Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "used by wry_host/android/webview2 when webview feature is on"
+)]
 pub enum Bridge {
     /// `wry` IPC: `window.ipc.postMessage(message)`.
     /// Every host but Android posts through it.
-    #[cfg_attr(target_os = "android", allow(dead_code))]
     Wry,
     /// A Kotlin object on `window`: `window.NAME.post(message)`.
     /// Constructed on Android only; elsewhere the page is tested through it.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     JsInterface(&'static str),
 }
 
 /// The challenge page and its bridge back to Rust. `data-host` appears on
 /// both the widget and the script tag, matching Discord's enterprise
 /// setup. The token is URL-safe so a colon split is unambiguous.
+#[allow(
+    dead_code,
+    reason = "used by wry_host/android/webview2 when webview feature is on"
+)]
 pub fn html(challenge: &CaptchaChallenge, bridge: Bridge) -> String {
     let rqdata = match &challenge.rqdata {
         Some(r) => format!("hcaptcha.setData({r:?});"),
@@ -90,6 +96,10 @@ pub fn html(challenge: &CaptchaChallenge, bridge: Bridge) -> String {
 
 /// Parse what the page posted back (`type:payload`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "used by wry_host/android/webview2 when webview feature is on"
+)]
 pub enum Outcome {
     Solved(String),
     Expired,
@@ -98,6 +108,10 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    #[allow(
+        dead_code,
+        reason = "used by wry_host/android/webview2 when webview feature is on"
+    )]
     pub fn from_body(body: &str) -> Option<Outcome> {
         let (ty, payload) = body.split_once(':').unwrap_or((body, ""));
         match ty {
