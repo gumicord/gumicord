@@ -454,9 +454,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1
-          # Point to lavapipe (Mesa's software Vulkan driver)
-          export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES" >> $GITHUB_ENV
+          # Find lavapipe ICD (path varies by Ubuntu version)
+          LVP_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -1)
+          if [ -n "$LVP_ICD" ]; then
+            echo "Found lavapipe ICD: $LVP_ICD"
+            echo "VK_ICD_FILENAMES=$LVP_ICD" >> $GITHUB_ENV
+          else
+            echo "WARNING: lavapipe ICD not found, trying default"
+            echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> $GITHUB_ENV
+          fi
+
+      # Clear probe cache so we reprobe with lavapipe available
+      - name: Clear GPU probe cache
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # Find and remove any probe.json cache files
+          find ~ -name "probe.json" -delete 2>/dev/null || true
+          find /home -name "probe.json" -delete 2>/dev/null || true
+          rm -f probe.json 2>/dev/null
+          echo "probe cache cleared"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -468,7 +484,15 @@ jobs:
           # Linux: force Vulkan with lavapipe (software Vulkan)
           # Windows: force DX12 (WARP) for headless rendering
           WGPU_BACKEND: ${{ matrix.os == 'windows-latest' && 'dx12' || matrix.os == 'ubuntu-latest' && 'vulkan' || '' }}
-        run: cargo run -p gumicord-screenshot
+          LIBGL_ALWAYS_SOFTWARE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            echo "=== Vulkan ICD debug ==="
+            echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+            ls -la /usr/share/vulkan/icd.d/ 2>/dev/null || echo "ICD dir not found"
+            vulkaninfo --summary 2>&1 | head -30 || echo "vulkaninfo failed"
+          fi
+          cargo run -p gumicord-screenshot
 
       - name: Upload shots
         if: always()
