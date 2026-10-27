@@ -451,7 +451,7 @@ jobs:
 
       - name: Install mesa for software rendering
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers mesa-libgl libglvnd-dev
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libgl1-mesa-glx libglvnd-dev
 
       - uses: Swatinem/rust-cache@v2
         with:
