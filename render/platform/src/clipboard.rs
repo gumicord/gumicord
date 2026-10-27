@@ -72,7 +72,152 @@ pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
     imp::image()
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios")))]
+/// Initializes the Android clipboard helper. Must be called from the UI thread
+/// during `android_on_create` before any clipboard operations.
+#[cfg(target_os = "android")]
+pub fn init(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
+    imp::init(vm, activity)
+}
+
+#[cfg(target_os = "android")]
+mod imp {
+    use super::{ClipboardError, ClipboardImage};
+    use jni::objects::{JObject, JString, JValue};
+    use jni::sys::{jboolean, jint};
+    use jni::JNIEnv;
+    use std::sync::OnceLock;
+
+    /// Global reference to the clipboard manager helper class.
+    static CLIPBOARD_HELPER: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
+
+    /// Initializes the clipboard helper. Called once from the shell on startup.
+    pub fn init(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
+        if vm.is_null() || activity.is_null() {
+            return;
+        }
+        let vm = unsafe { jni::JavaVM::from_raw(vm.cast()) };
+        let _ = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
+            let activity = unsafe { jni::objects::JObject::from_raw(env, activity.cast()) };
+            let helper = env.new_object(
+                "dev/gumicord/app/ClipboardHelper",
+                "(Landroid/app/Activity;)V",
+                &[JValue::from(&activity)],
+            )?;
+            let global = env.new_global_ref(helper)?;
+            let _ = CLIPBOARD_HELPER.set(global);
+            Ok(())
+        });
+    }
+
+    fn with_helper<T, F>(f: F) -> Result<T, ClipboardError>
+    where
+        F: FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> Result<T, jni::errors::Error>,
+    {
+        let Some(helper) = CLIPBOARD_HELPER.get() else {
+            return Err(ClipboardError::Unsupported);
+        };
+        let ctx = ndk_context::android_context();
+        if ctx.vm().is_null() {
+            return Err(ClipboardError::Unsupported);
+        }
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+        vm.attach_current_thread(|env| f(env, helper.as_obj()))
+            .map_err(|e| {
+                tracing::warn!(%e, "clipboard JNI call failed");
+                ClipboardError::Failed("JNI call failed")
+            })
+    }
+
+    pub fn set_text(text: &str) -> Result<(), ClipboardError> {
+        with_helper(|env, helper| {
+            let text = env.new_string(text)?;
+            env.call_method(
+                helper,
+                "setText",
+                "(Ljava/lang/String;)V",
+                &[JValue::from(&text)],
+            )?
+            .v()?;
+            Ok(())
+        })
+    }
+
+    pub fn text() -> Result<Option<String>, ClipboardError> {
+        with_helper(|env, helper| {
+            let result: JString = env
+                .call_method(helper, "getText", "()Ljava/lang/String;", &[])?
+                .l()?
+                .into();
+            if result.is_null() {
+                return Ok(None);
+            }
+            let text = env.get_string(&result)?;
+            Ok(Some(text.into()))
+        })
+    }
+
+    pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
+        with_helper(|env, helper| {
+            // Convert RGBA to PNG in Java via Bitmap.compress
+            let width = image.width as i32;
+            let height = image.height as i32;
+            let size = image.rgba.len() as i32;
+
+            // Create a direct ByteBuffer for the pixel data
+            let byte_buffer = env
+                .new_direct_byte_buffer(image.rgba.as_ptr() as *mut std::ffi::c_void, size)
+                .map_err(|_| ClipboardError::Failed("cannot create byte buffer"))?;
+
+            env.call_method(
+                helper,
+                "setImage",
+                "(Ljava/nio/ByteBuffer;II)V",
+                &[JValue::from(&byte_buffer), JValue::Int(width), JValue::Int(height)],
+            )?
+            .v()?;
+            Ok(())
+        })
+    }
+
+    pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
+        with_helper(|env, helper| {
+            let result: JObject = env
+                .call_method(helper, "getImage", "()Ldev/gumicord/app/ClipboardHelper$ImageData;", &[])?
+                .l()?;
+            if result.is_null() {
+                return Ok(None);
+            }
+            // Extract width, height, and byte array from the ImageData object
+            let width: jint = env.get_field(&result, "width", "I")?.i()?;
+            let height: jint = env.get_field(&result, "height", "I")?.i()?;
+            let rgba_array: jni::objects::JByteArray = env
+                .get_field(&result, "rgba", "[B")?
+                .l()?
+                .into();
+            let rgba = env.convert_byte_array(&rgba_array)?;
+            if width <= 0 || height <= 0 {
+                return Ok(None);
+            }
+            let expected = width as usize * height as usize * 4;
+            if rgba.len() != expected {
+                return Ok(None);
+            }
+            Ok(Some(ClipboardImage {
+                width: width as u32,
+                height: height as u32,
+                rgba,
+            }))
+        })
+    }
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
 
