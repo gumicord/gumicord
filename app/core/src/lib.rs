@@ -3674,7 +3674,7 @@ fn scene_messages() -> Vec<gumicord_model::Message> {
     ));
     let attachments_1 = [att_png, att_wav, att_txt]
         .into_iter()
-        .filter_map(|a| a)
+        .flatten()
         .collect::<Vec<_>>();
     vec![
         message_with_attachments(
