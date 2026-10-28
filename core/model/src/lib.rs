@@ -458,7 +458,7 @@ impl Attachment {
         let content_type = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|ext| match ext.to_lowercase().as_str() {
+            .and_then(|ext| match ext.to_lowercase().as_str() {
                 "png" => Some("image/png".to_owned()),
                 "jpg" | "jpeg" => Some("image/jpeg".to_owned()),
                 "gif" => Some("image/gif".to_owned()),
@@ -467,8 +467,7 @@ impl Attachment {
                 "mp4" | "mov" | "mkv" => Some("video/".to_owned() + ext),
                 "txt" | "md" => Some("text/plain".to_owned()),
                 _ => None,
-            })
-            .flatten();
+            });
         Some(Attachment {
             id: AttachmentId::from(meta.len()),
             filename,

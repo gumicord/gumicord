@@ -2130,6 +2130,7 @@ dependencies = [
  "arboard",
  "block2 0.6.2",
  "gtk",
+ "gumicord-model",
  "gumicord-render",
  "gumicord-uitree",
  "jni 0.22.4",
