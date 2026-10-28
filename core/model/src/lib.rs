@@ -445,6 +445,37 @@ impl Attachment {
             .as_deref()
             .is_some_and(|t| t.starts_with("image/"))
     }
+
+    /// Build an attachment from a local file path (FR-025 display, FR-030 send).
+    /// Uses the file's metadata; the URL is just the absolute path.
+    pub fn from_file(path: std::path::Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        let filename = path.file_name()?.to_string_lossy().to_string();
+        let size = meta.len();
+        let content_type = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| match ext.to_lowercase().as_str() {
+                "png" => Some("image/png".to_owned()),
+                "jpg" | "jpeg" => Some("image/jpeg".to_owned()),
+                "gif" => Some("image/gif".to_owned()),
+                "webp" => Some("image/webp".to_owned()),
+                "wav" | "mp3" | "ogg" => Some("audio/".to_owned() + ext),
+                "mp4" | "mov" | "mkv" => Some("video/".to_owned() + ext),
+                "txt" | "md" => Some("text/plain".to_owned()),
+                _ => None,
+            })
+            .flatten();
+        Some(Attachment {
+            id: AttachmentId::new(),
+            filename,
+            size,
+            url: path.canonicalize().ok()?.to_string_lossy().to_string(),
+            content_type,
+            width: None,
+            height: None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

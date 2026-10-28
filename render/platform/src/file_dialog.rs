@@ -16,6 +16,10 @@
 //! the caller read it, so the Kotlin side copies the picked document into
 //! the app cache and hands back that path. A folder keeps its SAF path.
 //!
+//! The test attachments used by FR-025 (image/audio display) and FR-030 (text
+//! send) live in `render/tests/attachments/`: `fr-025-test.png`,
+//! `fr-025-test.wav`, `fr-030-test.txt`.
+//!
 //! An empty answer means no choice was made: cancelling is ordinary, so
 //! it comes back empty rather than as an error. Call from the main
 //! thread; AppKit panels and Android activities belong there.
@@ -366,6 +370,30 @@ mod imp {
         // Returning a path would make the caller's write vanish, so say so
         // until a byte-oriented save bridge exists.
         Err(FileDialogError::Unsupported)
+    }
+
+    /// Convert a picked file path into the message attachment model (FR-025/FR-030).
+    /// The test attachments (render/tests/attachments/) serve as reference samples.
+    pub fn attachment_from_path(path: &std::path::Path) -> Option<gumicord_model::Attachment> {
+        gumicord_model::Attachment::from_file(path)
+    }
+
+    /// Reference the test attachments created for FR-025/FR-030.
+    /// These files live in render/tests/attachments/ and are used by both
+    /// the desktop and Android picker paths.
+    pub fn test_attachments() -> Vec<std::path::PathBuf> {
+        let dir = std::path::PathBuf::from("render/tests/attachments");
+        std::fs::read_dir(dir)
+            .ok()
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter_map(|e| {
+                        let p = e.path();
+                        if p.is_file() { Some(p) } else { None }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     /// Called from Kotlin via JNI when the picker returns. Runs on the UI
