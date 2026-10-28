@@ -245,13 +245,14 @@ drawer / sheet に `OverlayLayer` / `OverlayScrim` がなく hit 吸収が無い
 - 実装済み：安全な展開と検証、desktop の `rfd` 呼び出し、設定画面の
   導入行（テーマ欄・プラグイン欄の末尾）、導入後の再読み込み。
   プラグインは再走査ののち、権限は従来の許可の対話を通る
-  （黙って許さない）。携帯では選び口が無い旨を toast で言う
-- 未着手：Android の SAF・iOS の文書選び。どちらも OS との往復が要る
-  （Android は activity の返し、iOS は選びの委任）ため、Rust のみでの
-  穴埋めはしない。Android は activity の返しが要るぶん、受け口を足すことで
-  カバーできる ([ADR-0016](adr/0016-kotlin-receiving-points.md)。同 ADR で
-  「自前の Java/Kotlin を持たない」は廃止済み)。止むのは往復の設計になるため、
-  やるなら ADR を起票して決める。
-  穴が埋まれば、bytes を渡す口はすでに共通のため UI 側の手直しは要らない
+  （黙って許さない）
+- 実装済み (2026-10-28)：Android の SAF・iOS の文書選び
+  (`render/platform/src/file_dialog.rs` の各実装、受け口は
+  [ADR-0016](adr/0016-kotlin-receiving-points.md) の Kotlin)。
+  Android は選んだ文書をキャッシュへ複製してからパスを返す
+  (Scoped Storage では SAF の URI を `std::fs` で読めない)。
+  **実機未確認**
+- 未対応：Android の保存。宛先が SAF の文書 URI で `std::fs` からは書けないため、
+  バイト列を受け取る保存口を足すまで `Unsupported` を返す
 - 形式の置き場所は将来 `04-theme.md` §5.4 と `05-plugin-api.md` §4.2 に
   移す。registry（`EXT-044`）と一緒に決める

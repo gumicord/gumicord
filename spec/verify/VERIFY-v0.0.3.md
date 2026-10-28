@@ -106,7 +106,7 @@ screenshot ジョブは照合する (それまで `NEW` で素通りだった)�
 ## 対象外
 
 - macOS の署名・公証: Apple Developer Program の参加と secrets 登録が要る。
-  手順は `packaging/README.md`。未設定なら未署名のまま作られる
+  手順は `packaging/README.md`。未設定なら ad-hoc 署名 (未署名の警告) で作られる
 - Android のクリップボードと非 Windows のファイル選択の残りは v0.0.4
 - 実行時健全性の網羅確認は引き続きテスター任せ
 

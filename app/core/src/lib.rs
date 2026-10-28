@@ -667,8 +667,9 @@ impl Gumicord {
     }
 
     /// Installs a theme or plugin from an archive file. The OS picker runs
-    /// first; phones have no picker yet and say so instead of stalling.
-    /// The dialog blocks the loop while open, like any modal dialog.
+    /// first; a platform without one reports `Unsupported` instead of
+    /// stalling. The dialog blocks the loop while open, like any modal
+    /// dialog, and Android hands back a readable copy (not a SAF URI).
     fn install_package(&mut self, kind: crate::install::InstallKind) {
         use crate::install::InstallKind;
         use gumicord_platform::file_dialog::{FileFilter, PickOptions, pick_file};

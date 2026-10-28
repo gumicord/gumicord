@@ -22,8 +22,10 @@ restoring by hand.
 
 ## macOS signing and notarization (opt-in)
 
-Without secrets everything builds unsigned, like the mobile builds. The
-Release workflow signs and notarizes only when these repository secrets
+Without secrets the bundle is ad-hoc signed (`codesign --sign -`): Apple
+Silicon treats a completely unsigned bundle as damaged, while an ad-hoc
+signature gives the ordinary unidentified-developer warning. The Release
+workflow signs and notarizes properly only when these repository secrets
 exist; forks stay green without them.
 
 | Secret | Contents |

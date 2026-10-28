@@ -5,10 +5,14 @@
 //! | Windows | Win32 (`CF_UNICODETEXT`, `CF_DIB`) | done |
 //! | Linux / macOS | `arboard` (X11 / Wayland / `NSPasteboard`) | done |
 //! | iOS | `UIPasteboard` | done |
-//! | Android | the OS API | not yet |
+//! | Android | `ClipboardManager`, through Kotlin | done |
 //!
 //! Images ride as `CF_DIB`: 32- and 24-bit, uncompressed. Paletted and
 //! compressed DIBs are refused rather than guessed.
+//!
+//! Android copies an image as a `content:` URI backed by the app cache and
+//! the existing FileProvider; a MediaStore insert needs storage permission
+//! below API 29 and would litter the gallery.
 //!
 //! Failures are never swallowed. The clipboard is shared with every other
 //! program, and another one holding it at the moment we try is ordinary.
@@ -82,44 +86,54 @@ pub fn init(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
 #[cfg(target_os = "android")]
 mod imp {
     use super::{ClipboardError, ClipboardImage};
-    use jni::objects::{JObject, JString, JValue};
-    use jni::sys::{jboolean, jint};
-    use jni::JNIEnv;
+    use jni::objects::{Global, JByteArray, JObject, JString, JValue, Reference};
+    use jni::sys::jint;
+    use jni::{Env, jni_sig, jni_str};
     use std::sync::OnceLock;
 
     /// Global reference to the clipboard manager helper class.
-    static CLIPBOARD_HELPER: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
+    static CLIPBOARD_HELPER: OnceLock<Global<JObject<'static>>> = OnceLock::new();
 
     /// Initializes the clipboard helper. Called once from the shell on startup.
     pub fn init(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
         if vm.is_null() || activity.is_null() {
             return;
         }
+        // Safe: the shell hands over pointers owned by the running `onCreate`.
         let vm = unsafe { jni::JavaVM::from_raw(vm.cast()) };
-        let _ = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
-            let activity = unsafe { jni::objects::JObject::from_raw(env, activity.cast()) };
+        let done = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
+            let activity = unsafe { JObject::from_raw(env, activity.cast()) };
             let helper = env.new_object(
-                "dev/gumicord/app/ClipboardHelper",
-                "(Landroid/app/Activity;)V",
+                jni_str!("dev/gumicord/app/ClipboardHelper"),
+                jni_sig!("(Landroid/app/Activity;)V"),
                 &[JValue::from(&activity)],
             )?;
-            let global = env.new_global_ref(helper)?;
-            let _ = CLIPBOARD_HELPER.set(global);
+            // The global reference is dropped never on purpose: it outlives
+            // every window, and the JVM owns the object.
+            let helper = env.new_global_ref(helper)?;
+            if CLIPBOARD_HELPER.set(helper).is_err() {
+                tracing::warn!("the clipboard helper was installed twice");
+            }
             Ok(())
         });
+        if let Err(e) = done {
+            tracing::warn!(%e, "the clipboard helper could not be created; clipboard stays off");
+        }
     }
 
-    fn with_helper<T, F>(f: F) -> Result<T, ClipboardError>
-    where
-        F: FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> Result<T, jni::errors::Error>,
-    {
+    fn with_helper<T>(
+        f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> Result<T, jni::errors::Error>,
+    ) -> Result<T, ClipboardError> {
         let Some(helper) = CLIPBOARD_HELPER.get() else {
             return Err(ClipboardError::Unsupported);
         };
         let ctx = ndk_context::android_context();
+        // `from_raw` asserts on null, and a shell that never set the context
+        // has exactly that.
         if ctx.vm().is_null() {
             return Err(ClipboardError::Unsupported);
         }
+        // Safe: the shell set both pointers up before the first frame ran.
         let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
         vm.attach_current_thread(|env| f(env, helper.as_obj()))
             .map_err(|e| {
@@ -133,68 +147,92 @@ mod imp {
             let text = env.new_string(text)?;
             env.call_method(
                 helper,
-                "setText",
-                "(Ljava/lang/String;)V",
+                jni_str!("setText"),
+                jni_sig!("(Ljava/lang/String;)V"),
                 &[JValue::from(&text)],
-            )?
-            .v()?;
+            )?;
             Ok(())
         })
     }
 
     pub fn text() -> Result<Option<String>, ClipboardError> {
         with_helper(|env, helper| {
-            let result: JString = env
-                .call_method(helper, "getText", "()Ljava/lang/String;", &[])?
-                .l()?
-                .into();
-            if result.is_null() {
+            let result = env
+                .call_method(
+                    helper,
+                    jni_str!("getText"),
+                    jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            // A null string means the clipboard holds no text.
+            let Ok(result) = env.cast_local::<JString>(result) else {
                 return Ok(None);
-            }
-            let text = env.get_string(&result)?;
-            Ok(Some(text.into()))
+            };
+            Ok(result.try_to_string(env).ok())
         })
     }
 
     pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
         with_helper(|env, helper| {
-            // Convert RGBA to PNG in Java via Bitmap.compress
-            let width = image.width as i32;
-            let height = image.height as i32;
-            let size = image.rgba.len() as i32;
+            let width = image.width as jint;
+            let height = image.height as jint;
 
-            // Create a direct ByteBuffer for the pixel data
-            let byte_buffer = env
-                .new_direct_byte_buffer(image.rgba.as_ptr() as *mut std::ffi::c_void, size)
-                .map_err(|_| ClipboardError::Failed("cannot create byte buffer"))?;
+            // The buffer borrows the pixels for the duration of the call;
+            // the helper copies them before returning, so no reference to
+            // this memory survives the call.
+            //
+            // Safe: the pointer and length describe a live slice.
+            let byte_buffer = unsafe {
+                env.new_direct_byte_buffer(image.rgba.as_ptr() as *mut u8, image.rgba.len())
+            }?;
 
             env.call_method(
                 helper,
-                "setImage",
-                "(Ljava/nio/ByteBuffer;II)V",
-                &[JValue::from(&byte_buffer), JValue::Int(width), JValue::Int(height)],
-            )?
-            .v()?;
+                jni_str!("setImage"),
+                jni_sig!("(Ljava/nio/ByteBuffer;II)V"),
+                &[
+                    JValue::from(&byte_buffer),
+                    JValue::Int(width),
+                    JValue::Int(height),
+                ],
+            )?;
             Ok(())
         })
     }
 
     pub fn image() -> Result<Option<ClipboardImage>, ClipboardError> {
         with_helper(|env, helper| {
-            let result: JObject = env
-                .call_method(helper, "getImage", "()Ldev/gumicord/app/ClipboardHelper$ImageData;", &[])?
+            let result = env
+                .call_method(
+                    helper,
+                    jni_str!("getImage"),
+                    jni_sig!("()Ldev/gumicord/app/ClipboardHelper$ImageData;"),
+                    &[],
+                )?
                 .l()?;
+            let Ok(result) = env.cast_local::<JObject>(result) else {
+                return Ok(None);
+            };
             if result.is_null() {
                 return Ok(None);
             }
-            // Extract width, height, and byte array from the ImageData object
-            let width: jint = env.get_field(&result, "width", "I")?.i()?;
-            let height: jint = env.get_field(&result, "height", "I")?.i()?;
-            let rgba_array: jni::objects::JByteArray = env
-                .get_field(&result, "rgba", "[B")?
-                .l()?
-                .into();
-            let rgba = env.convert_byte_array(&rgba_array)?;
+            let width = env
+                .get_field(&result, jni_str!("width"), jni_sig!("I"))?
+                .i()?;
+            let height = env
+                .get_field(&result, jni_str!("height"), jni_sig!("I"))?
+                .i()?;
+            let rgba = env
+                .get_field(&result, jni_str!("rgba"), jni_sig!("[B"))?
+                .l()?;
+            let Ok(rgba) = env.cast_local::<JByteArray>(rgba) else {
+                return Ok(None);
+            };
+            if rgba.is_null() {
+                return Ok(None);
+            }
+            let rgba = env.convert_byte_array(&rgba)?;
             if width <= 0 || height <= 0 {
                 return Ok(None);
             }

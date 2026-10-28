@@ -1,19 +1,24 @@
-//! Native file picker (desktop).
+//! Native file picker.
 //!
 //! | platform | implementation | status |
 //! |---|---|---|
 //! | Windows | system open/save dialog | done |
 //! | macOS | `NSOpenPanel` / `NSSavePanel` | done |
 //! | Linux | XDG Desktop Portal, `zenity` fallback | done |
-//! | Android / iOS | their own pickers | not yet |
+//! | Android | Storage Access Framework, through Kotlin | done |
+//! | iOS | `UIDocumentPickerViewController` | done |
 //!
 //! Linux shows the desktop environment's own dialog through the portal,
 //! so nothing toolkit-specific is linked in. Where no portal answers,
 //! `zenity` steps in instead.
 //!
+//! Android does not return the SAF URI itself: scoped storage would not let
+//! the caller read it, so the Kotlin side copies the picked document into
+//! the app cache and hands back that path. A folder keeps its SAF path.
+//!
 //! An empty answer means no choice was made: cancelling is ordinary, so
 //! it comes back empty rather than as an error. Call from the main
-//! thread; AppKit panels belong there.
+//! thread; AppKit panels and Android activities belong there.
 
 use std::path::PathBuf;
 
@@ -62,6 +67,10 @@ pub fn pick_folder(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogE
 }
 
 /// A destination to write to. May name a file that does not exist yet.
+///
+/// Android answers `Unsupported`: the chosen destination is a SAF document,
+/// and a path handed to `std::fs` would silently drop the writes. Writing
+/// there needs a byte-oriented bridge, which does not exist yet.
 pub fn save_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
     check(options)?;
     imp::save_file(options)
@@ -83,25 +92,46 @@ fn check(options: &PickOptions) -> Result<(), FileDialogError> {
     Ok(())
 }
 
+/// Initializes the Android picker helper. Must be called from the UI thread
+/// during `android_on_create` before any picker use.
+#[cfg(target_os = "android")]
+pub fn init(vm: *mut std::ffi::c_void, activity: *mut std::ffi::c_void) {
+    imp::init(vm, activity)
+}
+
 #[cfg(target_os = "android")]
 mod imp {
-    use super::{FileDialogError, PathBuf, PickOptions};
-    use jni::objects::{JObject, JString, JValue};
+    use super::{FileDialogError, FileFilter, PathBuf, PickOptions};
+    use jni::objects::{Global, JObject, JObjectArray, JString, JValue};
     use jni::sys::jint;
-    use jni::JNIEnv;
+    use jni::{Env, jni_sig, jni_str};
     use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
-    static PICKER_HELPER: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
+    static PICKER_HELPER: OnceLock<Global<JObject<'static>>> = OnceLock::new();
     static PICKER_RESULT: OnceLock<Arc<(Mutex<Option<PickerResult>>, Condvar)>> = OnceLock::new();
+
+    /// How long a pick may stay unanswered before the caller is let go.
+    /// The picker is a separate activity; the user may take a while, but
+    /// never forever.
+    const PICK_TIMEOUT: Duration = Duration::from_secs(600);
 
     #[derive(Debug)]
     enum PickerResult {
         File(PathBuf),
         Files(Vec<PathBuf>),
         Folder(PathBuf),
-        Save(PathBuf),
         Cancelled,
         Failed(String),
+    }
+
+    /// Which Kotlin entry point to call. `call_method` takes a `JNIStr`,
+    /// which a runtime `&str` is not, so the choice is made here.
+    #[derive(Clone, Copy)]
+    enum Method {
+        File,
+        Files,
+        Folder,
     }
 
     /// Initializes the file picker helper. Called once from the shell on startup.
@@ -109,32 +139,44 @@ mod imp {
         if vm.is_null() || activity.is_null() {
             return;
         }
+        // Safe: the shell hands over pointers owned by the running `onCreate`.
         let vm = unsafe { jni::JavaVM::from_raw(vm.cast()) };
-        let _ = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
-            let activity = unsafe { jni::objects::JObject::from_raw(env, activity.cast()) };
+        let done = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
+            let activity = unsafe { JObject::from_raw(env, activity.cast()) };
             let helper = env.new_object(
-                "dev/gumicord/app/FilePickerHelper",
-                "(Landroid/app/Activity;)V",
+                jni_str!("dev/gumicord/app/FilePickerHelper"),
+                jni_sig!("(Landroid/app/Activity;)V"),
                 &[JValue::from(&activity)],
             )?;
-            let global = env.new_global_ref(helper)?;
-            let _ = PICKER_HELPER.set(global);
+            // The global reference is dropped never on purpose: it outlives
+            // every window, and the JVM owns the object.
+            let helper = env.new_global_ref(helper)?;
+            if PICKER_HELPER.set(helper).is_err() {
+                tracing::warn!("the file picker helper was installed twice");
+            }
+            // The slot must exist before the first pick, or the answer would
+            // have nowhere to land.
             let _ = PICKER_RESULT.set(Arc::new((Mutex::new(None), Condvar::new())));
             Ok(())
         });
+        if let Err(e) = done {
+            tracing::warn!(%e, "the file picker helper could not be created; picking stays off");
+        }
     }
 
-    fn with_helper<T, F>(f: F) -> Result<T, FileDialogError>
-    where
-        F: FnOnce(&mut JNIEnv<'_>, &jni::objects::JObject<'_>) -> Result<T, jni::errors::Error>,
-    {
+    fn with_helper<T>(
+        f: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> Result<T, jni::errors::Error>,
+    ) -> Result<T, FileDialogError> {
         let Some(helper) = PICKER_HELPER.get() else {
             return Err(FileDialogError::Unsupported);
         };
         let ctx = ndk_context::android_context();
+        // `from_raw` asserts on null, and a shell that never set the context
+        // has exactly that.
         if ctx.vm().is_null() {
             return Err(FileDialogError::Unsupported);
         }
+        // Safe: the shell set both pointers up before the first frame ran.
         let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
         vm.attach_current_thread(|env| f(env, helper.as_obj()))
             .map_err(|e| {
@@ -143,194 +185,236 @@ mod imp {
             })
     }
 
-    fn convert_extensions(filter: &PickOptions) -> Result<(jni::objects::JObjectArray, jni::objects::JObjectArray), FileDialogError> {
-        let ctx = ndk_context::android_context();
-        if ctx.vm().is_null() {
-            return Err(FileDialogError::Unsupported);
+    /// The MIME types the picker should offer. SAF wants a type per entry,
+    /// not the extension list itself.
+    fn mime_type_array<'local>(
+        env: &mut Env<'local>,
+        filters: &[FileFilter],
+    ) -> Result<JObjectArray<'local, JString<'local>>, jni::errors::Error> {
+        let mimes: Vec<&str> = filters
+            .iter()
+            .flat_map(|filter| filter.extensions.iter())
+            .map(|ext| match ext.as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "pdf" => "application/pdf",
+                "txt" => "text/plain",
+                _ => "*/*",
+            })
+            .collect();
+        if mimes.is_empty() {
+            return string_array(env, &["*/*"]);
         }
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
-        vm.attach_current_thread(|env| {
-            let mime_types = if filter.extensions.is_empty() {
-                let mime = env.new_string("*/*")?;
-                env.new_object_array(1, "java/lang/String", mime)?
-            } else {
-                let array = env.new_object_array(filter.len() as jint, "java/lang/String", JObject::null())?;
-                for (i, ext) in filter.iter().enumerate() {
-                    let mime = match ext.as_str() {
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        "pdf" => "application/pdf",
-                        "txt" => "text/plain",
-                        _ => "*/*",
-                    };
-                    let mime_str = env.new_string(mime)?;
-                    env.set_object_array_element(array, i as jint, mime_str)?;
-                }
-                array
-            };
-            let extensions = env.new_object_array(filter.len() as jint, "java/lang/String", JObject::null())?;
-            for (i, ext) in filter.iter().enumerate() {
-                let ext_str = env.new_string(ext)?;
-                env.set_object_array_element(extensions, i as jint, ext_str)?;
-            }
-            Ok((mime_types, extensions))
-        }).map_err(|e| {
-            tracing::warn!(%e, "failed to convert extensions");
-            FileDialogError::Failed("JNI conversion failed")
-        })
+        string_array(env, &mimes)
+    }
+
+    /// The extension list as plain strings, for the picker's own filtering.
+    fn extension_array<'local>(
+        env: &mut Env<'local>,
+        filters: &[FileFilter],
+    ) -> Result<JObjectArray<'local, JString<'local>>, jni::errors::Error> {
+        let extensions: Vec<&str> = filters
+            .iter()
+            .flat_map(|filter| filter.extensions.iter())
+            .map(String::as_str)
+            .collect();
+        string_array(env, &extensions)
+    }
+
+    fn string_array<'local>(
+        env: &mut Env<'local>,
+        values: &[&str],
+    ) -> Result<JObjectArray<'local, JString<'local>>, jni::errors::Error> {
+        let array = JObjectArray::<JString>::new(env, values.len(), &JString::null())?;
+        for (i, value) in values.iter().enumerate() {
+            let value = env.new_string(*value)?;
+            array.set_element(env, i, &value)?;
+        }
+        Ok(array)
     }
 
     fn pick_async(
         options: &PickOptions,
-        method: &str,
+        method: Method,
         multi: bool,
         directory: bool,
         save: bool,
     ) -> Result<PickerResult, FileDialogError> {
-        let (mime_types, extensions) = convert_extensions(&options.filters)?;
-
         let title = options.title.as_deref().unwrap_or("");
-        let start_dir = options.starting_dir.as_deref().and_then(|p| p.to_str()).unwrap_or("");
+        let start_dir = options
+            .starting_dir
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .unwrap_or("");
         let file_name = options.file_name.as_deref().unwrap_or("");
 
+        // A pick that timed out may still be answered later. Emptying the
+        // slot first keeps that late answer from being read as this pick's.
+        if let Some(slot) = PICKER_RESULT.get()
+            && let Ok(mut waited) = slot.0.lock()
+        {
+            *waited = None;
+        }
+
+        // Everything that makes a local reference happens in one attach:
+        // the arrays belong to that frame and would not survive a second one.
         with_helper(|env, helper| {
+            let mime_types = mime_type_array(env, &options.filters)?;
+            let extensions = extension_array(env, &options.filters)?;
             let title = env.new_string(title)?;
             let start_dir = env.new_string(start_dir)?;
             let file_name = env.new_string(file_name)?;
 
-            env.call_method(
-                helper,
-                method,
-                "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZZ)V",
-                &[
-                    JValue::from(&title),
-                    JValue::from(&mime_types),
-                    JValue::from(&extensions),
-                    JValue::from(&start_dir),
-                    JValue::from(&file_name),
-                    JValue::Bool(multi),
-                    JValue::Bool(directory),
-                    JValue::Bool(save),
-                ],
-            )?.v()?;
+            let args = [
+                JValue::from(&title),
+                JValue::from(&mime_types),
+                JValue::from(&extensions),
+                JValue::from(&start_dir),
+                JValue::from(&file_name),
+                JValue::Bool(multi as jni::sys::jboolean),
+                JValue::Bool(directory as jni::sys::jboolean),
+                JValue::Bool(save as jni::sys::jboolean),
+            ];
+            let signature = jni_sig!(
+                "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;\
+                 Ljava/lang/String;Ljava/lang/String;ZZZ)V"
+            );
+            match method {
+                Method::File => {
+                    env.call_method(helper, jni_str!("pickFile"), signature, &args)?;
+                }
+                Method::Files => {
+                    env.call_method(helper, jni_str!("pickFiles"), signature, &args)?;
+                }
+                Method::Folder => {
+                    env.call_method(helper, jni_str!("pickFolder"), signature, &args)?;
+                }
+            }
             Ok(())
         })?;
 
-        // Wait for result
-        let result_arc = PICKER_RESULT.get().ok_or(FileDialogError::Unsupported)?;
-        let (lock, cvar) = &*result_arc;
-        let mut result = lock.lock().unwrap();
+        wait_for_result()
+    }
+
+    fn wait_for_result() -> Result<PickerResult, FileDialogError> {
+        let slot = PICKER_RESULT.get().ok_or(FileDialogError::Unsupported)?;
+        let (lock, cvar) = &**slot;
+        let mut result = lock
+            .lock()
+            .map_err(|_| FileDialogError::Failed("the picker result was lost"))?;
+        let deadline = Instant::now() + PICK_TIMEOUT;
         while result.is_none() {
-            result = cvar.wait(result).unwrap();
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(FileDialogError::Failed("the file picker did not answer"));
+            }
+            let (guard, _) = cvar
+                .wait_timeout(result, left)
+                .map_err(|_| FileDialogError::Failed("the picker result was lost"))?;
+            result = guard;
         }
-        Ok(result.take().unwrap())
+        Ok(result.take().expect("the loop only exits with an answer"))
+    }
+
+    fn failure(e: String) -> FileDialogError {
+        tracing::warn!(%e, "the Android file picker failed");
+        FileDialogError::Failed("the file picker failed")
+    }
+
+    fn path_of(env: &Env<'_>, value: &JString<'_>) -> Option<PathBuf> {
+        let text = value.try_to_string(env).ok()?;
+        if text.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(text))
     }
 
     pub fn pick_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        let result = pick_async(options, "pickFile", false, false, false)?;
+        let result = pick_async(options, Method::File, false, false, false)?;
         Ok(match result {
             PickerResult::File(p) => Some(p),
             PickerResult::Cancelled => None,
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            PickerResult::Failed(e) => return Err(failure(e)),
             _ => None,
         })
     }
 
     pub fn pick_files(options: &PickOptions) -> Result<Vec<PathBuf>, FileDialogError> {
-        let result = pick_async(options, "pickFiles", true, false, false)?;
+        let result = pick_async(options, Method::Files, true, false, false)?;
         Ok(match result {
             PickerResult::Files(v) => v,
             PickerResult::Cancelled => Vec::new(),
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            PickerResult::Failed(e) => return Err(failure(e)),
             _ => Vec::new(),
         })
     }
 
     pub fn pick_folder(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        let result = pick_async(options, "pickFolder", false, true, false)?;
+        let result = pick_async(options, Method::Folder, false, true, false)?;
         Ok(match result {
             PickerResult::Folder(p) => Some(p),
             PickerResult::Cancelled => None,
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
+            PickerResult::Failed(e) => return Err(failure(e)),
             _ => None,
         })
-    }
-
-    pub fn save_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        let result = pick_async(options, "saveFile", false, false, true)?;
-        Ok(match result {
-            PickerResult::Save(p) => Some(p),
-            PickerResult::Cancelled => None,
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
-            _ => None,
-        })
-    }
-
-    /// Called from Kotlin via JNI when the picker returns a result
-    #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_gumicord_app_FilePickerHelper_onResult(
-        env: JNIEnv,
-        _: JObject,
-        kind: jint,
-        path: JString,
-        paths: jni::objects::JObjectArray,
-    ) {
-        let result = match kind {
-            0 => { // File
-                let path = env.get_string(&path).map(|s| s.into()).ok();
-                PickerResult::File(path.map(PathBuf::from).unwrap_or_default())
-            }
-            1 => { // Files
-                let len = env.get_array_length(&paths).unwrap_or(0);
-                let mut files = Vec::new();
-                for i in 0..len {
-                    if let Ok(obj) = env.get_object_array_element(&paths, i) {
-                        let s = env.get_string(&obj.into()).map(|s| s.into());
-                        if let Some(p) = s {
-                            files.push(PathBuf::from(p));
-                        }
-                    }
-                }
-                PickerResult::Files(files)
-            }
-            2 => { // Folder
-                let path = env.get_string(&path).map(|s| s.into()).ok();
-                PickerResult::Folder(path.map(PathBuf::from).unwrap_or_default())
-            }
-            3 => { // Save
-                let path = env.get_string(&path).map(|s| s.into()).ok();
-                PickerResult::Save(path.map(PathBuf::from).unwrap_or_default())
-            }
-            4 => PickerResult::Cancelled, // Cancelled
-            _ => PickerResult::Failed("unknown kind".into()),
-        };
-        let result_arc = PICKER_RESULT.get().unwrap();
-        let (lock, cvar) = &*result_arc;
-        *lock.lock().unwrap() = Some(result);
-        cvar.notify_one();
-    }
-}
-
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "android")))]
-mod imp {
-    use super::{FileDialogError, PathBuf, PickOptions};
-
-    pub fn pick_file(_options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        Err(FileDialogError::Unsupported)
-    }
-
-    pub fn pick_files(_options: &PickOptions) -> Result<Vec<PathBuf>, FileDialogError> {
-        Err(FileDialogError::Unsupported)
-    }
-
-    pub fn pick_folder(_options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        Err(FileDialogError::Unsupported)
     }
 
     pub fn save_file(_options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
+        // The destination is a SAF document, not a path `std::fs` can write.
+        // Returning a path would make the caller's write vanish, so say so
+        // until a byte-oriented save bridge exists.
         Err(FileDialogError::Unsupported)
+    }
+
+    /// Called from Kotlin via JNI when the picker returns. Runs on the UI
+    /// thread and only hands the answer over, waking the waiting caller.
+    ///
+    /// The name matches `FilePickerBridge` in `FilePickerHelper.kt`; a
+    /// `companion object` method would have put the companion class in the
+    /// symbol instead. `EnvUnowned` is the FFI-safe wrapper jni 0.22 wants
+    /// at a native boundary.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_gumicord_app_FilePickerBridge_onResult<'local>(
+        mut unowned: jni::EnvUnowned<'local>,
+        _this: JObject<'local>,
+        kind: jint,
+        path: JString<'local>,
+        paths: JObjectArray<'local, JString<'local>>,
+    ) {
+        unowned
+            .with_env(|env| -> jni::errors::Result<()> {
+                let result = match kind {
+                    0 => PickerResult::File(path_of(env, &path).unwrap_or_default()),
+                    1 => {
+                        let len = paths.len(env).unwrap_or(0);
+                        let mut files = Vec::new();
+                        for i in 0..len {
+                            if let Ok(element) = paths.get_element(env, i) {
+                                if let Some(path) = path_of(env, &element) {
+                                    files.push(path);
+                                }
+                            }
+                        }
+                        PickerResult::Files(files)
+                    }
+                    2 => PickerResult::Folder(path_of(env, &path).unwrap_or_default()),
+                    3 => PickerResult::Failed("save is not supported".to_owned()),
+                    4 => PickerResult::Cancelled,
+                    _ => PickerResult::Failed("unknown picker result".to_owned()),
+                };
+                let Some(slot) = PICKER_RESULT.get() else {
+                    return Ok(());
+                };
+                let (lock, cvar) = &**slot;
+                if let Ok(mut waited) = lock.lock() {
+                    *waited = Some(result);
+                    cvar.notify_one();
+                }
+                Ok(())
+            })
+            .resolve::<jni::errors::ThrowRuntimeExAndDefault>();
     }
 }
 
@@ -339,8 +423,11 @@ mod imp {
     use super::{FileDialogError, PathBuf, PickOptions};
     use objc2::rc::Retained;
     use objc2::{class, msg_send, sel};
-    use objc2_foundation::{NSArray, NSURL, NSString};
-    use objc2_ui_kit::{UIDocumentPickerViewController, UIDocumentPickerMode, UIViewController, UIApplication, UIWindowScene, UIScene, UIDocumentPickerDelegate};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    use objc2_ui_kit::{
+        UIApplication, UIDocumentPickerDelegate, UIDocumentPickerMode,
+        UIDocumentPickerViewController, UIScene, UIViewController, UIWindowScene,
+    };
     use std::sync::{Arc, Condvar, Mutex, OnceLock};
     use std::time::Duration;
 
@@ -365,7 +452,10 @@ mod imp {
     }
 
     impl DocumentPickerDelegate {
-        fn new(result: Arc<(Mutex<Option<PickerResult>>, Condvar)>, mode: UIDocumentPickerMode) -> Self {
+        fn new(
+            result: Arc<(Mutex<Option<PickerResult>>, Condvar)>,
+            mode: UIDocumentPickerMode,
+        ) -> Self {
             Self { result, mode }
         }
     }
@@ -397,9 +487,13 @@ mod imp {
 
             let result = match self.mode {
                 UIDocumentPickerMode::Import if paths.len() > 1 => PickerResult::Files(paths),
-                UIDocumentPickerMode::Import => PickerResult::File(paths.into_iter().next().unwrap()),
+                UIDocumentPickerMode::Import => {
+                    PickerResult::File(paths.into_iter().next().unwrap())
+                }
                 UIDocumentPickerMode::Open => PickerResult::File(paths.into_iter().next().unwrap()),
-                UIDocumentPickerMode::ExportToService => PickerResult::Save(paths.into_iter().next().unwrap()),
+                UIDocumentPickerMode::ExportToService => {
+                    PickerResult::Save(paths.into_iter().next().unwrap())
+                }
                 _ => PickerResult::File(paths.into_iter().next().unwrap()),
             };
             *lock.lock().unwrap() = Some(result);
@@ -428,9 +522,11 @@ mod imp {
 
         // Create the picker on the main thread
         let picker = {
-            let doc_types = options.filters.iter().flat_map(|f| {
-                f.extensions.iter().map(|ext| format!("public.{}", ext))
-            }).collect::<Vec<_>>();
+            let doc_types = options
+                .filters
+                .iter()
+                .flat_map(|f| f.extensions.iter().map(|ext| format!("public.{}", ext)))
+                .collect::<Vec<_>>();
 
             if doc_types.is_empty() {
                 UIDocumentPickerViewController::initWithDocumentTypes_inMode(
@@ -455,17 +551,19 @@ mod imp {
             // Must run on main thread
             let picker_ref = &picker;
             let delegate_ref = delegate_ptr;
-            
+
             // Configure picker
             picker_ref.setAllowsMultipleSelection(multi);
             picker_ref.setDelegate(Some(delegate_ptr));
-            
+
             // Present the picker
-            if let Some(window_scene) = unsafe { 
-                UIApplication::sharedApplication().connectedScenes()
-            }.firstObject() {
+            if let Some(window_scene) =
+                unsafe { UIApplication::sharedApplication().connectedScenes() }.firstObject()
+            {
                 if let Some(window_scene) = window_scene.downcast::<UIWindowScene>() {
-                    if let Some(root_vc) = window_scene.windows().firstObject()?.rootViewController() {
+                    if let Some(root_vc) =
+                        window_scene.windows().firstObject()?.rootViewController()
+                    {
                         let _: () = msg_send![root_vc, presentViewController:picker_ref animated:YES completion:nil];
                     }
                 }
@@ -476,7 +574,10 @@ mod imp {
         let (lock, cvar) = &*result_arc;
         let mut result = lock.lock().unwrap();
         while result.is_none() {
-            result = cvar.wait_timeout(result, Duration::from_secs(30)).unwrap().0;
+            result = cvar
+                .wait_timeout(result, Duration::from_secs(30))
+                .unwrap()
+                .0;
         }
         Ok(result.take().unwrap())
     }
@@ -563,7 +664,13 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos", target_os = "ios", target_os = "android")))]
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
 mod imp {
     use super::{FileDialogError, PathBuf, PickOptions};
 

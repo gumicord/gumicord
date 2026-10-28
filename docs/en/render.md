@@ -89,9 +89,11 @@ survive. Key items: `surviving_backends()`, `run_probe()`.
 `write_diag_file()`, `Application`, `Waker`. The IME candidate area takes the whole input
 field.
 
-### `src/file_dialog.rs` — Desktop native file picker. Key items:
-`PickOptions`, `FileFilter`, `FileDialogError`, `pick_file()`.
-Cancellation comes back empty. Phones stay unsupported.
+### `src/file_dialog.rs` — OS-native file picker on every platform. Key
+items: `PickOptions`, `FileFilter`, `FileDialogError`, `pick_file()`.
+Cancellation comes back empty. Android hands back a cache copy of the
+picked document and answers `Unsupported` for saving (a SAF destination is
+not a filesystem path).
 
 ### `src/window.rs` — Decoration-less window and on-demand-redraw event
 loop. Titlebar-area drag moves, 6px edge resize, press/release-split

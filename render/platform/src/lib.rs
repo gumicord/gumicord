@@ -47,10 +47,6 @@ pub use captcha::WryCaptcha;
 pub use captcha::WryCaptcha;
 pub use captcha::{CaptchaChallenge, CaptchaError, CaptchaHost, Host, SolvedCaptcha};
 pub use clipboard::ClipboardError;
-#[cfg(target_os = "android")]
-pub use clipboard::init;
-#[cfg(target_os = "android")]
-pub use file_dialog::init;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;
 pub use file_dialog::FileDialogError;

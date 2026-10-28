@@ -24,7 +24,7 @@
   (`%APPDATA%\gumicord\logs`、macOS／Linux は設定先の `logs/`)
 - 済: CRT 静的リンク。再頒布 `VCRUNTIME140`／`MSVCP140` 参照なしを確認
 - 済: デスクトップのファイル選択基盤 (`rfd`＋試験＋手動 smoke)。呼ぶ画面はまだ無い
-- 済: 署名・公証の secrets 対応 (未設定なら未署名のまま)。`packaging/README.md` に手順
+- 済: 署名・公証の secrets 対応 (未設定なら ad-hoc 署名で作り、通常の未署名警告に落とす)。`packaging/README.md` に手順
 - 済: Windows blessed 画像の登録 (`render/tests/screenshots/windows/`)。CI 照合が実ゲート化
 - 済: Linux の `desktop-file-validate` と AppImage 展開検査の CI 化
 - 済 (2026-10-24): `FR-007` (`ADR-0018`) — セキュアストレージ拒否時のトースト通知。仕様・コード・テスト完了、コミット済み (`ecc70f5`)
@@ -34,6 +34,13 @@
   確認してから登録 (2026-10-23)。macOS は GPU 付きランナが要るため
   CI 対象外のまま
 - 待ち: 署名・公証の実実行 (Apple Developer Program の参加と secrets 登録が要る)
+- 記録 (2026-10-28): v0.0.3 の配布物は壊れていた。APK は完全未署名で
+  `INSTALL_PARSE_FAILED_NO_CERTIFICATES` になり (端末では「パッケージが無効の
+  可能性があるため、インストールできませんでした」)、macOS の dmg は `.app` が
+  未署名のため Apple Silicon が「壊れている」と表示した。修正は次版に載る
+  (`release.yml` は既存リリースを上書きしない): Android の release を同梱の
+  debug keystore で署名し、macOS は secrets 未設定なら ad-hoc 署名する。
+  **v0.0.4 の実物**で `apksigner verify` と Gatekeeper の挙動を確認すること
 
 ### 状態
 
@@ -88,8 +95,16 @@
   crate 内同梱から GitHub の `maven-archive` に移ったため、Gradle 解決を
   通すのは CI の nightly だけ
 - Android のセッション途中切断 (2026-10-02 新規): **実機で再現せず・要因不明のまま解消**。QR 表示中の idle 中に `ECONNABORTED (os error 103)` で落ちる報告があったが、後のビルド (adjustResize + configChanges 適用後) で実機確認時に再現せず。`RemoteAuthError::Dropped` 扱いは session.rs で未分離のままだが、現状再現しないため保留。
-- 触って切り替える操作とセーフエリア、Android のクリップボード
-- D4: Android ファイル選択 (Storage Access Framework) **完了** — `FilePickerHelper.kt` 実装済み、JNI 経由で単体/複数/フォルダ/保存に対応
+- 触って切り替える操作とセーフエリアは残り。Android のクリップボード (文字・画像) は
+  **実装済み・実機未確認** — 文字は `ClipboardHelper`、画像は FileProvider 経由
+  (MediaStore は API 29 未満で権限が要り、ギャラリーを汚すため使わない)
+- D4: Android ファイル選択 (Storage Access Framework) **実装済み・実機未確認** —
+  `FilePickerHelper.kt` を Activity Result API で実装 (`GameActivity` は
+  `onActivityResult` を転送しないため旧 `startActivityForResult` は結果が来なかった)。
+  JNI 経由で単体/複数/フォルダに対応。選んだ文書はキャッシュへ複製してから Rust に
+  渡す (Scoped Storage では SAF の URI を `std::fs` で読めない)。**保存は未対応**:
+  宛先が SAF 文書で `std::fs` から書けないため `Unsupported` を返す。バイト列を
+  受け取る保存口が要る
 - D4: iOS ファイル選択 (UIDocumentPickerViewController) **完了** — `file_dialog.rs` iOS 実装追加、UIDocumentPickerViewController 経由で単体/複数/フォルダ/保存に対応。Linux/macOS は rfd 経由で実装済み
 - 一員行の行き先 (プロフィール表示) は将来のまま。複数指は対象外
 - iPad Stage Manager の窓化時の上部余白: `safe area changed` ログで inset 実測値を取ること

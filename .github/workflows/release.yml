@@ -6,8 +6,9 @@ name: Release
 # fails if its output already exists, so a broken release is fixed by
 # cutting a new version, never by editing files in place.
 #
-# Desktop only for now: the mobile legs ship debug/unsigned builds, which
-# is fine for a nightly channel but not for a versioned release.
+# Mobile legs ship sideload-only builds: Android is signed with the
+# committed, trust-free debug key (Android refuses unsigned APKs), and iOS
+# stays unsigned for AltStore to re-sign.
 
 on:
   workflow_dispatch:
@@ -93,8 +94,9 @@ jobs:
           - label: macos
             os: macos-latest
             bin: gumicord
-          # Stable ships unsigned release mobile builds for sideloading
-          # and the AltStore source (see packaging/README.md).
+          # Stable ships release mobile builds for sideloading and the
+          # AltStore source (see packaging/README.md). Android is signed with
+          # the committed debug key; the IPA stays unsigned.
           - label: ios
             os: macos-latest
           - label: android
@@ -149,8 +151,8 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      # Unsigned release builds for sideloading (no signing identity yet,
-      # same as nightlies). The Rust cdylib builds --release like CI.
+      # Signed with the committed, trust-free debug key (build.gradle):
+      # Android will not install an unsigned APK at all.
       - name: Build APK
         if: matrix.label == 'android'
         env:
@@ -284,7 +286,7 @@ jobs:
             -o Gumicord.app/Contents/Resources/Gumicord.icns
 
       # Opt-in: signs only when the certificate secrets exist, so forks
-      # and unconfigured repos keep building unsigned dmg files. The
+      # and unconfigured repos keep building ad-hoc-signed dmg files. The
       # presence check lives in the script: the secrets context is not
       # available in a step's if condition.
       - name: Sign app bundle
@@ -295,7 +297,12 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: |
           if [ -z "$MACOS_CERT_P12" ]; then
-            echo "signing secrets are not configured; leaving the bundle unsigned"
+            # An unsigned bundle is rejected by Apple Silicon as "damaged",
+            # not merely unrecognised. An ad-hoc signature gives it the
+            # ordinary unidentified-developer warning instead.
+            /usr/bin/codesign --force --deep --sign - Gumicord.app
+            /usr/bin/codesign --verify --deep --strict Gumicord.app
+            echo "signing secrets are not configured; the bundle is ad-hoc signed"
             exit 0
           fi
           echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
@@ -363,7 +370,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ inputs.tag }}-android
-          path: app/android/app/build/outputs/apk/stable/release/app-stable-release-unsigned.apk
+          path: app/android/app/build/outputs/apk/stable/release/app-stable-release.apk
           retention-days: 14
 
       - name: Upload IPA
@@ -405,7 +412,7 @@ jobs:
           mv dist/release-$TAG-linux/gumicord-*.deb dist/gumicord-$TAG-linux.deb
           mv dist/release-$TAG-macos/Gumicord.dmg dist/gumicord-$TAG-macos.dmg
           mv dist/release-$TAG-ios/Gumicord-unsigned.ipa dist/gumicord-$TAG.ipa
-          mv dist/release-$TAG-android/app-stable-release-unsigned.apk dist/gumicord-$TAG.apk
+          mv dist/release-$TAG-android/app-stable-release.apk dist/gumicord-$TAG.apk
           for entry in windows linux macos; do
             case "$entry" in
               windows) bin=gumicord.exe ;;
@@ -452,10 +459,11 @@ jobs:
             dist/apps-stable.json
           fail_on_unmatched_files: true
           body: |
-            Gumicord ${{ inputs.tag }}: Windows / Linux / macOS, Linux .deb, unsigned release APK and IPA for sideloading.
+            Gumicord ${{ inputs.tag }}: Windows / Linux / macOS, Linux .deb, release APK (debug-key signed) and unsigned IPA for sideloading.
             Built from https://github.com/${{ github.repository }}/commit/${{ needs.guard.outputs.sha }}.
-            Unsigned unless the signing secrets are configured: see
-            packaging/README.md for what turns signatures on.
+            The APK is signed with the committed debug key and the IPA is
+            unsigned; macOS is ad-hoc signed unless the Apple signing secrets
+            are configured: see packaging/README.md.
             AltStore source: https://gumicord.github.io/gumicord-sources/apps-stable.json
 
             WARNING: connecting to Discord with a third-party client breaks
