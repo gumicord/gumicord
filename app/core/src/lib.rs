@@ -3644,7 +3644,11 @@ fn scene_messages() -> Vec<gumicord_model::Message> {
             mention_everyone: false,
         };
     let message_with_attachments =
-        |id: u64, author: gumicord_model::User, at: &str, content: &str, atts: Vec<gumicord_model::Attachment>| gumicord_model::Message {
+        |id: u64,
+         author: gumicord_model::User,
+         at: &str,
+         content: &str,
+         atts: Vec<gumicord_model::Attachment>| gumicord_model::Message {
             id: MessageId::from(id),
             channel_id: ChannelId::from(SCENE_CHANNEL),
             guild_id: None,
@@ -3659,9 +3663,15 @@ fn scene_messages() -> Vec<gumicord_model::Message> {
             mentions: Vec::new(),
             mention_everyone: false,
         };
-    let att_png = gumicord_model::Attachment::from_file(std::path::Path::new("render/tests/attachments/fr-025-test.png"));
-    let att_wav = gumicord_model::Attachment::from_file(std::path::Path::new("render/tests/attachments/fr-025-test.wav"));
-    let att_txt = gumicord_model::Attachment::from_file(std::path::Path::new("render/tests/attachments/fr-030-test.txt"));
+    let att_png = gumicord_model::Attachment::from_file(std::path::Path::new(
+        "render/tests/attachments/fr-025-test.png",
+    ));
+    let att_wav = gumicord_model::Attachment::from_file(std::path::Path::new(
+        "render/tests/attachments/fr-025-test.wav",
+    ));
+    let att_txt = gumicord_model::Attachment::from_file(std::path::Path::new(
+        "render/tests/attachments/fr-030-test.txt",
+    ));
     let attachments_1 = [att_png, att_wav, att_txt]
         .into_iter()
         .filter_map(|a| a)
