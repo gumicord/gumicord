@@ -437,7 +437,7 @@ jobs:
           cargo xtask altstore --channel stable --tag "$TAG" \
             --ipa "dist/gumicord-$TAG.ipa" \
             --commit "${SHA::7}" --commit-message "$MSG" --date "$DATE" \
-            --out dist/apps-stable.json
+            --out dist/apps.json
 
       - name: Create and push the tag
         run: |
@@ -456,7 +456,7 @@ jobs:
             dist/*.dmg
             dist/*.apk
             dist/*.ipa
-            dist/apps-stable.json
+            dist/apps.json
           fail_on_unmatched_files: true
           body: |
             Gumicord ${{ inputs.tag }}: Windows / Linux / macOS, Linux .deb, release APK (debug-key signed) and unsigned IPA for sideloading.
@@ -464,7 +464,7 @@ jobs:
             The APK is signed with the committed debug key and the IPA is
             unsigned; macOS is ad-hoc signed unless the Apple signing secrets
             are configured: see packaging/README.md.
-            AltStore source: https://gumicord.github.io/gumicord-sources/apps-stable.json
+            AltStore source: https://gumicord.github.io/gumicord-sources/apps.json
 
             WARNING: connecting to Discord with a third-party client breaks
               their terms of service and can cost you your account.
@@ -487,11 +487,11 @@ jobs:
           rm -rf "$RUNNER_TEMP/sources" && git clone --depth 1 \
             "https://x-access-token:$GH_TOKEN@github.com/gumicord/gumicord-sources.git" \
             "$RUNNER_TEMP/sources"
-          cp dist/apps-stable.json "$RUNNER_TEMP/sources/"
+          cp dist/apps.json "$RUNNER_TEMP/sources/"
           cd "$RUNNER_TEMP/sources"
           git config user.name "gumicord-release[bot]"
           git config user.email "gumicord-release[bot]@users.noreply.github.com"
-          git add apps-stable.json
+          git add apps.json
           git commit -m "stable $TAG" || exit 0
           git push origin main
 
@@ -500,8 +500,8 @@ jobs:
         run: |
           TAG="${{ inputs.tag }}"
           for i in $(seq 1 30); do
-            if curl -fsSL https://gumicord.github.io/gumicord-sources/apps-stable.json \
+            if curl -fsSL https://gumicord.github.io/gumicord-sources/apps.json \
               | grep -qF -- "$TAG"; then exit 0; fi
             sleep 20
           done
-          echo "apps-stable.json not serving $TAG" >&2; exit 1
+          echo "apps.json not serving $TAG" >&2; exit 1

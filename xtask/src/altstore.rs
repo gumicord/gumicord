@@ -14,7 +14,7 @@
 //!     cargo xtask altstore --channel nightly --tag nightly-20260926-abcdef1 \
 //!       --ipa dist/gumicord-nightly-20260926-abcdef1.ipa --commit abcdef1 \
 //!       --commit-message "..." --date 2026-09-26T12:00:00+00:00 \
-//!       --out dist/apps-nightly.json
+//!       --out dist/apps.json
 //!
 //! With `--print-version` (and only `--channel` plus `--tag`) it prints
 //! the app version the source would advertise and writes nothing: CI
@@ -124,7 +124,7 @@ fn source_json(
     } else {
         format!("Stable release {tag} (unsigned build).")
     };
-    let repo = "gumicord/gumicord";
+    let repo = "gumicord/gumicord-sources";
     let app_name = if nightly {
         "Gumicord Nightly"
     } else {

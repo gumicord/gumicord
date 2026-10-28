@@ -589,7 +589,7 @@ jobs:
           cargo xtask altstore --channel nightly --tag "$TAG" \
             --ipa "dist/gumicord-$TAG.ipa" \
             --commit "${SHA::7}" --commit-message "$MSG" --date "$DATE" \
-            --out dist/apps-nightly.json
+            --out dist/apps.json
 
       # Short-lived installation token (expires after the run); the key
       # itself never expires, so there is nothing to rotate yearly.
@@ -614,7 +614,7 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.dmg
-            dist/apps-nightly.json
+            dist/apps.json
           fail_on_unmatched_files: true
           body: |
             Automated nightly for https://github.com/${{ github.repository }}/commit/${{ github.sha }}.
@@ -624,7 +624,7 @@ jobs:
             - Desktop builds (Windows / Linux / macOS), Linux AppImage, Linux .deb, unsigned macOS dmg,
               debug APK (arm64 + x86_64) and unsigned IPA for sideloading.
             - Debug builds: slower, larger, logging enabled. No signing identity exists yet.
-            - AltStore source: https://gumicord.github.io/gumicord-sources/apps-nightly.json
+            - AltStore source: https://gumicord.github.io/gumicord-sources/apps.json
             - WARNING: connecting to Discord with a third-party client breaks
               their terms of service and can cost you your account.
 
@@ -646,7 +646,7 @@ jobs:
               missing=1
             fi
           done
-          echo "$names" | grep -qF -- apps-nightly.json || { echo "missing apps-nightly.json"; missing=1; }
+          echo "$names" | grep -qF -- apps.json || { echo "missing apps.json"; missing=1; }
           [ "$missing" -eq 0 ]
 
       # The AltStore source lives in its own repository, served over
@@ -667,11 +667,11 @@ jobs:
           rm -rf "$RUNNER_TEMP/sources" && git clone --depth 1 \
             "https://x-access-token:$GH_TOKEN@github.com/gumicord/gumicord-sources.git" \
             "$RUNNER_TEMP/sources"
-          cp dist/apps-nightly.json "$RUNNER_TEMP/sources/"
+          cp dist/apps.json "$RUNNER_TEMP/sources/"
           cd "$RUNNER_TEMP/sources"
           git config user.name "gumicord-nightly[bot]"
           git config user.email "gumicord-nightly[bot]@users.noreply.github.com"
-          git add apps-nightly.json
+          git add apps.json
           git commit -m "nightly $TAG" || exit 0
           git push origin main
 
@@ -680,11 +680,11 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.name }}"
           for i in $(seq 1 30); do
-            if curl -fsSL https://gumicord.github.io/gumicord-sources/apps-nightly.json \
+            if curl -fsSL https://gumicord.github.io/gumicord-sources/apps.json \
               | grep -qF -- "$TAG"; then exit 0; fi
             sleep 20
           done
-          echo "apps-nightly.json not serving $TAG" >&2; exit 1
+          echo "apps.json not serving $TAG" >&2; exit 1
 
   # ────────────────────────────────────────────────────────────
   # Confirms rust-version in Cargo.toml is true. A declared value nobody
