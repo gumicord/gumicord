@@ -3643,12 +3643,36 @@ fn scene_messages() -> Vec<gumicord_model::Message> {
             mentions: Vec::new(),
             mention_everyone: false,
         };
+    let message_with_attachments =
+        |id: u64, author: gumicord_model::User, at: &str, content: &str, atts: Vec<gumicord_model::Attachment>| gumicord_model::Message {
+            id: MessageId::from(id),
+            channel_id: ChannelId::from(SCENE_CHANNEL),
+            guild_id: None,
+            author,
+            content: content.to_owned(),
+            timestamp: at.to_owned(),
+            edited_timestamp: None,
+            pinned: false,
+            attachments: atts,
+            member: None,
+            referenced_message: None,
+            mentions: Vec::new(),
+            mention_everyone: false,
+        };
+    let att_png = gumicord_model::Attachment::from_file(std::path::Path::new("render/tests/attachments/fr-025-test.png"));
+    let att_wav = gumicord_model::Attachment::from_file(std::path::Path::new("render/tests/attachments/fr-025-test.wav"));
+    let att_txt = gumicord_model::Attachment::from_file(std::path::Path::new("render/tests/attachments/fr-030-test.txt"));
+    let attachments_1 = [att_png, att_wav, att_txt]
+        .into_iter()
+        .filter_map(|a| a)
+        .collect::<Vec<_>>();
     vec![
-        message(
+        message_with_attachments(
             1,
             author(7, "ねんねこ"),
             "2026-09-03T12:00:00+00:00",
             "新しい詳細を配作了。 everyone で確認を。",
+            attachments_1.clone(),
         ),
         message(
             2,

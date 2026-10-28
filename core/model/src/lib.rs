@@ -447,7 +447,10 @@ impl Attachment {
     }
 
     /// Build an attachment from a local file path (FR-025 display, FR-030 send).
-    /// Uses the file's metadata; the URL is just the absolute path.
+    /// The `content_type` is a best-effort guess from the file extension; real
+    /// attachments receive it from the Discord API (`content_type` field),
+    /// which takes precedence. The URL points to the absolute file path for
+    /// the picker result; for API attachments it is the CDN URL.
     pub fn from_file(path: std::path::Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
         let filename = path.file_name()?.to_string_lossy().to_string();
