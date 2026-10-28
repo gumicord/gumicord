@@ -65,7 +65,7 @@ rfd.workspace = true
 objc2.workspace = true
 objc2-core-foundation.workspace = true
 objc2-foundation.workspace = true
-objc2-ui-kit.workspace = true
+objc2-ui-kit = { workspace = true, features = ["UIApplication", "UIDocumentPickerViewController", "UIScene", "UIWindowScene", "UIViewController"] }
 block2.workspace = true
 png.workspace = true
 raw-window-handle.workspace = true

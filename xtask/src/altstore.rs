@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(app["bundleIdentifier"], "dev.gumicord.nightly");
         assert_eq!(
             app["downloadURL"],
-            "https://github.com/gumicord/gumicord-nightly/releases/download/nightly-20260926-abcdef1/gumicord-nightly-20260926-abcdef1.ipa"
+            "https://github.com/gumicord/gumicord-sources/releases/download/nightly-20260926-abcdef1/gumicord-nightly-20260926-abcdef1.ipa"
         );
         assert_eq!(app["size"], 42000000);
         assert!(validate(&nightly()).is_ok());

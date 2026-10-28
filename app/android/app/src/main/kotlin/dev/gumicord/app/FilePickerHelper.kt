@@ -187,7 +187,7 @@ class FilePickerHelper(private val activity: Activity) {
         // A folder has no filesystem path under scoped storage, so its SAF
         // URI is what comes back. Copying a whole tree is not a pick anyway.
         val path = when (kind) {
-            FilePickerBridge.FOLDER => uri.toString()
+            FilePickerBridge.FOLDER -> uri.toString()
             else -> {
                 val copied = cacheCopy(uri, 0)
                 if (copied == null) {
@@ -197,11 +197,7 @@ class FilePickerHelper(private val activity: Activity) {
                 copied
             }
         }
-        if (path == null) {
-            FilePickerBridge.onResult(FilePickerBridge.FAILED, null, null)
-        } else {
-            FilePickerBridge.onResult(kind, path, null)
-        }
+        FilePickerBridge.onResult(kind, path, null)
     }
 
     /** Empties the past picks; their caller has read them by now. */

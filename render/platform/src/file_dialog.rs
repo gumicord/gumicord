@@ -449,17 +449,17 @@ mod imp {
 #[cfg(target_os = "ios")]
 mod imp {
     use super::{FileDialogError, PathBuf, PickOptions};
+    use objc2::define_class;
     use objc2::rc::Retained;
-    use objc2::{class, msg_send, sel};
-    use objc2_foundation::{NSArray, NSString, NSURL};
+    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, msg_send};
+    use objc2_foundation::{NSArray, NSObject, NSString, NSURL};
     use objc2_ui_kit::{
         UIApplication, UIDocumentPickerDelegate, UIDocumentPickerMode,
-        UIDocumentPickerViewController, UIScene, UIViewController, UIWindowScene,
+        UIDocumentPickerViewController, UIWindowScene,
     };
-    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
-
-    static PICKER_RESULT: OnceLock<Arc<(Mutex<Option<PickerResult>>, Condvar)>> = OnceLock::new();
 
     #[derive(Debug)]
     enum PickerResult {
@@ -471,185 +471,169 @@ mod imp {
         Failed(String),
     }
 
-    // UIDocumentPickerDelegate implementation
-    #[allow(non_camel_case_types)]
-    #[derive(Debug)]
-    struct DocumentPickerDelegate {
+    struct DelegateState {
         result: Arc<(Mutex<Option<PickerResult>>, Condvar)>,
         mode: UIDocumentPickerMode,
     }
 
-    impl DocumentPickerDelegate {
-        fn new(
-            result: Arc<(Mutex<Option<PickerResult>>, Condvar)>,
-            mode: UIDocumentPickerMode,
-        ) -> Self {
-            Self { result, mode }
-        }
-    }
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "GumicordDocumentPickerDelegate"]
+        #[ivars = DelegateState]
+        struct DocumentPickerDelegate;
 
-    unsafe impl UIDocumentPickerDelegate for DocumentPickerDelegate {
-        #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
-        fn documentPicker_didPickDocumentsAtURLs(
-            &self,
-            _controller: &UIDocumentPickerViewController,
-            urls: &NSArray<NSURL>,
-        ) {
-            let (lock, cvar) = &*self.result;
-            let mut result = lock.lock().unwrap();
-            let count = urls.count();
-            if count == 0 {
-                *lock.lock().unwrap() = Some(PickerResult::Cancelled);
-                cvar.notify_one();
-                return;
-            }
+        unsafe impl NSObjectProtocol for DocumentPickerDelegate {}
 
-            let mut paths = Vec::new();
-            for i in 0..count {
-                if let Some(url) = urls.objectAtIndex(i) {
-                    if let Ok(path) = url.filePath() {
-                        paths.push(PathBuf::from(path));
+        unsafe impl UIDocumentPickerDelegate for DocumentPickerDelegate {
+            #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
+            fn documentPicker_didPickDocumentsAtURLs(
+                &self,
+                _controller: &UIDocumentPickerViewController,
+                urls: &NSArray<NSURL>,
+            ) {
+                let state = self.ivars();
+                let mut paths = Vec::new();
+                for index in 0..urls.count() {
+                    let url = urls.objectAtIndex(index);
+                    if let Some(path) = url.path() {
+                        paths.push(PathBuf::from(path.to_string()));
                     }
                 }
+                let value = if paths.is_empty() {
+                    PickerResult::Cancelled
+                } else {
+                    match state.mode {
+                        UIDocumentPickerMode::Import if paths.len() > 1 => {
+                            PickerResult::Files(paths)
+                        }
+                        UIDocumentPickerMode::Open => PickerResult::Folder(paths.remove(0)),
+                        UIDocumentPickerMode::ExportToService => {
+                            PickerResult::Save(paths.remove(0))
+                        }
+                        _ => PickerResult::File(paths.remove(0)),
+                    }
+                };
+                *state.result.0.lock().unwrap() = Some(value);
+                state.result.1.notify_one();
             }
 
-            let result = match self.mode {
-                UIDocumentPickerMode::Import if paths.len() > 1 => PickerResult::Files(paths),
-                UIDocumentPickerMode::Import => {
-                    PickerResult::File(paths.into_iter().next().unwrap())
-                }
-                UIDocumentPickerMode::Open => PickerResult::File(paths.into_iter().next().unwrap()),
-                UIDocumentPickerMode::ExportToService => {
-                    PickerResult::Save(paths.into_iter().next().unwrap())
-                }
-                _ => PickerResult::File(paths.into_iter().next().unwrap()),
-            };
-            *lock.lock().unwrap() = Some(result);
-            cvar.notify_one();
+            #[unsafe(method(documentPickerWasCancelled:))]
+            fn documentPickerWasCancelled(&self, _controller: &UIDocumentPickerViewController) {
+                let state = self.ivars();
+                *state.result.0.lock().unwrap() = Some(PickerResult::Cancelled);
+                state.result.1.notify_one();
+            }
         }
+    );
 
-        #[unsafe(method(documentPickerWasCancelled:))]
-        fn documentPickerWasCancelled(&self, _controller: &UIDocumentPickerViewController) {
-            let (lock, cvar) = &*self.result;
-            *lock.lock().unwrap() = Some(PickerResult::Cancelled);
-            cvar.notify_one();
-        }
-    }
-
-    pub fn init(_vm: *mut std::ffi::c_void, _activity: *mut std::ffi::c_void) {
-        // iOS doesn't need initialization
-    }
+    pub fn init(_vm: *mut std::ffi::c_void, _activity: *mut std::ffi::c_void) {}
 
     fn run_picker(
         options: &PickOptions,
         mode: UIDocumentPickerMode,
         multi: bool,
     ) -> Result<PickerResult, FileDialogError> {
-        let result_arc = Arc::new((Mutex::new(None), Condvar::new()));
-        let delegate = DocumentPickerDelegate::new(result_arc.clone(), mode);
-
-        // Create the picker on the main thread
-        let picker = {
-            let doc_types = options
-                .filters
-                .iter()
-                .flat_map(|f| f.extensions.iter().map(|ext| format!("public.{}", ext)))
-                .collect::<Vec<_>>();
-
-            if doc_types.is_empty() {
-                UIDocumentPickerViewController::initWithDocumentTypes_inMode(
-                    UIDocumentPickerViewController::alloc(),
-                    &NSArray::from_vec(&["public.content"]),
-                    mode,
-                )
-            } else {
-                let types_array = NSArray::from_vec(doc_types);
-                UIDocumentPickerViewController::initWithDocumentTypes_inMode(
-                    UIDocumentPickerViewController::alloc(),
-                    &types_array,
-                    mode,
-                )
-            }
+        let mtm = MainThreadMarker::new()
+            .ok_or(FileDialogError::Failed("picker requires the main thread"))?;
+        let result = Arc::new((Mutex::new(None), Condvar::new()));
+        let delegate: Retained<DocumentPickerDelegate> = unsafe {
+            let this = DocumentPickerDelegate::alloc(mtm).set_ivars(DelegateState {
+                result: result.clone(),
+                mode,
+            });
+            msg_send![super(this), init]
         };
+        let mut types = options
+            .filters
+            .iter()
+            .flat_map(|filter| {
+                filter
+                    .extensions
+                    .iter()
+                    .map(|extension| format!("public.{extension}"))
+            })
+            .map(|value| NSString::from_str(&value))
+            .collect::<Vec<Retained<NSString>>>();
+        if types.is_empty() {
+            types.push(NSString::from_str("public.content"));
+        }
+        let types = NSArray::from_retained_slice(&types);
+        let picker = UIDocumentPickerViewController::initWithDocumentTypes_inMode(
+            UIDocumentPickerViewController::alloc(mtm),
+            &types,
+            mode,
+        );
+        picker.setAllowsMultipleSelection(multi);
+        let delegate_ref: &ProtocolObject<dyn UIDocumentPickerDelegate> =
+            ProtocolObject::from_ref(&*delegate);
+        picker.setDelegate(Some(delegate_ref));
 
-        // Configure the picker on the main thread
-        let delegate_ptr = Box::leak(Box::new(delegate));
-        let result_arc_clone = result_arc.clone();
-        unsafe {
-            // Must run on main thread
-            let picker_ref = &picker;
-            let delegate_ref = delegate_ptr;
-
-            // Configure picker
-            picker_ref.setAllowsMultipleSelection(multi);
-            picker_ref.setDelegate(Some(delegate_ptr));
-
-            // Present the picker
-            if let Some(window_scene) =
-                unsafe { UIApplication::sharedApplication().connectedScenes() }.firstObject()
-            {
-                if let Some(window_scene) = window_scene.downcast::<UIWindowScene>() {
-                    if let Some(root_vc) =
-                        window_scene.windows().firstObject()?.rootViewController()
-                    {
-                        let _: () = msg_send![root_vc, presentViewController:picker_ref animated:YES completion:nil];
-                    }
-                }
-            }
+        let app = UIApplication::sharedApplication(mtm);
+        if let Some(scene) = app.connectedScenes().anyObject()
+            && let Ok(scene) = scene.downcast::<UIWindowScene>()
+            && let Some(window) = scene.windows().firstObject()
+            && let Some(controller) = window.rootViewController()
+        {
+            controller.presentViewController_animated_completion(&picker, true, None);
         }
 
-        // Wait for result
-        let (lock, cvar) = &*result_arc;
-        let mut result = lock.lock().unwrap();
-        while result.is_none() {
-            result = cvar
-                .wait_timeout(result, Duration::from_secs(30))
+        let (lock, cvar) = &*result;
+        let mut answer = lock.lock().unwrap();
+        while answer.is_none() {
+            answer = cvar
+                .wait_timeout(answer, Duration::from_secs(30))
                 .unwrap()
                 .0;
         }
-        Ok(result.take().unwrap())
+        Ok(answer.take().unwrap())
     }
 
     pub fn pick_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        let result = run_picker(options, UIDocumentPickerMode::Import, false)?;
-        Ok(match result {
-            PickerResult::File(p) => Some(p),
-            PickerResult::Cancelled => None,
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
-            _ => None,
-        })
+        Ok(
+            match run_picker(options, UIDocumentPickerMode::Import, false)? {
+                PickerResult::File(path) => Some(path),
+                PickerResult::Cancelled | PickerResult::Files(_) => None,
+                PickerResult::Folder(_) | PickerResult::Save(_) | PickerResult::Failed(_) => None,
+            },
+        )
     }
 
     pub fn pick_files(options: &PickOptions) -> Result<Vec<PathBuf>, FileDialogError> {
-        let result = run_picker(options, UIDocumentPickerMode::Import, true)?;
-        Ok(match result {
-            PickerResult::Files(v) => v,
-            PickerResult::Cancelled => Vec::new(),
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
-            _ => Vec::new(),
-        })
+        Ok(
+            match run_picker(options, UIDocumentPickerMode::Import, true)? {
+                PickerResult::Files(paths) => paths,
+                PickerResult::File(path) => vec![path],
+                PickerResult::Cancelled => Vec::new(),
+                PickerResult::Folder(_) | PickerResult::Save(_) | PickerResult::Failed(_) => {
+                    Vec::new()
+                }
+            },
+        )
     }
 
     pub fn pick_folder(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        let result = run_picker(options, UIDocumentPickerMode::Open, false)?;
-        Ok(match result {
-            PickerResult::Folder(p) => Some(p),
-            PickerResult::File(p) => Some(p),
-            PickerResult::Cancelled => None,
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
-            _ => None,
-        })
+        Ok(
+            match run_picker(options, UIDocumentPickerMode::Open, false)? {
+                PickerResult::Folder(path) | PickerResult::File(path) => Some(path),
+                PickerResult::Cancelled
+                | PickerResult::Files(_)
+                | PickerResult::Save(_)
+                | PickerResult::Failed(_) => None,
+            },
+        )
     }
 
     pub fn save_file(options: &PickOptions) -> Result<Option<PathBuf>, FileDialogError> {
-        let result = run_picker(options, UIDocumentPickerMode::ExportToService, false)?;
-        Ok(match result {
-            PickerResult::Save(p) => Some(p),
-            PickerResult::File(p) => Some(p),
-            PickerResult::Cancelled => None,
-            PickerResult::Failed(e) => return Err(FileDialogError::Failed(&e)),
-            _ => None,
-        })
+        Ok(
+            match run_picker(options, UIDocumentPickerMode::ExportToService, false)? {
+                PickerResult::Save(path) | PickerResult::File(path) => Some(path),
+                PickerResult::Cancelled
+                | PickerResult::Files(_)
+                | PickerResult::Folder(_)
+                | PickerResult::Failed(_) => None,
+            },
+        )
     }
 }
 
