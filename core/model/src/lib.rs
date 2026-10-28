@@ -451,7 +451,7 @@ impl Attachment {
     /// attachments receive it from the Discord API (`content_type` field),
     /// which takes precedence. The URL points to the absolute file path for
     /// the picker result; for API attachments it is the CDN URL.
-    pub fn from_file(path: std::path::Path) -> Option<Self> {
+    pub fn from_file(path: &std::path::Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
         let filename = path.file_name()?.to_string_lossy().to_string();
         let size = meta.len();
@@ -470,7 +470,7 @@ impl Attachment {
             })
             .flatten();
         Some(Attachment {
-            id: AttachmentId::new(),
+            id: AttachmentId::from(meta.len()),
             filename,
             size,
             url: path.canonicalize().ok()?.to_string_lossy().to_string(),

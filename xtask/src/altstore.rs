@@ -1,4 +1,9 @@
-//! AltStore source generation, one file per channel.
+//! AltStore source generation, consolidated for both channels.
+//!
+//! Stable and nightly share the same repository reference and icon assets
+//! (packaging/icons/app-icon.png, app-icon-nightly.png, updated from
+//! assets/app-icon-desktop.png and assets/app-icon-nightly.png). The JSON
+//! is built per-channel but points at the same consolidated sources.
 //!
 //! The JSON is built in CI after the installable is published: it points
 //! at the release asset by its final name, so generation runs after the
@@ -119,11 +124,7 @@ fn source_json(
     } else {
         format!("Stable release {tag} (unsigned build).")
     };
-    let repo = if nightly {
-        "gumicord/gumicord-nightly"
-    } else {
-        "gumicord/gumicord"
-    };
+    let repo = "gumicord/gumicord";
     let app_name = if nightly {
         "Gumicord Nightly"
     } else {
