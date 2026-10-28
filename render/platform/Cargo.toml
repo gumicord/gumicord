@@ -23,6 +23,7 @@ webview-linux = ["dep:wry", "dep:gtk"]
 keychain = ["dep:keyring"]
 
 [dependencies]
+gumicord-model.workspace = true
 gumicord-render.workspace = true
 gumicord-uitree.workspace = true
 winit.workspace = true
