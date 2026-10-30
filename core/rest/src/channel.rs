@@ -107,6 +107,29 @@ impl RestClient {
         self.send(Route::create_message(channel), Some(&body)).await
     }
 
+    /// Posts a message and its local files as one multipart request.
+    pub async fn create_message_with_files(
+        &self,
+        channel: ChannelId,
+        content: &str,
+        reply_to: Option<MessageId>,
+        reply_mention: bool,
+        files: Vec<(String, Vec<u8>)>,
+    ) -> Result<Message, RestError> {
+        let mut payload =
+            serde_json::to_value(create_message_body(content, reply_to, reply_mention))
+                .map_err(RestError::Decode)?;
+        payload["attachments"] = serde_json::Value::Array(
+            files
+                .iter()
+                .enumerate()
+                .map(|(index, (name, _))| serde_json::json!({ "id": index, "filename": name }))
+                .collect(),
+        );
+        self.send_multipart(Route::create_message(channel), payload, files)
+            .await
+    }
+
     /// Edits a message. Editing someone else's returns 403; not offering the
     /// action comes first, and this is the layer behind that.
     pub async fn edit_message(
@@ -184,9 +207,18 @@ impl RestClient {
     /// Oversized responses are dropped. What the CDN returns is not under our
     /// control, and one image must not exhaust memory.
     pub async fn fetch_cdn(&self, url: &str) -> Result<Vec<u8>, RestError> {
-        /// Avatars are tens of kilobytes at most.
-        const MAX: usize = 4 * 1024 * 1024;
+        self.fetch_cdn_limited(url, 4 * 1024 * 1024).await
+    }
 
+    /// Fetches a user-uploaded attachment image without authentication.
+    ///
+    /// Original images are much larger than avatars, so they have a separate
+    /// bound while still refusing unbounded CDN responses.
+    pub async fn fetch_attachment(&self, url: &str) -> Result<Vec<u8>, RestError> {
+        self.fetch_cdn_limited(url, 32 * 1024 * 1024).await
+    }
+
+    async fn fetch_cdn_limited(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, RestError> {
         let response = self.raw_http().get(url).send().await?;
         let status = response.status();
         if !status.is_success() {
@@ -196,15 +228,31 @@ impl RestClient {
             });
         }
 
-        let bytes = response.bytes().await?;
-        if bytes.len() > MAX {
-            tracing::warn!(url, len = bytes.len(), "image too large; dropping it");
+        if response
+            .content_length()
+            .is_some_and(|len| len > max_bytes as u64)
+        {
+            tracing::warn!(url, max_bytes, "image too large; dropping it");
             return Err(RestError::Api {
                 status: 0,
                 body: "画像が大きすぎる".to_owned(),
             });
         }
-        Ok(bytes.to_vec())
+
+        let capacity = response.content_length().unwrap_or(0).min(max_bytes as u64) as usize;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                tracing::warn!(url, max_bytes, "image too large; dropping it");
+                return Err(RestError::Api {
+                    status: 0,
+                    body: "画像が大きすぎる".to_owned(),
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 }
 

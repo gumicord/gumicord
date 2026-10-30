@@ -25,6 +25,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod dirs;
 pub mod file_dialog;
+pub mod graphics;
 pub mod ime_parking;
 #[cfg(target_os = "ios")]
 pub mod ios_text;
@@ -50,6 +51,9 @@ pub use clipboard::ClipboardError;
 pub use clock::{caret_blink_interval, local_utc_offset_minutes, now_unix};
 pub use dirs::app_data_dir;
 pub use file_dialog::FileDialogError;
+pub use graphics::{
+    GraphicsApi, available_graphics_apis, save_graphics_api, selected_graphics_api,
+};
 pub use secret::{SecretError, SecretStore};
 #[cfg(target_os = "android")]
 pub use share::export_crash_logs;

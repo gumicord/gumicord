@@ -165,6 +165,8 @@
         "padding": { "$ref": "#/$defs/edgesOrRef" },
         "margin": { "$ref": "#/$defs/edgesOrRef" },
         "gap": { "$ref": "#/$defs/lengthOrRef" },
+        "flexWrap": { "type": "string", "enum": ["wrap", "nowrap"] },
+        "objectFit": { "type": "string", "enum": ["cover", "contain", "fill"] },
         "width": { "$ref": "#/$defs/lengthOrRef" },
         "height": { "$ref": "#/$defs/lengthOrRef" },
         "minWidth": { "$ref": "#/$defs/lengthOrRef" },

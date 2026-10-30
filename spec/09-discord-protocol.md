@@ -259,6 +259,13 @@ Discord のレート制限は**ルートごとではなくバケットごと**�
 | `GET /users/@me` | `78bb8553...` | 1000 | 0.00 秒 |
 | `POST /channels/:id/messages` | `62df3a8b...` | **5** | **1.00 秒** |
 
+### メッセージへのファイル添付
+
+`POST /channels/:id/messages` の multipart/form-data を使う。通常のメッセージ本文は
+`payload_json` に入れ、各ファイルを `files[n]` として送り、`attachments` に同じ番号と
+ファイル名を指定する。返信の `message_reference` と `allowed_mentions` も
+`payload_json` に含める。ファイル選択のキャンセルは送信操作として扱わない。
+
 ### 事前抑制 ✅
 
 `NFR-021` は「事前にリクエストを抑制する」ことを要求する。429 を受けてから待つのではなく、**残量が 0 なら送る前に待つ**。

@@ -65,6 +65,7 @@ enum Job {
         list: Vec<Message>,
     },
     LastChannel(ChannelId),
+    ForgetLastChannel,
     GuildOrder(String),
     /// Writes one row of key-value state.
     State(&'static str, String),
@@ -170,6 +171,10 @@ impl Db {
 
     pub fn save_last_channel(&self, channel: ChannelId) {
         self.send(Job::LastChannel(channel));
+    }
+
+    pub fn forget_last_channel(&self) {
+        self.send(Job::ForgetLastChannel);
     }
 
     /// Deletes the cache on sign-out. Leaving it behind lets the next person
@@ -501,6 +506,9 @@ fn run(conn: &rusqlite::Connection, job: Job) -> rusqlite::Result<()> {
             )?;
             Ok(())
         }
+        Job::ForgetLastChannel => conn
+            .execute("DELETE FROM state WHERE key = 'last_channel'", [])
+            .map(|_| ()),
         Job::Wipe => {
             // Delete the contents, then shrink the file.
             conn.execute_batch(

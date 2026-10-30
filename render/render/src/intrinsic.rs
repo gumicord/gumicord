@@ -169,7 +169,7 @@ const CHANNEL_LIST_W: f32 = 240.0;
 /// Member list width, matching Discord.
 const MEMBER_LIST_W: f32 = 240.0;
 /// Height of the custom title bar.
-const TITLEBAR_H: f32 = 32.0;
+pub const TITLEBAR_HEIGHT: f32 = 32.0;
 /// Width of one title bar button, matching Windows.
 const TITLEBAR_BUTTON_W: f32 = 46.0;
 /// Scrollbar width, wider than the thumb so it stays grabbable.
@@ -205,7 +205,7 @@ pub fn intrinsic(id: NodeId) -> Intrinsic {
         AppScreenMain => Intrinsic::row().grow(1.0).cross(Cross::Stretch),
 
         // ── chrome.*
-        ChromeTitlebar => Intrinsic::row().h(TITLEBAR_H).cross(Cross::Stretch),
+        ChromeTitlebar => Intrinsic::row().h(TITLEBAR_HEIGHT).cross(Cross::Stretch),
         // The title takes the slack, pushing the buttons right.
         ChromeTitlebarTitle => Intrinsic::row().grow(1.0).one_line(),
         ChromeTitlebarControls => Intrinsic::row().cross(Cross::Stretch),

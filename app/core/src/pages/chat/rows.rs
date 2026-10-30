@@ -202,6 +202,7 @@ impl crate::Gumicord {
                         .is_some_and(|r| Some(r.author.id) == me)
                         || calls_me(&blocks, me, member.map(|x| x.roles.as_slice())),
                     blocks,
+                    attachments: m.attachments.clone(),
                     reply: m.referenced_message.as_ref().map(|r| {
                         let member = self.live.store().member(guild, r.author.id);
                         let author = match &member {

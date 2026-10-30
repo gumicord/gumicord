@@ -23,9 +23,10 @@ pub mod text;
 
 pub use geom::{Rect, Size};
 pub use gpu::{GpuError, Presented, candidate_backends};
-pub use intrinsic::{Axis, Cross, Intrinsic, intrinsic};
+pub use intrinsic::{Axis, Cross, Intrinsic, TITLEBAR_HEIGHT, intrinsic};
 pub use layout::{SCROLL_TO_END, ScrollBar, ScrollState, SlideState};
 pub use motion::Motion;
+pub use probe::backend_survived_probe;
 pub use text::ImageData;
 
 use gumicord_uitree::{Content, Key, NodeId, UiNode};

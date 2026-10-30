@@ -1322,15 +1322,15 @@ fn header_button_appears_only_when_narrow() {
 #[test]
 fn members_icon_exists() {
     assert!(
-        gumicord_render::icon::lookup(MEMBERS_ICON).is_some(),
+        gumicord_render::icon::lookup_svg(MEMBERS_ICON).is_some(),
         "人形札の絵がない"
     );
     assert!(
-        gumicord_render::icon::lookup(BACK_ICON).is_some(),
+        gumicord_render::icon::lookup_svg(BACK_ICON).is_some(),
         "戻る札の絵がない"
     );
     assert!(
-        gumicord_render::icon::lookup(SEND_ICON).is_some(),
+        gumicord_render::icon::lookup_svg(SEND_ICON).is_some(),
         "送信札の絵がない"
     );
 }

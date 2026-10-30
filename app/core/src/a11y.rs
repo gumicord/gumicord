@@ -269,7 +269,7 @@ mod tests {
         tree.children
             .push(text(StableId::ChatMessageContent, "hello"));
         tree.children
-            .push(text(StableId::ChromeTitlebarControl, "×"));
+            .push(text(StableId::ChromeTitlebarControl, "閉じる"));
         let update = tree_update(&tree, Some(("chat.message.content", None)), "Gumicord");
         assert_eq!(update.nodes.len(), 3);
         let focused = update

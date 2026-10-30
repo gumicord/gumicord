@@ -121,6 +121,51 @@
     },
     {
       "select": "primitive.button",
+      "when": { "slot": "login_token" },
+      "style": { "background": "$color.bg.selected", "color": "$color.text.primary" }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "login_token_kind" },
+      "style": { "gap": "$space.2", "height": 36 }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_token_user" },
+      "style": { "background": "$color.bg.sunken", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_token_bot" },
+      "style": { "background": "$color.bg.sunken", "color": "$color.text.secondary" }
+    },
+    {
+      "select": "app.screen.login.card",
+      "when": { "slot": "token_card" },
+      "style": { "gap": "$space.2", "padding": [12, 20, 12, 20] }
+    },
+    {
+      "select": "app.screen.login.label",
+      "when": { "slot": "token_label" },
+      "style": { "margin": [4, 0, 0, 0] }
+    },
+    {
+      "select": "app.screen.login.label",
+      "when": { "slot": "token_kind_label" },
+      "style": { "margin": [4, 0, 0, 0] }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_token_user", "state": "selected" },
+      "style": { "background": "$color.bg.selected", "borderColor": "$color.accent", "borderWidth": 1 }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "login_token_bot", "state": "selected" },
+      "style": { "background": "$color.bg.selected", "borderColor": "$color.accent", "borderWidth": 1 }
+    },
+    {
+      "select": "primitive.button",
       "when": { "slot": "login_submit", "state": "hover" },
       "style": { "background": "$color.brand", "opacity": 0.9 }
     },
@@ -902,7 +947,7 @@
 
     {
       "select": "chat.input",
-      "style": { "padding": [0, 16, 16, 16] }
+      "style": { "padding": [0, 16, 16, 16], "gap": 8 }
     },
     {
       "select": "chat.input.toolbar",
@@ -911,6 +956,79 @@
         "radius": "$radius.md",
         "padding": [6, 12, 6, 12],
         "margin": [0, 0, 2, 0]
+      }
+    },
+    {
+      "select": "chat.input.actions",
+      "style": { "gap": "$space.2", "margin": [0, 0, 0, 8] }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "add_attachment" },
+      "style": {
+        "width": 48,
+        "height": 48,
+        "padding": 0,
+        "margin": [0, 8, 0, 0],
+        "background": "$color.bg.raised",
+        "radius": "$radius.md",
+        "color": "$color.text.secondary"
+      }
+    },
+    {
+      "select": "layout.row",
+      "when": { "slot": "attachment_grid" },
+      "style": { "flexWrap": "wrap", "gap": 8 }
+    },
+    {
+      "select": "chat.input.toolbar",
+      "when": { "slot": "attachments" },
+      "style": {
+        "background": "$color.bg.raised",
+        "radius": "$radius.md",
+        "padding": "$space.2",
+        "margin": [8, 0, 0, 0]
+      }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "remove_attachment" },
+      "style": {
+        "width": 24,
+        "height": 24,
+        "padding": 0,
+        "background": "#00000000",
+        "radius": "$radius.sm",
+        "color": "$color.text.muted"
+      }
+    },
+    {
+      "select": "primitive.button",
+      "when": { "slot": "remove_attachment", "state": "hover" },
+      "style": { "background": "$color.bg.hover", "color": "$color.text.primary" }
+    },
+    {
+      "select": "primitive.image",
+      "when": { "slot": "attachment_preview" },
+      "style": { "radius": "$radius.md", "margin": [0, 8, 0, 0], "objectFit": "contain" }
+    },
+    {
+      "select": "primitive.image",
+      "when": { "slot": "attachment_media" },
+      "style": { "radius": "$radius.md", "margin": [0, 0, 6, 0], "objectFit": "contain" }
+    },
+    {
+      "select": "chat.message.attachments",
+      "style": { "gap": "$space.2", "margin": [6, 0, 0, 0] }
+    },
+    {
+      "select": "chat.message.attachment",
+      "style": {
+        "background": "$color.bg.raised",
+        "radius": "$radius.sm",
+        "padding": "$space.2",
+        "borderColor": "$color.border",
+        "borderWidth": 1
       }
     },
     {
@@ -1040,7 +1158,22 @@
 {
         "select": "layout.column",
         "when": { "slot": "qr_column" },
-        "style": { "minWidth": 400, "maxWidth": 400 }
+        "style": { "width": 400, "gap": "$space.2" }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "settings_group_general" },
+      "style": { "font": "$font.small", "color": "$color.text.muted", "margin": [12, 0, 4, 12] }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "settings_group_mods" },
+      "style": { "font": "$font.small", "color": "$color.text.muted", "margin": [12, 0, 4, 12] }
+    },
+    {
+      "select": "primitive.text",
+      "when": { "slot": "settings_group_developer" },
+      "style": { "font": "$font.small", "color": "$color.text.muted", "margin": [12, 0, 4, 12] }
       }
    ]
 }

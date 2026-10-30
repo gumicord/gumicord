@@ -11,7 +11,7 @@ pub mod value;
 
 pub use ids::{DataKind, NodeId, Origin, UnknownNodeId};
 pub use node::{Anchor, Content, DataRef, Editable, Line, Span, UiNode};
-pub use style::{Decoration, Style};
+pub use style::{Decoration, ObjectFit, Style};
 
 /// Node state a theme can select on. Several can hold at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

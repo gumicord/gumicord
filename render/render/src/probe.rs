@@ -57,6 +57,15 @@ fn backend_name(backend: wgpu::Backends) -> Option<&'static str> {
     }
 }
 
+/// Whether a manually selected backend survives the same isolated startup
+/// probe used by automatic selection.
+pub fn backend_survived_probe(name: &str, cache_dir: Option<&Path>) -> bool {
+    let Some(backend) = backend_of(name) else {
+        return false;
+    };
+    surviving_backends(&[backend], cache_dir).contains(backend)
+}
+
 pub(crate) fn backend_of(name: &str) -> Option<wgpu::Backends> {
     match name {
         "gl" => Some(wgpu::Backends::GL),

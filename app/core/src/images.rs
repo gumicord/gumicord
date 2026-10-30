@@ -16,10 +16,8 @@
 //! Pixels never go on the tree: it is rebuilt every frame, which would copy
 //! megabytes each time.
 //!
-//! Only PNG is decoded, since the CDN is asked for `.png`. Attachments, which
-//! are whatever the user uploaded, will need more. Animated avatars are asked
-//! for as stills too — an `a_` prefix means GIF, but `.png` returns the first
-//! frame; animating them is a separate matter.
+//! Avatars use bounded PNG decoding; image attachments use bounded PNG/JPEG
+//! decoding. Animated and newer formats remain outside this path.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -37,6 +35,7 @@ const IN_FLIGHT: usize = 6;
 /// guild icons 48, so 96 covers a 2x display; the atlas is only 2048 square,
 /// and larger images fill it in dozens.
 const MAX_SIDE: u32 = 128;
+const MAX_ATTACHMENT_SIDE: u32 = 768;
 
 /// The splash icon, served from bytes baked into the binary so it shows
 /// with no cache and no network.
@@ -92,9 +91,18 @@ impl Images {
     /// Whether the renderer already holds it is not known here; the caller
     /// checks with `has_image` first.
     pub fn request(&mut self, url: &str) {
+        self.request_capped(url, MAX_SIDE);
+    }
+
+    pub fn request_capped(&mut self, url: &str, max_side: u32) {
+        self.request_with_limits(url, max_side, false);
+    }
+
+    fn request_with_limits(&mut self, url: &str, max_side: u32, attachment: bool) {
         if url.is_empty() {
             return;
         }
+        let attachment = attachment || url.starts_with("file-preview:");
         if url == SPLASH_ICON_URL {
             if self.requested.insert(url.to_owned())
                 && let Some(image) = decode_image_capped(
@@ -117,11 +125,15 @@ impl Images {
         if !self.requested.insert(url.to_owned()) {
             return;
         }
+        if attachment {
+            tracing::debug!(max_side, "queued attachment image");
+        }
 
         let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
         let (url, dir) = (url.to_owned(), self.dir.clone());
         let counter = std::sync::Arc::clone(&self.in_flight);
 
+        let preview_path = url.strip_prefix("file-preview:").map(PathBuf::from);
         rt.spawn(async move {
             // Not all at once: opening a list asks for dozens.
             while counter.load(std::sync::atomic::Ordering::Relaxed) >= IN_FLIGHT {
@@ -129,31 +141,72 @@ impl Images {
             }
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            let bytes = match read_cached(dir.as_deref(), &url) {
-                Some(b) => Some(b),
-                None => match rest.fetch_cdn(&url).await {
-                    Ok(b) => {
-                        write_cached(dir.as_deref(), &url, &b);
-                        Some(b)
-                    }
-                    Err(e) => {
-                        tracing::debug!(%e, url, "画像を取れなかった");
+            let bytes = if let Some(path) = preview_path {
+                let path_for_log = path.clone();
+                match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
+                    Ok(Ok(bytes)) => Some(bytes),
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, path = %path_for_log.display(), "could not read image preview");
                         None
                     }
-                },
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path_for_log.display(), "image preview reader stopped");
+                        None
+                    }
+                }
+            } else {
+                match read_cached(dir.as_deref(), &url) {
+                    Some(b) => Some(b),
+                    None => match if attachment {
+                        rest.fetch_attachment(&url).await
+                    } else {
+                        rest.fetch_cdn(&url).await
+                    } {
+                        Ok(b) => {
+                            if attachment {
+                                tracing::debug!(bytes = b.len(), "downloaded attachment image");
+                            }
+                            write_cached(dir.as_deref(), &url, &b);
+                            Some(b)
+                        }
+                        Err(e) => {
+                            tracing::debug!(%e, url, "画像を取れなかった");
+                            None
+                        }
+                    },
+                }
             };
             counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
             // Decoding goes to another thread; dozens of them would stall the
             // async work running beside the main thread.
-            if let Some(bytes) = bytes
-                && let Ok(Some(image)) =
-                    tokio::task::spawn_blocking(move || decode_png(&url, &bytes)).await
-            {
-                let _ = tx.send(image);
-                waker.wake();
+            if let Some(bytes) = bytes {
+                let decode_url = url.clone();
+                match tokio::task::spawn_blocking(move || {
+                    decode_image_capped(&decode_url, &bytes, max_side)
+                })
+                .await
+                {
+                    Ok(Some(image)) => {
+                        if attachment {
+                            tracing::debug!(
+                                width = image.width,
+                                height = image.height,
+                                "decoded attachment image"
+                            );
+                        }
+                        let _ = tx.send(image);
+                        waker.wake();
+                    }
+                    Ok(None) => tracing::warn!(url, "downloaded attachment is not a supported image"),
+                    Err(error) => tracing::warn!(%error, url, "image decoder stopped"),
+                }
             }
         });
+    }
+
+    pub fn request_attachment(&mut self, url: &str) {
+        self.request_with_limits(url, MAX_ATTACHMENT_SIDE, true);
     }
 
     /// Collects what arrived, reporting whether anything did.
@@ -227,6 +280,7 @@ fn write_cached(dir: Option<&std::path::Path>, url: &str, bytes: &[u8]) {
 
 /// Decodes a PNG to RGBA8. These files are someone else's, so a broken one
 /// must not panic.
+#[cfg(test)]
 fn decode_png(url: &str, bytes: &[u8]) -> Option<ImageData> {
     decode_png_capped(url, bytes, MAX_SIDE)
 }

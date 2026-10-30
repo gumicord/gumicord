@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use gumicord_uitree::{Decoration, NodeId, State, StateSet};
+use gumicord_uitree::{Decoration, NodeId, ObjectFit, State, StateSet};
 
 use crate::cond::{ColorScheme, PlatformSel, When};
 use crate::diag::{Diagnostics, Ignored};
@@ -517,6 +517,21 @@ fn style(
             "padding" => s.padding = edges(v, env, &p, diags),
             "margin" => s.margin = edges(v, env, &p, diags),
             "gap" => s.gap = length(v, env, &p, diags),
+            "flexWrap" => {
+                s.flex_wrap = match v.as_str() {
+                    Some("wrap") => Some(true),
+                    Some("nowrap") => Some(false),
+                    _ => {
+                        diags.warn(
+                            &p,
+                            Ignored::Property,
+                            format!("flexWrap は wrap / nowrap のいずれかである: {v}"),
+                        );
+                        None
+                    }
+                }
+            }
+            "objectFit" => s.object_fit = object_fit(v, &p, diags),
             "width" => s.width = length(v, env, &p, diags),
             "height" => s.height = length(v, env, &p, diags),
             "minWidth" => s.min_width = length(v, env, &p, diags),
@@ -536,6 +551,22 @@ fn style(
         }
     }
     (s, t)
+}
+
+fn object_fit(v: &Value, path: &str, diags: &mut Diagnostics) -> Option<ObjectFit> {
+    match v.as_str() {
+        Some("cover") => Some(ObjectFit::Cover),
+        Some("contain") => Some(ObjectFit::Contain),
+        Some("fill") => Some(ObjectFit::Fill),
+        _ => {
+            diags.warn(
+                path,
+                Ignored::Property,
+                format!("objectFit は cover / contain / fill のいずれかである: {v}"),
+            );
+            None
+        }
+    }
 }
 
 // ------------------------------------------------------------------ when

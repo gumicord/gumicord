@@ -1003,8 +1003,8 @@ impl TextEngine {
         name: &str,
         size_px: u32,
     ) -> Option<GlyphEntry> {
-        let (name, def) = icon::lookup(name)?;
-        self.atlas.icon(device, queue, name, def, size_px)
+        let (name, svg) = icon::lookup_svg(name)?;
+        self.atlas.icon_svg(device, queue, name, svg, size_px)
     }
 
     /// How much is in the atlas, as a rough performance signal.
@@ -1314,31 +1314,30 @@ impl Atlas {
         entry
     }
 
-    /// Uploads an icon.
-    fn icon(
+    fn icon_svg(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         name: &'static str,
-        def: &icon::IconDef,
+        svg: &str,
         size: u32,
     ) -> Option<GlyphEntry> {
         let k = AtlasKey::Icon(name, size);
-        if let Some(e) = self.entries.get(&k) {
-            return *e;
+        if let Some(entry) = self.entries.get(&k) {
+            return *entry;
         }
-        // Square, with no pen offset.
+        let pixels = icon::rasterize_svg(svg, size)?;
         let entry = self.insert(
             device,
             queue,
             size,
             size,
-            &def.rasterize(size),
+            &pixels,
             Placement::ICON,
             Side::Glyph,
-        );
-        self.entries.insert(k, entry);
-        entry
+        )?;
+        self.entries.insert(k, Some(entry));
+        Some(entry)
     }
 
     fn rasterize_glyph(
@@ -2143,6 +2142,9 @@ impl TextEngine {
         let mut entry = place(&mut self.atlas);
         if entry.is_none() && self.atlas.recycle_images() {
             entry = place(&mut self.atlas);
+        }
+        if entry.is_none() {
+            tracing::warn!(url = %image.url, width = image.width, height = image.height, "image did not fit in the renderer atlas");
         }
         if entry.is_some() {
             self.atlas.images_since_recycle += 1;

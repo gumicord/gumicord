@@ -2,7 +2,13 @@
 use super::Composing;
 use crate::inputs::{composer_addr, empty_doc};
 use gumicord_model::ChannelId;
-use gumicord_uitree::{Editable, Key, NodeId, State, UiNode};
+use gumicord_uitree::{Editable, Key, NodeId, State, UiNode, value::Edges};
+
+fn is_preview_image(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+}
 
 impl crate::Gumicord {
     pub(crate) fn chat_view(&self) -> UiNode {
@@ -103,8 +109,12 @@ impl crate::Gumicord {
                     .child_if(self.chat.composing != Composing::New, || {
                         self.composing_bar()
                     })
+                    .child_if(!self.chat.attachments.is_empty(), || {
+                        self.attachment_preview()
+                    })
                     .child(
                         UiNode::new(NodeId::ChatInputBody)
+                            .child(self.attachment_button())
                             .child(UiNode::new(NodeId::LayoutColumn).child({
                                 let doc =
                                     self.inputs.doc(&self.draft_addr()).unwrap_or(empty_doc());
@@ -129,11 +139,65 @@ impl crate::Gumicord {
                             }))
                             // Phones have no return key to lean on; the desk
                             // keeps Enter.
-                            .child_if(crate::is_mobile(), || {
-                                UiNode::new(NodeId::ChatInputActions).child(self.send_button())
-                            }),
+                            .child(
+                                UiNode::new(NodeId::ChatInputActions)
+                                    .child_if(crate::is_mobile(), || self.send_button()),
+                            ),
                     ),
             )
+    }
+
+    fn attachment_preview(&self) -> UiNode {
+        let cards = self
+            .chat
+            .attachments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| {
+                let name = path.file_name()?;
+                let mut card = UiNode::new(NodeId::LayoutColumn).with_key(Key::Id(index as u64));
+                card.style.width = Some(136.0);
+                if is_preview_image(path) {
+                    let mut image = UiNode::image(
+                        NodeId::PrimitiveImage,
+                        format!("file-preview:{}", path.display()),
+                    )
+                    .with_key(Key::Slot("attachment_preview"));
+                    image.style.width = Some(128.0);
+                    image.style.height = Some(80.0);
+                    card = card.child(image);
+                }
+                Some(
+                    card.child(
+                        UiNode::new(NodeId::LayoutRow)
+                            .child(UiNode::text(
+                                NodeId::PrimitiveText,
+                                name.to_string_lossy().into_owned(),
+                            ))
+                            .child(
+                                UiNode::new(NodeId::PrimitiveButton)
+                                    .with_key(Key::Slot(crate::REMOVE_ATTACHMENT))
+                                    .with_state_if(
+                                        self.is_hovered(
+                                            NodeId::PrimitiveButton,
+                                            Some(&Key::Slot(crate::REMOVE_ATTACHMENT)),
+                                        ),
+                                        State::Hover,
+                                    )
+                                    .child(UiNode::icon(NodeId::PrimitiveIcon, "close")),
+                            ),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let grid = UiNode::new(NodeId::LayoutRow)
+            .with_key(Key::Slot("attachment_grid"))
+            .children(cards);
+        let mut list = UiNode::new(NodeId::LayoutScroll).child(grid);
+        list.style.height = Some(152.0);
+        UiNode::new(NodeId::ChatInputToolbar)
+            .with_key(Key::Slot("attachments"))
+            .child(list)
     }
 
     /// The mobile send button beside the composer. Dimmed while the draft
@@ -152,15 +216,36 @@ impl crate::Gumicord {
             .child(UiNode::icon(NodeId::PrimitiveIcon, crate::SEND_ICON))
     }
 
+    fn attachment_button(&self) -> UiNode {
+        let mut button = UiNode::new(NodeId::PrimitiveButton)
+            .with_key(Key::Slot(crate::ADD_ATTACHMENT))
+            .with_state_if(
+                self.is_hovered(
+                    NodeId::PrimitiveButton,
+                    Some(&Key::Slot(crate::ADD_ATTACHMENT)),
+                ),
+                State::Hover,
+            )
+            .child(UiNode::icon(NodeId::PrimitiveIcon, "icon.add"));
+        button.style.width = Some(48.0);
+        button.style.height = Some(48.0);
+        button.style.margin = Some(Edges {
+            right: 8.0,
+            ..Edges::default()
+        });
+        button
+    }
+
     /// Whether the composer holds something to send.
     pub(crate) fn composer_send_ready(&self) -> bool {
-        !self
-            .inputs
-            .doc(&self.draft_addr())
-            .unwrap_or(empty_doc())
-            .text()
-            .trim()
-            .is_empty()
+        !self.chat.attachments.is_empty()
+            || !self
+                .inputs
+                .doc(&self.draft_addr())
+                .unwrap_or(empty_doc())
+                .text()
+                .trim()
+                .is_empty()
     }
 
     /// Cancels a reply or an edit.

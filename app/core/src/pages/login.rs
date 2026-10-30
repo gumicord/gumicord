@@ -4,7 +4,7 @@
 //! the built subtree.
 
 use gumicord_platform::Application;
-use gumicord_platform::{HiddenKey, TextDocument};
+use gumicord_platform::TextDocument;
 use gumicord_uitree::{Content, Editable, Key, NodeId, State, UiNode};
 
 use super::super::inputs::{InputAddr, InputKind};
@@ -36,7 +36,7 @@ pub(crate) enum LoginField {
     Email,
     Password,
     Totp,
-    /// The bot-token form's single field.
+    /// The user or bot token form's single field.
     Token,
 }
 
@@ -58,9 +58,8 @@ pub(crate) struct LoginView {
     /// platform's modal can hand back a bare token while the challenge's own
     /// `rqtoken`/`session_id` are still available to echo on the retry.
     pub(crate) pending: Option<gumicord_rest::CaptchaChallenge>,
-    /// The hidden code (konami) typed on the QR screen so far. Completed
-    /// sequences open the bot-token form; anything else resets it.
-    pub(crate) hidden_code: Vec<HiddenKey>,
+    /// Whether the token form is submitting a bot token rather than a user token.
+    pub(crate) token_is_bot: bool,
 }
 
 /// The address and kind of one login box: the login field node plus
@@ -91,7 +90,7 @@ impl LoginView {
             error: None,
             field_errors: Vec::new(),
             pending: None,
-            hidden_code: Vec::new(),
+            token_is_bot: false,
         }
     }
 }
@@ -118,7 +117,7 @@ impl crate::Gumicord {
     }
 
     /// Submits the active login step. Runs the password flow, hands off a TOTP
-    /// code, or logs in with a bot token; nothing to send stays put.
+    /// code, or logs in with a user or bot token; nothing to send stays put.
     /// While an attempt is in flight every submit is ignored: re-sending
     /// only stacks duplicate attempts behind the running one.
     pub(crate) fn submit_login(&mut self) -> bool {
@@ -163,8 +162,12 @@ impl crate::Gumicord {
             if token.is_empty() {
                 return false;
             }
-            self.login.submit_bot_token(token);
-            self.inputs.must_mut(&login_addr(LoginField::Token)).take();
+            let token = if self.login_view.token_is_bot {
+                gumicord_model::Token::bot(token)
+            } else {
+                gumicord_model::Token::new(token)
+            };
+            self.login.submit_token(token);
             self.focus = None;
             true
         } else {
@@ -207,6 +210,7 @@ impl crate::Gumicord {
         // step still finds it.
         self.inputs.must_mut(&login_addr(LoginField::Totp)).take();
         self.inputs.must_mut(&login_addr(LoginField::Token)).take();
+        self.login_view.token_is_bot = false;
         self.focus = None;
         self.login_view.form = crate::is_mobile().then_some(LoginField::Password);
         self.login_view.error = None;
@@ -254,10 +258,10 @@ impl crate::Gumicord {
 
         match form {
             Some(LoginField::Email | LoginField::Password) => {
-                screen = screen.child(self.login_card(|_| {
-                    UiNode::new(NodeId::LayoutColumn)
-                        .with_key(Key::Slot("list"))
-                        .child(UiNode::text(
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(self.login_card(|card| {
+                        card.child(UiNode::text(
                             NodeId::AppScreenLoginTitle,
                             "Discordにログイン",
                         ))
@@ -291,15 +295,17 @@ impl crate::Gumicord {
                         .child(self.login_divider())
                         // No QR screen on phones, so nowhere to go back to.
                         .child_if(!crate::is_mobile(), || self.login_qr_button())
+                        .child(self.login_secondary("トークンでログイン", "login_token"))
                         .child(self.login_register_link())
-                }))
+                    }))
+                    .child(UiNode::new(NodeId::LayoutSpacer));
             }
 
             Some(LoginField::Totp) => {
-                screen = screen.child(self.login_card(|_| {
-                    UiNode::new(NodeId::LayoutColumn)
-                        .with_key(Key::Slot("list"))
-                        .child(UiNode::text(
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(self.login_card(|card| {
+                        card.child(UiNode::text(
                             NodeId::AppScreenLoginTitle,
                             "認証コードを入力",
                         ))
@@ -324,50 +330,73 @@ impl crate::Gumicord {
                         .child_if(self.login_view.error.is_some(), || self.login_error_node())
                         .child(self.login_submit("ログイン", self.login_totp_ready()))
                         .child(self.login_secondary("戻る", "login_back"))
-                }))
+                    }))
+                    .child(UiNode::new(NodeId::LayoutSpacer));
             }
 
             Some(LoginField::Token) => {
-                screen = screen.child(self.login_card(|_| {
-                    UiNode::new(NodeId::LayoutColumn)
-                        .with_key(Key::Slot("list"))
-                        .child(UiNode::text(
-                            NodeId::AppScreenLoginTitle,
-                            "ボットトークンでログイン",
-                        ))
-                        .child(self.login_label("トークン"))
-                        .child(self.login_field(
-                            "token",
-                            "トークン",
-                            self.inputs.must(&login_addr(LoginField::Token)),
-                            false,
-                        ))
-                        .child_if(self.login_view.error.is_some(), || self.login_error_node())
-                        .child(self.login_submit("ログイン", self.login_code_ready()))
-                        .child(self.login_secondary("戻る", "login_back"))
-                }))
+                screen = screen
+                    .child(UiNode::new(NodeId::LayoutSpacer))
+                    .child(self.login_card(|card| {
+                        card.with_key(Key::Slot("token_card"))
+                            .child(UiNode::text(
+                                NodeId::AppScreenLoginTitle,
+                                "トークンでログイン",
+                            ))
+                            .child(
+                                self.login_label("トークン")
+                                    .with_key(Key::Slot("token_label")),
+                            )
+                            .child(self.login_field(
+                                "token",
+                                "トークン",
+                                self.inputs.must(&login_addr(LoginField::Token)),
+                                true,
+                            ))
+                            .child(
+                                self.login_label("アカウント種別")
+                                    .with_key(Key::Slot("token_kind_label")),
+                            )
+                            .child(
+                                UiNode::new(NodeId::LayoutRow)
+                                    .with_key(Key::Slot("login_token_kind"))
+                                    .child(self.token_kind_button(false))
+                                    .child(self.token_kind_button(true)),
+                            )
+                            .child_if(self.login_view.error.is_some(), || self.login_error_node())
+                            .child(self.login_submit("ログイン", self.login_code_ready()))
+                            .child(self.login_secondary("戻る", "login_back"))
+                    }))
+                    .child(UiNode::new(NodeId::LayoutSpacer));
             }
 
             None => {
-                // Default: QR code screen with option to use password login
+                // Default: QR code screen with manual login options.
+                // Keep this width in the screen tree so QR centering does not
+                // depend on the active theme supplying a slot rule.
+                let mut qr_column =
+                    UiNode::new(NodeId::LayoutColumn).with_key(Key::Slot("qr_column"));
+                qr_column.style.width = Some(400.0);
+                qr_column.children.extend([UiNode::text(
+                    NodeId::AppScreenLoginTitle,
+                    "QR コードでログイン",
+                )]);
+                if let Some(qr) = s.qr() {
+                    qr_column.children.push(UiNode::qr(NodeId::PrimitiveQr, qr));
+                }
+                qr_column
+                    .children
+                    .push(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()));
+                qr_column
+                    .children
+                    .push(self.login_secondary("パスワードでログイン", "login_password"));
+                qr_column
+                    .children
+                    .push(self.login_secondary("トークンでログイン", "login_token"));
                 screen = screen.child(
                     UiNode::new(NodeId::LayoutRow)
                         .child(UiNode::new(NodeId::LayoutSpacer))
-                        .child(
-                            UiNode::new(NodeId::LayoutColumn)
-                                .with_key(Key::Slot("qr_column"))
-                                .child(UiNode::text(
-                                    NodeId::AppScreenLoginTitle,
-                                    "QR コードでログイン",
-                                ))
-                                .child_if(s.qr().is_some(), || {
-                                    UiNode::qr(NodeId::PrimitiveQr, s.qr().unwrap_or_default())
-                                })
-                                .child(UiNode::text(NodeId::AppScreenLoginHint, self.login.hint()))
-                                .child(
-                                    self.login_secondary("パスワードでログイン", "login_password"),
-                                ),
-                        )
+                        .child(qr_column)
                         .child(UiNode::new(NodeId::LayoutSpacer)),
                 )
             }
@@ -380,7 +409,7 @@ impl crate::Gumicord {
 impl crate::Gumicord {
     /// Wraps children in a centered login card container.
     fn login_card(&self, build: impl FnOnce(UiNode) -> UiNode) -> UiNode {
-        UiNode::new(NodeId::AppScreenLoginCard).child(build(UiNode::new(NodeId::LayoutSpacer)))
+        build(UiNode::new(NodeId::AppScreenLoginCard))
     }
 
     /// A small label above a login-field box.
@@ -524,7 +553,7 @@ impl crate::Gumicord {
         normalize_totp(self.inputs.must(&login_addr(LoginField::Totp)).text()).len() == TOTP_LEN
     }
 
-    /// Whether the bot-token box holds something.
+    /// Whether the token box holds something.
     fn login_code_ready(&self) -> bool {
         !self
             .inputs
@@ -532,6 +561,22 @@ impl crate::Gumicord {
             .text()
             .trim()
             .is_empty()
+    }
+
+    fn token_kind_button(&self, is_bot: bool) -> UiNode {
+        let (slot, label) = if is_bot {
+            ("login_token_bot", "ボットトークン")
+        } else {
+            ("login_token_user", "ユーザートークン")
+        };
+        UiNode::new(NodeId::PrimitiveButton)
+            .with_key(Key::Slot(slot))
+            .with_state_if(self.login_view.token_is_bot == is_bot, State::Selected)
+            .with_state_if(
+                self.is_hovered(NodeId::PrimitiveButton, Some(&Key::Slot(slot))),
+                State::Hover,
+            )
+            .child(UiNode::text(NodeId::PrimitiveText, label))
     }
 
     /// The primary login form button (submit). Dimmed while an attempt
@@ -567,6 +612,20 @@ impl crate::Gumicord {
                 self.login.start_password();
                 self.focus = None;
                 self.login_view.form = Some(LoginField::Password);
+                true
+            }
+            "login_token" => {
+                self.login.start_token();
+                self.inputs.must_mut(&login_addr(LoginField::Token)).take();
+                self.login_view.token_is_bot = false;
+                self.login_view.error = None;
+                self.login_view.field_errors.clear();
+                self.login_view.form = Some(LoginField::Token);
+                self.focus = Some(login_addr(LoginField::Token));
+                true
+            }
+            "login_token_user" | "login_token_bot" => {
+                self.login_view.token_is_bot = slot == "login_token_bot";
                 true
             }
             "login_submit" => self.submit_login(),
@@ -1324,24 +1383,19 @@ mod tests {
         assert_eq!(login_text(&a, LoginField::Email), "a@b.c");
     }
 
-    /// Opening the bot-token form starts from an empty box while a kept
+    /// Opening the token form starts from an empty box while a kept
     /// password stays in its own document.
     #[test]
     fn opening_the_token_form_drops_a_kept_password() {
-        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
-
         let mut a = pending();
         a.login
             .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
         login_input(&mut a, LoginField::Password, "secret");
-
-        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
-            assert!(a.hidden_key(key), "QR 画面上のキーは消費されるはず");
-        }
+        a.login_button("login_token");
 
         assert!(matches!(a.login.session(), Session::Token));
         assert!(
-            login_text(&a, LoginField::Totp).is_empty(),
+            login_text(&a, LoginField::Token).is_empty(),
             "トークン欄にパスワードが残っている"
         );
         assert_eq!(login_text(&a, LoginField::Password), "secret");
@@ -1522,76 +1576,14 @@ mod tests {
         assert_eq!(state_of(&a), Some(false), "揃ったのに無効表示");
     }
 
-    /// The konami code on the QR screen opens the bot-token form.
+    /// Submitting the token form hands the selected token kind to the background.
     #[test]
-    fn the_konami_code_opens_the_bot_token_form() {
-        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
-
+    fn submitting_the_token_form_hands_off_the_selected_kind() {
         let mut a = pending();
         a.login
             .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
-
-        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
-            assert!(a.hidden_key(key), "QR 画面上のキーは消費されるはず");
-        }
-
-        assert!(
-            matches!(a.login.session(), Session::Token),
-            "コンバットコードでトークン画面に入っていない"
-        );
-        assert_eq!(
-            a.focus,
-            Some(login_addr(LoginField::Token)),
-            "入力欄にフォーカスが無い"
-        );
-    }
-
-    /// A stray key breaks the sequence; nothing opens and the buffer resets.
-    #[test]
-    fn a_stray_key_breaks_the_konami_code() {
-        use gumicord_platform::HiddenKey::{Down, Left, Up};
-
-        let mut a = pending();
-        a.login
-            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
-
-        // Up Up Down Down Left, then a Left where a Right belongs.
-        for key in [Up, Up, Down, Down, Left, Left] {
-            a.hidden_key(key);
-        }
-
-        assert!(!matches!(a.login.session(), Session::Token));
-        assert_eq!(a.focus, None);
-    }
-
-    /// Off the QR screen the hidden code does nothing.
-    #[test]
-    fn the_konami_code_does_nothing_off_the_qr_screen() {
-        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
-
-        // `pending` starts at Connecting, not the QR screen.
-        let mut a = pending();
-        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
-            a.hidden_key(key);
-        }
-
-        assert!(!matches!(a.login.session(), Session::Token));
-        assert_eq!(a.focus, None);
-    }
-
-    /// Submitting the token form hands the bot token to the background and
-    /// drops the form's focus.
-    #[test]
-    fn submitting_the_token_form_hands_off_the_bot_token() {
-        use gumicord_platform::HiddenKey::{A, B, Down, Left, Right, Up};
-
-        let mut a = pending();
-        a.login
-            .apply_for_test(LoginEvent::Qr("https://example/1".to_owned()));
-
-        for key in [Up, Up, Down, Down, Left, Right, Left, Right, B, A] {
-            a.hidden_key(key);
-        }
+        a.login_button("login_token");
+        a.login_button("login_token_bot");
         a.focused_document().unwrap().insert("bot-token");
         assert!(a.submit_login(), "トークンログインが送信されなかった");
         assert_eq!(a.focus, None, "送信後もフォーカスが残っている");

@@ -1,13 +1,12 @@
 # ログイン画面 UI — 現状記録・問題点・制約 (手戻り引き継ぎ)
 
-**状態: ドラフト — 後任 AI への手戻り引継ぎ用。**
+**状態: ドラフト — 現状記録。**
 
-この文書は、ログイン画面 UI を「直す」担当者へ渡す前提資料である。ここに現状の
-実装・問題点・制約を書き留め、デザインの改善方針そのものは書かない（担当 AI が
-[01-requirements.md](01-requirements.md) の `FR-001` と相談して決める）。
+この文書は、ログイン画面の実装・問題点・制約を記録する。
 
-動作は確認済み（QR / パスワードフォーム / TOTP / WebView2 captcha モーダルすべて
-動作する）。UI の見た目が未整備なため手戻りする。**機能は触らない。**
+QR / パスワードフォーム / TOTP / WebView2 captcha モーダルに加えて、
+通常の入口からユーザーまたはボットのトークンでログインできる (`FR-008`)。
+従来の隠しコマンドは廃止する。
 
 ---
 
@@ -21,37 +20,46 @@
 | ノードのレイアウト (intrinsic) | `render/render/src/intrinsic.rs` — `AppScreenLogin` ほか |
 | 見た目 (テーマ) | `examples/themes/midnight/theme.json` — `app.screen.login.*`, `primitive.*` |
 
-ログイン状態は `Session` 列挙型（QR 待ち / `Password` / `PasswordTotp` / その他）で
-`login_screen()` が 3 つに分岐してノードを組み立てる。
+ログイン状態は `Session` 列挙型（QR 待ち / `Password` / `PasswordTotp` / `Token` / その他）で
+`login_screen()` が分岐してノードを組み立てる。
 
 ---
 
 ## 2. 現状のノード構成
 
-ログイン画面 (`AppScreenLogin`) は `Intrinsic::column().grow(1.0).cross(Cross::Center)`
-つまり「画面一杯・子は水平中央」の縦並び。最上部と最下部に `LayoutSpacer` を置いて
-縦位置を調節している（→ [制約 4.1](#41-垂直中央に使える手段が限られる)）。
+ログイン画面 (`AppScreenLogin`) は画面全体を使う縦並びで、交差軸は Stretch。
+QR 画面は幅 400px の列を左右の spacer で中央に置く。列幅は画面側で指定し、テーマの
+slot ルールがない場合も中央配置を保つ。フォーム画面は内容高のカードを
+上下の spacer ではさんで垂直中央に置く（→ [制約 4.1](#41-垂直中央に使える手段が限られる)）。
 
 ### 2.1 QR ログイン (既定)
 
 ```
-LayoutSpacer
-AppScreenLoginTitle  : "QR コードでログイン"
-PrimitiveQr          : スキャン用 QR
-AppScreenLoginHint   : 状態・エラー文言 (login.hint())
-PrimitiveButton[login_password] : "パスワードでログイン"
-LayoutSpacer
+LayoutRow (画面高いっぱい)
+  LayoutSpacer
+  LayoutColumn[qr_column] (幅 400px, gap 8px)
+    AppScreenLoginTitle  : "QR コードでログイン"
+    PrimitiveQr          : スキャン用 QR
+    AppScreenLoginHint   : 状態・エラー文言 (login.hint())
+    PrimitiveButton[login_password] : "パスワードでログイン"
+    PrimitiveButton[login_token]    : "トークンでログイン"
+  LayoutSpacer
 ```
+
+中央の列は幅 400px とし、左右の spacer で画面中央に置く。ログイン方法のボタン間には
+間隔を設ける。
 
 ### 2.2 パスワードログイン (`Session::Password`)
 
 ```
 LayoutSpacer
-AppScreenLoginTitle   : "パスワードでログイン"
-AppScreenLoginField[email]    : メールアドレス
-AppScreenLoginField[password] : パスワード
-PrimitiveButton[login_submit] : "ログイン"
-PrimitiveButton[login_back]   : "戻る"
+AppScreenLoginCard (内容高)
+  AppScreenLoginTitle   : "パスワードでログイン"
+  AppScreenLoginField[email]    : メールアドレス
+  AppScreenLoginField[password] : パスワード
+  PrimitiveButton[login_submit] : "ログイン"
+  PrimitiveButton[login_back]   : "戻る"
+  PrimitiveButton[login_token]  : "トークンでログイン"
 LayoutSpacer
 ```
 
@@ -62,17 +70,38 @@ captcha 要求中もこの画面のまま（モーダルが上に被さる）。
 
 ```
 LayoutSpacer
-AppScreenLoginTitle   : "認証コードを入力"
-AppScreenLoginField[totp] : 認証コード
-PrimitiveButton[login_submit] : "ログイン"
-PrimitiveButton[login_back]   : "戻る"
+AppScreenLoginCard (内容高)
+  AppScreenLoginTitle   : "認証コードを入力"
+  AppScreenLoginField[totp] : 認証コード
+  PrimitiveButton[login_submit] : "ログイン"
+  PrimitiveButton[login_back]   : "戻る"
 LayoutSpacer
 ```
 
-### 2.4 ボタンとスロット
+### 2.4 トークンログイン
 
-- どの画面も「1 個の主ボタン + 0〜1 個の副ボタン」を持つ。
-- 主従の区別は**スロット名だけ**（`login_submit` / `login_password` / `login_back`）。
+上下の spacer にはさんだ内容高のカードに、タイトル・秘密入力欄・種類選択・送信・戻るを置く。
+入力欄の下にユーザー／ボットの選択を置く。選択中の種類は
+`State::Selected` で示し、送信時は同じ種類で認証とアカウント保存を行う。
+トークン欄は秘密入力として表示する。フォームカードは内容高に合わせて縦の余白を抑え、
+画面の上下の spacer で中央に配置する。
+
+```
+LayoutSpacer
+AppScreenLoginCard[token_card] (内容高)
+  AppScreenLoginTitle : "トークンでログイン"
+  AppScreenLoginField[token] : 秘密入力欄
+  AppScreenLoginLabel : "アカウント種別"
+  LayoutRow[login_token_kind] : ユーザー / ボット
+  PrimitiveButton[login_submit] : "ログイン"
+  PrimitiveButton[login_back] : "戻る"
+LayoutSpacer
+```
+
+### 2.5 ボタンとスロット
+
+- フォームは送信ボタンと戻るボタンを持つ。ログイン方式を選ぶ画面には方式ごとの入口がある。
+- 主従の区別は**スロット名だけ**（`login_submit` / `login_password` / `login_token` / `login_back`）。
   `PrimitiveButton` の見た目は全部同じ（→ [問題 3.3](#33-主ボタンと副ボタンの区別がない)）。
 - ボタンは `is_hovered` で `State::Hover` を持つ（テーマがホバー着色する）。
 - 入力欄は `State::Focus` をフォーカス時に持つ。

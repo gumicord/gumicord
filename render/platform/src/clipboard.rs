@@ -47,6 +47,11 @@ pub fn text() -> Result<Option<String>, ClipboardError> {
     imp::text()
 }
 
+/// Files copied in the clipboard's native file-list format, if any.
+pub fn files() -> Result<Vec<std::path::PathBuf>, ClipboardError> {
+    imp::files()
+}
+
 /// An image, decoded to RGBA8, top row first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardImage {
@@ -173,6 +178,10 @@ mod imp {
         })
     }
 
+    pub fn files() -> Result<Vec<std::path::PathBuf>, ClipboardError> {
+        Ok(Vec::new())
+    }
+
     pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
         with_helper(|env, helper| {
             let width = image.width as jint;
@@ -267,6 +276,10 @@ mod imp {
         Err(ClipboardError::Unsupported)
     }
 
+    pub fn files() -> Result<Vec<std::path::PathBuf>, ClipboardError> {
+        Ok(Vec::new())
+    }
+
     pub fn set_image(_image: &ClipboardImage) -> Result<(), ClipboardError> {
         Err(ClipboardError::Unsupported)
     }
@@ -321,6 +334,20 @@ mod imp {
             // Only an image is present, which is not an error.
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
             Err(e) => Err(map_error(e, "cannot read text")),
+        })
+    }
+
+    pub fn files() -> Result<Vec<std::path::PathBuf>, ClipboardError> {
+        with_clipboard(|clipboard| match clipboard.get_text() {
+            Ok(text) => Ok(text
+                .lines()
+                .filter_map(|line| line.strip_prefix("file://"))
+                .map(|uri_path| {
+                    std::path::PathBuf::from(uri_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+                })
+                .collect()),
+            Err(arboard::Error::ContentNotAvailable) => Ok(Vec::new()),
+            Err(e) => Err(map_error(e, "cannot read files")),
         })
     }
 
@@ -386,6 +413,10 @@ mod imp {
         let board = board();
         let current: Option<Retained<NSString>> = unsafe { msg_send![&board, string] };
         Ok(current.map(|s| s.to_string()))
+    }
+
+    pub fn files() -> Result<Vec<std::path::PathBuf>, ClipboardError> {
+        Ok(Vec::new())
     }
 
     pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {
@@ -522,6 +553,7 @@ mod imp {
         GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
     };
     use windows_sys::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
+    use windows_sys::Win32::UI::Shell::DragQueryFileW;
 
     /// Retries before giving up.
     ///
@@ -620,6 +652,35 @@ mod imp {
         unsafe { GlobalUnlock(handle as HGLOBAL) };
 
         Ok(Some(text))
+    }
+
+    pub fn files() -> Result<Vec<std::path::PathBuf>, ClipboardError> {
+        use std::os::windows::ffi::OsStringExt;
+        const CF_HDROP: u32 = 15;
+        let _owned = Owned::open()?;
+        if unsafe { IsClipboardFormatAvailable(CF_HDROP) } == 0 {
+            return Ok(Vec::new());
+        }
+        let handle = unsafe { GetClipboardData(CF_HDROP) };
+        if handle.is_null() {
+            return Err(ClipboardError::Failed("cannot read file list"));
+        }
+        let drop = handle.cast();
+        let count = unsafe { DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0) };
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let len = unsafe { DragQueryFileW(drop, index, std::ptr::null_mut(), 0) } as usize;
+            let mut wide = vec![0u16; len + 1];
+            let copied =
+                unsafe { DragQueryFileW(drop, index, wide.as_mut_ptr(), wide.len() as u32) }
+                    as usize;
+            if copied > 0 && copied <= len {
+                paths.push(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+                    &wide[..copied],
+                )));
+            }
+        }
+        Ok(paths)
     }
 
     pub fn set_image(image: &ClipboardImage) -> Result<(), ClipboardError> {

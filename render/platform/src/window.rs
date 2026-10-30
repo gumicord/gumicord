@@ -569,6 +569,7 @@ fn run_loop(
         window: None,
         renderer: None,
         backend_rotor: 0,
+        manual_backend_failed: false,
         #[cfg(target_os = "android")]
         android_app: None,
         #[cfg(target_os = "android")]
@@ -613,6 +614,7 @@ fn run_loop(
         frame_us: std::collections::VecDeque::new(),
         frame_times: std::collections::VecDeque::new(),
         first_frame: true,
+        hover_refreshing: false,
         started: std::time::Instant::now(),
         blink: crate::clock::caret_blink_interval(),
         caret_on: true,
@@ -747,6 +749,8 @@ struct Host {
     /// probe children, so each failed attempt rotates to the next candidate
     /// instead of retrying a backend that cannot drive this window.
     backend_rotor: usize,
+    /// Android retries another runtime candidate after a saved API fails.
+    manual_backend_failed: bool,
     /// The activity for Android-only queries (IME state). Cloned on resume;
     /// the same activity lives until the process exits.
     #[cfg(target_os = "android")]
@@ -862,6 +866,10 @@ struct Host {
     /// too, so a low rate here means sleeping on purpose.
     frame_times: std::collections::VecDeque<std::time::Instant>,
     first_frame: bool,
+    /// A layout change can move the hovered target without a pointer event.
+    /// Refresh that hover once in the same event turn so the next visible
+    /// frame already reflects the new target.
+    hover_refreshing: bool,
     /// When `run` started, for measuring time to first frame.
     started: std::time::Instant,
     /// Blink interval; `None` means blinking is switched off.
@@ -2023,7 +2031,14 @@ impl Host {
         // against the previous frame. Without rechecking here the highlight
         // sticks to the row that moved away.
         if self.app.hover_changed(&self.hits()) {
-            self.request_redraw();
+            if self.hover_refreshing {
+                self.request_redraw();
+            } else {
+                self.hover_refreshing = true;
+                self.redraw();
+                self.hover_refreshing = false;
+                return;
+            }
         }
 
         // A resize does the same to window management: the zone follows the
@@ -2123,9 +2138,24 @@ impl Host {
         // here at runtime: each failed attempt rotates to the next backend
         // (GLES, then Vulkan). A device where GLES setup is impossible still
         // draws on Vulkan, and devices where GLES works never pay for it.
-        let backend = if cfg!(target_os = "android") {
+        let preference = crate::selected_graphics_api();
+        let backend = if cfg!(target_os = "android")
+            && (preference == crate::GraphicsApi::Automatic || self.manual_backend_failed)
+        {
             let order = gumicord_render::candidate_backends();
             Some(order[self.backend_rotor % order.len()])
+        } else if let (Some(backend), Some(name)) = (preference.backend(), preference.probe_name())
+        {
+            let cache = crate::app_data_dir().map(|dir| dir.join("gpu"));
+            if gumicord_render::backend_survived_probe(name, cache.as_deref()) {
+                Some(backend)
+            } else {
+                tracing::warn!(
+                    api = name,
+                    "saved graphics API failed its isolated probe; using automatic selection"
+                );
+                None
+            }
         } else {
             None
         };
@@ -2166,24 +2196,24 @@ impl Host {
         // The renderer starts with the bundled font and unfolds system fonts
         // on a background thread; a wake lets a sleeping loop know they are
         // ready. The window must exist before the first frame measures text.
-        let wake = {
-            let w = self.waker.clone();
-            Box::new(move || w.wake()) as Box<dyn Fn() + Send + Sync + 'static>
-        };
-        let attempt = || {
+        let wake = self.waker.clone();
+        let make_attempt = |backend| {
+            let w = wake.clone();
             Renderer::new(
                 window.clone().into(),
                 size.width,
                 size.height,
                 scale,
-                wake,
+                Box::new(move || w.wake()),
                 crate::app_data_dir().map(|d| d.join("fonts")),
                 crate::app_data_dir().map(|d| d.join("gpu")),
                 backend,
             )
         };
         #[cfg(target_os = "android")]
-        let created = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(attempt)) {
+        let created = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            make_attempt(backend)
+        })) {
             Ok(Ok(r)) => {
                 self.renderer = Some(r);
                 true
@@ -2191,21 +2221,56 @@ impl Host {
             Ok(Err(e)) => {
                 // A failed backend must not pin the choice: rotate, so the
                 // next event tries the next candidate.
-                self.backend_rotor += 1;
+                if preference != crate::GraphicsApi::Automatic {
+                    let order = gumicord_render::candidate_backends();
+                    let selected = preference.backend();
+                    self.backend_rotor = order
+                        .iter()
+                        .position(|candidate| Some(*candidate) == selected)
+                        .unwrap_or(0)
+                        + 1;
+                    self.manual_backend_failed = true;
+                } else {
+                    self.backend_rotor += 1;
+                }
                 tracing::warn!(%e, backend = ?backend, "gpu not ready yet; retrying on the next event");
                 false
             }
             Err(_) => {
-                self.backend_rotor += 1;
+                if preference != crate::GraphicsApi::Automatic {
+                    let order = gumicord_render::candidate_backends();
+                    let selected = preference.backend();
+                    self.backend_rotor = order
+                        .iter()
+                        .position(|candidate| Some(*candidate) == selected)
+                        .unwrap_or(0)
+                        + 1;
+                    self.manual_backend_failed = true;
+                } else {
+                    self.backend_rotor += 1;
+                }
                 tracing::warn!(backend = ?backend, "gpu not ready yet; retrying on the next event");
                 false
             }
         };
         #[cfg(not(target_os = "android"))]
-        let created = match attempt() {
+        let created = match make_attempt(backend) {
             Ok(r) => {
                 self.renderer = Some(r);
                 true
+            }
+            Err(e) if backend.is_some() => {
+                tracing::warn!(%e, backend = ?backend, "selected graphics API could not initialise; falling back to automatic selection");
+                match make_attempt(None) {
+                    Ok(r) => {
+                        self.renderer = Some(r);
+                        true
+                    }
+                    Err(fallback) => {
+                        tracing::error!(%fallback, "could not initialise the GPU with the automatic fallback");
+                        false
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!(%e, "could not initialise the GPU");
@@ -3354,7 +3419,10 @@ impl ApplicationHandler<LoopEvent> for Host {
                 if self.fresh_zone() == Zone::Client {
                     let hits = self.hits();
                     if self.app.context_menu(&hits, self.cursor) {
-                        self.request_redraw();
+                        // The menu is the response to this press. Render it
+                        // before returning to the event loop so it cannot sit
+                        // pending until a later pointer event wakes the window.
+                        self.redraw();
                     }
                 }
             }

@@ -26,6 +26,7 @@ keychain = ["dep:keyring"]
 gumicord-model.workspace = true
 gumicord-render.workspace = true
 gumicord-uitree.workspace = true
+wgpu.workspace = true
 winit.workspace = true
 accesskit.workspace = true
 accesskit_winit.workspace = true

@@ -11,6 +11,13 @@
 
 use crate::value::{Background, Color, Edges, Font, Shadow};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFit {
+    Cover,
+    Contain,
+    Fill,
+}
+
 /// The resolved style of one node.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Style {
@@ -25,6 +32,10 @@ pub struct Style {
     pub padding: Option<Edges>,
     pub margin: Option<Edges>,
     pub gap: Option<f32>,
+    /// Wraps row children when they no longer fit on the current line.
+    pub flex_wrap: Option<bool>,
+    /// How image content fits its assigned rectangle.
+    pub object_fit: Option<ObjectFit>,
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub min_width: Option<f32>,
@@ -87,6 +98,8 @@ impl Style {
         overlay_field(&mut self.padding, &other.padding);
         overlay_field(&mut self.margin, &other.margin);
         overlay_field(&mut self.gap, &other.gap);
+        overlay_field(&mut self.flex_wrap, &other.flex_wrap);
+        overlay_field(&mut self.object_fit, &other.object_fit);
         overlay_field(&mut self.width, &other.width);
         overlay_field(&mut self.height, &other.height);
         overlay_field(&mut self.min_width, &other.min_width);

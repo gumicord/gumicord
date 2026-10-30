@@ -347,6 +347,44 @@ impl<'a> Cx<'a, '_, '_> {
         let gap = node.style.gap.unwrap_or(0.0);
         let mut sizes = vec![Size::ZERO; n];
 
+        if it.axis == Axis::Row && node.style.flex_wrap == Some(true) {
+            let mut content = Size::ZERO;
+            let mut line_width = 0.0f32;
+            let mut line_height = 0.0f32;
+            let mut line_count = 0usize;
+            for (i, child) in node.children.iter().enumerate() {
+                if is_overlay(child.id) {
+                    continue;
+                }
+                let margin = child.style.margin.unwrap_or_default();
+                let available = Size::new(
+                    (inner.w - margin.horizontal()).max(0.0),
+                    (inner.h - margin.vertical()).max(0.0),
+                );
+                let size = self.measure(child, available);
+                sizes[i] = size;
+                let item_width = size.w + margin.horizontal();
+                if line_count > 0 && line_width + gap + item_width > inner.w {
+                    content.w = content.w.max(line_width);
+                    content.h += line_height + gap;
+                    line_width = 0.0;
+                    line_height = 0.0;
+                    line_count = 0;
+                }
+                if line_count > 0 {
+                    line_width += gap;
+                }
+                line_width += item_width;
+                line_height = line_height.max(size.h + margin.vertical());
+                line_count += 1;
+            }
+            if line_count > 0 {
+                content.w = content.w.max(line_width);
+                content.h += line_height;
+            }
+            return (sizes, content);
+        }
+
         if it.axis == Axis::Stack {
             let mut content = Size::ZERO;
             for (i, c) in node.children.iter().enumerate() {
@@ -585,6 +623,50 @@ impl<'a> Cx<'a, '_, '_> {
         } else {
             clip
         };
+
+        if it.axis == Axis::Row && node.style.flex_wrap == Some(true) {
+            let gap = node.style.gap.unwrap_or(0.0);
+            let mut x = inner.x;
+            let mut y = inner.y - offset;
+            let mut line_height = 0.0f32;
+            let mut line_items = 0usize;
+            for (index, child) in node.children.iter().enumerate() {
+                if is_overlay(child.id) {
+                    self.place_scrollbar(node.id, child, rect, offset, over, bar_clip);
+                    continue;
+                }
+                let margin = child.style.margin.unwrap_or_default();
+                let size = sizes[index];
+                let item_width = size.w + margin.horizontal();
+                if line_items > 0 && x + item_width > inner.right() {
+                    y += line_height + gap;
+                    x = inner.x;
+                    line_height = 0.0;
+                    line_items = 0;
+                }
+                if line_items > 0 {
+                    x += gap;
+                }
+                let ci = intrinsic(child.id);
+                let available_height = (inner.h - margin.vertical()).max(0.0);
+                let height =
+                    Self::cross_size(child, &ci, size.h, available_height, it.cross, false);
+                let child_rect = Rect::new(
+                    x + margin.left,
+                    y + margin.top + Self::cross_offset(it.cross, available_height, height),
+                    size.w,
+                    height,
+                );
+                let child_rect = self.swipe_row(child, child_rect);
+                let child_rect = self.slide_surface(child, child_rect);
+                self.place(child, child_rect, clip);
+                x += item_width;
+                line_height = line_height.max(size.h + margin.vertical());
+                line_items += 1;
+            }
+            self.in_vscroll = vscroll;
+            return;
+        }
 
         let gap = node.style.gap.unwrap_or(0.0);
         let horizontal = it.axis == Axis::Row;

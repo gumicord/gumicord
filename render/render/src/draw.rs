@@ -978,7 +978,7 @@ fn draw_image(
     radius_px: f32,
     scissor: Option<[u32; 4]>,
 ) {
-    let box_px = snap(placed.inner, scale);
+    let mut box_px = snap(placed.inner, scale);
     if box_px[2] <= 0.0 || box_px[3] <= 0.0 {
         return;
     }
@@ -999,16 +999,35 @@ fn draw_image(
     };
 
     let (mut u0, mut v0, mut u1, mut v1) = (e.uv[0], e.uv[1], e.uv[2], e.uv[3]);
-    if have > want {
-        // Wider than the box; crop the sides.
-        let cut = uw * (1.0 - want / have) * 0.5;
-        u0 += cut;
-        u1 -= cut;
-    } else if have < want {
-        // Taller than the box; crop top and bottom.
-        let cut = uh * (1.0 - have / want) * 0.5;
-        v0 += cut;
-        v1 -= cut;
+    match placed
+        .node
+        .style
+        .object_fit
+        .unwrap_or(gumicord_uitree::ObjectFit::Cover)
+    {
+        gumicord_uitree::ObjectFit::Cover if have > want => {
+            // Wider than the box; crop the sides.
+            let cut = uw * (1.0 - want / have) * 0.5;
+            u0 += cut;
+            u1 -= cut;
+        }
+        gumicord_uitree::ObjectFit::Cover if have < want => {
+            // Taller than the box; crop top and bottom.
+            let cut = uh * (1.0 - have / want) * 0.5;
+            v0 += cut;
+            v1 -= cut;
+        }
+        gumicord_uitree::ObjectFit::Contain if have > want => {
+            let width = box_px[3] * have;
+            box_px[0] += (box_px[2] - width) * 0.5;
+            box_px[2] = width;
+        }
+        gumicord_uitree::ObjectFit::Contain if have < want => {
+            let height = box_px[2] / have;
+            box_px[1] += (box_px[3] - height) * 0.5;
+            box_px[3] = height;
+        }
+        _ => {}
     }
 
     dl.push_glyph(

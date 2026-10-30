@@ -70,6 +70,7 @@ pub(crate) struct MessageRow {
     /// The parsed body. The raw string is deliberately absent: holding both
     /// invites drawing from the wrong one, and only the reader would notice.
     pub(crate) blocks: Vec<gumicord_markdown::Block>,
+    pub(crate) attachments: Vec<gumicord_model::Attachment>,
     pub(crate) mentioned: bool,
     /// The answered message, if this replies to one (FR-028). Display only:
     /// pressing it to jump there is a later piece.
@@ -122,6 +123,8 @@ pub(crate) struct ChatView {
     pub(crate) composing: Composing,
     /// Whether a reply mentions its target. Discord's default is on.
     pub(crate) reply_mention: bool,
+    /// Files held by the current channel's composer.
+    pub(crate) attachments: Vec<std::path::PathBuf>,
     pub(crate) selected_channel: u64,
     /// A jump waiting for the next frame: the renderer knows where the
     /// message landed last frame, this layer only knows it was pressed.
@@ -148,6 +151,7 @@ impl ChatView {
             reveals: crate::markdown::Reveals::default(),
             composing: Composing::New,
             reply_mention: true,
+            attachments: Vec::new(),
             selected_channel: channel,
             pending_reveal: None,
             pending_jump: None,

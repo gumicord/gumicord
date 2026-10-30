@@ -212,6 +212,10 @@ pub enum Action {
     ShareLog,
     /// Show or hide the FPS meter pinned at the top right.
     ToggleFps,
+    /// Expand or collapse the graphics API selector in settings.
+    ToggleGraphicsApiOptions,
+    /// Save the graphics API for the next launch.
+    SelectGraphicsApi(gumicord_platform::GraphicsApi),
 
     // Input-field actions, desktop only. Touch screens have the OS's own
     // selection UI, which suits a finger better; since there is no secondary
@@ -222,14 +226,15 @@ pub enum Action {
     SelectAll,
 }
 
-/// A settings screen category. Support holds what fits nowhere else
-/// yet; more categories arrive with their features.
+/// A selectable settings page within a noninteractive navigation group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
-    #[default]
     Plugins,
     Theme,
-    Support,
+    #[default]
+    General,
+    Graphics,
+    Developer,
 }
 
 impl SettingsCategory {
@@ -237,7 +242,9 @@ impl SettingsCategory {
         match self {
             SettingsCategory::Plugins => "プラグイン",
             SettingsCategory::Theme => "テーマ",
-            SettingsCategory::Support => "サポート",
+            SettingsCategory::General => "表示",
+            SettingsCategory::Graphics => "グラフィック API",
+            SettingsCategory::Developer => "ログ",
         }
     }
 }

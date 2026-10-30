@@ -254,6 +254,55 @@ impl RestClient {
         self.send_raw_h(route, body, &[]).await
     }
 
+    /// Sends a JSON message payload together with file parts.
+    pub async fn send_multipart<T: DeserializeOwned>(
+        &self,
+        route: Route,
+        payload: serde_json::Value,
+        files: Vec<(String, Vec<u8>)>,
+    ) -> Result<T, RestError> {
+        let body = serde_json::to_string(&payload).map_err(RestError::Decode)?;
+        for attempt in 0..=MAX_RETRIES {
+            if let Some(wait) = self
+                .limiter
+                .lock()
+                .await
+                .before(&route.bucket_key, Instant::now())
+            {
+                tokio::time::sleep(wait).await;
+            }
+            let mut form = reqwest::multipart::Form::new().text("payload_json", body.clone());
+            for (index, (name, bytes)) in files.iter().enumerate() {
+                let part = reqwest::multipart::Part::bytes(bytes.clone()).file_name(name.clone());
+                form = form.part(format!("files[{index}]"), part);
+            }
+            let response = self
+                .build(&route, Option::<&()>::None, &[])
+                .multipart(form)
+                .send()
+                .await?;
+            let status = response.status();
+            let headers = read_rate_limit(&response, status.as_u16());
+            self.limiter
+                .lock()
+                .await
+                .after(&route.bucket_key, &headers, Instant::now());
+            if status.as_u16() != 429 {
+                let text = self.finish(response, status.as_u16()).await?;
+                return serde_json::from_str(&text).map_err(RestError::Decode);
+            }
+            let wait = headers
+                .retry_after
+                .map(|s| std::time::Duration::try_from_secs_f64(s.max(0.0)).unwrap_or_default())
+                .unwrap_or_default();
+            tokio::time::sleep(wait).await;
+            if attempt == MAX_RETRIES {
+                return Err(RestError::RateLimited);
+            }
+        }
+        Err(RestError::RateLimited)
+    }
+
     /// Like [`Self::send_raw`], with extra headers. The captcha retry is the
     /// only caller: it is where the solution lives.
     pub(crate) async fn send_raw_h(

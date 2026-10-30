@@ -28,6 +28,10 @@ pub(crate) struct SettingsView {
     /// Narrow windows show the menu and the page on separate screens.
     /// While set, the page covers the menu; the back row returns to it.
     pub(crate) narrow_page: bool,
+    /// Saved API preference; it takes effect after restarting the app.
+    pub(crate) graphics_api: gumicord_platform::GraphicsApi,
+    /// Whether the inline API dropdown is expanded.
+    pub(crate) graphics_api_open: bool,
 }
 
 /// A plugin's state in the user's words. One place, so the list and the
@@ -54,6 +58,8 @@ impl crate::Gumicord {
         self.settings.narrow_page = false;
         self.refresh_settings_states();
         self.refresh_theme_list();
+        self.settings.graphics_api = gumicord_platform::selected_graphics_api();
+        self.settings.graphics_api_open = false;
         if self.settings.open {
             return false;
         }
@@ -148,9 +154,11 @@ impl crate::Gumicord {
         use crate::menu::{Action, Item, SettingsCategory};
         let mut items = vec![Item::new(Action::CloseSettings, "閉じる").icon("close")];
         for category in [
+            SettingsCategory::General,
+            SettingsCategory::Graphics,
             SettingsCategory::Plugins,
             SettingsCategory::Theme,
-            SettingsCategory::Support,
+            SettingsCategory::Developer,
         ] {
             items.push(
                 Item::new(Action::SettingsCategory(category), category.label())
@@ -213,7 +221,8 @@ impl crate::Gumicord {
                     items
                 }
                 Some(id) => {
-                    let mut items = vec![Item::new(Action::SettingsPluginBack, "← プラグイン")];
+                    let mut items =
+                        vec![Item::new(Action::SettingsPluginBack, "プラグイン").icon("icon.back")];
                     if let Some(p) = self.settings.states.iter().find(|p| &p.id == id) {
                         // The approval dialog owns unapproved plugins; the
                         // re-approve row below is their way back to it.
@@ -244,11 +253,35 @@ impl crate::Gumicord {
                     items
                 }
             },
-            SettingsCategory::Support => {
-                vec![
-                    Item::new(Action::ToggleFps, "FPSを表示").selected(self.show_fps),
-                    Item::new(Action::ShareLog, "ログを共有"),
-                ]
+            SettingsCategory::General => {
+                vec![Item::new(Action::ToggleFps, "FPSを表示").selected(self.show_fps)]
+            }
+            SettingsCategory::Developer => vec![Item::new(Action::ShareLog, "ログを共有")],
+            SettingsCategory::Graphics => {
+                let disclosure = if self.settings.graphics_api_open {
+                    "icon.chevron-up"
+                } else {
+                    "icon.chevron-down"
+                };
+                let mut items = vec![
+                    Item::new(
+                        Action::ToggleGraphicsApiOptions,
+                        format!("描画 API　{}", self.settings.graphics_api.label()),
+                    )
+                    .icon(disclosure),
+                ];
+                if self.settings.graphics_api_open {
+                    items.extend(
+                        gumicord_platform::available_graphics_apis()
+                            .iter()
+                            .copied()
+                            .map(|api| {
+                                Item::new(Action::SelectGraphicsApi(api), api.label().to_owned())
+                                    .selected(api == self.settings.graphics_api)
+                            }),
+                    );
+                }
+                items
             }
         }
     }
@@ -298,8 +331,14 @@ impl crate::Gumicord {
                     }
                 },
             },
-            SettingsCategory::Support => {
-                vec!["不具合の報告に使う。記録にトークンは含まれない。".to_owned()]
+            SettingsCategory::General => {
+                vec!["画面上の情報表示を調整します。".to_owned()]
+            }
+            SettingsCategory::Developer => {
+                vec!["不具合の調査に使う記録を共有できます。トークンは含まれません。".to_owned()]
+            }
+            SettingsCategory::Graphics => {
+                vec!["変更は次回起動時に適用します。".to_owned()]
             }
         }
     }
@@ -309,6 +348,23 @@ impl crate::Gumicord {
         let id = self.settings.plugin.as_ref()?;
         let (pid, tree) = self.settings.page.as_ref()?;
         (pid == id).then(|| tree.clone())
+    }
+
+    /// Navigation with noninteractive section labels. The actionable item
+    /// indices remain the flat `settings_nav_items` order used by routing.
+    fn settings_nav_tree(&self, hovered: Option<usize>) -> UiNode {
+        let items = self.settings_nav_items();
+        let heading = |label: &str, slot| {
+            UiNode::text(NodeId::PrimitiveText, label).with_key(gumicord_uitree::Key::Slot(slot))
+        };
+        UiNode::new(NodeId::SettingsNav)
+            .child(crate::menu::rows(&items[..1], hovered, 0))
+            .child(heading("一般", "settings_group_general"))
+            .child(crate::menu::rows(&items[1..3], hovered, 1))
+            .child(heading("MOD", "settings_group_mods"))
+            .child(crate::menu::rows(&items[3..5], hovered, 3))
+            .child(heading("開発者向け", "settings_group_developer"))
+            .child(crate::menu::rows(&items[5..], hovered, 5))
     }
 
     /// The settings screen, Discord-style: categories left, page right. Rows
@@ -325,17 +381,15 @@ impl crate::Gumicord {
         // Narrow windows show the menu and the page on separate screens:
         // side by side they fit neither.
         if self.panes() == crate::Panes::One && !self.settings.narrow_page {
-            return UiNode::new(NodeId::SettingsScreen).child(
-                UiNode::new(NodeId::SettingsNav).child(crate::menu::rows(&nav, hovered, 0)),
-            );
+            return UiNode::new(NodeId::SettingsScreen).child(self.settings_nav_tree(hovered));
         }
 
         if self.narrow_settings_page() {
             let back = if self.settings.plugin.is_some() {
                 // Up one level, like the plugin's own back row below.
-                Item::new(crate::menu::Action::SettingsPluginBack, "← 設定")
+                Item::new(crate::menu::Action::SettingsPluginBack, "設定").icon("icon.back")
             } else {
-                Item::new(crate::menu::Action::SettingsNarrowBack, "← 設定")
+                Item::new(crate::menu::Action::SettingsNarrowBack, "設定").icon("icon.back")
             };
             let mut page = UiNode::new(NodeId::SettingsPage);
             for text in self.settings_page_texts() {
@@ -363,7 +417,7 @@ impl crate::Gumicord {
         }
 
         UiNode::new(NodeId::SettingsScreen)
-            .child(UiNode::new(NodeId::SettingsNav).child(crate::menu::rows(&nav, hovered, 0)))
+            .child(self.settings_nav_tree(hovered))
             .child(page)
     }
 }
@@ -617,20 +671,21 @@ mod tests {
     /// Demo loads no plugins, and nothing failed to fetch.
     #[test]
     fn empty_lists_say_so() {
-        let a = with_settings();
+        let mut a = with_settings();
+        press_menu(&mut a, 3);
         let texts = settings_texts(&a).join("\n");
         assert!(texts.contains("プラグインはありません"), "{texts}");
         let mut theme = with_settings();
-        press_menu(&mut theme, 2);
+        press_menu(&mut theme, 4);
         let texts = settings_texts(&theme).join("\n");
         assert!(texts.contains("問題は起きていません"), "{texts}");
     }
 
-    /// The rows share the menu's index space: 0 closes, 1 and 2 switch.
+    /// The rows share the menu's index space and preserve plugin/theme routing.
     #[test]
     fn settings_rows_route_by_index() {
         let mut a = with_settings();
-        press_menu(&mut a, 2);
+        press_menu(&mut a, 4);
         assert_eq!(
             a.settings.category,
             crate::menu::SettingsCategory::Theme,
@@ -639,21 +694,21 @@ mod tests {
         press_menu(&mut a, 1);
         assert_eq!(
             a.settings.category,
-            crate::menu::SettingsCategory::Plugins,
+            crate::menu::SettingsCategory::General,
             "戻れない"
         );
         press_menu(&mut a, 0);
         assert!(!a.settings.open, "閉じない");
     }
 
-    /// Support sits last: 3 opens it without moving 0, 1 and 2.
+    /// Developer settings sit last and carry log sharing.
     #[test]
-    fn support_category_opens_last_and_carries_share_log() {
+    fn developer_category_opens_last_and_carries_share_log() {
         let mut a = with_settings();
-        press_menu(&mut a, 3);
+        press_menu(&mut a, 5);
         assert_eq!(
             a.settings.category,
-            crate::menu::SettingsCategory::Support,
+            crate::menu::SettingsCategory::Developer,
             "増えた分類が開かない"
         );
         assert!(
@@ -664,12 +719,12 @@ mod tests {
         );
     }
 
-    /// Support carries the FPS toggle first: pressing it flips the meter
+    /// General settings carry the FPS toggle: pressing it flips the meter
     /// without leaving the screen, and the meter node rides the tree.
     #[test]
-    fn support_carries_the_fps_toggle() {
+    fn general_carries_the_fps_toggle() {
         let mut a = with_settings();
-        press_menu(&mut a, 3);
+        press_menu(&mut a, 1);
         assert!(
             a.settings_page_items()
                 .iter()
@@ -677,8 +732,8 @@ mod tests {
             "FPS の行がない"
         );
         assert!(!a.show_fps);
-        // Nav takes 0-3; the FPS row is 4.
-        assert!(press_menu(&mut a, 4));
+        // Nav takes 0-5; the FPS row is 6.
+        assert!(press_menu(&mut a, 6));
         assert!(a.show_fps, "押しても付かない");
         assert!(a.settings.open, "押したら閉じた");
         // A drawn frame's numbers reach the overlay on the next build.
@@ -704,7 +759,7 @@ mod tests {
             }
         });
         assert_eq!(found, 1, "計測が出ていない");
-        assert!(press_menu(&mut a, 4));
+        assert!(press_menu(&mut a, 6));
         assert!(!a.show_fps, "押しても消えない");
     }
 
@@ -733,7 +788,7 @@ mod tests {
     #[test]
     fn the_gear_opens_settings() {
         assert!(
-            gumicord_render::icon::lookup(SETTINGS_GEAR).is_some(),
+            gumicord_render::icon::lookup_svg(SETTINGS_GEAR).is_some(),
             "歯車の絵がない"
         );
         let mut a = app();
@@ -761,10 +816,10 @@ mod tests {
             out
         };
         let mut a = with_settings();
-        assert_eq!(selected_index(&a), [1], "開いている分類行がない");
-        press_menu(&mut a, 2);
+        assert_eq!(selected_index(&a), [3], "開いている分類行がない");
+        press_menu(&mut a, 4);
         // 分類行に加え、標準のテーマ行も付く (demo は標準のはず)。
-        assert_eq!(selected_index(&a), [2, 4], "移っていない");
+        assert_eq!(selected_index(&a), [4, 6], "移っていない");
     }
 
     /// Escape closes it; a press that hits no row does not, so a finger
@@ -795,8 +850,8 @@ mod tests {
     #[test]
     fn choosing_a_category_drills_into_its_page_when_narrow() {
         let mut a = narrow_settings();
-        // Nav takes 0-3; 2 is the theme tab.
-        assert!(a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(2)))]));
+        // Nav item 4 is the theme page; headings do not consume indices.
+        assert!(a.pressed(&[hit_of(NodeId::OverlayMenuItem, Some(Key::Index(4)))]));
         assert!(a.settings.narrow_page, "掘り下げない");
         let mut ids = Vec::new();
         let mut labels = Vec::new();
@@ -808,7 +863,7 @@ mod tests {
         });
         assert!(!ids.contains(&NodeId::SettingsNav), "分類が残っている");
         assert!(ids.contains(&NodeId::SettingsPage), "中身がない");
-        assert!(labels.iter().any(|l| l == "← 設定"), "戻る行がない");
+        assert!(labels.iter().any(|l| l == "設定"), "戻る行がない");
     }
 
     /// The narrow back row returns to the menu; the screen stays open.

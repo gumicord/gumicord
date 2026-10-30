@@ -44,7 +44,8 @@ fn resolve_node(theme: &Theme, node: &mut UiNode, parent: &Style, ctx: &MatchCon
     let mine = ctx.with_states(node.states).with_slot(slot);
     // The colour crosses, the identifier does not: a theme decides where it
     // lands, not whose it is.
-    let mut style = theme.style_for_tinted(node.id, &mine, node.tint);
+    let mut style = node.style.clone();
+    style.overlay(&theme.style_for_tinted(node.id, &mine, node.tint));
     style.inherit_from(parent);
 
     for child in &mut node.children {

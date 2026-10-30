@@ -522,6 +522,13 @@ impl Live {
         self.last_channel
     }
 
+    pub fn forget_last_channel(&mut self) {
+        self.last_channel = None;
+        if let Some(db) = &self.db {
+            db.forget_last_channel();
+        }
+    }
+
     pub fn guilds(&self) -> impl Iterator<Item = &GuildRow> {
         self.store.guilds()
     }
@@ -1057,6 +1064,61 @@ impl Live {
                     return;
                 }
                 tracing::warn!(%e, channel = %channel, "could not send");
+            }
+            waker.wake();
+        });
+    }
+
+    pub fn send_message_with_files(
+        &self,
+        channel: ChannelId,
+        content: String,
+        reply_to: Option<MessageId>,
+        reply_mention: bool,
+        paths: Vec<std::path::PathBuf>,
+    ) {
+        let (Some(rt), Some(rest), Some(waker)) = (&self.rt, &self.rest, &self.waker) else {
+            return;
+        };
+        let (rest, tx, waker) = (rest.clone(), self.tx.clone(), waker.clone());
+        rt.spawn(async move {
+            let files = tokio::task::spawn_blocking(move || {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        let name = path
+                            .file_name()
+                            .ok_or_else(|| "selected path has no filename".to_owned())?
+                            .to_string_lossy()
+                            .into_owned();
+                        let bytes = std::fs::read(&path)
+                            .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+                        Ok((name, bytes))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .await;
+            let files = match files {
+                Ok(Ok(files)) => files,
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, channel = %channel, "could not read an attachment");
+                    waker.wake();
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(%e, channel = %channel, "attachment reader stopped");
+                    waker.wake();
+                    return;
+                }
+            };
+            if let Err(e) = rest
+                .create_message_with_files(channel, &content, reply_to, reply_mention, files)
+                .await
+            {
+                if report_dead_token(&tx, Some(&waker), &e) {
+                    return;
+                }
+                tracing::warn!(%e, channel = %channel, "could not send message with files");
             }
             waker.wake();
         });

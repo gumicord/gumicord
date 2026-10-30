@@ -49,10 +49,10 @@ use std::collections::{HashMap, VecDeque};
 
 use gumicord_model::{ChannelId, GuildId, MessageId, RoleId, UserId};
 use gumicord_platform::{
-    Application, FrameCx, HiddenKey, RevealRequest, Swipe, SwipeDir, TextDocument, Waker,
+    Application, FrameCx, RevealRequest, Swipe, SwipeDir, TextDocument, Waker,
 };
 use gumicord_plugin::{ManagerEvent, PluginManager};
-use gumicord_render::Hit;
+use gumicord_render::{Hit, TITLEBAR_HEIGHT};
 
 use gumicord_theme::MatchContext;
 use gumicord_uitree::value::Color;
@@ -145,6 +145,8 @@ const MEMBERS_OPEN: &str = "members_open";
 const BACK_OPEN: &str = "back_open";
 /// Slot for the mobile send button beside the composer; routes to submit.
 const SEND_MESSAGE: &str = "send_message";
+const ADD_ATTACHMENT: &str = "add_attachment";
+const REMOVE_ATTACHMENT: &str = "remove_attachment";
 /// The member-list button's icon. Unknown names draw nothing, so the
 /// registry and this string are pinned together by a test below.
 const MEMBERS_ICON: &str = "members";
@@ -333,6 +335,10 @@ pub struct Gumicord {
     /// restore is a decision [`sync_selection`](Self::sync_selection) applies
     /// rather than a constructor's guess. `NFR-013`.
     pending_restore: Option<ChannelId>,
+    /// Whether the active account's cache has already supplied its restore
+    /// target. Keeping this separate prevents a resolved target being queued
+    /// again on every wake.
+    restore_seeded: bool,
     /// The message row a finger drives left, if any. At most one: the
     /// touch layer is single-finger.
     message_swipe: Option<crate::pages::chat::MessageSwipe>,
@@ -533,6 +539,7 @@ impl Gumicord {
 
         // Read before the move into the struct below.
         let pending_restore = live.last_channel();
+        let restore_seeded = pending_restore.is_some();
 
         let mut app = Gumicord {
             themes,
@@ -551,6 +558,7 @@ impl Gumicord {
             inputs,
             focus: None,
             pending_restore,
+            restore_seeded,
             message_swipe: None,
             sheet: crate::pages::overlays::SlideState::new(),
             toasts: VecDeque::new(),
@@ -880,6 +888,9 @@ impl Gumicord {
                         slot @ ("login_submit"
                         | "login_back"
                         | "login_password"
+                        | "login_token"
+                        | "login_token_user"
+                        | "login_token_bot"
                         | "login_forgot_password"
                         | "login_qr"
                         | "login_register"),
@@ -899,10 +910,14 @@ impl Gumicord {
                     self.chat.selected_guild = *id;
                     // Clear the channel, or the list and the body disagree.
                     self.chat.selected_channel = 0;
+                    self.chat.attachments.clear();
                     changed = true;
                 }
                 (NodeId::NavChannelListItem, Some(Key::Id(id))) => {
                     changed |= self.chat.selected_channel != *id;
+                    if self.chat.selected_channel != *id {
+                        self.chat.attachments.clear();
+                    }
                     self.chat.selected_channel = *id;
                 }
                 (NodeId::PrimitiveButton, Some(Key::Slot(CANCEL_COMPOSING))) => {
@@ -934,6 +949,25 @@ impl Gumicord {
                     // stays for the next message.
                     if self.focus.as_ref() != Some(&composer_addr()) {
                         self.focus = Some(composer_addr());
+                        changed = true;
+                    }
+                }
+                (NodeId::PrimitiveButton, Some(Key::Slot(ADD_ATTACHMENT))) => {
+                    pick_chat_attachments(self);
+                    changed = true;
+                }
+                (NodeId::PrimitiveButton, Some(Key::Slot(REMOVE_ATTACHMENT))) => {
+                    if let Some(index) = hits.iter().find_map(|hit| {
+                        (hit.id == NodeId::LayoutColumn)
+                            .then_some(hit.key.as_ref())
+                            .flatten()
+                            .and_then(|key| match key {
+                                Key::Id(index) => Some(*index as usize),
+                                _ => None,
+                            })
+                    }) && index < self.chat.attachments.len()
+                    {
+                        self.chat.attachments.remove(index);
                         changed = true;
                     }
                 }
@@ -1062,8 +1096,37 @@ impl Application for Gumicord {
     /// clipping. A 300-row member list shows about 15, and the rest are not
     /// wanted.
     fn request_images(&mut self, urls: &[String]) {
+        let attachment_urls: std::collections::HashSet<&str> = self
+            .live
+            .store()
+            .messages(ChannelId::from(self.chat.selected_channel))
+            .iter()
+            .flat_map(|message| message.attachments.iter())
+            .filter(|attachment| is_previewable_attachment(attachment))
+            .map(|attachment| attachment.url.as_str())
+            .collect();
+        let matching_attachments = urls
+            .iter()
+            .filter(|url| {
+                attachment_urls.contains(url.as_str()) || url.starts_with("file-preview:")
+            })
+            .count();
+        if !attachment_urls.is_empty() || matching_attachments > 0 {
+            tracing::debug!(
+                image_urls = urls.len(),
+                attachment_urls = attachment_urls.len(),
+                matching_attachments,
+                "resolving visible attachment images"
+            );
+        }
         for url in urls {
-            self.images.request(url);
+            if url.starts_with("file-preview:") {
+                self.images.request_capped(url, 192);
+            } else if attachment_urls.contains(url.as_str()) {
+                self.images.request_attachment(url);
+            } else {
+                self.images.request(url);
+            }
         }
     }
 
@@ -1337,6 +1400,8 @@ impl Application for Gumicord {
                     );
                     self.live.disconnect();
                     self.live.open_cache(key.is_bot, key.id);
+                    self.pending_restore = None;
+                    self.restore_seeded = true;
                     if let Ok(store) = gumicord_platform::SecretStore::new()
                         && let Ok(mut idx) = crate::account::AccountsIndex::load(&store)
                     {
@@ -1357,6 +1422,7 @@ impl Application for Gumicord {
                     self.images.forget_everything();
                     self.floating = None;
                     self.chat.composing = Composing::New;
+                    self.chat.attachments.clear();
                     if let Some(doc) = self.inputs.doc_mut(&self.draft_addr()) {
                         doc.take();
                     }
@@ -1391,14 +1457,15 @@ impl Application for Gumicord {
             // index is only readable once the secure store answers, and
             // `new` skips it entirely when it does not. Adopt whatever it
             // named so the restore is not lost for this run.
-            if self.pending_restore.is_none()
-                && let Some(channel) = self.live.last_channel()
-            {
-                tracing::debug!(
-                    channel = channel.get(),
-                    "the cache named a channel to reopen"
-                );
-                self.pending_restore = Some(channel);
+            if !self.restore_seeded {
+                if let Some(channel) = self.live.last_channel() {
+                    tracing::debug!(
+                        channel = channel.get(),
+                        "the cache named a channel to reopen"
+                    );
+                    self.pending_restore = Some(channel);
+                }
+                self.restore_seeded = true;
             }
 
             // Set before READY, so our own typing is filtered from the start.
@@ -1871,10 +1938,15 @@ impl Application for Gumicord {
         }
         // Emptying an edit is not a delete; Discord rejects it too. Clearing
         // the field and pressing enter must not destroy the message.
+        let attachments = self.chat.attachments.clone();
+        if matches!(self.chat.composing, Composing::Edit(_)) && !attachments.is_empty() {
+            self.notify_toast("編集時のファイル添付には対応していません".to_owned());
+            return false;
+        }
         let body = {
             let doc = self.inputs.ensure(self.draft_addr(), InputKind::Text);
             let body = doc.text().trim().to_owned();
-            if body.is_empty() {
+            if body.is_empty() && attachments.is_empty() {
                 return false;
             }
             doc.take();
@@ -1884,6 +1956,7 @@ impl Application for Gumicord {
         let reply_mention = self.chat.reply_mention;
 
         self.chat.composing = Composing::New;
+        self.chat.attachments.clear();
 
         if self.uses_live() {
             let channel = ChannelId::from(self.chat.selected_channel);
@@ -1893,10 +1966,36 @@ impl Application for Gumicord {
                 }
                 // The gateway echoes it back; adding it here shows it twice.
                 Composing::Reply(id) => {
-                    self.live
-                        .send_message(channel, body, Some(MessageId::from(id)), reply_mention);
+                    if attachments.is_empty() {
+                        self.live.send_message(
+                            channel,
+                            body,
+                            Some(MessageId::from(id)),
+                            reply_mention,
+                        );
+                    } else {
+                        self.live.send_message_with_files(
+                            channel,
+                            body,
+                            Some(MessageId::from(id)),
+                            reply_mention,
+                            attachments,
+                        );
+                    }
                 }
-                Composing::New => self.live.send_message(channel, body, None, reply_mention),
+                Composing::New => {
+                    if attachments.is_empty() {
+                        self.live.send_message(channel, body, None, reply_mention);
+                    } else {
+                        self.live.send_message_with_files(
+                            channel,
+                            body,
+                            None,
+                            reply_mention,
+                            attachments,
+                        );
+                    }
+                }
             }
             return true;
         }
@@ -1939,42 +2038,27 @@ impl Application for Gumicord {
         true
     }
 
-    /// The hidden login code on the QR screen: the konami sequence. Completed
-    /// sequences open the bot-token form; any wrong key resets the buffer.
-    fn hidden_key(&mut self, key: HiddenKey) -> bool {
-        use HiddenKey::{A, B, Down, Left, Right, Up};
-
-        const SEQUENCE: [HiddenKey; 10] = [Up, Up, Down, Down, Left, Right, Left, Right, B, A];
-
-        // Only the QR screen listens; elsewhere the arrows and B/A mean
-        // nothing to the app.
-        if self.login.session().qr().is_none() {
-            self.login_view.hidden_code.clear();
-            return true;
-        }
-
-        self.login_view.hidden_code.push(key);
-        let len = self.login_view.hidden_code.len();
-        if self.login_view.hidden_code[..] != SEQUENCE[..len] {
-            self.login_view.hidden_code.clear();
-            return true;
-        }
-        if len == SEQUENCE.len() {
-            self.login_view.hidden_code.clear();
-            self.login.start_token();
-            // A fresh token box; the password lives at its own address.
-            self.inputs.must_mut(&login_addr(LoginField::Token)).take();
-            self.login_view.form = Some(LoginField::Token);
-            self.focus = Some(login_addr(LoginField::Token));
-        }
-        true
-    }
-
     /// A clipboard operation on the menu's target field, or the focused
     /// field from a Ctrl shortcut (no menu open). Without either every
     /// operation does nothing.
     fn clipboard(&mut self, op: gumicord_platform::ClipboardOp) -> bool {
         use gumicord_platform::ClipboardOp::{Copy, Cut, Paste};
+        let composer_target = matches!(self.menu_field, Some(MenuField::Composer))
+            || (self.menu_field.is_none()
+                && self
+                    .focus
+                    .as_ref()
+                    .is_some_and(|address| address == &composer_addr()));
+        if op == Paste && composer_target {
+            match gumicord_platform::clipboard::files() {
+                Ok(paths) if !paths.is_empty() => {
+                    add_chat_attachment_paths(self, paths);
+                    return true;
+                }
+                Ok(_) | Err(gumicord_platform::ClipboardError::Unsupported) => {}
+                Err(e) => tracing::debug!(%e, "could not read clipboard files; trying text"),
+            }
+        }
         // Login fields are one line, so pasted newlines would hide text
         // there. The composer keeps them, like Discord.
         let single_line = match self.menu_field {
@@ -2107,14 +2191,68 @@ impl Application for Gumicord {
             Some(theme) => {
                 gumicord_theme::resolve(theme, &mut tree, &ctx);
             }
-            None => gumicord_theme::resolve::clear(&mut tree),
+            // The tree is rebuilt each frame; without a theme its authored
+            // layout sizes remain the baseline rather than being erased.
+            None => {}
+        }
+        if self.settings.open && panes == Panes::One {
+            fit_narrow_settings(&mut tree, cx.viewport.w);
         }
         write_startup_diag(self, &tree, cx, panes);
         tree
     }
 }
 
+/// Narrow settings are a single-column screen. Keep the navigation and page
+/// within a 12px gutter even when the active theme uses desktop settings
+/// padding or a fixed sidebar width.
+fn fit_narrow_settings(node: &mut UiNode, viewport_width: f32) {
+    if node.id == NodeId::SettingsScreen {
+        node.style.padding = Some(gumicord_uitree::value::Edges::all(12.0));
+        for child in &mut node.children {
+            if matches!(child.id, NodeId::SettingsNav | NodeId::SettingsPage) {
+                child.style.width = Some((viewport_width - 48.0).max(0.0));
+                child.style.min_width = None;
+                child.style.max_width = None;
+                child.style.margin = Some(gumicord_uitree::value::Edges::all(12.0));
+            }
+        }
+    }
+    for child in &mut node.children {
+        fit_narrow_settings(child, viewport_width);
+    }
+}
+
 /// First-frame facts for field debugging, where no debugger reaches.
+fn pick_chat_attachments(app: &mut Gumicord) {
+    use gumicord_platform::file_dialog::{PickOptions, pick_files};
+    let options = PickOptions {
+        title: Some("添付するファイルを選ぶ".to_owned()),
+        ..PickOptions::default()
+    };
+    match pick_files(&options) {
+        Ok(paths) => {
+            add_chat_attachment_paths(app, paths);
+        }
+        Err(gumicord_platform::FileDialogError::Unsupported) => {
+            app.notify_toast("ファイル選択はこの端末では未対応".to_owned());
+        }
+        Err(e) => app.notify_toast(format!("ファイルを選べなかった：{e}")),
+    }
+}
+
+fn add_chat_attachment_paths(app: &mut Gumicord, paths: Vec<std::path::PathBuf>) {
+    for path in paths {
+        if app.chat.attachments.len() >= 10 {
+            app.notify_toast("一度に添付できるのは10件までです".to_owned());
+            break;
+        }
+        if path.is_file() && !app.chat.attachments.contains(&path) {
+            app.chat.attachments.push(path);
+        }
+    }
+}
+
 fn write_startup_diag(app: &Gumicord, tree: &UiNode, cx: &FrameCx, panes: Panes) {
     if app.startup_diag.get() {
         return;
@@ -2322,7 +2460,7 @@ impl Gumicord {
             // the reading is wider than the remaining space.
             .child_if(self.show_fps, || {
                 UiNode::text(NodeId::OverlayFps, self.stats_text())
-                    .with_anchor(Anchor::at(self.match_ctx.window_width, 0.0))
+                    .with_anchor(Anchor::at(self.match_ctx.window_width, TITLEBAR_HEIGHT))
             })
     }
 
@@ -2533,6 +2671,8 @@ impl Gumicord {
             InstallPluginFile => "install_plugin_file",
             ShareLog => "share_log",
             ToggleFps => "toggle_fps",
+            ToggleGraphicsApiOptions => "toggle_graphics_api_options",
+            SelectGraphicsApi(_) => "select_graphics_api",
             Cut => "cut",
             CopySelection => "copy_selection",
             Paste => "paste",
@@ -2718,6 +2858,25 @@ impl Gumicord {
             crate::menu::Action::ToggleFps => {
                 self.show_fps = !self.show_fps;
             }
+            crate::menu::Action::ToggleGraphicsApiOptions => {
+                self.settings.graphics_api_open = !self.settings.graphics_api_open;
+            }
+            crate::menu::Action::SelectGraphicsApi(api) => {
+                match gumicord_platform::save_graphics_api(*api) {
+                    Ok(()) => {
+                        self.settings.graphics_api = *api;
+                        self.settings.graphics_api_open = false;
+                        self.notify_toast(format!(
+                            "描画 API を「{}」に設定しました。次回起動時に適用します",
+                            api.label()
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "could not save graphics API preference");
+                        self.notify_toast(format!("描画 API の設定を保存できませんでした: {e}"));
+                    }
+                }
+            }
 
             crate::menu::Action::Cut => {
                 self.clipboard(gumicord_platform::ClipboardOp::Cut);
@@ -2851,6 +3010,8 @@ impl Gumicord {
     fn forget_account(&mut self) -> bool {
         self.live.forget_everything();
         self.images.forget_everything();
+        self.pending_restore = None;
+        self.restore_seeded = false;
 
         // Anything still on screen belongs to the account that just left.
         self.floating = None;
@@ -3007,8 +3168,14 @@ impl Gumicord {
                     .and_then(|c| store.channel(ChannelId::from(c.id)).map(|m| (c, m)))
                     .map(|(c, m)| channel_data(c, m)),
                 DataKind::Member => member_data(&data.id, guild, store, &statuses),
-                // No data-bearing nodes of the other kinds exist today;
-                // their resolvers arrive with their nodes.
+                DataKind::Attachment => messages.values().find_map(|message| {
+                    message
+                        .attachments
+                        .iter()
+                        .find(|attachment| attachment.id.get() == data.id)
+                        .map(attachment_data)
+                }),
+                // Other data-bearing node resolvers arrive with their nodes.
                 _ => None,
             };
             if let Some(value) = value {
@@ -3084,6 +3251,54 @@ struct MemberDataJson {
     display_name: String,
     status: String,
     roles: Vec<String>,
+}
+
+fn attachment_preview_size(attachment: &gumicord_model::Attachment) -> (f32, f32) {
+    let (Some(width), Some(height)) = (attachment.width, attachment.height) else {
+        return (360.0, 240.0);
+    };
+    if width == 0 || height == 0 {
+        return (360.0, 240.0);
+    }
+    let scale = (480.0 / width as f32).min(360.0 / height as f32).min(1.0);
+    (width as f32 * scale, height as f32 * scale)
+}
+
+fn is_previewable_attachment(attachment: &gumicord_model::Attachment) -> bool {
+    attachment
+        .content_type
+        .as_deref()
+        .and_then(|mime| mime.split(';').next())
+        .is_some_and(|mime| {
+            matches!(
+                mime.trim().to_ascii_lowercase().as_str(),
+                "image/png" | "image/jpeg"
+            )
+        })
+        || std::path::Path::new(&attachment.filename)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+}
+
+fn attachment_data(attachment: &gumicord_model::Attachment) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "id": attachment.id.to_string(),
+        "filename": attachment.filename,
+        "size": attachment.size,
+        "url": attachment.url,
+    });
+    let object = value.as_object_mut().expect("JSON object");
+    if let Some(content_type) = &attachment.content_type {
+        object.insert("contentType".to_owned(), content_type.clone().into());
+    }
+    if let Some(width) = attachment.width {
+        object.insert("width".to_owned(), width.into());
+    }
+    if let Some(height) = attachment.height {
+        object.insert("height".to_owned(), height.into());
+    }
+    value
 }
 
 fn user_data(user: &gumicord_model::User, avatar_url: Option<String>) -> UserDataJson {
@@ -3277,7 +3492,12 @@ impl Gumicord {
                             .with_id_key(m.id),
                     )
             })
-            .child(self.content_of(m));
+            .child(self.content_of(m))
+            .child_if(!m.attachments.is_empty(), || {
+                UiNode::new(NodeId::ChatMessageAttachments)
+                    .with_data(m.id)
+                    .children(m.attachments.iter().map(Self::attachment_node))
+            });
 
         UiNode::new(NodeId::ChatMessage)
             .with_id_key(m.id)
@@ -3290,6 +3510,28 @@ impl Gumicord {
             })
             // Author line and body stacked.
             .child(body)
+    }
+
+    fn attachment_node(attachment: &gumicord_model::Attachment) -> UiNode {
+        let mut node = UiNode::new(NodeId::ChatMessageAttachment)
+            .with_data(attachment.id.get())
+            .with_id_key(attachment.id.get());
+        let image_url = if attachment.url.starts_with("https://") {
+            Some(attachment.url.clone())
+        } else if std::path::Path::new(&attachment.url).is_file() {
+            Some(format!("file-preview:{}", attachment.url))
+        } else {
+            None
+        };
+        if let Some(image_url) = image_url.filter(|_| is_previewable_attachment(attachment)) {
+            let (width, height) = attachment_preview_size(attachment);
+            let mut image = UiNode::image(NodeId::PrimitiveImage, image_url)
+                .with_key(Key::Slot("attachment_media"));
+            image.style.width = Some(width);
+            image.style.height = Some(height);
+            node = node.child(image);
+        }
+        node.child(UiNode::text(NodeId::PrimitiveText, &attachment.filename))
     }
 
     /// Jumps the chat to a message. Loaded targets move at once; anything
@@ -3488,6 +3730,7 @@ impl Gumicord {
                 "last channel is unavailable; selecting a fallback"
             );
             self.pending_restore = None;
+            self.live.forget_last_channel();
             self.chat.selected_channel = 0;
         }
 
