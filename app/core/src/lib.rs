@@ -2187,13 +2187,10 @@ impl Application for Gumicord {
         let mut tree = self.apply_plugins(tree);
 
         // [5] resolve the theme
-        match &self.themes.theme {
-            Some(theme) => {
-                gumicord_theme::resolve(theme, &mut tree, &ctx);
-            }
-            // The tree is rebuilt each frame; without a theme its authored
-            // layout sizes remain the baseline rather than being erased.
-            None => {}
+        // The tree is rebuilt each frame; without a theme its authored
+        // layout sizes remain the baseline rather than being erased.
+        if let Some(theme) = &self.themes.theme {
+            gumicord_theme::resolve(theme, &mut tree, &ctx);
         }
         if self.settings.open && panes == Panes::One {
             fit_narrow_settings(&mut tree, cx.viewport.w);
