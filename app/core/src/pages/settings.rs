@@ -538,7 +538,16 @@ mod tests {
         a.settings.open = true;
         a.settings.category = crate::menu::SettingsCategory::Theme;
 
-        // Nav takes 0-3; the standard row is 4, the install is 5.
+        let nav = a.settings_nav_items();
+        let theme_index = nav
+            .iter()
+            .position(|item| {
+                item.action
+                    == crate::menu::Action::SettingsCategory(crate::menu::SettingsCategory::Theme)
+            })
+            .unwrap() as u32;
+        let bundled_index = nav.len() as u32;
+        let install_index = bundled_index + 1;
         let press = |a: &mut Gumicord, index: u32| {
             a.pressed(&[Hit {
                 id: NodeId::OverlayMenuItem,
@@ -560,9 +569,8 @@ mod tests {
             out
         };
         // Bundled to start: the theme tab and the standard row show active.
-        // Nav takes 0-3; the standard row is 4, the install is 5.
-        assert_eq!(selected(&a), [2, 4]);
-        assert!(press(&mut a, 5));
+        assert_eq!(selected(&a), [theme_index, bundled_index]);
+        assert!(press(&mut a, install_index));
         assert_eq!(
             a.themes.source,
             ThemeSource::Saved("dev.example.wall".to_owned())
@@ -570,10 +578,14 @@ mod tests {
         // Selecting rescans the folder, which is empty for this app;
         // put the test install back the way production's rescan keeps it.
         a.settings.themes = scan_themes_in(&root);
-        assert_eq!(selected(&a), [2, 5], "active mark did not follow");
-        assert!(press(&mut a, 4));
+        assert_eq!(
+            selected(&a),
+            [theme_index, install_index],
+            "active mark did not follow"
+        );
+        assert!(press(&mut a, bundled_index));
         assert_eq!(a.themes.source, ThemeSource::Bundled);
-        assert_eq!(selected(&a), [2, 4]);
+        assert_eq!(selected(&a), [theme_index, bundled_index]);
     }
 
     /// Startup falls back to bundled when the saved theme is gone.
@@ -816,10 +828,27 @@ mod tests {
             out
         };
         let mut a = with_settings();
-        assert_eq!(selected_index(&a), [3], "開いている分類行がない");
-        press_menu(&mut a, 4);
+        let nav = a.settings_nav_items();
+        let open_category = nav.iter().position(|item| item.selected).unwrap() as u32;
+        let theme_category = nav
+            .iter()
+            .position(|item| {
+                item.action
+                    == crate::menu::Action::SettingsCategory(crate::menu::SettingsCategory::Theme)
+            })
+            .unwrap() as u32;
+        assert_eq!(
+            selected_index(&a),
+            [open_category],
+            "開いている分類行がない"
+        );
+        press_menu(&mut a, theme_category);
         // 分類行に加え、標準のテーマ行も付く (demo は標準のはず)。
-        assert_eq!(selected_index(&a), [4, 6], "移っていない");
+        assert_eq!(
+            selected_index(&a),
+            [theme_category, nav.len() as u32],
+            "移っていない"
+        );
     }
 
     /// Escape closes it; a press that hits no row does not, so a finger
